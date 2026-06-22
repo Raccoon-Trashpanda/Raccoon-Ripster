@@ -28,6 +28,21 @@ param(
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Quiet pip's stderr chatter and force UTF-8 so a hidden console can't choke.
+$env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
+$env:PIP_NO_INPUT = "1"
+$env:PYTHONIOENCODING = "utf-8"
+$env:PYTHONUTF8 = "1"
+
+# Always record the install to a log so a hidden/silent run is diagnosable.
+$LogDir = Join-Path $InstallDir "logs"
+try { New-Item -ItemType Directory -Force -Path $LogDir | Out-Null } catch {}
+try { Start-Transcript -Path (Join-Path $LogDir "provision.log") -Force | Out-Null } catch {}
+trap {
+    try { Write-Host "[ripster] FATAL: $($_ | Out-String)" } catch {}
+    try { Stop-Transcript | Out-Null } catch {}
+    exit 1
+}
 
 function Info($m) { Write-Host "[ripster] $m" -ForegroundColor Cyan }
 function Ok($m)   { Write-Host "[ripster] $m" -ForegroundColor Green }
@@ -93,9 +108,9 @@ if (-not (Test-Path $VenvPy)) {
     if (-not (Test-Path $VenvPy)) { throw "venv creation failed" }
 }
 Info "installing Python dependencies (pulls every dependency, incl. native-window pywebview)"
-[void](Invoke-Native @($VenvPy, "-m", "pip", "install", "--upgrade", "pip", "wheel"))
+[void](Invoke-Native @($VenvPy, "-m", "pip", "install", "--no-input", "--disable-pip-version-check", "--upgrade", "pip", "wheel"))
 $req = Join-Path $InstallDir "requirements.txt"
-$code = Invoke-Native @($VenvPy, "-m", "pip", "install", "-r", $req)
+$code = Invoke-Native @($VenvPy, "-m", "pip", "install", "--no-input", "--disable-pip-version-check", "-r", $req)
 if ($code -ne 0) { throw "pip install failed (exit $code)" }
 Ok "all Python dependencies installed"
 
@@ -135,3 +150,4 @@ Ok "Bootstrap complete."
 Info "Launch Ripster -> it opens in its own window at http://127.0.0.1:7799"
 Info "On first run, open the Setup tab to install the heavy/optional engines"
 Info "(Apple Go downloader, ffmpeg, Widevine L3 device, ...) on THIS machine."
+try { Stop-Transcript | Out-Null } catch {}
