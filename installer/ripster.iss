@@ -78,15 +78,14 @@ Type: files;          Name: "{app}\Ripster.vbs"
 // package or its deps. Absolute paths (known only at install) fix this for good.
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  Pth: String;
+  Pth, Extra, NL: String;
 begin
   if CurStep = ssPostInstall then
   begin
     Pth := ExpandConstant('{app}\python\python312._pth');
+    NL := Chr(13) + Chr(10);
+    Extra := NL + ExpandConstant('{app}') + NL + ExpandConstant('{app}\python\Lib\site-packages') + NL;
     if FileExists(Pth) then
-      SaveStringToFile(Pth,
-        #13#10 + ExpandConstant('{app}') +
-        #13#10 + ExpandConstant('{app}\python\Lib\site-packages') + #13#10,
-        True);
+      SaveStringToFile(Pth, Extra, True);
   end;
 end;
