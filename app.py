@@ -10,10 +10,16 @@ Open: http://127.0.0.1:7799
 import asyncio, os, sys, time
 import platform
 
-# Bundled-Python (embeddable, ._pth) runs isolated and does NOT add the script
-# dir to sys.path, so `import ripster` would fail. Make it work no matter how or
-# from where we were launched.
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Bundled-Python (embeddable, ._pth) runs ISOLATED and resolves ._pth entries
+# against CWD, so neither the app package nor the bundled deps are reliably on
+# sys.path. Fix it in pure Python: add the app dir (for `import ripster`) AND the
+# bundled site-packages (for `import uvicorn` etc.), absolute, so it works from
+# any CWD / launch method.
+_APPDIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _APPDIR)
+_BUNDLED_SP = os.path.join(_APPDIR, "python", "Lib", "site-packages")
+if os.path.isdir(_BUNDLED_SP):
+    sys.path.insert(0, _BUNDLED_SP)
 
 # Ensure UTF-8 output on Windows (avoids cp1251 crash on box-drawing chars)
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
