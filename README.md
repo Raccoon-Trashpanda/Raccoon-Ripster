@@ -50,8 +50,8 @@ from the in-app **Setup** tab.
 
 ### Windows — from source
 ```bat
-git clone https://github.com/<you>/ripster.git
-cd ripster
+git clone https://github.com/Raccoon-Trashpanda/Raccoon-Ripster.git
+cd Raccoon-Ripster
 run.bat
 ```
 `run.bat` creates a virtual environment, installs dependencies, copies
@@ -59,8 +59,8 @@ run.bat
 
 ### macOS / Linux (or manual on Windows)
 ```bash
-git clone https://github.com/<you>/ripster.git
-cd ripster
+git clone https://github.com/Raccoon-Trashpanda/Raccoon-Ripster.git
+cd Raccoon-Ripster
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
@@ -160,9 +160,9 @@ removed, please open an issue.
 
 ### Ideas & inspiration
 - [jaylex32 / Elixium](https://github.com/jaylex32/Elixium) — Deezer/Qobuz web downloader — influenced the search UI
-- [nicholasgasior / d-fi](https://github.com/nicholasgasior/d-fi) — Deezer CLI core
-- [DJDoubleD / QobuzDownloaderX-Blue](https://github.com/DJDoubleD/QobuzDownloaderX-Blue) — compatible Qobuz App ID & secret
-- [exislow / tidal-dl-ng](https://github.com/exislow/tidal-dl-ng) — Tidal download reference
+- nicholasgasior / d-fi — Deezer CLI core
+- DJDoubleD / QobuzDownloaderX-Blue — compatible Qobuz App ID & secret
+- exislow / tidal-dl-ng — Tidal download reference
 
 ### Built with
 [FastAPI](https://github.com/tiangolo/fastapi) ·
