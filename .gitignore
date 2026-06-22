@@ -43,10 +43,13 @@ logs/
 .cache/
 releases_cache.json
 
-# ── Desktop launcher build artifacts ────────────────────────────────────────
+# ── Desktop launcher / bundled-Python build artifacts ───────────────────────
 RipsterLauncher.exe
+RipsterSetup*.exe
 build/
 dist/
+# Bundled Python embeddable (127 MB, rebuilt at package time — not committed)
+python/
 *.spec
 
 # ── OS / editor noise ───────────────────────────────────────────────────────

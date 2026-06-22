@@ -42,17 +42,19 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-; Bundle the whole app tree, excluding local state, secrets, venv and build output.
+; Bundle the whole app tree INCLUDING the embedded Python (python\) so the
+; install is a pure file copy -- no download, no PowerShell, no pip at install
+; time. Works fully offline. Note: *.exe / *.pyc are NOT excluded (the embedded
+; interpreter needs python.exe / pythonw.exe / *.dll); we exclude only the
+; installer's own output and any stray packaged exe instead.
 Source: "{#SrcDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion; \
-  Excludes: "\.git\*,\.git,\.venv\*,\.venv,installer\output\*,downloads\*,tokens\*,logs\*,backups\*,__pycache__\*,*.pyc,*.wvd,frida-server*,*.exe,tools\widevine\*,_widevine_setup\_keydive_out\*,config.yaml"
+  Excludes: "\.git\*,\.git,\.venv\*,\.venv,installer\output\*,dist\*,RipsterSetup*.exe,apple-music-downloader.exe,downloads\*,tokens\*,logs\*,backups\*,*.wvd,frida-server*,tools\widevine\*,_widevine_setup\_keydive_out\*,config.yaml"
+
+; Seed config.yaml from the example only if the user doesn't already have one.
+Source: "{#SrcDir}\config.example.yaml"; DestDir: "{app}"; DestName: "config.yaml"; \
+  Flags: onlyifdoesntexist uninsneveruninstall
 
 [Run]
-; One-time provisioning: Python + venv + all pip dependencies + launcher.
-Filename: "powershell.exe"; \
-  Parameters: "-NoProfile -ExecutionPolicy Bypass -File ""{app}\installer\provision.ps1"" -InstallDir ""{app}"""; \
-  StatusMsg: "Installing Python & dependencies (one-time, may take several minutes)..."; \
-  Flags: runhidden waituntilterminated
-
 ; Offer to launch after install (opens Ripster's own window, no browser).
 Filename: "{app}\Ripster.vbs"; Description: "{cm:LaunchProgram,{#AppName}}"; \
   Flags: postinstall nowait shellexec skipifsilent

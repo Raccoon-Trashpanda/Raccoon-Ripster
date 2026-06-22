@@ -118,7 +118,21 @@ def open_window(url: str, title: str = "Ripster") -> str:
         return "browser"
 
 
+def _seed_config(base_dir: Path = BASE_DIR) -> None:
+    """First run: copy config.example.yaml -> config.yaml so the user has a
+    template to fill in. Robust across every install method (installer, source,
+    bundled-Python) — no reliance on the installer seeding it."""
+    cfg = Path(base_dir) / "config.yaml"
+    ex = Path(base_dir) / "config.example.yaml"
+    if not cfg.exists() and ex.exists():
+        try:
+            cfg.write_bytes(ex.read_bytes())
+        except Exception:
+            pass
+
+
 def main(base_dir: Path = BASE_DIR) -> None:
+    _seed_config(base_dir)
     url = server_url(base_dir)
     proc = None
     if not server_alive(url):

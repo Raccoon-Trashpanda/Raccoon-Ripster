@@ -1,48 +1,53 @@
 # Building the Ripster installer
 
-`RipsterSetup-<version>.exe` is built with [Inno Setup 6](https://jrsoftware.org/isdl.php).
+`RipsterSetup-<version>.exe` is built with [Inno Setup 6](https://jrsoftware.org/isdl.php)
+and bundles a **self-contained Python interpreter** with all dependencies, so the
+end user's install is a pure file copy.
 
 ## What the installer does
 
-It is a **bootstrap / provisioning** installer — it does **not** freeze a fixed
-binary. At install time, on the user's machine, it:
+At install time it simply **copies files** — no download, no PowerShell, no pip:
 
-1. Ensures **Python 3.12** (downloads the official installer if missing).
-2. Creates a `.venv` and `pip install`s **all** Python dependencies
-   (including `pywebview` → the native desktop window, no browser tab).
-3. Seeds `config.yaml` from `config.example.yaml`.
-4. Installs Start-Menu / Desktop shortcuts to a console-less launcher.
+1. Lays down the app + a bundled `python\` interpreter (Python embeddable with all
+   `requirements.txt` deps preinstalled, incl. `pywebview` → native window).
+2. Seeds `config.yaml` from the example (also done by the launcher on first run).
+3. Installs Start-Menu / Desktop shortcuts to a console-less launcher
+   (`Ripster.vbs` → `Ripster.cmd` → `python\pythonw.exe ripster_launcher.py`).
 
-Everything heavy, per-user or secret is **pulled and compiled on the user's own
-machine** from the in-app **Setup tab** — never bundled:
+This works **fully offline** and avoids the AV "downloader/dropper" heuristic that
+flagged the older provisioning installer (which silently downloaded + ran Python).
 
-- the Go Apple-Music downloader (compiled from open source — zhaarey),
-- `ffmpeg`, `N_m3u8DL-RE`, `Bento4` (downloaded from their open-source releases),
-- the Docker decryption wrapper,
-- the user's **own** Widevine **L3 `device.wvd`** (minted locally — see
-  `_widevine_setup/`). No `.wvd` or account token is ever shipped.
+Heavy / per-user / secret engines (Apple Go downloader, ffmpeg, Widevine L3
+device) are still pulled/compiled per-user from the in-app **Setup tab** — never
+bundled. Those steps need internet.
 
 ## Prerequisites
 
-- Inno Setup 6 (`ISCC.exe`). Install via winget:
+- Inno Setup 6 (`ISCC.exe`):
   ```powershell
   winget install -e --id JRSoftware.InnoSetup --accept-package-agreements --accept-source-agreements
   ```
 
-## Build
+## Build (two steps)
 
 ```powershell
-& "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\ripster.iss
+# 1. Build the bundled Python (downloads embeddable + pip-installs requirements
+#    into github_setup\python\ — a .gitignored 127 MB build artifact).
+powershell -ExecutionPolicy Bypass -File installer\build_embedded_python.ps1
+
+# 2. Compile the installer (bundles python\ + app → installer\output\RipsterSetup-<ver>.exe)
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\ripster.iss
 ```
 
-The output lands in `installer\output\RipsterSetup-<version>.exe`.
+Re-run step 1 only after a `requirements.txt` change; otherwise step 2 alone
+repackages app changes.
 
 ## Notes
 
-- The installer is **per-user** (`PrivilegesRequired=lowest`) — no admin needed;
-  it installs to `%LocalAppData%\Programs\Ripster`.
-- `provision.ps1` is idempotent and can be re-run standalone to repair an install:
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File installer\provision.ps1 -InstallDir "<dir>"
-  ```
-- Requires an internet connection on first install (Python + pip dependencies).
+- Per-user install (`PrivilegesRequired=lowest`) → no admin; installs to
+  `%LocalAppData%\Programs\Ripster`.
+- The resulting `.exe` is ~33 MB (LZMA-compressed Python + app).
+- **Unsigned** → SmartScreen may still warn "unknown publisher" until the file
+  earns reputation or is code-signed (an EV cert removes the warning instantly).
+- `provision.ps1` is retained for **from-source** installs (`git clone` → builds a
+  `.venv`); the bundled installer does not use it.
