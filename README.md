@@ -38,7 +38,17 @@ machine.
 
 ## Quick start
 
-### Windows
+### Windows — installer (easiest)
+
+Download **`RipsterSetup-<version>.exe`** from the
+[Releases](https://github.com/Raccoon-Trashpanda/Raccoon-Ripster/releases) page
+and run it. At install time it installs Python + all dependencies on your
+machine, then adds a **Ripster** shortcut. Launching it opens Ripster in **its
+own desktop window** (no browser tab). Heavy/optional engines (Apple Go
+downloader, ffmpeg, your own Widevine device) are installed later, per-machine,
+from the in-app **Setup** tab.
+
+### Windows — from source
 ```bat
 git clone https://github.com/<you>/ripster.git
 cd ripster
@@ -55,13 +65,21 @@ python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp config.example.yaml config.yaml
-python app.py                       # or: python ripster_launcher.py
+python ripster_launcher.py          # opens its own window; or: python app.py (headless server)
 ```
 
-Then open **http://127.0.0.1:7799**
+### How you reach the UI
 
-> ⚠️ Always use `127.0.0.1`, **never** `localhost` — Spotify OAuth has rejected
-> `localhost` redirects since April 2025.
+- **`ripster_launcher.py`** (and the installer shortcut) open Ripster in a
+  **native desktop window** automatically — you don't type any URL. It uses the
+  system WebView (Edge WebView2 on Windows); if that's unavailable it falls back
+  to your default browser.
+- **`app.py`** runs just the server (headless) — then open
+  **http://127.0.0.1:7799** in a browser yourself.
+
+> ⚠️ Whether in the native window or a browser, Ripster serves on
+> **`127.0.0.1`**, **never** `localhost` — Spotify OAuth has rejected `localhost`
+> redirects since April 2025, so the Spotify redirect URI must use `127.0.0.1`.
 
 ---
 
