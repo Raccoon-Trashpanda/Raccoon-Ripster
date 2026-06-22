@@ -60,8 +60,9 @@ Filename: "{app}\Ripster.vbs"; Description: "{cm:LaunchProgram,{#AppName}}"; \
   Flags: postinstall nowait shellexec skipifsilent
 
 [Icons]
-Name: "{group}\Ripster";           Filename: "{app}\Ripster.vbs"; WorkingDir: "{app}"
-Name: "{group}\Uninstall Ripster"; Filename: "{uninstallexe}"
+Name: "{group}\Ripster";             Filename: "{app}\Ripster.vbs"; WorkingDir: "{app}"
+Name: "{group}\Ripster (browser)";   Filename: "{app}\Ripster (browser).cmd"; WorkingDir: "{app}"; Comment: "Use this if the main Ripster window doesn't open"
+Name: "{group}\Uninstall Ripster";   Filename: "{uninstallexe}"
 Name: "{autodesktop}\Ripster";     Filename: "{app}\Ripster.vbs"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [UninstallDelete]
