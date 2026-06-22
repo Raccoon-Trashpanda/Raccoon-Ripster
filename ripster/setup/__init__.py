@@ -124,6 +124,7 @@ def tool_path(name: str) -> Optional[str]:
     if _is_windows:
         candidates: list[str] = {
             "go": [
+                str(_base_dir / "tools" / "go" / "bin" / "go.exe"),  # portable zip
                 r"C:\Program Files\Go\bin\go.exe",
                 r"C:\Go\bin\go.exe",
                 os.path.expandvars(r"%USERPROFILE%\go\bin\go.exe"),
@@ -395,25 +396,32 @@ async def install_go_windows() -> None:
         ver = "go1.22.4"
     await ilog(f"   Latest Go: {ver}")
     arch = "amd64" if platform.machine().endswith("64") else "386"
-    url  = f"https://go.dev/dl/{ver}.windows-{arch}.msi"
-    tmp  = Path(tempfile.gettempdir()) / f"{ver}.windows-{arch}.msi"
-    ok   = await download_file(url, tmp, f"Go {ver} installer")
+    # Use the PORTABLE zip, not the MSI: the MSI needs elevation and returned
+    # 1603 on a normal (non-admin) install. The zip extracts locally, no admin.
+    url  = f"https://go.dev/dl/{ver}.windows-{arch}.zip"
+    tmp  = Path(tempfile.gettempdir()) / f"{ver}.windows-{arch}.zip"
+    ok   = await download_file(url, tmp, f"Go {ver} (portable zip)")
     if not ok:
         await ilog("   Please install manually: https://go.dev/dl/", "warn")
         return
-    await ilog("🔧 Running Go MSI installer (silent)… this may take 30–60 seconds", "info")
-    msiexec = r"C:\Windows\System32\msiexec.exe"
-    rc, _   = await irun([msiexec, "/i", str(tmp), "/qn", "/norestart"])
-    if rc == 0 or rc == 3010:
-        await ilog("✓ Go installed successfully", "success")
-        _need_restart = True
-        if _broadcast:
-            await _broadcast({
-                "type":   "restart_required",
-                "reason": "Go was installed — click Restart now or close terminal and run python app.py again",
-            })
-    else:
-        await ilog(f"✗ Installer exit code {rc}", "error")
+    await ilog("🔧 Extracting Go (portable, no admin)…", "info")
+    tools = _base_dir / "tools"
+    go_root = tools / "go"
+    try:
+        tools.mkdir(exist_ok=True)
+        if go_root.exists():
+            shutil.rmtree(go_root, ignore_errors=True)
+        with zipfile.ZipFile(tmp) as z:
+            z.extractall(tools)                      # creates tools\go\
+        go_bin = go_root / "bin"
+        # Usable immediately this session; tool_path() also finds it after restart.
+        os.environ["PATH"] = str(go_bin) + os.pathsep + os.environ.get("PATH", "")
+        if (go_bin / "go.exe").exists():
+            await ilog(f"✓ Go installed (portable) → {go_root}", "success")
+        else:
+            await ilog("✗ Go extracted but go.exe missing", "error")
+    except Exception as e:
+        await ilog(f"✗ Go extract failed: {e}", "error")
         await ilog("   Try manual install: https://go.dev/dl/", "warn")
 
 
@@ -465,7 +473,8 @@ async def install_mp4decrypt_windows() -> None:
 
     BENTO4_VER  = "1-6-0-641"
     name        = f"Bento4-SDK-{BENTO4_VER}.x86_64-microsoft-win32.zip"
-    PRIMARY_URL = f"https://www.bok.net/Bento4/binaries/{BENTO4_VER}/{name}"
+    # bok.net serves the zip directly under /binaries/ (the /{ver}/ subpath 404s).
+    PRIMARY_URL = f"https://www.bok.net/Bento4/binaries/{name}"
     tmp = Path(tempfile.gettempdir()) / name
 
     await ilog(f"   URL: {PRIMARY_URL}", "stdout")
@@ -493,10 +502,34 @@ async def install_mp4decrypt_windows() -> None:
         await ilog(f"✗ Failed: {e}", "error")
 
 
+async def ensure_git() -> Optional[str]:
+    """Best-effort install Git per-user via winget if missing (no admin). Git is
+    required to clone the Apple downloader; a fresh PC usually has neither."""
+    git = tool_path("git")
+    if git:
+        return git
+    if not shutil.which("winget"):
+        await ilog("✗ Git missing and winget unavailable — install: https://git-scm.com", "error")
+        return None
+    await ilog("📦 Git not found — installing via winget (per-user, no admin)…")
+    rc, _ = await irun(["winget", "install", "-e", "--id", "Git.Git",
+                        "--scope", "user", "--silent",
+                        "--accept-package-agreements", "--accept-source-agreements"])
+    cand = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git\cmd\git.exe")
+    if os.path.isfile(cand):
+        os.environ["PATH"] = os.path.dirname(cand) + os.pathsep + os.environ.get("PATH", "")
+        await ilog("✓ Git installed", "success")
+        return cand
+    git = tool_path("git") or shutil.which("git")
+    if not git:
+        await ilog(f"✗ Git install failed (winget exit {rc}) — install: https://git-scm.com", "error")
+    return git
+
+
 async def clone_downloader() -> bool:
     """Clone or update zhaarey/apple-music-downloader next to app.py."""
     main_go = _base_dir / "main.go"
-    git     = tool_path("git") or "git"
+    git     = await ensure_git() or "git"
     if main_go.exists():
         await ilog("✓ main.go already present — skipping clone", "success")
         return True
