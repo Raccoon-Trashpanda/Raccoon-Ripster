@@ -14,7 +14,9 @@ Install: apple_auth.install(app, cfg, save_config_fn, broadcast_fn)
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+from pathlib import Path
+
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 router = APIRouter()
@@ -213,6 +215,55 @@ async def apple_set_token(mut: str = ""):
         body=f"media-user-token ({len(mut)} символов) сохранён в Ripster.<br>"
              "Это окно закроется через несколько секунд.",
     ))
+
+
+def _cookies_path() -> Path:
+    """The cookies.txt path gamdl reads (gamdl-cookies-path), resolved relative
+    to the app working dir when not absolute."""
+    p = (_cfg.get("gamdl-cookies-path") or "cookies.txt").strip() or "cookies.txt"
+    return Path(p)
+
+
+@router.get("/api/apple/cookies-status")
+async def apple_cookies_status():
+    p = _cookies_path()
+    n = 0
+    if p.exists():
+        try:
+            n = len([l for l in p.read_text(encoding="utf-8", errors="ignore").splitlines()
+                     if l.strip() and not l.lstrip().startswith("#")])
+        except Exception:
+            pass
+    return {"exists": p.exists(), "lines": n, "path": str(p)}
+
+
+@router.post("/api/apple/cookies")
+async def apple_save_cookies(request: Request):
+    """Save a pasted Netscape cookies.txt (from a logged-in music.apple.com) to
+    the gamdl cookies path. Empty body clears it."""
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    text = (data.get("text") or "").strip()
+    p = _cookies_path()
+    if not text:
+        try:
+            if p.exists():
+                p.unlink()
+        except Exception:
+            pass
+        return {"ok": True, "exists": False, "lines": 0}
+    try:
+        if p.parent and str(p.parent) not in ("", "."):
+            p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(text + ("" if text.endswith("\n") else "\n"), encoding="utf-8")
+    except Exception as e:
+        return {"ok": False, "error": str(e)}
+    lines = [l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    looks_apple = "apple.com" in text.lower()
+    return {"ok": True, "exists": True, "lines": len(lines),
+            "looks_apple": looks_apple, "path": str(p)}
 
 
 @router.get("/api/apple/auth-status")

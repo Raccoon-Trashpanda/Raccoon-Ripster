@@ -511,18 +511,38 @@ async def ensure_git() -> Optional[str]:
     if not shutil.which("winget"):
         await ilog("✗ Git missing and winget unavailable — install: https://git-scm.com", "error")
         return None
-    await ilog("📦 Git not found — installing via winget (per-user, no admin)…")
-    rc, _ = await irun(["winget", "install", "-e", "--id", "Git.Git",
-                        "--scope", "user", "--silent",
+    await ilog("📦 Git not found — installing via winget…")
+    rc, _ = await irun(["winget", "install", "-e", "--id", "Git.Git", "--silent",
                         "--accept-package-agreements", "--accept-source-agreements"])
-    cand = os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git\cmd\git.exe")
-    if os.path.isfile(cand):
-        os.environ["PATH"] = os.path.dirname(cand) + os.pathsep + os.environ.get("PATH", "")
+    # winget's Git-for-Windows installer lands in Program Files (or per-user). Our
+    # running process still has the OLD PATH, so refresh it from the registry and
+    # probe the known install locations directly.
+    try:
+        import winreg
+        for hive, sub in ((winreg.HKEY_LOCAL_MACHINE,
+                           r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment"),
+                          (winreg.HKEY_CURRENT_USER, "Environment")):
+            try:
+                with winreg.OpenKey(hive, sub) as k:
+                    val, _ = winreg.QueryValueEx(k, "Path")
+                    os.environ["PATH"] = os.environ.get("PATH", "") + os.pathsep + val
+            except Exception:
+                pass
+    except Exception:
+        pass
+    for c in (r"C:\Program Files\Git\cmd\git.exe",
+              r"C:\Program Files (x86)\Git\cmd\git.exe",
+              os.path.expandvars(r"%LOCALAPPDATA%\Programs\Git\cmd\git.exe")):
+        if os.path.isfile(c):
+            os.environ["PATH"] = os.path.dirname(c) + os.pathsep + os.environ["PATH"]
+            await ilog("✓ Git installed", "success")
+            return c
+    git = shutil.which("git") or tool_path("git")
+    if git:
         await ilog("✓ Git installed", "success")
-        return cand
-    git = tool_path("git") or shutil.which("git")
-    if not git:
-        await ilog(f"✗ Git install failed (winget exit {rc}) — install: https://git-scm.com", "error")
+    else:
+        await ilog("✗ Git installed but not visible yet — restart Ripster and retry",
+                   "error")
     return git
 
 

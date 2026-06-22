@@ -634,6 +634,26 @@
             <button class="btn-sm" onclick="testAuth('apple')" data-i18n="s.check" style="padding:6px 12px;background:rgba(252,60,68,.08);color:#fc3c44;border:1px solid rgba(252,60,68,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🔑 Проверить</button>
             <div id="test-auth-apple" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
           </div>
+
+          <!-- Apple cookies.txt (gamdl: AAC / music videos) -->
+          <div class="field-group" style="grid-column:1/-1;margin-top:14px">
+            <label class="lbl">
+              🍪 cookies.txt (gamdl — AAC / клипы)
+              <span id="apple-cookies-status" style="font-size:10px;color:var(--muted);margin-left:6px"></span>
+            </label>
+            <div style="font-size:10.5px;color:var(--muted);line-height:1.55;margin:2px 0 6px">
+              Экспортируй cookies с залогиненного <b>music.apple.com</b> (расширение «Get cookies.txt» / Netscape-формат) и вставь сюда. Нужно для <b>gamdl</b> (AAC, музыкальные клипы); для ALAC/Atmos через wrapper — не требуется.
+            </div>
+            <textarea id="apple-cookies" rows="5" spellcheck="false"
+              placeholder="# Netscape HTTP Cookie File&#10;.apple.com  TRUE  /  TRUE  ...  media-user-token  ..."
+              style="width:100%;font-family:monospace;font-size:11px;background:rgba(0,0,0,.25);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px;resize:vertical"></textarea>
+            <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
+                onclick="(async()=>{const el=document.getElementById('apple-cookies'),st=document.getElementById('apple-cookies-status');st.textContent='…';try{const r=await api('POST','/api/apple/cookies',{text:el.value});st.textContent=r&&r.ok?(r.exists?('✅ Сохранено: '+r.lines+' cookies'+(r.looks_apple?'':' ⚠ нет apple.com')):'🗑 очищено'):('✗ '+((r&&r.error)||'ошибка'));st.style.color=r&&r.ok?'var(--green,#30d158)':'#fc3c44';}catch(e){st.textContent='✗ '+e;st.style.color='#fc3c44';}})()">💾 Сохранить cookies</button>
+              <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.08);color:#fc3c44;border:1px solid rgba(252,60,68,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
+                onclick="(async()=>{const st=document.getElementById('apple-cookies-status');try{const r=await api('GET','/api/apple/cookies-status');st.textContent=r&&r.exists?('✅ установлено: '+r.lines+' cookies'):'— не задано';st.style.color='var(--muted)';}catch(e){}})()">🔄 Статус</button>
+            </div>
+          </div>
         </div>
 
         <!-- ═══ Quality selector ═══ -->

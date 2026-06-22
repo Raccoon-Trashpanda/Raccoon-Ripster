@@ -63,7 +63,7 @@ Filename: "{app}\Ripster.vbs"; Description: "{cm:LaunchProgram,{#AppName}}"; \
 Name: "{group}\Ripster";             Filename: "{app}\Ripster.vbs"; WorkingDir: "{app}"
 Name: "{group}\Ripster (browser)";   Filename: "{app}\Ripster (browser).cmd"; WorkingDir: "{app}"; Comment: "Use this if the main Ripster window doesn't open"
 Name: "{group}\Uninstall Ripster";   Filename: "{uninstallexe}"
-Name: "{autodesktop}\Ripster";     Filename: "{app}\Ripster.vbs"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\Ripster";     Filename: "{app}\Ripster (browser).cmd"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\.venv"
