@@ -50,12 +50,19 @@ function Get-Python {
     return $null
 }
 
-function Invoke-Py($pyArr, $rest) {
-    # Run the detected python with extra args.
-    $all = @()
-    $all += $pyArr
-    $all += $rest
-    & $all[0] @($all[1..($all.Count - 1)])
+# Run a native command (python/pip/venv) so that lines it writes to stderr
+# (pip notices, deprecation warnings) do NOT abort the script. Under
+# $ErrorActionPreference='Stop' a native stderr line becomes a terminating
+# NativeCommandError even when the exe exits 0 -- which silently broke the
+# hidden installer run. We merge stderr->stdout, print it, and return the real
+# exit code for an explicit check.
+function Invoke-Native($cmd) {
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $cmd[0] @($cmd[1..($cmd.Count - 1)]) 2>&1 | ForEach-Object { Write-Host $_ }
+        return $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prev }
 }
 
 # 1. Python 3.12+
@@ -82,13 +89,14 @@ $Venv   = Join-Path $InstallDir ".venv"
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
 if (-not (Test-Path $VenvPy)) {
     Info "creating virtual environment (.venv)"
-    Invoke-Py $py @("-m", "venv", $Venv)
+    [void](Invoke-Native ($py + @("-m", "venv", $Venv)))
     if (-not (Test-Path $VenvPy)) { throw "venv creation failed" }
 }
 Info "installing Python dependencies (pulls every dependency, incl. native-window pywebview)"
-& $VenvPy -m pip install --upgrade pip wheel | Out-Null
-& $VenvPy -m pip install -r (Join-Path $InstallDir "requirements.txt")
-if ($LASTEXITCODE -ne 0) { throw "pip install failed" }
+[void](Invoke-Native @($VenvPy, "-m", "pip", "install", "--upgrade", "pip", "wheel"))
+$req = Join-Path $InstallDir "requirements.txt"
+$code = Invoke-Native @($VenvPy, "-m", "pip", "install", "-r", $req)
+if ($code -ne 0) { throw "pip install failed (exit $code)" }
 Ok "all Python dependencies installed"
 
 # 3. Seed config
