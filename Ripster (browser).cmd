@@ -8,3 +8,8 @@ echo   Address: http://127.0.0.1:7799
 echo.
 start "" powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep 8; Start-Process 'http://127.0.0.1:7799'"
 "%~dp0python\python.exe" app.py
+echo.
+echo ============================================================
+echo   Ripster stopped (or failed to start). Error is shown above.
+echo ============================================================
+pause
