@@ -6,8 +6,16 @@ cookies.txt
 *.session
 # OrpheusDL per-service secret blobs (Spotify/Tidal auth)
 orpheus/
-# Widevine L3 device — never publish
+# Widevine L3 device — never publish (each user mints their own locally)
 *.wvd
+tools/widevine/
+_widevine_setup/_keydive_out/
+_widevine_setup/_sdk/
+frida-server*
+client_id.bin
+private_key.pem
+device_client_id_blob
+device_private_key
 # Windows / Go binaries (not part of the Python repo)
 *.exe
 backups/
