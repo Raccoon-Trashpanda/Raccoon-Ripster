@@ -70,3 +70,23 @@ Type: filesandordirs; Name: "{app}\.venv"
 Type: filesandordirs; Name: "{app}\__pycache__"
 Type: files;          Name: "{app}\Ripster.cmd"
 Type: files;          Name: "{app}\Ripster.vbs"
+
+[Code]
+// Bake the ABSOLUTE app dir + site-packages into the embedded Python's ._pth at
+// install time. With a ._pth, Python runs isolated and resolves relative entries
+// against CWD, so the bundled interpreter otherwise can't reliably find the app
+// package or its deps. Absolute paths (known only at install) fix this for good.
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  Pth: String;
+begin
+  if CurStep = ssPostInstall then
+  begin
+    Pth := ExpandConstant('{app}\python\python312._pth');
+    if FileExists(Pth) then
+      SaveStringToFile(Pth,
+        #13#10 + ExpandConstant('{app}') +
+        #13#10 + ExpandConstant('{app}\python\Lib\site-packages') + #13#10,
+        True);
+  end;
+end;
