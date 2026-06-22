@@ -10,6 +10,11 @@ Open: http://127.0.0.1:7799
 import asyncio, os, sys, time
 import platform
 
+# Bundled-Python (embeddable, ._pth) runs isolated and does NOT add the script
+# dir to sys.path, so `import ripster` would fail. Make it work no matter how or
+# from where we were launched.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 # Ensure UTF-8 output on Windows (avoids cp1251 crash on box-drawing chars)
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
     try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')

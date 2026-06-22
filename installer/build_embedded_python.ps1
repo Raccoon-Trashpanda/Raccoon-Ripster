@@ -39,10 +39,6 @@ Expand-Archive $zip $dest -Force
 $pth = Get-ChildItem (Join-Path $dest "python*._pth") | Select-Object -First 1
 (Get-Content $pth.FullName) -replace '^#\s*import site', 'import site' | Set-Content $pth.FullName -Encoding ASCII
 Add-Content $pth.FullName "Lib\site-packages"
-# CRITICAL: add the app dir (parent of python\) so `import ripster` / `import app`
-# work. With a ._pth present Python runs isolated and does NOT add the script
-# dir, so without this the bundled interpreter can't find the app package.
-Add-Content $pth.FullName ".."
 
 Write-Host "[build] bootstrapping pip"
 $getpip = Join-Path $tmp "get-pip.py"
