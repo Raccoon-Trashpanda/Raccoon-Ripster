@@ -1,0 +1,84 @@
+# Ripster — example configuration.
+# Copy this file to `config.yaml` and fill in the services you use.
+# Everything can also be set from the web UI (Settings tab) — config.yaml is
+# written back automatically, so you rarely need to edit this by hand.
+#
+# Leave a service's credentials blank to simply not use it.
+
+# ── General ──────────────────────────────────────────────────────────────────
+engine: zhaarey            # default Apple engine: zhaarey | gamdl | amd
+quality: alac              # default quality: alac | aac | atmos
+save-path: downloads       # where finished files land (relative or absolute)
+queue-autostart: true      # start downloading as soon as a link is added
+max-parallel: 2            # parallel downloads (>2 not recommended for Apple)
+auto-delete-minutes: 0     # delete finished releases after N min (0 = never)
+quality-subfolders: true   # sort output into per-quality folders
+
+# ── Apple Music ──────────────────────────────────────────────────────────────
+# media-user-token / authorization-token: from music.apple.com DevTools, or use
+# the "Login via Apple" button in Settings. Needed for AAC/video.
+media-user-token: ''
+authorization-token: ''
+storefront: us
+language: en-US
+apple-wrapper: public          # ALAC/Atmos decryption: public | local | auto. Default
+                               # 'public' = works out of the box, NO Docker. Use 'local'
+                               # only if you run your own Docker wrapper with a premium Apple ID.
+amd-instance-url: wm.wol.moe   # public wrapper for ALAC/Atmos (no Apple ID needed)
+amd-instance-secure: true
+amd-parallel: 4
+gamdl-cookies-path: cookies.txt
+gamdl-song-codec: alac
+gamdl-ffmpeg-path: ffmpeg
+embed-cover: true
+cover-format: jpg
+cover-size: 1000x1000
+save-cover-to-folder: true
+
+# ── Qobuz ────────────────────────────────────────────────────────────────────
+qobuz-auth-token: ''
+qobuz-app-id: ''
+qobuz-secrets: ''
+qobuz-email: ''
+qobuz-password: ''        # hashed (MD5) before use; never stored in clear
+qobuz-quality: '27'       # 5=MP3 320 · 6=CD · 7=24/96 · 27=24/192
+
+# ── Deezer ───────────────────────────────────────────────────────────────────
+deezer-arl: ''            # deezer.com → DevTools → Application → Cookies → arl
+deezer-quality: flac
+
+# ── Tidal ────────────────────────────────────────────────────────────────────
+# Easiest: use the device-flow login button in Settings (auto-refreshing).
+tidal-token: ''
+tidal-refresh: ''
+tidal-country: US
+tidal-quality: lossless
+
+# ── Spotify (conversion only — finds the release on Apple/Qobuz/etc.) ─────────
+spotify-client-id: ''     # create an app at developer.spotify.com
+spotify-client-secret: ''
+spotify-sp-dc: ''         # sp_dc cookie (for native streaming, optional)
+spotify-engine: orpheus_spotify
+orpheus-quality: hifi
+
+# ── Beatport ─────────────────────────────────────────────────────────────────
+beatport-username: ''
+beatport-password: ''
+beatport-quality: hifi
+
+# ── SoundCloud ───────────────────────────────────────────────────────────────
+soundcloud-oauth-token: ''
+soundcloud-save-path: downloads
+
+# ── Yandex Music (optional) ──────────────────────────────────────────────────
+yandex-token: ''
+yandex-quality: flac
+
+# ── Output transcode (optional, off by default = keep native format) ─────────
+transcode-format: ''       # '' = native · mp3 · flac · alac
+transcode-keep-original: false
+
+# ── Built-in audio player ────────────────────────────────────────────────────
+player-gapless: true
+player-viz: true
+player-stream-quality: mp3

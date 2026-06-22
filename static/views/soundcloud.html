@@ -1,0 +1,34 @@
+      <div style="padding:14px 16px;min-width:0">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+            <span style="font-size:20px;color:#ff5500">☁</span>
+            <span style="font-size:14px;font-weight:700;color:var(--text)">SoundCloud</span>
+          </div>
+          <div style="display:flex;gap:5px;margin-left:auto;align-items:center">
+            <input id="sc-q" placeholder="Поиск: артист, микс, релиз…"
+              style="padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);outline:none;font-family:var(--font);width:240px;max-width:46vw"
+              onkeydown="if(event.key==='Enter')scSearch()"/>
+            <select id="sc-kind" onchange="scSearch()"
+              style="padding:6px 8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
+              <option value="all">Всё</option>
+              <option value="tracks">Миксы / треки</option>
+              <option value="playlists">Релизы / сеты</option>
+            </select>
+            <select id="sc-sort" onchange="_scRender()"
+              style="padding:6px 8px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:11px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
+              <option value="relevance">По релевантности</option>
+              <option value="new">Сначала новые</option>
+              <option value="old">Сначала старые</option>
+              <option value="plays">По прослушиваниям</option>
+              <option value="duration">По длительности</option>
+            </select>
+            <button onclick="scSearch()"
+              style="padding:6px 12px;background:var(--surface);border:1px solid var(--border2);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;color:var(--text);font-family:var(--font);flex:0 0 auto">🔍</button>
+          </div>
+        </div>
+        <div id="sc-status" style="font-size:12px;color:var(--muted);padding:10px 0;display:none">Ищу…</div>
+        <div id="sc-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px"></div>
+        <div id="sc-empty" style="text-align:center;padding:40px;font-size:13px;color:var(--muted)">
+          Введи запрос — например <b>anjunadeep</b> — и нажми поиск.
+        </div>
+      </div>

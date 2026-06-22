@@ -1,0 +1,39 @@
+      <div style="padding:14px 16px;max-width:1600px;margin:0 auto">
+        <div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:4px" data-i18n="v.spectrum">📊 Спектральный анализ</div>
+        <div style="font-size:11px;color:var(--muted);margin-bottom:14px" data-i18n="spec.subtitle">Проверь lossless-аудио по спектрограмме. Настоящий FLAC/ALAC имеет частоты до 20–22 кГц без резкого среза.</div>
+
+        <!-- Drop zone + path input -->
+        <div id="spec-drop" style="border:2px dashed var(--border);border-radius:12px;padding:28px 20px;text-align:center;margin-bottom:12px;cursor:pointer;transition:border-color .2s"
+          onclick="document.getElementById('spec-file-inp').click()"
+          ondragover="event.preventDefault();this.style.borderColor='#af52de'"
+          ondragleave="this.style.borderColor='var(--border)'"
+          ondrop="event.preventDefault();this.style.borderColor='var(--border)';specDropFile(event.dataTransfer.files[0])">
+          <div style="font-size:26px;margin-bottom:6px">🎵</div>
+          <div style="font-size:12px;color:var(--muted)" data-i18n="spec.drop">Перетащи файл или нажми для выбора</div>
+          <div style="font-size:10px;color:var(--muted2);margin-top:4px">MP3 · FLAC · ALAC · AAC · OGG · M4A · WAV · AIFF</div>
+        </div>
+        <input id="spec-file-inp" type="file" accept=".mp3,.flac,.m4a,.aac,.ogg,.wav,.aif,.aiff,.wv,.opus" style="display:none"
+          onchange="specLoadFile(this.files[0])"/>
+
+        <div style="display:flex;gap:8px;margin-bottom:14px">
+          <input id="spec-path" data-i18n-ph="spec.path_ph" placeholder="…или введи путь к файлу" style="flex:1"
+            onkeydown="if(event.key==='Enter')specAnalyzePath()"/>
+          <button onclick="specAnalyzePath()" data-i18n="spec.analyze" style="padding:7px 14px;background:rgba(175,82,222,.15);border:1px solid rgba(175,82,222,.3);border-radius:8px;color:#af52de;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font);white-space:nowrap">Анализ</button>
+        </div>
+
+        <!-- Result panel -->
+        <div id="spec-result" style="display:none">
+          <!-- File info bar -->
+          <div id="spec-info" style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 14px;margin-bottom:10px;font-size:11px;display:flex;flex-wrap:wrap;gap:12px"></div>
+          <!-- Verdict badge -->
+          <div id="spec-verdict" style="margin-bottom:10px;padding:8px 14px;border-radius:8px;font-size:12px;font-weight:700"></div>
+          <!-- Spectrogram image -->
+          <div style="border:1px solid var(--border);border-radius:10px;overflow:hidden;background:#000">
+            <img id="spec-img" src="" style="width:100%;display:block" loading="lazy"/>
+          </div>
+          <div style="font-size:10px;color:var(--muted);margin-top:6px" data-i18n="spec.axis_note">Ось X — время · Ось Y — частота (0 Гц внизу, 22 кГц вверху) · Яркость — уровень сигнала</div>
+        </div>
+
+        <div id="spec-spinner" style="display:none;text-align:center;padding:30px;color:var(--muted);font-size:12px" data-i18n="spec.spinner">⏳ Генерирую спектрограмму…</div>
+        <div id="spec-error" style="display:none;color:#ff453a;font-size:12px;padding:10px 0"></div>
+      </div>

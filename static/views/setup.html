@@ -1,0 +1,63 @@
+      <div class="view-header">
+        <div class="view-title">Setup &amp; Dependencies</div>
+        <div class="view-sub">Auto-install Go · MP4Box · mp4decrypt · apple-music-downloader</div>
+      </div>
+      <div class="view-body" style="gap:0;padding:0;display:flex;flex-direction:column;height:100%">
+
+        <!-- Restart required banner -->
+        <div id="restart-banner" style="display:none;background:linear-gradient(90deg,rgba(239,159,39,.18),rgba(239,159,39,.08));border-bottom:2px solid var(--orange);padding:14px 28px;flex-shrink:0">
+          <div style="display:flex;align-items:center;gap:12px">
+            <span style="font-size:28px">⚠️</span>
+            <div>
+              <div style="font-family:var(--display);font-size:15px;font-weight:800;color:var(--orange)">RESTART REQUIRED</div>
+              <div style="font-size:12px;color:rgba(239,159,39,.8);margin-top:2px" id="restart-reason">Go was installed — close this terminal and run <code style="background:rgba(255,255,255,.1);padding:1px 6px;border-radius:4px">python app.py</code> again to apply PATH changes.</div>
+            </div>
+            <button class="btn-orange btn-sm" style="margin-left:auto;flex-shrink:0" onclick="restartApp()">⟳ Restart now</button>
+          </div>
+        </div>
+
+        <!-- Top area: tools + button -->
+        <div style="padding:16px 28px 0;flex-shrink:0">
+          <!-- Step indicators -->
+          <div id="step-track" style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap"></div>
+
+          <!-- Tools status grid -->
+          <div id="tools-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px"></div>
+
+          <!-- Controls -->
+          <div class="row" style="gap:10px;margin-bottom:14px">
+            <button class="btn-red" id="btn-setup" onclick="runSetup()">⚡ Auto-install everything</button>
+            <button class="btn-ghost btn-sm" onclick="checkTools()">↺ Re-check</button>
+            <div id="setup-spinner" style="display:none;align-items:center;gap:7px">
+              <span id="setup-spinner-dot" style="width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;animation:amd-blink 1s infinite"></span>
+              <span id="setup-running-label" style="font-size:11px;color:var(--muted);font-family:var(--mono)"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Python dependency updates -->
+        <div style="padding:0 28px 14px;flex-shrink:0">
+          <div data-i18n="setup.deps_hdr" style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-family:var(--display);margin-bottom:8px">📦 Python-зависимости</div>
+          <div data-i18n-html="setup.deps_note" style="font-size:11px;color:var(--muted);margin-bottom:8px">Обновление pip-пакетов приложения. <b>📌 закреплённые</b> ломают сборку — «Обновить всё» их не трогает. После обновления нужен рестарт.</div>
+          <div class="row" style="gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            <button class="btn-ghost btn-sm" data-i18n="setup.deps_check" onclick="loadDeps()">🔄 Проверить обновления</button>
+            <button class="btn-red btn-sm" data-i18n="setup.deps_update_all" onclick="updateAllDeps()">⬆️ Обновить всё (без закреплённых)</button>
+          </div>
+          <div id="deps-list" data-i18n="setup.deps_hint" style="font-size:12px;color:var(--muted)">Нажми «Проверить обновления».</div>
+        </div>
+
+        <!-- Live console — fills remaining space -->
+        <div style="padding:0 28px 16px;flex:1;display:flex;flex-direction:column;min-height:0">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
+            <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-family:var(--display)">📋 Live install log</div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);cursor:pointer">
+                <input type="checkbox" id="setup-autoscroll" checked style="width:auto;padding:0;background:none;border:none"/> auto-scroll
+              </label>
+              <button class="btn-ghost btn-sm" style="padding:3px 9px;font-size:10px" onclick="clearSetupConsole()">Clear</button>
+            </div>
+          </div>
+          <div class="console" id="setup-console" style="flex:1;max-height:none;min-height:200px"></div>
+        </div>
+
+      </div>

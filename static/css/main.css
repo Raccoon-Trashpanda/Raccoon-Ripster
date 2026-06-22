@@ -1,0 +1,1283 @@
+/* Ripster main stylesheet — extracted from index.html */
+
+/* ── Block 1 ── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  /* ── Dark theme (default) — Raccoon Ripster design system ── */
+  --bg:#111318;
+  --bg2:#111318;
+  --bg3:#1c1e2a;
+  --surface:#1c1e2a;
+  --surface2:#252836;
+  --border:#3a3a58;
+  --border2:#4a4a68;
+  --text:#e8e8f8;
+  --muted:#9090a8;
+  --muted2:#6a6a8a;
+  --red:#c084a0;
+  --red2:#8a5570;
+  --danger:#E24B4A;
+  --danger-dim:#3a1a1a;
+  --green:#3ecfaa;
+  --blue:#0a84ff;
+  --orange:#EF9F27;
+  --purple:#9090c8;
+  --yellow:#ffd60a;
+  --topbar-bg:#111318;
+  --sidebar-bg:#111318;
+  --console-bg:rgba(0,0,0,.35);
+  --font:system-ui,-apple-system,'Segoe UI',sans-serif;
+  --mono:'JetBrains Mono','Fira Code','Cascadia Code',monospace;
+  --display:system-ui,-apple-system,'Segoe UI',sans-serif;
+  --radius:14px;
+  --shadow:0 20px 60px rgba(0,0,0,.6);
+}
+/* ── Light theme ── */
+html.light{
+  --bg:#f4f4f8;
+  --bg2:#ebebf0;
+  --bg3:#e0e0e8;
+  --surface:#ffffff;
+  --surface2:#f0f0f5;
+  --border:rgba(0,0,0,.1);
+  --border2:rgba(0,0,0,.16);
+  --text:#18181f;
+  --muted:rgba(18,18,30,.5);
+  --muted2:rgba(18,18,30,.3);
+  --red:#a05880;
+  --red2:#7a3a58;
+  --danger:#c83030;
+  --danger-dim:rgba(200,48,48,.1);
+  --green:#1a9e3e;
+  --blue:#0063d4;
+  --orange:#c07800;
+  --topbar-bg:rgba(244,244,248,.95);
+  --sidebar-bg:#ebebf0;
+  --console-bg:rgba(0,0,0,.04);
+  --shadow:0 10px 40px rgba(0,0,0,.12);
+}
+html{overflow:hidden;height:100%}
+html,body{background:var(--bg);color:var(--text);font-family:var(--font);overflow:hidden;height:100%}
+body{display:flex;flex-direction:column}
+body{height:100%;margin:0}
+
+/* ── LAYOUT ── */
+.app{display:grid;grid-template-columns:220px minmax(0, 1fr);grid-template-rows:56px minmax(0, 1fr);flex:1 1 0;min-height:0;width:100vw;gap:0;overflow:hidden}
+.topbar{grid-column:1/-1;display:flex;align-items:center;padding:0 20px 0 20px;background:var(--topbar-bg);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);gap:12px;position:relative;z-index:100;overflow:hidden;min-width:0}
+.topbar > *{flex-shrink:0}
+.tb-status{font-size:11px;font-family:var(--mono);color:var(--muted);white-space:nowrap;flex-shrink:0}
+.tb-restart{background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:14px;padding:2px 7px;cursor:pointer;line-height:1;flex-shrink:0}
+.tb-restart:hover{color:var(--fg);border-color:var(--muted)}
+.sidebar{background:var(--sidebar-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;padding:12px 10px;gap:2px;min-height:0;scrollbar-width:thin}
+/* .main — defined in MAIN CONTENT section below with position:relative */
+
+/* ── TOPBAR ── */
+.tb-logo{display:flex;align-items:center;gap:9px;text-decoration:none}
+.tb-mark{width:34px;height:34px;border-radius:10px;background:var(--surface);border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden}
+.tb-name{font-family:Georgia,'Times New Roman',serif;font-size:14px;font-weight:700;letter-spacing:-.3px;color:var(--text)}
+.tb-sub{font-size:10px;color:var(--muted);font-weight:400;font-family:var(--mono)}
+/* (.tb-pills — removed; topbar now uses a single details popover instead of a row of pills) */
+.pill{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:600;padding:4px 10px;border-radius:20px;font-family:var(--display);letter-spacing:.2px}
+.pill .dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
+.pill-ok{background:rgba(62,207,170,.12);color:var(--green)}.pill-ok .dot{background:var(--green);animation:pulse-g 2s infinite}
+.pill-warn{background:rgba(239,159,39,.12);color:var(--orange)}.pill-warn .dot{background:var(--orange)}
+.pill-err{background:rgba(226,75,74,.12);color:var(--danger)}.pill-err .dot{background:var(--danger)}
+.pill-blue{background:rgba(10,132,255,.12);color:var(--blue)}.pill-blue .dot{background:var(--blue)}
+@keyframes pulse-g{0%,100%{box-shadow:0 0 0 0 rgba(62,207,170,.5)}50%{box-shadow:0 0 0 4px rgba(62,207,170,0)}}
+
+/* (.tb-status — defined in layout section above) */
+
+/* ── SIDEBAR NAV ── */
+.nav-section{font-size:9px;font-weight:700;color:var(--muted2);text-transform:uppercase;letter-spacing:1px;padding:10px 8px 4px;font-family:var(--display)}
+.nav-item{display:flex;align-items:center;gap:9px;padding:9px 10px;border-radius:10px;cursor:pointer;font-size:12.5px;font-weight:500;color:var(--muted);transition:all .15s;user-select:none}
+.nav-item:hover{background:var(--surface);color:var(--text)}
+.nav-item.active{background:rgba(192,132,160,.12);color:var(--red);font-weight:600;box-shadow:inset 2px 0 0 var(--red);border-radius:10px}
+.nav-item .icon{font-size:14px;width:20px;text-align:center;flex-shrink:0}
+.stab{padding:7px 14px;font-size:12px;font-weight:600;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer;font-family:var(--font);transition:all .15s;border-radius:0}
+.stab.active{color:var(--red);border-bottom-color:var(--red)}
+.stab:hover:not(.active){color:var(--text)}
+.stab.svc-tab{display:inline-flex;align-items:center;gap:6px}
+.svc-ico{width:15px;height:15px;flex:0 0 auto;display:inline-block;vertical-align:middle}
+.svc-ico.is-stroke{fill:none}
+.stab-panel{display:none}.stab-panel.active{display:block}
+
+/* ── SoundCloud mix detail drawer (right side on desktop, full-width on mobile) ── */
+#sc-detail{position:fixed;top:0;right:0;height:100vh;width:min(480px,100vw);
+  background:var(--surface,#15151a);border-left:1px solid var(--border);
+  box-shadow:-10px 0 36px rgba(0,0,0,.45);z-index:1200;
+  transform:translateX(102%);transition:transform .26s cubic-bezier(.4,0,.2,1);
+  display:flex;flex-direction:column;overflow:hidden}
+#sc-detail.open{transform:translateX(0)}
+#sc-detail .scd-head{display:flex;align-items:center;justify-content:space-between;
+  padding:14px 16px 10px;border-bottom:1px solid var(--border);flex:0 0 auto}
+#sc-detail .scd-close{width:30px;height:30px;border-radius:8px;border:1px solid var(--border);
+  background:transparent;color:var(--muted);cursor:pointer;font-size:15px;flex:0 0 auto}
+#sc-detail .scd-close:hover{color:var(--text);background:rgba(255,255,255,.05)}
+#sc-detail .scd-body{overflow-y:auto;padding:16px 16px 168px;flex:1 1 auto}
+.scd-cover{width:100%;aspect-ratio:1;object-fit:cover;border-radius:12px;background:var(--surface2);display:block}
+.scd-trk{display:flex;gap:9px;padding:5px 0;align-items:baseline;border-bottom:1px solid rgba(255,255,255,.04);font-size:12px;line-height:1.45}
+.scd-trk .n{color:var(--muted2);font-family:var(--mono);flex:0 0 24px;text-align:right;font-size:10px}
+.scd-trk .ts{color:var(--blue);font-family:var(--mono);flex:0 0 auto;cursor:pointer;font-size:11px}
+.scd-trk .nm{flex:1;min-width:0;color:var(--text);word-break:break-word}
+#sc-detail-backdrop{position:fixed;inset:0;z-index:1199;background:transparent;display:none}
+#sc-detail-backdrop.show{display:block}
+.repo-row{display:flex;align-items:flex-start;gap:10px;padding:9px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+.repo-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;margin-top:4px}
+.repo-info{flex:1;min-width:0}
+.repo-link{font-size:12.5px;font-weight:600;color:var(--text);text-decoration:none}
+.repo-link:hover{color:var(--blue,#0a84ff)}
+.repo-sub{font-size:11px;color:var(--muted);margin-top:2px;line-height:1.4}
+.repo-tag{font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;white-space:nowrap;flex-shrink:0;margin-top:2px}
+.nav-badge{margin-left:auto;font-size:9px;font-weight:700;background:var(--red);color:#fff;border-radius:20px;padding:1px 6px;font-family:var(--display)}
+
+/* ── MAIN CONTENT ──
+   .main is the grid cell right of the sidebar. Views inside it stack via
+   position:absolute so each active view reliably fills the available space,
+   no matter how the outer flex/grid chain behaves. This has saved us from a
+   dozen "DOM has zero size" bugs with Console / Stats / History. */
+.main{position:relative;background:var(--bg);overflow:hidden;min-width:0;min-height:0}
+.view{position:absolute;inset:0;display:none;flex-direction:column;overflow:hidden}
+.view.active{display:flex}
+.view-header{padding:22px 28px 16px;flex-shrink:0;border-bottom:1px solid var(--border)}
+.view-title{font-family:var(--display);font-size:22px;font-weight:800;letter-spacing:-.5px}
+.view-sub{font-size:12px;color:var(--muted);margin-top:3px}
+.view-body{flex:1 1 auto;overflow-y:auto;padding:20px 28px;min-height:0;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.1) transparent}
+.view-body::-webkit-scrollbar{width:4px}
+.view-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:2px}
+/* Safety net: any direct <div> child of an active view that is NOT a
+   .view-header / .view-body / .console-toolbar still needs to stretch and
+   scroll so views like Search / Watchlist / Releases (which use an inline
+   padding wrapper) don't collapse. */
+.view.active > div:not(.view-header):not(.view-body):not(.console-toolbar):not(.hidden){
+  flex:1 1 auto;
+  overflow-y:auto;
+  min-height:0;
+  scrollbar-width:thin;
+  scrollbar-color:rgba(255,255,255,.1) transparent;
+}
+.view.active > div:not(.view-header):not(.view-body):not(.console-toolbar)::-webkit-scrollbar{width:4px}
+.view.active > div:not(.view-header):not(.view-body):not(.console-toolbar)::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:2px}
+
+/* ── INPUTS ── */
+input,select,textarea{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 12px;color:var(--text);font-family:var(--font);font-size:13px;outline:none;transition:border-color .15s;width:100%}
+input:focus,select:focus,textarea:focus{border-color:rgba(192,132,160,.6);box-shadow:0 0 0 3px rgba(192,132,160,.12)}
+input::placeholder{color:var(--muted);font-size:12px}
+/* Radio/checkbox must NOT inherit the full-width text-input styling above —
+   width:100% made them stretch to the whole row (dot centred, label shoved off
+   to the right). Reset them to native sizing. */
+input[type=radio],input[type=checkbox]{width:auto;padding:0;border:none;background:none;box-shadow:none;border-radius:0;flex:0 0 auto}
+select{cursor:pointer}
+select option{background:var(--surface)}
+.input-row{display:flex;gap:8px}
+.input-row input{flex:1}
+label.lbl{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-family:var(--display);display:block;margin-bottom:5px}
+
+/* ── BUTTONS ── */
+/* ── BUTTONS — soft 3D, depth without weight ── */
+button{
+  cursor:pointer; border:none; font-family:var(--font);
+  font-size:13px; font-weight:600; border-radius:10px;
+  padding:9px 18px; white-space:nowrap;
+  /* Center content (icon/text) on both axes within the button's borders. */
+  display:inline-flex; align-items:center; justify-content:center; gap:5px;
+  transition: transform .12s cubic-bezier(.3,1.5,.6,1),
+              box-shadow .15s ease, background .15s ease, color .15s ease;
+  -webkit-tap-highlight-color: transparent;
+  /* Subtle outer glow + inset highlight on top = light hitting a curved surface */
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.06),
+    inset 0 -1px 0 rgba(0,0,0,.18),
+    0 1px 2px rgba(0,0,0,.18),
+    0 2px 8px rgba(0,0,0,.10);
+}
+button:active{ transform: translateY(1px) scale(.985);
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,.25),
+    0 1px 1px rgba(0,0,0,.08);
+}
+button:focus-visible{ outline: 2px solid rgba(192,132,160,.55); outline-offset: 2px }
+
+.btn-red{
+  background: linear-gradient(180deg, var(--red) 0%, var(--red2) 100%);
+  color:#fff;
+}
+.btn-red:hover{ filter: brightness(1.08) }
+.btn-red:disabled{ opacity:.4; cursor:not-allowed; box-shadow:none }
+
+.btn-ghost{
+  background: linear-gradient(180deg, var(--surface) 0%, rgba(0,0,0,.04) 100%);
+  color:var(--muted); border:1px solid var(--border);
+}
+.btn-ghost:hover{
+  background: linear-gradient(180deg, var(--surface2) 0%, var(--surface) 100%);
+  color:var(--text);
+}
+
+.btn-green{
+  background: linear-gradient(180deg, rgba(62,207,170,.18) 0%, rgba(62,207,170,.06) 100%);
+  color:var(--green); border:1px solid rgba(62,207,170,.28);
+}
+.btn-green:hover{ filter: brightness(1.15) }
+.btn-green:disabled{ opacity:.4; cursor:not-allowed; box-shadow:none }
+
+.btn-orange{
+  background: linear-gradient(180deg, rgba(239,159,39,.18) 0%, rgba(239,159,39,.06) 100%);
+  color:var(--orange); border:1px solid rgba(239,159,39,.28);
+}
+.btn-orange:hover{ filter: brightness(1.15) }
+.btn-orange:disabled{ opacity:.4; cursor:not-allowed; box-shadow:none }
+
+.btn-sm{ padding:6px 13px; font-size:11.5px; border-radius:8px }
+.btn-icon{
+  width:34px; height:34px; padding:0;
+  display:flex; align-items:center; justify-content:center; font-size:14px;
+}
+.btn-icon.sm{ width:28px; height:28px; font-size:12px; border-radius:8px }
+
+/* Bare-bones tabs / chips that piggyback on <button> shouldn't get the depth */
+.stab, .chip, .pill, .nav-item button, .rel-svc-pill, .srch-sort-btn{
+  box-shadow: none !important;
+}
+.stab:active, .chip:active, .pill:active{ transform: none }
+
+/* Service-tab action buttons (custom inline styles, brand-tinted bg) — inject
+   the unified soft-3D shadow + press feedback so they don't feel flat. */
+.stab-panel .btn-sm,
+.stab-panel button[onclick^="testAuth"],
+.stab-panel button[onclick^="saveServiceTab"],
+.stab-panel button[onclick^="saveTokens"]{
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,.08),
+    inset 0 -1px 0 rgba(0,0,0,.18),
+    0 2px 6px rgba(0,0,0,.18) !important;
+  transition: transform .12s cubic-bezier(.3,1.5,.6,1),
+              box-shadow .15s ease, filter .15s !important;
+}
+.stab-panel .btn-sm:hover,
+.stab-panel button[onclick^="testAuth"]:hover,
+.stab-panel button[onclick^="saveServiceTab"]:hover{
+  filter: brightness(1.12);
+}
+.stab-panel .btn-sm:active,
+.stab-panel button[onclick^="testAuth"]:active,
+.stab-panel button[onclick^="saveServiceTab"]:active{
+  transform: translateY(1px) scale(.985);
+  box-shadow: inset 0 1px 3px rgba(0,0,0,.3) !important;
+}
+
+/* ── CARDS / BLOCKS — soft depth / floating volume ── */
+/* Light inset on top edge + dark outer shadow = card floats above the bg plane */
+.block{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:16px;
+  box-shadow:
+    0 1px 3px rgba(0,0,0,.25),
+    0 4px 14px rgba(0,0,0,.18),
+    inset 0 1px 0 rgba(255,255,255,.04);
+}
+.block-title{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.9px;margin-bottom:12px;font-family:var(--display)}
+.card{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  transition:all .18s;
+  box-shadow:
+    0 1px 3px rgba(0,0,0,.22),
+    0 3px 10px rgba(0,0,0,.14),
+    inset 0 1px 0 rgba(255,255,255,.04);
+}
+.card:hover{
+  border-color:var(--border2);
+  box-shadow:
+    0 2px 8px rgba(0,0,0,.34),
+    0 10px 28px rgba(0,0,0,.30),
+    inset 0 1px 0 rgba(255,255,255,.07);
+  transform:translateY(-2px);
+}
+
+/* ── TOGGLE ── */
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:6px 0}
+.toggle-info .toggle-label{font-size:13px;color:var(--text);font-weight:500}
+.toggle-info .toggle-sub{font-size:11px;color:var(--muted);margin-top:1px}
+.toggle-wrap{position:relative;width:40px;height:24px;flex-shrink:0}
+.toggle-inp{opacity:0;width:0;height:0;position:absolute}
+.toggle-slider{position:absolute;inset:0;background:rgba(255,255,255,.12);border-radius:12px;cursor:pointer;transition:.2s}
+.toggle-slider::before{content:'';position:absolute;width:18px;height:18px;left:3px;bottom:3px;background:#fff;border-radius:50%;transition:.2s;box-shadow:0 1px 4px rgba(0,0,0,.3)}
+.toggle-inp:checked+.toggle-slider{background:var(--red)}
+.toggle-inp:checked+.toggle-slider::before{transform:translateX(16px)}
+.divider{height:1px;background:var(--border);margin:8px 0}
+
+/* ── QUEUE ── */
+.queue-input-area{padding:20px 28px 16px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0}
+.queue-list{flex:1;overflow-y:auto;padding:12px 20px;display:flex;flex-direction:column;gap:6px;align-content:start;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.08) transparent}
+.queue-list .empty-state{margin:auto}
+.queue-list::-webkit-scrollbar{width:4px}
+.queue-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:2px}
+
+/* ── compact ROW layout ── */
+.qi{display:flex;flex-direction:row;align-items:center;gap:11px;background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:7px 10px 7px 13px;transition:border-color .15s,box-shadow .15s,background .15s;position:relative;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.2);flex-shrink:0}
+.qi:hover{border-color:rgba(255,255,255,.16);background:var(--surface2);box-shadow:0 3px 12px rgba(0,0,0,.28)}
+.qi::before{content:'';position:absolute;left:0;top:0;bottom:0;width:3px}
+.qi.queued::before{background:var(--muted2)}
+.qi.running::before{background:var(--blue)}
+.qi.done::before{background:var(--green)}
+.qi.error::before{background:var(--danger)}
+.qi.paused::before{background:var(--orange)}
+.qi.partial::before{background:var(--orange)}
+@keyframes qi-spin{to{transform:rotate(360deg)}}
+.qi-spinner{display:inline-block;width:9px;height:9px;border:1.5px solid rgba(100,160,255,.25);border-top-color:var(--blue);border-radius:50%;animation:qi-spin .65s linear infinite;vertical-align:middle;margin-right:5px;flex-shrink:0}
+.qi-art{width:44px;height:44px;border-radius:8px;flex-shrink:0;background:var(--surface2);overflow:hidden;display:flex;align-items:center;justify-content:center;font-size:18px}
+.qi-art img{width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .3s}
+.qi-art img.loaded{opacity:1}
+.qi-body{flex:1;min-width:0;display:flex;flex-direction:column;gap:3px}
+.qi-l1{display:flex;align-items:baseline;gap:6px;min-width:0}
+.qi-l2{display:flex;align-items:center;gap:8px;min-width:0}
+.qi-title{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:var(--display);flex:0 1 auto;min-width:40px}
+.qi-artist{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex:1 1 auto;min-width:0}
+.qi-badge{font-size:9px;font-weight:800;padding:2px 7px;border-radius:20px;text-transform:uppercase;letter-spacing:.5px;font-family:var(--display);flex-shrink:0}
+.qi-prog-wrap{height:4px;background:rgba(255,255,255,.07);border-radius:2px;overflow:hidden;flex:1 1 auto;max-width:200px;min-width:50px}
+.qi-prog-bar{height:100%;border-radius:2px;transition:width .3s ease}
+.qi-count{font-size:11px;color:var(--muted);font-family:var(--mono);flex-shrink:0}
+.qi-st{font-size:10px;font-family:var(--mono);font-weight:600;flex-shrink:0;display:inline-flex;align-items:center;white-space:nowrap}
+.qi-st.st-run{color:var(--blue)}
+.qi-st.st-done{color:var(--green)}
+.qi-st.st-err{color:var(--danger)}
+.qi-st.st-partial{color:var(--orange)}
+.qi-st.st-q{color:var(--muted)}
+.qi-actions{display:flex;gap:5px;margin-left:auto;flex-shrink:0;align-items:center}
+.qi-actions .dl-action-btn,.dl-action-btn{flex:0 0 auto;width:28px;min-width:28px;height:24px;padding:0;border-radius:6px;border:1px solid;font-size:13px;font-weight:600;cursor:pointer;background:transparent;font-family:var(--font);display:inline-flex;align-items:center;justify-content:center;gap:3px;transition:opacity .15s;white-space:nowrap}
+.qi-actions .dl-action-btn:has(.dl-cnt){width:auto;min-width:28px;padding:0 6px;font-size:12px}
+.dl-cnt{background:rgba(255,255,255,.15);border-radius:8px;padding:0 5px;font-size:10px;font-weight:700;min-width:14px;text-align:center}
+.qi-actions .dl-action-btn:hover{opacity:.75}
+.qi-log-toggle{font-size:9px;color:var(--muted);cursor:pointer;padding:2px 6px;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:transparent;user-select:none;transition:color .15s;flex-shrink:0;font-family:var(--mono)}
+.qi-log-toggle:hover{color:var(--text)}
+.qi-log-panel{display:none;margin-top:5px;padding:6px 8px;background:var(--console-bg);border-radius:6px;border:1px solid var(--border);max-height:140px;overflow-y:auto;font-family:var(--mono);font-size:9.5px;line-height:1.5;color:var(--text);width:100%}
+.qi-log-panel .ll-error{color:var(--danger)}
+.qi-log-panel .ll-warn{color:var(--orange)}
+.qi-log-panel .ll-success{color:var(--green)}
+.qi-log-panel .ll-info{color:var(--muted2)}
+.qi-log-panel .ll-stdout{color:var(--muted)}
+.qi-close{flex-shrink:0;width:18px;height:18px;display:flex;align-items:center;justify-content:center;background:transparent;border:none;border-radius:50%;color:var(--muted);font-size:12px;line-height:1;cursor:pointer;padding:0;opacity:.25;transition:opacity .15s,color .15s,background .15s}
+.qi:hover .qi-close{opacity:.7}
+.qi-close:hover{opacity:1;color:#fff;background:var(--danger)}
+
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;flex:1;gap:12px;color:var(--muted)}
+.empty-icon{font-size:52px;opacity:.4}
+.empty-text{font-size:14px;text-align:center;line-height:1.6}
+
+/* ── TRANSPORT ── */
+.transport{display:flex;align-items:center;gap:10px;padding:14px 28px;border-top:1px solid var(--border);background:var(--bg2);flex-shrink:0}
+.transport-prog{flex:1}
+.tp-label{font-size:10px;color:var(--muted);font-family:var(--mono);margin-bottom:5px}
+.tp-track{height:5px;background:rgba(255,255,255,.07);border-radius:3px;overflow:hidden}
+.tp-bar{height:100%;border-radius:3px;background:var(--red);transition:width .4s ease}
+
+/* ── QUALITY GRID ── */
+.quality-grid,.qgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px}
+.qcard{padding:15px;border-radius:var(--radius);cursor:pointer;background:var(--surface);border:1.5px solid var(--border);transition:all .18s;position:relative;overflow:hidden;box-shadow:0 2px 6px rgba(0,0,0,.22),0 4px 16px rgba(0,0,0,.14),inset 0 1px 0 rgba(255,255,255,.04)}
+.qcard::after{content:'';position:absolute;inset:0;opacity:0;transition:opacity .15s}
+.qcard:hover{transform:translateY(-2px);box-shadow:0 4px 14px rgba(0,0,0,.36),0 10px 32px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.07)}
+.qcard:hover::after{opacity:1}
+.qcard.sel{border-width:2px}
+.qcard-top{display:flex;align-items:center;justify-content:space-between;margin-bottom:6px}
+.qcard-name{font-family:var(--display);font-size:15px;font-weight:800;letter-spacing:-.2px}
+.qcard-badge{font-size:8px;font-weight:800;padding:3px 8px;border-radius:6px;text-transform:uppercase;letter-spacing:.6px;font-family:var(--display)}
+.qcard-sub{font-size:11px;color:var(--muted);margin-bottom:4px}
+.qcard-br{font-size:11px;font-weight:600;font-family:var(--mono)}
+.qcard-req{font-size:10px;color:var(--muted);margin-top:5px;display:flex;align-items:center;gap:4px}
+.sel-check{position:absolute;top:10px;right:10px;font-size:16px}
+
+/* ── META CARD ── */
+.meta-hero{border-radius:var(--radius) var(--radius) 0 0;height:130px;display:flex;align-items:flex-end;padding:14px;position:relative;overflow:hidden}
+.meta-hero-blur{position:absolute;inset:0;background-size:cover;background-position:center;filter:blur(24px) saturate(1.8);opacity:.4;transform:scale(1.1)}
+.meta-hero-content{display:flex;align-items:flex-end;gap:12px;position:relative;z-index:1;width:100%}
+.meta-art{width:88px;height:88px;border-radius:11px;flex-shrink:0;overflow:hidden;box-shadow:0 8px 28px rgba(0,0,0,.6)}
+.meta-art img{width:100%;height:100%;object-fit:cover}
+.meta-ti{font-family:var(--display);font-size:17px;font-weight:800;color:#fff;letter-spacing:-.3px;line-height:1.2}
+.meta-ar{font-size:12px;color:rgba(255,255,255,.7);margin-top:3px}
+.meta-badges{display:flex;gap:5px;margin-top:7px;flex-wrap:wrap}
+.meta-body{padding:14px;border-top:1px solid var(--border)}
+.meta-row{display:flex;align-items:baseline;gap:10px;padding:5px 0;border-bottom:1px solid rgba(255,255,255,.04)}
+.meta-row:last-child{border-bottom:none}
+.meta-key{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;width:88px;flex-shrink:0;font-family:var(--display)}
+.meta-val{font-family:var(--mono);font-size:11.5px;color:var(--text);flex:1;word-break:break-all;line-height:1.4}
+.fmt-pill{font-size:9px;font-weight:700;padding:2px 7px;border-radius:20px;text-transform:uppercase;background:rgba(255,255,255,.08);color:rgba(255,255,255,.6)}
+.fmt-pill.atmos{background:rgba(10,132,255,.2);color:var(--blue)}
+.fmt-pill.hires{background:rgba(62,207,170,.2);color:var(--green)}
+.fmt-pill.explicit{background:rgba(226,75,74,.15);color:var(--danger)}
+
+/* ── COVER ART FADE-IN ────────────────────────────────────────────────────
+   All cover images carry data-cover or use onload="this.style.opacity='1'".
+   Global rule: starts invisible, transitions to opaque on load.
+   Covers already in browser cache fire `load` synchronously — the inline
+   onload handles that. The rule below catches any img[data-cover] added via
+   innerHTML that might have loaded before the inline handler ran. */
+img[data-cover]{
+  opacity:0;
+  transition:opacity .28s ease;
+}
+img[data-cover].loaded{
+  opacity:1;
+}
+/* ── LOG CONSOLE ── */
+.console{font-family:var(--mono);font-size:11.5px;line-height:1.7;flex:1 1 auto;display:block;overflow-y:auto;padding:14px 20px;background:var(--console-bg);border:1px solid var(--border);border-radius:var(--radius);min-height:0;scrollbar-width:thin;scrollbar-color:var(--border) transparent;color:var(--text)}
+
+/* Console view: header + toolbar + console log, simple flex column.
+   .view.active already gives us position:absolute;inset:0;display:flex so we
+   just lay out the 3 rows here. */
+.view--console{gap:10px;padding:0 20px 20px}
+.view--console > .view-header{padding:22px 0 10px;border-bottom:1px solid var(--border)}
+.view--console > .console-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:4px 0;flex-shrink:0}
+.console::-webkit-scrollbar{width:4px}
+.console::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:2px}
+.log-info{color:var(--muted)}
+.log-success{color:var(--green)}
+.log-error{color:var(--danger)}
+.log-stdout{color:var(--blue)}
+.log-warn{color:var(--orange)}
+
+/* ── CODE BLOCK ── */
+.code-block{background:var(--console-bg);border:1px solid var(--border);border-radius:10px;padding:14px 16px;font-family:var(--mono);font-size:11px;line-height:1.8;color:var(--text);white-space:pre;overflow-x:auto;position:relative}
+.ck{color:#bd93f9}.cv{color:#50fa7b}.cs{color:#f1fa8c}.cm{color:#6272a4}
+.copy-code{position:absolute;top:8px;right:8px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);border-radius:7px;padding:4px 10px;font-size:10px;font-family:var(--font);color:var(--muted);cursor:pointer;transition:all .14s}
+.copy-code:hover{background:rgba(255,255,255,.14);color:var(--text)}
+.copy-code.ok{color:var(--green)}
+
+/* ── TOKEN FIELD ── */
+.token-field{display:flex;align-items:center;gap:7px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:8px 11px;transition:border-color .15s}
+.token-field:hover{border-color:var(--border2)}
+.token-val{flex:1;background:none;border:none;outline:none;font-family:var(--mono);font-size:11px;color:var(--text);min-width:0}
+.token-val::placeholder{color:var(--muted);font-family:var(--font);font-size:12px;font-style:italic}
+
+/* ── SETTINGS FORM ── */
+.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+@media(max-width:700px){.settings-grid{grid-template-columns:1fr}}
+
+/* ── SC TILE DEPTH — floating card with soft shadow ── */
+.sc-tile{
+  background:var(--surface);
+  border:1px solid var(--border);
+  border-radius:12px;
+  overflow:hidden;
+  transition:border-color .15s, box-shadow .18s, transform .18s;
+  box-shadow:
+    0 1px 3px rgba(0,0,0,.28),
+    0 4px 16px rgba(0,0,0,.20),
+    inset 0 1px 0 rgba(255,255,255,.04);
+}
+.sc-tile:hover{
+  border-color:#ff5500;
+  box-shadow:
+    0 2px 6px rgba(0,0,0,.36),
+    0 10px 32px rgba(0,0,0,.30),
+    inset 0 1px 0 rgba(255,255,255,.07);
+  transform:translateY(-2px);
+}
+
+/* ── PREVIEW PLAYER DOCK — upward depth shadow ── */
+#preview-player{
+  box-shadow:
+    0 -4px 20px rgba(0,0,0,.45),
+    0 -1px 0 rgba(255,255,255,.04) inset;
+}
+
+/* ══ AIMP-style side player ══════════════════════════════════════════════
+   When the player is expanded on desktop it leaves the bottom dock and docks
+   as a narrow vertical panel on the border between the nav sidebar (220px)
+   and the content — cover + transport + full track-list, with the seek strip
+   kept at the bottom. The content area shifts right so cards stay fully
+   visible AND scrollable behind the panel. body.pp-side is toggled in JS. */
+@media(min-width:700px){
+  /* Compact AIMP-style window anchored to the bottom-LEFT corner, on the
+     border just right of the nav sidebar. Grows upward from the bottom for
+     the track-list; capped height so it never reaches the top. */
+  body.pp-side #preview-player{
+    bottom:0; left:220px; right:auto !important; top:auto !important;
+    width:344px; max-height:calc(100vh - 72px);
+    border-radius:14px 14px 0 0;
+    display:flex !important; flex-direction:column;
+    border-top:1px solid var(--border);
+    border-right:1px solid var(--border);
+    box-shadow:0 -6px 34px rgba(0,0,0,.55), 8px -4px 34px rgba(0,0,0,.4);
+  }
+  /* expanded block holds the track-list and scrolls within the capped box */
+  body.pp-side #pp-expanded{
+    display:flex !important; flex-direction:column; gap:12px;
+    flex:1 1 auto; min-height:0;
+    padding:16px 16px 10px !important; border-bottom:none !important;
+  }
+  /* the cover+meta+controls row → stacked vertically, centered cover */
+  body.pp-side #pp-expanded > div:first-child{
+    flex-direction:column !important; align-items:stretch !important;
+    gap:10px !important; max-width:none !important; margin:0 !important;
+    flex:0 0 auto;
+  }
+  body.pp-side #pp-art-big{
+    width:140px !important; height:140px !important; align-self:center;
+    font-size:44px !important;
+  }
+  /* track-list fills the remaining height and scrolls */
+  body.pp-side #pp-chapters-wrap{
+    max-width:none !important; margin:0 !important;
+    flex:1 1 auto; min-height:0; display:flex; flex-direction:column;
+  }
+  body.pp-side #pp-chapters{ max-height:none !important; flex:1 1 auto; }
+  /* compact the bottom mini-bar — transport/meta/seek already live in the panel.
+     Hide the left + center zones and the quality/volume controls; keep only the
+     window-action extras (expand / float / local / close) in the right zone. */
+  body.pp-side .pp-zone-left,
+  body.pp-side .pp-zone-center,
+  body.pp-side #pp-quality,
+  body.pp-side #pp-vol-wrap{ display:none !important; }
+  /* shift content right so it clears the 344px panel and stays scrollable */
+  body.pp-side .main{ padding-left:344px; transition:padding-left .18s ease; }
+
+  /* Collapsed dock open: reserve space so the last cards clear the 58px dock */
+  .main[data-preview-open="1"] #sc-grid,
+  .main[data-preview-open="1"] .queue-list,
+  .main[data-preview-open="1"] .view-body,
+  .main[data-preview-open="1"] #detail-content{ padding-bottom:80px !important; }
+}
+
+/* ── Player soft polish (additive — :hover/:active/:focus + props not set inline,
+   so no visual regression to the existing dock) ──────────────────────────── */
+/* Elevate the dock a touch so it reads as a soft floating surface. */
+#preview-player{ box-shadow:0 -6px 24px rgba(0,0,0,.28); }
+
+/* Round, springy control buttons — smooth hover/press on every pp-* button. */
+#pp-prev, #pp-next, #pp-play, #pp-mute, #pp-expand-btn, #pp-float-btn,
+#pp-play-big, #pp-mute-big{
+  transition:transform .12s ease, background-color .15s ease,
+             color .15s ease, box-shadow .15s ease;
+}
+#pp-prev:hover, #pp-next:hover, #pp-mute:hover, #pp-expand-btn:hover,
+#pp-float-btn:hover, #pp-mute-big:hover{
+  color:var(--text);
+  background:rgba(255,255,255,.07);
+}
+#pp-play:hover, #pp-play-big:hover{
+  transform:scale(1.06);
+  box-shadow:0 4px 16px rgba(192,132,160,.45);
+}
+#pp-prev:active, #pp-next:active, #pp-play:active,
+#pp-mute:active, #pp-play-big:active{ transform:scale(.92); }
+
+/* Keyboard accessibility — soft focus ring instead of the harsh default. */
+#preview-player button:focus-visible,
+#preview-player input:focus-visible{
+  outline:none;
+  box-shadow:0 0 0 2px rgba(192,132,160,.55);
+  border-radius:50%;
+}
+
+/* Progress bars: gentle glow + slightly taller hit area on hover for easier seek. */
+#pp-progress, #pp-progress-big{
+  transition:height .12s ease, box-shadow .15s ease;
+}
+#pp-progress:hover, #pp-progress-big:hover{
+  box-shadow:0 0 0 4px rgba(192,132,160,.10);
+}
+#pp-fill, #pp-fill-big{
+  background:linear-gradient(90deg, var(--red), #d8a4bf) !important;
+  box-shadow:0 0 8px rgba(192,132,160,.5);
+}
+
+/* Expanded-panel volume slider stays horizontal (mini-bar volume is vertical, below). */
+#pp-vol-big{ accent-color:var(--red); height:4px; }
+
+/* ══ Three-zone mini bar — transport + extra buttons ══════════════════════ */
+.pp-transport{
+  width:30px; height:30px; border-radius:50%;
+  background:transparent; color:var(--muted); border:none; cursor:pointer;
+  font-size:15px; flex-shrink:0; padding:0;
+  transition:transform .12s ease, color .15s ease, background-color .15s ease;
+}
+.pp-transport:hover{ color:var(--text); background:rgba(255,255,255,.07); }
+.pp-transport:active{ transform:scale(.9); }
+.pp-extra{
+  width:28px; height:28px; border-radius:50%;
+  background:transparent; color:var(--muted); border:1px solid var(--border);
+  cursor:pointer; font-size:12px; flex-shrink:0; padding:0;
+  display:flex; align-items:center; justify-content:center;
+  transition:transform .12s ease, color .15s ease,
+             background-color .15s ease, border-color .15s ease;
+}
+.pp-extra:hover{ color:var(--text); background:rgba(255,255,255,.07); border-color:var(--border2); }
+.pp-extra:active{ transform:scale(.9); }
+
+/* ══ Quality pill ═════════════════════════════════════════════════════════ */
+#pp-quality-btn{ transition:background-color .15s ease, color .15s ease, border-color .15s ease; }
+#pp-quality-btn:hover{ color:var(--text); background:rgba(255,255,255,.10); border-color:var(--border2); }
+#pp-quality-menu .pp-q-opt{
+  display:flex; align-items:center; justify-content:space-between; gap:10px;
+  padding:7px 10px; border-radius:7px; cursor:pointer;
+  font-size:12px; color:var(--muted); white-space:nowrap;
+  transition:background-color .12s ease, color .12s ease;
+}
+#pp-quality-menu .pp-q-opt:hover{ background:rgba(255,255,255,.07); color:var(--text); }
+#pp-quality-menu .pp-q-opt.active{ color:var(--red); }
+#pp-quality-menu .pp-q-opt.active::after{ content:"✓"; font-size:11px; }
+#pp-quality-menu .pp-q-sub{ font-size:10px; color:var(--muted2); font-family:var(--mono); }
+
+/* ══ Volume — vertical slider popup on hover (distinct from the seek line) ══ */
+#pp-vol-popup{
+  display:none;
+  position:absolute; bottom:38px; left:50%; transform:translateX(-50%);
+  background:rgba(20,20,26,.98);
+  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
+  border:1px solid var(--border); border-radius:13px;
+  padding:13px 9px 11px; box-shadow:0 8px 28px rgba(0,0,0,.55);
+  z-index:9600;
+}
+/* Bridge the gap so moving the cursor icon→popup doesn't dismiss it. */
+#pp-vol-popup::before{ content:""; position:absolute; left:0; right:0; bottom:-10px; height:10px; }
+#pp-vol-wrap:hover #pp-vol-popup, #pp-vol-popup:hover{ display:block; }
+#pp-vol-wrap:hover #pp-mute{ color:var(--text); }
+#pp-vol{
+  writing-mode:vertical-lr; direction:rtl;     /* vertical, up = louder */
+  -webkit-appearance:slider-vertical; appearance:slider-vertical;
+  width:6px; height:104px; cursor:pointer; accent-color:var(--red);
+}
+#pp-vol::-webkit-slider-runnable-track{ width:6px; border-radius:3px; background:rgba(255,255,255,.16); }
+#pp-vol::-webkit-slider-thumb{
+  -webkit-appearance:none; width:14px; height:14px; border-radius:50%;
+  background:var(--red); border:2px solid #fff; margin-left:-4px;
+  box-shadow:0 1px 4px rgba(0,0,0,.4);
+}
+#pp-vol::-moz-range-track{ width:6px; border-radius:3px; background:rgba(255,255,255,.16); }
+#pp-vol::-moz-range-thumb{ width:14px; height:14px; border-radius:50%; background:var(--red); border:2px solid #fff; }
+
+/* Chapter rows in the expanded panel — soft hover affordance. */
+#pp-chapters > *{ transition:background-color .12s ease; border-radius:7px; }
+#pp-chapters > *:hover{ background:rgba(255,255,255,.05); }
+
+/* ── TOPBAR bottom shadow for depth separation ── */
+.topbar{
+  box-shadow: 0 1px 0 var(--border), 0 2px 12px rgba(0,0,0,.18);
+}
+
+/* ── SIDEBAR card-row depth ── */
+.sidebar{
+  box-shadow: 1px 0 0 var(--border), 2px 0 16px rgba(0,0,0,.15);
+}
+
+/* ── MOBILE / RESPONSIVE ─────────────────────────────────────── */
+/* Bottom tab bar — hidden on desktop */
+.mobile-tabbar{display:none}
+.mobile-tab{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;cursor:pointer;font-size:9.5px;font-weight:600;color:var(--muted);transition:color .15s;padding:7px 0;font-family:var(--display);letter-spacing:.2px;border:none;background:transparent;-webkit-tap-highlight-color:transparent;user-select:none}
+.mobile-tab .mt-icon{font-size:20px;line-height:1.2}
+.mobile-tab.active{color:var(--red)}
+/* Sidebar drawer overlay */
+.drawer-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:900;-webkit-backdrop-filter:blur(2px);backdrop-filter:blur(2px)}
+.drawer-overlay.open{display:block}
+/* Hamburger button — hidden until mobile breakpoint */
+#mobile-menu-btn{display:none}
+@media(max-width:699px){
+  /* iOS Safari full-height fix */
+  html,body{height:100%;height:-webkit-fill-available}
+  /* Single-column layout; bottom tab bar handled via fixed positioning + padding */
+  .app{grid-template-columns:1fr;grid-template-rows:48px minmax(0,1fr)}
+  .main{grid-column:1;padding-bottom:56px}
+  /* Sidebar becomes a slide-over drawer */
+  .sidebar{display:none;position:fixed;top:0;bottom:0;left:0;width:265px;z-index:1000;box-shadow:10px 0 40px rgba(0,0,0,.65);border-right:1px solid var(--border2);overflow-y:auto;padding-bottom:calc(env(safe-area-inset-bottom) + 8px)}
+  .sidebar.open{display:flex}
+  /* Compact topbar */
+  .topbar{height:48px;padding:0 10px;gap:7px;grid-column:1}
+  .tb-controls{display:none!important}
+  .lang-switcher{display:none!important}
+  .tb-status{display:none!important}
+  .wrapper-pill{display:none!important}
+  .tb-sub{display:none}
+  .tb-mark{width:28px;height:28px;border-radius:8px}
+  .tb-name{font-size:12px}
+  #mobile-menu-btn{display:flex!important}
+  /* Bottom nav visible */
+  .mobile-tabbar{display:flex!important;position:fixed;bottom:0;left:0;right:0;height:56px;background:var(--topbar-bg);border-top:1px solid var(--border);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);z-index:10100;padding-bottom:env(safe-area-inset-bottom)}
+  /* Push notification stack above the tab bar */
+  #notif-stack{bottom:68px;right:10px;max-width:calc(100vw - 20px)}
+  /* Tighter view padding on small screens */
+  .view-header{padding:12px 14px 10px}
+  .view-title{font-size:18px}
+  .view-body{padding:12px 14px}
+  /* Queue tiles: tighter grid on narrow screens (cover stays full-width). */
+  .queue-list{padding:12px 14px;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:9px}
+  .qi{padding:0}
+  .qi-art{width:100%}
+  /* Keep details popover from overflowing */
+  #tb-details-pop{left:8px;right:8px;min-width:0}
+  /* Player: above the tab bar, full width */
+  #preview-player{left:0!important;bottom:56px!important}
+  /* When player is hidden on mobile, slide it fully below the tab bar */
+  #preview-player:not(.visible){transform:translateY(calc(100% + 56px))!important}
+  /* Views: don't scroll under the tab bar */
+  .view{bottom:56px!important}
+}
+.field-group{display:flex;flex-direction:column;gap:5px}
+.settings-row{display:flex;gap:10px}
+.settings-row .field-group{flex:1}
+
+/* ── SETUP SPINNER ── */
+#setup-spinner{display:none;align-items:center;gap:7px}
+
+/* ── MISC ── */
+.row{display:flex;gap:8px;align-items:center}
+.col{display:flex;flex-direction:column;gap:6px}
+.mt8{margin-top:8px}
+.mt12{margin-top:12px}
+.mt16{margin-top:16px}
+.flex1{flex:1}
+.gap12{gap:12px}
+.gap16{gap:16px}
+
+/* ── TOAST ── */
+/* ── Notification stack (iOS/Windows style) ── */
+#notif-stack{position:fixed;bottom:20px;right:20px;z-index:9999;display:flex;flex-direction:column-reverse;gap:8px;align-items:flex-end;pointer-events:none;max-width:320px}
+.notif{background:rgba(26,26,30,.96);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:0.5px solid rgba(255,255,255,.1);border-radius:14px;padding:12px 14px 10px;box-shadow:0 8px 32px rgba(0,0,0,.55),0 1px 0 rgba(255,255,255,.06) inset;pointer-events:all;display:flex;align-items:flex-start;gap:9px;width:100%;transform:translateX(0);opacity:1;transition:transform .25s ease,opacity .25s ease,max-height .3s ease,margin .3s ease,padding .3s ease}
+.notif.notif-enter{transform:translateX(110%);opacity:0}
+.notif.notif-exit{transform:translateX(110%);opacity:0;max-height:0;margin:0;padding:0;overflow:hidden}
+.notif-dot{width:9px;height:9px;border-radius:50%;flex-shrink:0;margin-top:3px;box-shadow:0 0 6px currentColor}
+.notif-body{flex:1;min-width:0}
+.notif-msg{font-size:13px;font-weight:500;color:#f5f5f7;line-height:1.35;word-break:break-word}
+.notif-sub{font-size:11px;color:rgba(245,245,247,.45);margin-top:2px}
+.notif-close{font-size:16px;color:rgba(255,255,255,.25);cursor:pointer;flex-shrink:0;line-height:1;transition:color .15s;padding:0 2px}
+.notif-close:hover{color:rgba(255,255,255,.6)}
+.notif-prog{height:2px;border-radius:1px;margin-top:8px;transition:width linear}
+/* Legacy single toast — hidden, kept for compat */
+#toast{display:none}
+
+/* ── ANIMATIONS ── */
+@keyframes fade-in{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.qi{animation:fade-in .2s ease}
+
+/* ── SCROLLBAR ── (duplicate .view-body rule removed — .view-body fully defined above) */
+
+/* ── GRID GAPS FIX ── */
+.col-gap-8{gap:8px}
+
+/* ── Language toggle ─────────────────────────────────────────── */
+.lang-switcher{position:relative;flex-shrink:0}
+.lang-flag-btn{background:var(--surface);border:1px solid var(--border);border-radius:8px;height:32px;padding:0 10px;font-size:15px;cursor:pointer;display:flex;align-items:center;gap:4px;color:var(--text);font-family:var(--font);transition:.15s;white-space:nowrap}
+.lang-flag-btn:hover{border-color:var(--border2)}
+.lang-dropdown{position:fixed;background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:4px;z-index:9999;box-shadow:0 8px 24px rgba(0,0,0,.5);min-width:90px}
+.lang-dropdown button{display:block;width:100%;background:none;border:none;padding:5px 10px;font-size:13px;color:var(--text);cursor:pointer;border-radius:6px;text-align:left;font-family:var(--font)}
+.lang-dropdown button:hover{background:var(--surface3,#2a2a3a)}
+/* ── Guest mode ──────────────────────────────────────────────── */
+body.guest-mode .owner-only { display:none !important; }
+body.guest-mode .guest-only { display:flex !important; }
+/* Views use .active class for visibility — prevent guest-only class from
+   always showing a view regardless of active state (e.g. view-guest-prefs
+   was always rendered on top of other views in guest mode). */
+body.guest-mode .view.guest-only:not(.active) { display:none !important; }
+body.guest-mode [data-stab="releases"] { display:none !important; }
+body.guest-mode #stab-releases         { display:none !important; }
+.guest-only { display:none; }
+
+/* Compact guest queue — a tall card per task is unusable at 30-60 downloads.
+   Single-column slim rows: small cover + title/status + inline actions, so the
+   guest can actually scan a long queue. */
+body.guest-mode .queue-list { grid-template-columns:1fr; gap:7px; padding:12px 14px; }
+body.guest-mode .qi { flex-direction:row; align-items:center; }
+body.guest-mode .qi-art { width:54px; height:54px; aspect-ratio:auto; flex:0 0 54px; align-self:stretch; }
+body.guest-mode .qi-info { padding:7px 10px; gap:2px; }
+body.guest-mode .qi-blocks-row { margin-top:3px; min-height:0; }
+body.guest-mode .qi-log-toggle, body.guest-mode .qi-log-panel { display:none !important; }
+body.guest-mode .qi-actions { margin-top:5px; gap:5px; flex-wrap:nowrap; }
+/* Same compact rows on any narrow screen (mobile owner view too). */
+@media (max-width:760px){
+  .queue-list{ grid-template-columns:1fr !important; gap:7px; }
+  .qi{ flex-direction:row; align-items:center; }
+  .qi-art{ width:54px; height:54px; aspect-ratio:auto; flex:0 0 54px; align-self:stretch; }
+  .qi-info{ padding:7px 10px; gap:2px; }
+  .qi-log-toggle{ display:none; }
+}
+#guest-banner { display:none; background:rgba(175,82,222,.13); border-bottom:1px solid rgba(175,82,222,.22);
+  padding:7px 20px; font-size:11px; color:#c084fc; font-weight:600; }
+body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
+
+/* ── Guest mobile ──────────────────────────────────────────── */
+#mobile-guest-bar { display:none }
+#mobile-guest-tabbar { display:none }
+@media(max-width:699px){
+  body.guest-mode #mobile-menu-btn  { display:none!important }
+  body.guest-mode #mobile-tabbar    { display:none!important }
+  body.guest-mode #mobile-guest-tabbar { display:flex!important }
+  body.guest-mode #mobile-guest-bar { display:flex }
+  body.guest-mode .main             { padding-bottom:116px }
+  body.guest-mode .view             { bottom:116px!important }
+  body.guest-mode #preview-player   { bottom:116px!important }
+  body.guest-mode #notif-stack      { bottom:130px }
+  /* Larger touch targets in queue tiles (cover stays full-width). */
+  body.guest-mode .qi               { padding:0 }
+  body.guest-mode .qi-art           { width:100% }
+  body.guest-mode .dl-action-btn    { min-height:34px }
+  /* Player bar must fit any phone width — the row used to overflow the right
+     edge (cut volume slider on iPhone / Android). Hide the on-screen volume
+     (phones have hardware volume buttons) and let the title shrink instead of
+     forcing a fixed 160px. Viewport-based — works on every device, no model
+     detection needed. */
+  body.guest-mode #pp-vol,
+  body.guest-mode #pp-mute,
+  body.guest-mode #pp-vol-big,
+  body.guest-mode #pp-mute-big      { display:none!important }
+  body.guest-mode #pp-mini-meta     { flex:1 1 auto!important }
+  body.guest-mode #preview-player   { max-width:100vw;overflow:hidden }
+}
+
+/* ── Block 2 ── */
+/* ── Fullscreen player ─────────────────────────────────────────────── */
+    #fullscreen-player{
+      position:fixed; inset:0; z-index:10300;
+      display:none; flex-direction:column;
+      padding: env(safe-area-inset-top, 0) 0 env(safe-area-inset-bottom, 0);
+      color:#fff; user-select:none;
+      transform: translate3d(0, 100%, 0);
+      will-change: transform, opacity;
+      /* Spring easing on open — "thrown into place", Telegram-style */
+      transition: transform .36s cubic-bezier(.22,1.05,.36,1), opacity .22s ease;
+      opacity:0;
+      touch-action: pan-y;
+      overflow:hidden;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+    }
+    #fullscreen-player.open{ display:flex; transform: translate3d(0, 0, 0); opacity:1; }
+    /* Snappier stagger — total reveal in ~280ms (was 600ms+) */
+    #fullscreen-player.open .fp-top      { animation: fpRow .26s .00s ease-out backwards }
+    #fullscreen-player.open .fp-art-wrap { animation: fpRow .32s .04s cubic-bezier(.2,1.2,.3,1) backwards }
+    #fullscreen-player.open .fp-meta     { animation: fpRow .26s .08s ease-out backwards }
+    #fullscreen-player.open .fp-seek-wrap{ animation: fpRow .26s .12s ease-out backwards }
+    #fullscreen-player.open .fp-controls { animation: fpRow .26s .14s ease-out backwards }
+    #fullscreen-player.open .fp-extra    { animation: fpRow .26s .18s ease-out backwards }
+    @keyframes fpRow { from{ opacity:0; transform: translate3d(0,10px,0) } to{ opacity:1; transform: translate3d(0,0,0) } }
+    /* While the user drags the panel down — no transition, follow finger 1:1 */
+    #fullscreen-player.dragging{ transition:none; }
+    /* When fullscreen player is open, hide mobile-guest UI underneath so it
+       doesn't bleed through behind the bottom controls. */
+    body.fp-open #mobile-guest-tabbar,
+    body.fp-open #mobile-guest-bar,
+    body.fp-open .mobile-tabbar,
+    body.fp-open #preview-player{ display:none !important }
+    #fp-bg{
+      position:absolute; inset:-40px;
+      background:#111318 center/cover no-repeat;
+      filter: blur(48px) brightness(.45) saturate(1.2);
+      transform: scale(1.15);
+      transition: background-image .3s ease;
+    }
+    #fp-shade{
+      position:absolute; inset:0;
+      background: radial-gradient(ellipse at center, rgba(0,0,0,.15) 0%, rgba(0,0,0,.7) 100%);
+    }
+    /* All children above the bg */
+    #fullscreen-player > :not(#fp-bg):not(#fp-shade){ position:relative; z-index:1 }
+
+    .fp-top{
+      display:flex; align-items:center; gap:12px;
+      padding: 14px 18px 6px;
+    }
+    .fp-icon-btn{
+      width:40px; height:40px; border-radius:50%; padding:0;
+      background: linear-gradient(180deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.04) 100%);
+      border:1px solid rgba(255,255,255,.08); color:#fff;
+      cursor:pointer; font-size:18px; line-height:1;
+      backdrop-filter: blur(10px);
+      flex-shrink:0;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.12),
+        inset 0 -1px 0 rgba(0,0,0,.18),
+        0 2px 6px rgba(0,0,0,.25);
+    }
+    .fp-icon-btn:active{ transform: scale(.92);
+      box-shadow: inset 0 1px 2px rgba(0,0,0,.4); }
+    .fp-top-label{
+      flex:1; text-align:center; font-size:11px; color:rgba(255,255,255,.6);
+      text-transform:uppercase; letter-spacing:1.2px; font-weight:600;
+    }
+
+    .fp-art-wrap{
+      flex:1 1 auto; display:flex; align-items:center; justify-content:center;
+      padding: 24px 28px;
+      min-height: 200px;
+    }
+    .fp-art{
+      width:min(72vw, 380px); aspect-ratio:1;
+      border-radius:16px;
+      background:rgba(255,255,255,.05);
+      display:flex; align-items:center; justify-content:center;
+      font-size:84px; color:rgba(255,255,255,.4);
+      box-shadow: 0 20px 80px rgba(0,0,0,.55), 0 4px 24px rgba(0,0,0,.4);
+      overflow:hidden; cursor:pointer;
+      transition: transform .2s ease;
+    }
+    .fp-art:active{ transform: scale(.97) }
+    .fp-art img{ width:100%; height:100%; object-fit:cover; display:block }
+
+    .fp-meta{ padding: 4px 28px 14px; text-align:center }
+    #fp-title{
+      font-family:var(--display); font-size:22px; font-weight:800;
+      letter-spacing:-.3px; line-height:1.2;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+    #fp-artist{
+      font-size:13px; color:rgba(255,255,255,.6); margin-top:5px;
+      white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+
+    .fp-seek-wrap{ padding: 6px 28px 4px }
+    .fp-seek{
+      position:relative; height:32px; cursor:pointer;
+      display:flex; align-items:center;
+    }
+    .fp-seek::before{
+      content:""; position:absolute; left:0; right:0; top:50%;
+      height:6px; transform:translateY(-50%);
+      background:rgba(255,255,255,.18); border-radius:3px;
+    }
+    .fp-fill{
+      position:absolute; left:0; top:50%; transform:translateY(-50%);
+      height:6px; width:0%; background:#fff; border-radius:3px;
+      pointer-events:none;
+    }
+    .fp-thumb{
+      position:absolute; top:50%; left:0; width:10px; height:10px;
+      border-radius:50%; background:#fff;
+      /* translate(-50%, -50%) is the BASE — the JS drives horizontal position
+         via a CSS custom property --x-pct, applied through `translate3d`
+         BEFORE the centring offset. Pure transform → no layout, GPU-only. */
+      --x-pct: 0%;
+      transform: translate3d(var(--x-pct), 0, 0) translate(-50%, -50%);
+      will-change: transform;
+      pointer-events:none; opacity:.85;
+      box-shadow: 0 1px 4px rgba(0,0,0,.5);
+      transition: opacity .12s ease;
+    }
+    .fp-seek:hover .fp-thumb{
+      transform: translate3d(var(--x-pct), 0, 0) translate(-50%, -50%) scale(1.4);
+      opacity:1
+    }
+    .fp-seek:active .fp-thumb{
+      transform: translate3d(var(--x-pct), 0, 0) translate(-50%, -50%) scale(1.6);
+      opacity:1
+    }
+    /* No transition on fill width — would fight live drag updates. */
+    .fp-fill{ will-change: width; }
+    /* ══ Player seek bars — thick, service-coloured PLAYED line with a glowing
+       thumb; thin, soft-shadowed CACHE line. main.css is ?v-busted, so these
+       !important rules override any stale inline styles from a cached index.html. ══ */
+    #pp-progress, #pp-progress-big {
+      height: 8px !important; overflow: visible !important; border-radius: 4px !important;
+      background: rgba(255,255,255,.13) !important;
+    }
+    /* PLAYED — thick, service colour (background set by JS), soft glow. */
+    #pp-fill, #pp-fill-big, .fp-fill {
+      height: 8px !important; top: 50% !important; transform: translateY(-50%) !important;
+      border-radius: 4px !important;
+      box-shadow: 0 0 8px var(--pp-svc, rgba(255,255,255,.45)),
+                  0 0 2px var(--pp-svc, rgba(255,255,255,.65));
+    }
+    /* THUMB — pseudo-element on the fill's right edge → tracks the playhead with
+       zero extra JS (fill width already = played %). White dot, service-colour ring. */
+    #pp-fill::after, #pp-fill-big::after, .fp-fill::after {
+      content: ""; position: absolute; right: 0; top: 50%;
+      width: 10px; height: 10px; border-radius: 50%;
+      transform: translate(50%, -50%);
+      background: #fff;
+      box-shadow: 0 0 0 2px var(--pp-svc, rgba(255,255,255,.30)),
+                  0 1px 5px rgba(0,0,0,.5);
+      pointer-events: none; z-index: 5;
+    }
+    /* CACHE — thinner than the played line, rounded, soft drop shadow. */
+    #pp-buffered, #pp-buffered-big, #fp-buffered {
+      height: 3px !important; top: 50% !important; transform: translateY(-50%) !important;
+      border-radius: 2px !important;
+      background: rgba(255,255,255,.26) !important;
+      box-shadow: 0 1px 3px rgba(0,0,0,.6) !important;
+    }
+    /* Fullscreen track line matches the thicker played line; its old standalone
+       thumb is replaced by the unified .fp-fill::after dot. */
+    .fp-seek::before { height: 8px !important; border-radius: 4px !important; }
+    .fp-thumb { display: none !important; }
+    .fp-times{
+      display:flex; justify-content:space-between; font-size:11px;
+      color:rgba(255,255,255,.55); font-family:var(--mono);
+      margin-top:2px;
+    }
+
+    .fp-controls{
+      display:flex; align-items:center; justify-content:center; gap:30px;
+      padding: 14px 28px 8px;
+    }
+    .fp-ctrl{
+      width:54px; height:54px; border-radius:50%;
+      background: linear-gradient(180deg, rgba(255,255,255,.08) 0%, rgba(255,255,255,.02) 100%);
+      border:1px solid rgba(255,255,255,.06); color:#fff;
+      cursor:pointer; font-size:24px; line-height:1; padding:0;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.1),
+        inset 0 -1px 0 rgba(0,0,0,.2),
+        0 2px 10px rgba(0,0,0,.25);
+    }
+    .fp-ctrl:active{ transform: scale(.88);
+      box-shadow: inset 0 2px 4px rgba(0,0,0,.4); }
+    .fp-ctrl.fp-play{
+      width:72px; height:72px; font-size:30px;
+      background: linear-gradient(180deg, #ffffff 0%, #ececf2 100%);
+      color:#0e0f14; border:none;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.6),
+        inset 0 -2px 4px rgba(0,0,0,.08),
+        0 6px 24px rgba(0,0,0,.55),
+        0 0 0 6px rgba(255,255,255,.04);
+    }
+    .fp-ctrl.fp-play:active{ transform: scale(.94);
+      box-shadow: inset 0 2px 6px rgba(0,0,0,.18), 0 2px 8px rgba(0,0,0,.3); }
+
+    .fp-extra{
+      display:flex; gap:10px; justify-content:center; flex-wrap:wrap;
+      padding: 8px 16px 18px;
+    }
+    .fp-pill{
+      display:inline-flex; align-items:center; gap:6px;
+      padding:8px 14px; border-radius:22px;
+      background: linear-gradient(180deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.04) 100%);
+      border:1px solid rgba(255,255,255,.10);
+      color:#fff; font-size:12px; font-weight:600; cursor:pointer;
+      backdrop-filter: blur(10px);
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.10),
+        inset 0 -1px 0 rgba(0,0,0,.15),
+        0 1px 3px rgba(0,0,0,.2);
+    }
+    .fp-pill:active{ transform: scale(.94);
+      box-shadow: inset 0 2px 4px rgba(0,0,0,.3); }
+    .fp-pill.active{
+      background: linear-gradient(180deg, rgba(192,132,160,.4) 0%, rgba(192,132,160,.18) 100%);
+      border-color: rgba(192,132,160,.5);
+      color:#fff;
+    }
+
+    /* Larger viewports — cap width so it doesn't look stretched */
+    @media (min-width: 700px){
+      .fp-art{ width: 360px }
+      #fullscreen-player > :not(#fp-bg):not(#fp-shade){
+        max-width: 540px; margin-left:auto; margin-right:auto; width:100%;
+      }
+    }
+
+    /* Tactility tweaks — physical, not flat */
+    .fp-icon-btn, .fp-ctrl, .fp-pill{
+      transition: transform .12s cubic-bezier(.3,1.5,.6,1), background .12s, box-shadow .12s;
+      -webkit-tap-highlight-color: transparent;
+      cursor: pointer;
+    }
+    .fp-icon-btn:hover{ background:rgba(255,255,255,.13); transform:scale(1.08) }
+    .fp-pill:hover{ background:rgba(255,255,255,.13); transform:scale(1.05) }
+    .fp-ctrl:hover{ color:#fff; transform:scale(1.07) }
+    .fp-ctrl.fp-play:hover{ transform:scale(1.05) }
+    /* Active = pressed: deeper scale + lower shadow */
+    .fp-icon-btn:active{ transform: scale(.9); background:rgba(255,255,255,.2) }
+    .fp-ctrl:active{ transform: scale(.88) }
+    .fp-ctrl.fp-play:active{ transform: scale(.93); box-shadow: 0 2px 10px rgba(0,0,0,.35) }
+    .fp-pill:active{ transform: scale(.94) }
+    /* CD-like rotation when playing — toggled off by `body.no-spin` */
+    .fp-art.playing img{ animation: fpSpin 22s linear infinite }
+    body.no-spin .fp-art.playing img{ animation:none !important }
+    @keyframes fpSpin{ from{ transform: rotate(0) } to{ transform: rotate(360deg) } }
+    /* Ripple element */
+    .fp-ripple{
+      position:absolute; border-radius:50%; pointer-events:none;
+      background:rgba(255,255,255,.22); transform:scale(0); opacity:.9;
+      animation: fpRipple .55s cubic-bezier(.2,.7,.2,1) forwards;
+    }
+    @keyframes fpRipple{
+      to{ transform: scale(8); opacity:0 }
+    }
+    /* Respect prefers-reduced-motion */
+    @media (prefers-reduced-motion: reduce){
+      #fullscreen-player, .fp-icon-btn, .fp-ctrl, .fp-pill, .fp-art img{
+        transition:none !important; animation:none !important;
+      }
+    }
+
+    #preview-player {
+      transform: translate3d(0, 100%, 0);
+      pointer-events: none;
+      transition: transform .26s cubic-bezier(.22,1.05,.36,1);
+      will-change: transform;
+      backface-visibility: hidden;
+      -webkit-backface-visibility: hidden;
+    }
+    #preview-player.visible { transform: translate3d(0, 0, 0); pointer-events: auto; }
+    /* Pad the scrollable body so content isn't hidden behind the player.
+       Views with .view-body use that inner element; views without (releases,
+       soundcloud tab, etc.) use the .view itself as the scroll container. */
+    .main[data-preview-open="1"]     .view-body { padding-bottom: 72px  !important; }
+    .main[data-preview-expanded="1"] .view-body { padding-bottom: 240px !important; }
+    .main[data-preview-open="1"]     .view:not(:has(.view-body)) { padding-bottom: 72px;  }
+    .main[data-preview-expanded="1"] .view:not(:has(.view-body)) { padding-bottom: 240px; }
+    /* Also raise the view bottom on mobile so the player doesn't overlap it */
+    @media(max-width:699px) {
+      .main[data-preview-open="1"]     .view { bottom: 108px !important; }
+      .main[data-preview-expanded="1"] .view { bottom: 276px !important; }
+    }
+    #pp-prev:disabled, #pp-next:disabled { opacity: .25; cursor: default; }
+    #pp-expand-btn.expanded { transform: rotate(180deg); }
+    /* Bigger pointer hit-area on the seek bars (was 5px → impossible to grab on touch).
+       Visual stripe stays thin via a ::before pseudo; the wrapper extends invisibly. */
+    #pp-progress, #pp-progress-big {
+      height: 16px !important;
+      background: transparent !important;
+      position: relative;
+    }
+    #pp-progress::before, #pp-progress-big::before {
+      content: ""; position: absolute; left:0; right:0; top:50%;
+      transform: translateY(-50%); height:4px;
+      background: rgba(255,255,255,.12); border-radius: 2px;
+      pointer-events: none;
+    }
+    #pp-fill, #pp-fill-big {
+      position: absolute !important; left:0; top:50%;
+      transform: translateY(-50%);
+      height: 4px !important; border-radius: 2px;
+      pointer-events: none;
+    }
+    #pp-progress:hover::before, #pp-progress-big:hover::before {
+      background: rgba(255,255,255,.2);
+    }
+    /* Unified soft-3D for dock buttons (inline-styled, would otherwise stay flat) */
+    #pp-prev, #pp-next, #pp-mute, #pp-expand-btn, #pp-float-btn,
+    #pp-mute-big {
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.08),
+        inset 0 -1px 0 rgba(0,0,0,.15),
+        0 1px 3px rgba(0,0,0,.2) !important;
+      transition: transform .12s cubic-bezier(.3,1.5,.6,1),
+                  box-shadow .15s ease,
+                  background .12s !important;
+    }
+    #pp-prev:hover, #pp-next:hover, #pp-mute:hover, #pp-expand-btn:hover,
+    #pp-float-btn:hover, #pp-mute-big:hover {
+      background: rgba(255,255,255,.08) !important;
+      color: var(--text) !important;
+    }
+    #pp-prev:active, #pp-next:active, #pp-mute:active, #pp-expand-btn:active,
+    #pp-float-btn:active, #pp-mute-big:active,
+    #pp-play:active, #pp-play-big:active {
+      transform: scale(.88);
+      box-shadow: inset 0 2px 4px rgba(0,0,0,.3) !important;
+    }
+    /* Play buttons get a brand-gradient look identical to .btn-red. */
+    #pp-play, #pp-play-big {
+      background: linear-gradient(180deg, var(--red) 0%, var(--red2) 100%) !important;
+      box-shadow:
+        inset 0 1px 0 rgba(255,255,255,.18),
+        inset 0 -1px 0 rgba(0,0,0,.18),
+        0 4px 12px rgba(192,132,160,.35),
+        0 1px 3px rgba(0,0,0,.3) !important;
+    }
+    #pp-play:hover, #pp-play-big:hover { filter: brightness(1.08); }
+    /* Volume slider — remove browser default margins so track runs edge-to-edge */
+    #pp-vol, #pp-vol-big {
+      -webkit-appearance: none; appearance: none;
+      margin: 0; padding: 0; background: transparent; border: none; outline: none;
+    }
+    #pp-vol::-webkit-slider-runnable-track, #pp-vol-big::-webkit-slider-runnable-track {
+      height: 3px; border-radius: 2px; background: rgba(255,255,255,.18);
+    }
+    #pp-vol::-moz-range-track, #pp-vol-big::-moz-range-track {
+      height: 3px; border-radius: 2px; background: rgba(255,255,255,.18);
+    }
+    #pp-vol::-webkit-slider-thumb, #pp-vol-big::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 11px; height: 11px; border-radius: 50%; background: #fff;
+      margin-top: -4px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.4);
+    }
+    #pp-vol::-moz-range-thumb, #pp-vol-big::-moz-range-thumb {
+      width: 11px; height: 11px; border-radius: 50%; background: #fff;
+      border: none; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.4);
+    }
+    /* Detail panel slide-in from right */
+    #detail-panel { transform: translateX(100%); transition: transform .28s cubic-bezier(.25,.46,.45,.94); }
+    #detail-overlay.open #detail-panel { transform: translateX(0); }
+    /* Release service toggle pills */
+    .rel-svc-pill { display:inline-flex;align-items:center;gap:4px;padding:4px 11px;border-radius:20px;border:1px solid;font-size:11px;font-weight:600;cursor:pointer;user-select:none;transition:opacity .15s }
+    .rel-svc-pill.off { opacity:.35 }
+
+/* ══ RIPSTER CODER — XRECODE-style table view ══ */
+.cx{display:flex;flex-direction:column;gap:10px;padding:16px 20px 24px;max-width:1400px;margin:0 auto;width:100%;box-sizing:border-box}
+.cx-head{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.cx-head-l{display:flex;align-items:center;gap:9px}
+.cx-title{font-family:var(--display);font-size:18px;font-weight:800;color:#c9a0ff}
+.cx-head-r{display:flex;align-items:center;gap:7px;flex:1;min-width:240px}
+.cx-path{flex:1;min-width:0;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 11px;color:var(--text);font-size:12px;font-family:var(--mono)}
+.cx-btn{background:var(--surface2);border:1px solid var(--border2);border-radius:8px;padding:8px 13px;font-size:12px;font-weight:600;color:var(--text);cursor:pointer;white-space:nowrap;font-family:var(--font);transition:background .15s}
+.cx-btn:hover{background:rgba(255,255,255,.09)}
+.cx-btn-go{background:#7c5cff;border-color:#7c5cff;color:#fff;font-weight:700}
+.cx-btn-go:hover{background:#8d70ff}
+.cx-tree{max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:9px;padding:7px;background:var(--surface)}
+.cx-srcinfo{font-size:11px;color:var(--muted);min-height:0}
+/* file table */
+.cx-table-wrap{border:1px solid var(--border);border-radius:10px;overflow:auto;max-height:46vh;background:var(--surface)}
+.cx-table{width:100%;border-collapse:collapse;font-size:12px}
+.cx-table thead th{position:sticky;top:0;z-index:1;background:var(--bg2);text-align:left;padding:7px 10px;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:var(--muted);border-bottom:1px solid var(--border);white-space:nowrap}
+.cx-table td{padding:5px 10px;border-bottom:1px solid rgba(255,255,255,.04);vertical-align:middle}
+.cx-table tr:hover td{background:rgba(255,255,255,.03)}
+.cx-c-cb{width:30px;text-align:center}
+.cx-c-num{width:34px;color:var(--muted);font-family:var(--mono);text-align:right}
+.cx-c-src{max-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#7fb2ff}
+.cx-c-dst{max-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text)}
+.cx-c-size{width:92px;text-align:right;color:var(--muted);font-family:var(--mono);white-space:nowrap}
+.cx-grp td{background:rgba(124,92,255,.08)!important;border-bottom:1px solid rgba(124,92,255,.18)}
+.cx-grp-name{font-weight:700;color:#c9a0ff;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cx-empty{text-align:center;color:var(--muted);padding:26px 10px;font-size:12px}
+.cx-summary{font-size:11px;color:var(--muted);padding:0 2px}
+.cx-summary b{color:var(--text)}
+.cx-row-cb,#cx-all{width:15px;height:15px;cursor:pointer;accent-color:#7c5cff}
+/* panels */
+.cx-panel{background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:12px 14px}
+.cx-panel-title{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.5px;color:var(--muted);margin-bottom:9px}
+.cx-row{display:flex;align-items:center;gap:10px}
+.cx-check{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--text);cursor:pointer}
+.cx-check input{width:15px;height:15px;accent-color:#7c5cff;cursor:pointer}
+.cx-mini{min-width:130px}
+.cx-tmpl{font-family:var(--mono);font-size:12px}
+/* format radio grid */
+.cx-fmt-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:7px}
+.cx-fmt{display:flex;flex-direction:column;gap:1px;border:1px solid var(--border2);border-radius:9px;padding:7px 11px;cursor:pointer;transition:border-color .12s,background .12s;position:relative}
+.cx-fmt:hover{background:rgba(255,255,255,.04)}
+.cx-fmt.active{border-color:#7c5cff;background:rgba(124,92,255,.12)}
+.cx-fmt input{position:absolute;opacity:0;pointer-events:none}
+.cx-fmt-l{font-size:13px;font-weight:700;color:var(--text)}
+.cx-fmt-s{font-size:10px;color:var(--muted)}
+/* action grid — radio hidden, selection shown by highlight (matches format grid) */
+.cx-act-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:7px}
+.cx-act{display:flex;align-items:center;gap:9px;border:1px solid var(--border2);border-radius:9px;padding:11px 13px;cursor:pointer;font-size:13px;color:var(--text);transition:border-color .12s,background .12s;text-align:left;justify-content:flex-start}
+.cx-act:hover{background:rgba(255,255,255,.04)}
+.cx-act input{position:absolute;opacity:0;pointer-events:none}
+.cx-act-i{font-size:15px;line-height:1;flex:0 0 auto}
+.cx-act-t{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cx-act:has(input:checked){border-color:#7c5cff;background:rgba(124,92,255,.14)}
+.cx-act:has(input:checked) .cx-act-t{color:#c9a0ff}
+/* bottom bar */
+.cx-bottom{display:flex;align-items:center;gap:14px;padding-top:2px}
+.cx-run{background:#7c5cff;color:#fff;font-weight:800;font-size:14px;padding:11px 34px;border:none;border-radius:10px;cursor:pointer;font-family:var(--display);transition:background .15s}
+.cx-run:hover{background:#8d70ff}
+.cx-run:disabled{opacity:.6;cursor:default}
+.cx-result{font-size:12px;color:var(--muted);flex:1;min-width:0}
+.cx-prog{margin:2px}
+.cx-prog-track{height:7px;background:rgba(255,255,255,.08);border-radius:4px;overflow:hidden}
+.cx-prog-bar{height:100%;width:0;background:#7c5cff;transition:width .25s}
+.cx-prog-lbl{font-size:11px;color:var(--muted);margin-top:5px;font-family:var(--mono)}
+.cx-extra{margin-top:4px;border:1px solid var(--border);border-radius:11px;background:var(--surface);padding:4px 14px}
+.cx-extra>summary{cursor:pointer;font-size:12px;font-weight:600;color:var(--muted);padding:8px 0;list-style:none}
+.cx-extra>summary::-webkit-details-marker{display:none}
+.cx-extra>summary:before{content:'▸ ';color:#7c5cff}
+.cx-extra[open]>summary:before{content:'▾ '}
+
+/* Now-playing track row in an album/release card. !important beats the inline
+   hover background so the highlight survives mouseover/out. */
+.alb-row-playing{background:rgba(255,255,255,.06)!important;box-shadow:inset 3px 0 0 var(--alb-svc,var(--red))}
+.alb-row-playing .a-track-title,.alb-row-playing div[title]{color:var(--text)}
+

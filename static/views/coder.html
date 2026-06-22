@@ -1,0 +1,161 @@
+<div class="cx">
+  <!-- ── HEADER: title + source path + actions ── -->
+  <div class="cx-head">
+    <div class="cx-head-l">
+      <span style="font-size:20px">🎛</span>
+      <span class="cx-title">Ripster Coder</span>
+    </div>
+    <div class="cx-head-r">
+      <input id="coder-path" class="cx-path" data-i18n-ph="cd.path_ph" placeholder="Путь к папке релиза…  C:\Users\…\Album"
+             oninput="document.getElementById('coder-srcinfo').textContent=''"
+             onkeydown="if(event.key==='Enter')cxLoadFiles(this.value.trim())"/>
+      <button class="cx-btn" onclick="cxBrowseToggle()" data-i18n-title="cd.browse_t" title="Дерево папок" data-i18n="cd.browse">📂 Обзор</button>
+      <button class="cx-btn" onclick="cxLoadFiles(document.getElementById('coder-path').value.trim())" data-i18n-title="cd.open_t" title="Загрузить список файлов" data-i18n="cd.open">↻ Открыть</button>
+    </div>
+  </div>
+
+  <!-- folder tree (collapsed by default) -->
+  <div id="coder-tree" class="cx-tree" style="display:none"></div>
+  <div id="coder-srcinfo" class="cx-srcinfo"></div>
+
+  <!-- ── FILE TABLE: source → result + size ── -->
+  <div class="cx-table-wrap">
+    <table class="cx-table">
+      <thead>
+        <tr>
+          <th class="cx-c-cb"><input type="checkbox" id="cx-all" checked onchange="cxToggleAll(this.checked)"/></th>
+          <th class="cx-c-num">#</th>
+          <th class="cx-c-src" data-i18n="cd.col_src">Имя исходного файла</th>
+          <th class="cx-c-dst" data-i18n="cd.col_dst">Имя результирующего файла</th>
+          <th class="cx-c-size" data-i18n="cd.col_size">Размер</th>
+        </tr>
+      </thead>
+      <tbody id="cx-tbody">
+        <tr><td colspan="5" class="cx-empty" data-i18n="cd.empty">Выбери папку релиза — «📂 Обзор» или вставь путь и нажми «↻ Открыть»</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="cx-summary" id="cx-summary"></div>
+
+  <!-- ── OUTPUT DIRECTORY ── -->
+  <div class="cx-panel">
+    <div class="cx-panel-title" data-i18n="cd.outdir">Результирующий каталог</div>
+    <div class="cx-row">
+      <input id="cx-outdir" class="cx-path" data-i18n-ph="cd.outdir_ph" placeholder="(по умолчанию: <папка>/converted/<ФОРМАТ>)"/>
+    </div>
+    <div class="cx-row" style="gap:18px;flex-wrap:wrap">
+      <label class="cx-check"><input type="checkbox" id="cx-insrc"/> <span data-i18n="cd.in_src">Создавать файлы в исходной папке</span></label>
+      <label class="cx-check"><input type="checkbox" id="coder-rename" onchange="cxOnRenameToggle(this.checked)"/> <span data-i18n="cd.rename">Переименовать по тегам</span></label>
+      <input id="coder-tmpl" class="cx-path cx-tmpl" value="{tracknumber}. {artist} - {title}" style="display:none;flex:1;min-width:220px"/>
+    </div>
+  </div>
+
+  <!-- ── OUTPUT FORMAT (radio grid) ── -->
+  <div class="cx-panel">
+    <div class="cx-panel-title" data-i18n="cd.fmt_title">Настройки результата</div>
+    <select id="coder-fmt" style="display:none"></select>
+    <div class="cx-fmt-grid" id="cx-fmt-grid"></div>
+    <div class="cx-row" style="margin-top:8px;gap:14px;flex-wrap:wrap">
+      <div class="field-group cx-mini" id="coder-br-wrap">
+        <label class="lbl" data-i18n="cd.bitrate">Битрейт</label>
+        <select id="coder-br">
+          <option value="320k">320 kbps</option>
+          <option value="256k">256 kbps</option>
+          <option value="192k">192 kbps</option>
+          <option value="128k">128 kbps</option>
+        </select>
+      </div>
+      <div class="field-group cx-mini">
+        <label class="lbl" data-i18n="cd.srate">Частота</label>
+        <select id="coder-srate">
+          <option value="" data-i18n="cd.as_source">Как в источнике</option>
+          <option value="44100">44.1 kHz</option>
+          <option value="48000">48 kHz</option>
+          <option value="88200">88.2 kHz</option>
+          <option value="96000">96 kHz</option>
+        </select>
+      </div>
+      <div class="field-group cx-mini" id="coder-bd-wrap" style="display:none">
+        <label class="lbl" data-i18n="cd.bdepth">Битность</label>
+        <select id="coder-bd">
+          <option value="" data-i18n="cd.as_source">Как в источнике</option>
+          <option value="16">16-bit</option>
+          <option value="24">24-bit</option>
+        </select>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── ACTION (radio) ── -->
+  <div class="cx-panel">
+    <div class="cx-panel-title" data-i18n="cd.action">Действие</div>
+    <div class="cx-act-grid">
+      <label class="cx-act"><input type="radio" name="cx-action" value="encode" checked onchange="cxSetAction()"/><span class="cx-act-i">🎚</span><span class="cx-act-t" data-i18n="cd.act_encode">Кодировать</span></label>
+      <label class="cx-act"><input type="radio" name="cx-action" value="merge" onchange="cxSetAction()"/><span class="cx-act-i">🔗</span><span class="cx-act-t" data-i18n="cd.act_merge">Слияние / CUE</span></label>
+      <label class="cx-act"><input type="radio" name="cx-action" value="split" onchange="cxSetAction()"/><span class="cx-act-i">✂</span><span class="cx-act-t" data-i18n="cd.act_split">Разрезать CUE</span></label>
+      <label class="cx-act"><input type="radio" name="cx-action" value="retag" onchange="cxSetAction()"/><span class="cx-act-i">🏷</span><span class="cx-act-t" data-i18n="cd.act_retag">Ретег по ISRC</span></label>
+    </div>
+
+    <!-- merge name (only for merge action) -->
+    <div class="field-group mt8" id="coder-name-wrap" style="display:none">
+      <label class="lbl" data-i18n="cd.merge_name">Имя склеенного микса (файл + .cue)</label>
+      <input id="coder-name" data-i18n-ph="cd.merge_name_ph" placeholder="Artist - Title"/>
+    </div>
+    <!-- split re-encode (only for split action) -->
+    <label class="cx-check mt8" id="cx-split-reenc-wrap" style="display:none">
+      <input type="checkbox" id="coder-split-reenc"/> <span data-i18n="cd.split_reenc">Перекодировать в выбранный формат (иначе — как в источнике)</span>
+    </label>
+  </div>
+
+  <!-- ── OUTPUT SETTINGS ── -->
+  <div class="cx-panel" id="cx-outset">
+    <div class="cx-panel-title" data-i18n="cd.outset">Настройки вывода</div>
+    <div class="cx-row" style="gap:18px;flex-wrap:wrap">
+      <label class="cx-check"><input type="checkbox" id="coder-norm"/> <span data-i18n="cd.normalize">Нормализовать громкость (−14 LUFS)</span></label>
+    </div>
+  </div>
+
+  <!-- live progress -->
+  <div id="coder-progress" class="cx-prog" style="display:none">
+    <div class="cx-prog-track"><div id="coder-pbar" class="cx-prog-bar"></div></div>
+    <div id="coder-plabel" class="cx-prog-lbl"></div>
+  </div>
+
+  <!-- ── BOTTOM BAR ── -->
+  <div class="cx-bottom">
+    <button class="cx-run" id="coder-run" onclick="cxRun()" data-i18n="cd.run">Пуск</button>
+    <div id="coder-result" class="cx-result"></div>
+  </div>
+
+  <!-- ── EXTRAS (batch / auto / download) — collapsed ── -->
+  <details class="cx-extra">
+    <summary data-i18n="cd.extra">Ещё: пакет · авто-склейка · скачать с сервиса</summary>
+
+    <div class="cx-panel mt8">
+      <div class="cx-panel-title" data-i18n="cd.batch_title">📚 Пакетный конверт (несколько папок)</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="cd.batch_desc">Открой папку выше → «➕ В пакет», повтори, затем сконвертируй все разом с текущими настройками формата.</div>
+      <div class="cx-row" style="flex-wrap:wrap">
+        <button class="cx-btn" onclick="coderBatchAdd()" data-i18n="cd.batch_add">➕ В пакет</button>
+        <button class="cx-btn cx-btn-go" id="coder-batch-run" onclick="coderBatchRun()" data-i18n="cd.batch_run">🎚 Конвертировать пакет</button>
+        <button class="cx-btn" onclick="coderBatchClear()" data-i18n="cd.batch_clear">Очистить</button>
+        <div id="coder-batch-res" style="font-size:12px;color:var(--muted);flex:1;min-width:140px"></div>
+      </div>
+      <div id="coder-batch-list" style="margin-top:8px;display:flex;flex-direction:column;gap:4px"></div>
+    </div>
+
+    <div class="cx-panel mt8">
+      <div class="cx-panel-title" data-i18n="cd.auto_title">⚡ Авто-склейка DJ-миксов</div>
+      <label class="cx-check"><input type="checkbox" id="coder-auto" onchange="saveSetting('coder-auto',this.checked)"/>
+        <span data-i18n="cd.auto_desc">Если в названии релиза есть «(DJ Mix)» и источник lossless — после скачивания треки сами склеиваются в один файл + CUE в папку mixed/.</span></label>
+    </div>
+
+    <div class="cx-panel mt8">
+      <div class="cx-panel-title" data-i18n="cd.dl_title">⬇ Скачать с сервиса и сконвертить</div>
+      <div style="font-size:11px;color:var(--muted);margin-bottom:8px" data-i18n="cd.dl_desc">Apple / Qobuz / Deezer / Tidal / Beatport — скачается в исходном качестве. После — открой папку выше и сконвертируй/склей.</div>
+      <div class="cx-row">
+        <input id="coder-url" class="cx-path" data-i18n-ph="cd.dl_ph" placeholder="https://music.apple.com/… или Qobuz/Deezer/Tidal/Beatport" style="flex:1"/>
+        <button class="cx-btn cx-btn-go" onclick="coderDownloadConvert()" data-i18n="cd.dl_btn">Скачать+конверт</button>
+      </div>
+    </div>
+  </details>
+</div>

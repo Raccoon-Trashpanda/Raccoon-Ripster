@@ -1,0 +1,43 @@
+<svg width="480" height="120" viewBox="0 0 480 120" xmlns="http://www.w3.org/2000/svg">
+  <rect width="480" height="120" rx="16" fill="#111318"/>
+
+  <!-- Raccoon icon -->
+  <!-- Head -->
+  <ellipse cx="60" cy="62" rx="34" ry="31" fill="#7a7a8a"/>
+  <!-- Ears -->
+  <ellipse cx="36" cy="34" rx="12" ry="13" fill="#7a7a8a"/>
+  <ellipse cx="84" cy="34" rx="12" ry="13" fill="#7a7a8a"/>
+  <!-- Inner ears -->
+  <ellipse cx="36" cy="35" rx="7" ry="8" fill="#c084a0"/>
+  <ellipse cx="84" cy="35" rx="7" ry="8" fill="#c084a0"/>
+  <!-- Mask -->
+  <ellipse cx="48" cy="58" rx="15" ry="11" fill="#2a2a38"/>
+  <ellipse cx="72" cy="58" rx="15" ry="11" fill="#2a2a38"/>
+  <rect x="57" y="51" width="6" height="9" fill="#2a2a38"/>
+  <!-- Eye whites -->
+  <ellipse cx="48" cy="57" rx="10" ry="8" fill="#e8e8f0"/>
+  <ellipse cx="72" cy="57" rx="10" ry="8" fill="#e8e8f0"/>
+  <!-- Pupils -->
+  <ellipse cx="48" cy="57" rx="6" ry="6" fill="#1a1a2e"/>
+  <ellipse cx="72" cy="57" rx="6" ry="6" fill="#1a1a2e"/>
+  <!-- Eye shine -->
+  <ellipse cx="50" cy="54" rx="2.5" ry="2.5" fill="white"/>
+  <ellipse cx="74" cy="54" rx="2.5" ry="2.5" fill="white"/>
+  <!-- Nose -->
+  <ellipse cx="60" cy="68" rx="7" ry="5" fill="#2a2a38"/>
+  <ellipse cx="58" cy="66" rx="2" ry="1.5" fill="#5a5a7a" opacity="0.6"/>
+  <!-- Muzzle -->
+  <ellipse cx="60" cy="74" rx="14" ry="10" fill="#c8c8d8"/>
+  <!-- Smile -->
+  <path d="M53 76 Q60 82 67 76" fill="none" stroke="#7a7a8a" stroke-width="1.2" stroke-linecap="round"/>
+  <!-- Tail stripe hint -->
+  <path d="M30 95 Q22 106 32 109 Q44 113 40 101" fill="none" stroke="#7a7a8a" stroke-width="4" stroke-linecap="round"/>
+  <path d="M30 95 Q22 106 32 109 Q44 113 40 101" fill="none" stroke="#2a2a38" stroke-width="1.5" stroke-linecap="round" stroke-dasharray="5 4"/>
+
+  <!-- Wordmark -->
+  <text x="108" y="58" font-family="Georgia, 'Times New Roman', serif" font-size="34" font-weight="700" fill="#f0f0f8" letter-spacing="-0.5">Raccoon</text>
+  <text x="108" y="93" font-family="Georgia, 'Times New Roman', serif" font-size="34" font-weight="700" fill="#c084a0" letter-spacing="-0.5">Ripster</text>
+
+  <!-- Tagline -->
+  <text x="110" y="112" font-family="Arial, sans-serif" font-size="10" fill="#6a6a8a" letter-spacing="0.14em">UNIVERSAL MUSIC DOWNLOADER</text>
+</svg>

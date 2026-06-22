@@ -1,0 +1,34 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+pyyaml>=6.0.1
+mutagen>=1.47.0
+httpx>=0.27
+
+# CRITICAL — do NOT loosen. The AMD/public-wrapper engine ships protobuf-
+# generated _pb2 modules built against the protobuf 6.31.x runtime (grpcio-tools
+# 1.80). Any other protobuf version makes those modules fail to import and the
+# wrapper silently "doesn't download". Several deps (esp. standard pywidevine)
+# try to drag protobuf below 4.x — this hard pin blocks that downgrade.
+# 6.33.4: OrpheusDL Spotify desktop_api + pywidevine ship protobuf-6.33 gencode
+# (runtime must be >= gencode). AMD's 6.31 gencode still loads fine on 6.33
+# runtime (newer runtime is allowed), so this satisfies BOTH. Do NOT drop below
+# 6.33 or OrpheusDL/pywidevine fail to import (VersionError).
+protobuf==6.33.4
+grpcio>=1.78
+
+# Optional: enable Deezer engine (remove if you don't need Deezer)
+deemix>=3.6.6
+
+# Qobuz + Tidal engines (single package, serves both).
+# Pinned to 2.0.5 — the last 2.0.x on PyPI. streamrip 2.1.x broke Qobuz login
+# (GitHub #954, #956, #796), and 2.0.6 was never published to PyPI (the jump is
+# 2.0.5 → 2.1.0), so `==2.0.6` made `pip install -r` fail. Do NOT bump to 2.1.x.
+# streamrip pulls its own aiofiles<0.8; do NOT add a separate aiofiles line.
+streamrip==2.0.5
+
+# Desktop launcher — Ripster opens in its OWN native window (not a browser tab)
+# via the system webview (Edge WebView2 on Windows; no bundled Chromium, unlike
+# Electron/QtWebEngine). ripster_launcher.py falls back to the default browser if
+# this is absent. Pulls pythonnet + clr_loader on Windows.
+pywebview==6.2.1

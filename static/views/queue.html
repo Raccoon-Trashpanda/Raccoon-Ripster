@@ -1,0 +1,92 @@
+      <!-- Wrapper status banner — compact, expandable -->
+      <!-- ═══ WRAPPER CONTROL BANNER ═══ -->
+      <div id="wrapper-banner" style="display:none;flex-shrink:0">
+        <div style="background:rgba(226,75,74,.08);border-bottom:1px solid rgba(226,75,74,.22)">
+          <div style="display:flex;align-items:center;gap:7px;padding:7px 16px">
+            <span style="font-size:13px">🔴</span>
+            <div style="flex:1;min-width:0">
+              <span style="font-size:12px;font-weight:700;color:var(--red);font-family:var(--display)" data-i18n="q.wrapper_offline">Wrapper не запущен</span>
+              <span id="wb-docker-status" style="font-size:10px;color:var(--muted);margin-left:8px"></span>
+            </div>
+            <button id="wb-btn-start" onclick="wrapperStart()"
+              style="background:rgba(62,207,170,.2);border:1px solid rgba(62,207,170,.35);border-radius:7px;padding:5px 13px;font-size:11px;font-weight:700;color:var(--green);cursor:pointer;font-family:var(--font);white-space:nowrap">
+              <span data-i18n="q.start_wrapper">▶ Запустить</span>
+            </button>
+            <button id="wb-btn-pull" onclick="wrapperPull()"
+              style="background:rgba(10,132,255,.12);border:1px solid rgba(10,132,255,.25);border-radius:7px;padding:5px 11px;font-size:11px;font-weight:600;color:var(--blue);cursor:pointer;font-family:var(--font);white-space:nowrap">
+              ⬇ Pull
+            </button>
+            <button onclick="switchToAAC()"
+              style="background:rgba(239,159,39,.1);border:1px solid rgba(239,159,39,.22);border-radius:7px;padding:5px 10px;font-size:10px;font-weight:600;color:var(--orange);cursor:pointer;font-family:var(--font);white-space:nowrap">
+              → AAC
+            </button>
+            <button onclick="toggleWrapperBanner()"
+              style="background:none;border:1px solid rgba(255,255,255,.08);border-radius:7px;padding:5px 8px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font)">
+              <span id="wrapper-expand-lbl">? ▼</span>
+            </button>
+            <button onclick="dismissWrapperBanner()"
+              style="background:none;border:none;color:var(--muted2);cursor:pointer;font-size:16px;padding:0;line-height:1">✕</button>
+          </div>
+          <div id="wb-log" style="display:none;padding:0 16px 8px">
+            <div id="wb-log-text"
+              style="background:rgba(0,0,0,.3);border-radius:6px;padding:6px 10px;font-family:var(--mono);font-size:10px;color:var(--muted);max-height:72px;overflow-y:auto"></div>
+          </div>
+          <div id="wrapper-detail" style="display:none;padding:0 16px 10px">
+            <div style="background:rgba(0,0,0,.35);border:1px solid rgba(226,75,74,.12);border-radius:7px;padding:7px 11px;display:flex;align-items:center;gap:7px">
+              <code id="wrapper-cmd-text" style="font-family:var(--mono);font-size:10px;color:#ffb3b5;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+                docker run -v ./rootfs/data:/app/rootfs/data -p 10020:10020 -p 20020:20020 -e args="-H 0.0.0.0" ghcr.io/itouakirai/wrapper:x86
+              </code>
+              <button onclick="copyWrapperCmd()" id="wrapper-cmd-copy"
+                style="flex-shrink:0;background:rgba(226,75,74,.12);border:1px solid rgba(226,75,74,.22);border-radius:6px;padding:4px 9px;font-size:10px;font-weight:700;color:var(--danger);cursor:pointer;font-family:var(--font)">⎘</button>
+            </div>
+            <div style="margin-top:4px;font-size:10px;color:var(--muted)">
+              С Apple ID: <code style="color:var(--muted2);font-family:var(--mono)">-e args="-L email:pass -H 0.0.0.0"</code> · Нужен Docker Desktop
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Wrapper ONLINE flash -->
+      <div id="wrapper-ok-banner" style="display:none;background:rgba(62,207,170,.07);border-bottom:1px solid rgba(62,207,170,.15);padding:5px 16px;flex-shrink:0">
+        <div style="font-size:11px;color:var(--green);display:flex;align-items:center;gap:8px">
+          <span data-i18n="q.wrapper_online">✓ Wrapper запущен и готов</span>
+          <button id="wb-btn-stop" onclick="wrapperStop()"
+            style="background:rgba(226,75,74,.1);border:1px solid rgba(226,75,74,.2);border-radius:6px;padding:2px 8px;font-size:10px;color:var(--danger);cursor:pointer;font-family:var(--font)"><span data-i18n="q.stop">■ Стоп</span></button>
+          <button onclick="document.getElementById('wrapper-ok-banner').style.display='none'"
+            style="margin-left:auto;background:none;border:none;color:var(--muted);cursor:pointer;font-size:13px;padding:0">✕</button>
+        </div>
+      </div>
+
+
+      <div class="queue-input-area" style="flex:0 0 auto">
+        <div class="input-row" style="gap:8px;align-items:center">
+          <!-- Service color indicator -->
+          <div id="url-svc-dot" style="width:8px;height:8px;border-radius:50%;background:var(--red);flex-shrink:0;transition:background .2s"></div>
+          <input id="url-input" type="url"
+            data-i18n-ph="q.url_ph" placeholder="Вставь ссылку — Apple Music, Qobuz, Deezer, Tidal, Spotify…"
+            oninput="detectUrlService(this.value)"
+            onkeydown="if(event.key==='Enter')addUrl()"
+            style="flex:1"/>
+          <select id="url-quality" style="width:160px"></select>
+          <button class="btn-red" onclick="addUrl()" data-i18n="q.add">+ Добавить</button>
+        </div>
+        <div id="url-svc-label" style="font-size:11px;color:var(--muted);margin-top:5px;padding-left:16px;min-height:14px"></div>
+      </div>
+
+      <div class="queue-list" id="queue-list">
+        <div class="empty-state" id="queue-empty">
+          <div class="empty-icon">🎵</div>
+          <div class="empty-text" data-i18n-html="q.empty_html">Очередь пуста<br>Вставь ссылку выше или найди в разделе Поиск</div>
+        </div>
+      </div>
+
+      <div class="transport" style="flex:0 0 auto">
+        <button class="btn-red" id="btn-start" onclick="startQueue()">▶ Start</button>
+        <button class="btn-orange" id="btn-pause" onclick="pauseQueue()" disabled>⏸ Pause</button>
+        <button class="btn-ghost" id="btn-stop" onclick="stopQueue()" disabled>■ Stop</button>
+        <button class="btn-ghost btn-sm" onclick="clearDone()" data-i18n="q.clear_done" data-i18n-title="q.clear_done_title" title="Убрать готовые">Убрать готовые</button>
+        <div class="transport-prog">
+          <div class="tp-label" id="tp-label">Queue: 0 items</div>
+          <div class="tp-track"><div class="tp-bar" id="tp-bar" style="width:0%"></div></div>
+        </div>
+      </div>

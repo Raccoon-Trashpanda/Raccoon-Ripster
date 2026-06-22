@@ -1,0 +1,40 @@
+      <div class="view-header">
+        <div class="view-title" data-i18n="h.title">История загрузок</div>
+        <div class="view-sub">
+          <span id="hist-count" style="font-family:var(--mono);color:var(--green)">0</span> <span data-i18n="h.subtitle">записей · сохраняется в history.json</span>
+        </div>
+      </div>
+      <div class="view-body" style="display:flex;flex-direction:column;gap:12px">
+        <div class="row" style="flex-wrap:wrap;gap:8px;align-items:center">
+          <select id="hist-filter" onchange="loadHistory()"
+            style="padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer;outline:none;width:auto">
+            <option value="" data-i18n="h.all_svcs">Все сервисы</option>
+            <option value="apple">Apple Music</option>
+            <option value="deezer">Deezer</option>
+            <option value="qobuz">Qobuz</option>
+            <option value="tidal">Tidal</option>
+          </select>
+          <select id="hist-status-filter" onchange="loadHistory()"
+            style="padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer;outline:none;width:auto">
+            <option value="" data-i18n="h.all_results">Все результаты</option>
+            <option value="done" data-i18n="h.only_done">Только успешные</option>
+            <option value="error" data-i18n="h.only_errors">Только ошибки</option>
+          </select>
+          <button class="btn-ghost btn-sm" onclick="loadHistory()" data-i18n="h.refresh">↺ Обновить</button>
+          <select id="hist-clear-period"
+            style="margin-left:auto;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer;outline:none;width:auto">
+            <option value="" data-i18n="h.clr_all">Всё</option>
+            <option value="h:1"  data-i18n="h.clr_1h">Старше 1 часа</option>
+            <option value="h:6"  data-i18n="h.clr_6h">Старше 6 часов</option>
+            <option value="h:24" data-i18n="h.clr_24h">Старше 24 часов</option>
+            <option value="d:7"  data-i18n="h.clr_7d">Старше 7 дней</option>
+            <option value="d:30" data-i18n="h.clr_30d">Старше 30 дней</option>
+          </select>
+          <button class="btn-ghost btn-sm" onclick="clearHistory()" data-i18n="h.clear">Очистить</button>
+        </div>
+        <div id="history-list" style="display:flex;flex-direction:column;gap:6px"></div>
+        <div id="history-empty" class="empty-state" style="display:none">
+          <div class="empty-icon">📜</div>
+          <div class="empty-text" data-i18n-html="h.empty_html">История пуста<br>Скачай что-нибудь — и всё появится здесь</div>
+        </div>
+      </div>

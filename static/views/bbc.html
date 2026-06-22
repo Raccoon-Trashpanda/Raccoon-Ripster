@@ -1,0 +1,44 @@
+      <audio id="bbc-audio" style="display:none" preload="none"></audio>
+      <div style="padding:14px 16px;min-width:0">
+
+        <!-- Header -->
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px;flex-wrap:wrap">
+          <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+            <span style="font-size:22px">📻</span>
+            <span style="font-size:14px;font-weight:700;color:var(--text)" data-i18n="v.bbc">BBC Sounds</span>
+          </div>
+          <!-- Brand pills -->
+          <div id="bbc-brands" style="display:flex;gap:5px;flex-wrap:wrap"></div>
+          <!-- Search -->
+          <div style="display:flex;gap:5px;margin-left:auto;align-items:center">
+            <input id="bbc-q" data-i18n-ph="bbc.search_ph" placeholder="Поиск…"
+              style="padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);outline:none;font-family:var(--font);width:160px"
+              onkeydown="if(event.key==='Enter')bbcSearch()"/>
+            <button onclick="bbcSearch()"
+              style="padding:6px 12px;background:var(--surface);border:1px solid var(--border2);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;color:var(--text);font-family:var(--font)">
+              🔍
+            </button>
+            <button onclick="bbcClearSearch()" id="bbc-clear-btn"
+              style="display:none;padding:6px 10px;background:transparent;border:1px solid var(--border);border-radius:8px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)">
+              <span data-i18n="bbc.clear">✕ Все</span>
+            </button>
+          </div>
+        </div>
+
+        <!-- Active downloads -->
+        <div id="bbc-dl-list" style="display:none;margin-bottom:10px"></div>
+
+        <!-- Status / spinner -->
+        <div id="bbc-status" style="font-size:12px;color:var(--muted);padding:8px 0;display:none">Загружаю…</div>
+
+        <!-- Episode grid -->
+        <div id="bbc-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px"></div>
+
+        <!-- Load more -->
+        <div style="text-align:center;padding:14px 0">
+          <button id="bbc-more-btn" onclick="bbcLoadMore()" data-i18n="bbc.more"
+            style="display:none;padding:7px 20px;background:var(--surface);border:1px solid var(--border);border-radius:9px;font-size:12px;font-weight:600;cursor:pointer;color:var(--text);font-family:var(--font)">
+            Ещё ↓
+          </button>
+        </div>
+      </div>

@@ -1,0 +1,48 @@
+# ── Secrets & runtime config ────────────────────────────────────────────────
+# Your real config (tokens, passwords) — copy config.example.yaml → config.yaml
+config.yaml
+tokens/
+cookies.txt
+*.session
+# OrpheusDL per-service secret blobs (Spotify/Tidal auth)
+orpheus/
+# Widevine L3 device — never publish
+*.wvd
+# Windows / Go binaries (not part of the Python repo)
+*.exe
+backups/
+
+# ── Downloaded media & generated output ─────────────────────────────────────
+downloads/
+mixed/
+*.m4a
+*.flac
+*.mp3
+*.opus
+*.alac
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# ── Logs & caches ───────────────────────────────────────────────────────────
+logs/
+*.log
+.cache/
+releases_cache.json
+
+# ── Desktop launcher build artifacts ────────────────────────────────────────
+RipsterLauncher.exe
+build/
+dist/
+*.spec
+
+# ── OS / editor noise ───────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

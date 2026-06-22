@@ -1,0 +1,1 @@
+"""Ripster — universal music downloader."""

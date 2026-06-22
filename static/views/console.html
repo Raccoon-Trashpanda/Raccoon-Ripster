@@ -1,0 +1,31 @@
+      <div class="view-header">
+        <div class="view-title">Console</div>
+        <div class="view-sub">Real-time output from the downloader · <span id="console-count" style="font-family:var(--mono);color:var(--green)">0 logs</span></div>
+      </div>
+      <div class="console-toolbar">
+        <select id="console-task-filter" onchange="_refreshConsole()" data-i18n-title="con.filter_task_title" title="Консоль задачи"
+          style="padding:5px 9px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);cursor:pointer;outline:none;font-family:var(--font);width:auto;max-width:240px;flex:0 0 auto">
+          <option value="all" data-i18n="con.all_tasks">Все задачи</option>
+        </select>
+        <select id="console-svc-filter" onchange="_refreshConsole()" data-i18n-title="con.filter_svc_title" title="Консоль по сервису"
+          style="padding:5px 9px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);cursor:pointer;outline:none;font-family:var(--font);width:auto;max-width:200px;flex:0 0 auto">
+          <option value="all" data-i18n="h.all_svcs">Все сервисы</option>
+        </select>
+        <select id="console-level-filter" onchange="_refreshConsole()" data-i18n-title="con.filter_level_title" title="Уровень логов"
+          style="padding:5px 9px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);cursor:pointer;outline:none;font-family:var(--font);width:auto;flex:0 0 auto">
+          <option value="all" data-i18n="con.all_levels">Все уровни</option>
+          <option value="error" data-i18n="h.only_errors">Только ошибки</option>
+          <option value="warn">Warn+</option>
+          <option value="info">Info+</option>
+        </select>
+        <button class="btn-ghost btn-sm" data-i18n="h.clear" onclick="clearConsole()">Очистить</button>
+        <button class="btn-ghost btn-sm owner-only" onclick="ripsterDumpLogs(100)">Dump to DevTools</button>
+        <button class="btn-ghost btn-sm" data-i18n="con.refresh" onclick="_refreshConsole()">Обновить</button>
+        <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="autoscroll" checked><div class="toggle-slider"></div></label>
+        <span data-i18n="con.autoscroll" style="font-size:12px;color:var(--muted)">Авто-скролл</span>
+        <span class="owner-only" style="font-size:11px;color:var(--muted);margin-left:auto;font-family:var(--mono)">
+          F12 → <code style="background:rgba(255,255,255,.06);padding:1px 5px;border-radius:4px">ripsterDumpLogs()</code>
+        </span>
+        <button id="fix-deps-btn" onclick="fixGamdlDeps()" style="display:none" class="btn-orange btn-sm owner-only">🔧 Fix gamdl deps (protobuf)</button>
+      </div>
+      <div class="console" id="console-out"></div>

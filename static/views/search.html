@@ -1,0 +1,65 @@
+      <div style="padding:14px 16px">
+        <!-- Row 1: text input -->
+        <div style="display:flex;gap:8px;margin-bottom:8px">
+          <input id="search-q" data-i18n-ph="search.ph" placeholder="Поиск: артист, альбом, трек… или вставь ссылку Deezer / Spotify / Qobuz"
+            style="flex:1;padding:9px 13px;background:var(--surface);border:1px solid var(--border);border-radius:9px;font-size:13px;color:var(--text);outline:none;font-family:var(--font)"
+            onkeydown="if(event.key==='Enter')doSearch()"/>
+          <button onclick="doSearch()" data-i18n="search.find"
+            style="padding:9px 20px;background:var(--red);color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font);flex-shrink:0">Найти</button>
+        </div>
+        <!-- Row 2: service + type selectors -->
+        <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">
+          <select id="search-svc" onchange="onSearchSvcChange()"
+            style="padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
+            <option value="apple">🍎 Apple Music</option>
+            <option value="deezer">🎵 Deezer</option>
+            <option value="qobuz">🎼 Qobuz</option>
+            <option value="spotify">🟢 Spotify</option>
+            <option value="beatport">🎧 Beatport</option>
+            <option value="yandex">🟡 Яндекс.Музыка</option>
+          </select>
+          <select id="search-type"
+            style="padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
+            <option value="album" data-i18n="search.type_album">Альбомы</option>
+            <option value="track" data-i18n="search.type_track">Треки</option>
+            <option value="artist" data-i18n="search.type_artist">Артисты</option>
+          </select>
+          <div id="search-svc-hint" style="font-size:11px;color:var(--muted);margin-left:4px"></div>
+        </div>
+        <!-- Batch paste toggle -->
+        <div style="display:flex;gap:8px;margin-bottom:10px">
+          <button onclick="toggleBatch()" data-i18n="search.batch"
+            style="padding:4px 10px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)">
+            📋 Пакетная вставка
+          </button>
+          <button onclick="convertSpotifyFromSearch()" data-i18n="search.convert"
+            style="padding:4px 10px;background:var(--surface);border:1px solid rgba(29,185,84,.3);border-radius:7px;font-size:11px;cursor:pointer;color:#1db954;font-family:var(--font)">
+            Spotify → конвертировать
+          </button>
+        </div>
+        <div id="batch-area" style="display:none;margin-bottom:12px">
+          <textarea id="batch-urls" rows="5" data-i18n-ph="search.batch_ph" placeholder="Вставь несколько ссылок, по одной на строку…"
+            style="width:100%;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:9px;font-size:11px;font-family:var(--mono);color:var(--text);resize:vertical;outline:none;box-sizing:border-box"></textarea>
+          <div style="display:flex;gap:8px;margin-top:6px;align-items:center">
+            <select id="batch-quality"
+              style="padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:12px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
+            </select>
+            <button onclick="addBatch()" data-i18n="search.add_batch"
+              style="padding:6px 14px;background:var(--green,var(--green));color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">
+              + Добавить все в очередь
+            </button>
+          </div>
+        </div>
+        <div id="search-status" style="font-size:13px;color:var(--muted);padding:30px 0;text-align:center" data-i18n="search.hint">Введи запрос — Apple Music, Deezer или Qobuz</div>
+        <!-- Sort bar — shown only when results are present -->
+        <div id="search-sort-bar" style="display:none;margin-bottom:10px;display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span style="font-size:11px;color:var(--muted);flex-shrink:0">Сортировка:</span>
+          <button class="srch-sort-btn active" data-sort="relevance" onclick="_searchSort(this,'relevance')" style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);border:1px solid var(--border);background:var(--surface2);color:var(--text)">По релевантности</button>
+          <button class="srch-sort-btn" data-sort="date_desc" onclick="_searchSort(this,'date_desc')" style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);border:1px solid var(--border);background:var(--surface);color:var(--muted)">Новые ↓</button>
+          <button class="srch-sort-btn" data-sort="date_asc" onclick="_searchSort(this,'date_asc')" style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);border:1px solid var(--border);background:var(--surface);color:var(--muted)">Старые ↑</button>
+          <button class="srch-sort-btn" data-sort="tracks_desc" onclick="_searchSort(this,'tracks_desc')" style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);border:1px solid var(--border);background:var(--surface);color:var(--muted)">Треков ↓</button>
+          <button class="srch-sort-btn" data-sort="tracks_asc" onclick="_searchSort(this,'tracks_asc')" style="padding:3px 10px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);border:1px solid var(--border);background:var(--surface);color:var(--muted)">Треков ↑</button>
+          <span id="search-count" style="margin-left:auto;font-size:11px;color:var(--muted2);font-family:var(--mono)"></span>
+        </div>
+        <div id="search-results" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:10px"></div>
+      </div>

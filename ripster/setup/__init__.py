@@ -1,0 +1,722 @@
+"""ripster.setup — auto-installer and tool-detection helpers.
+
+Public surface:
+    install(cfg, broadcast_fn, save_config_fn, base_dir, is_windows)
+    install_log          — list of {text, level, ts} entries streamed to browser
+    ilog(text, level)    — append to install_log and broadcast
+    istep(name, status)  — broadcast install step status
+    irun(cmd, cwd)       — run subprocess, stream output to install_log
+    check_tools()        — return dict of tool presence / version
+    tool_path(name)      — find tool on PATH or in base_dir/tools
+    find_go()            — locate go executable with Windows fallbacks
+    check_docker_installed() — (bool, path_or_error)
+    run_full_setup()     — master setup routine (installs everything)
+    _gamdl_flag(name, *args) — return flag only if gamdl supports it
+    _build_env()         — os.environ copy with extra PATH entries
+    download_file(url, dest, label)        — download with progress
+    download_file_no_ssl(url, dest, label) — download, SSL relaxed
+    install_go_windows()
+    install_gpac_windows()
+    install_mp4decrypt_windows()
+    clone_downloader()
+    go_mod_download()
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import platform
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+import zipfile
+from datetime import datetime
+from pathlib import Path
+from typing import Optional
+
+_cfg:         dict     = {}
+_broadcast              = None
+_save_config            = None
+_base_dir:    Path      = Path(".")
+_is_windows:  bool      = platform.system() == "Windows"
+
+install_log:  list[dict] = []
+_need_restart: bool       = False
+_gamdl_flags: set[str]   = set()
+
+
+def install(
+    cfg:            dict,
+    broadcast_fn,
+    save_config_fn,
+    base_dir:       Path,
+    is_windows:     bool,
+) -> None:
+    """Wire globals. Call once at app startup before any setup function."""
+    global _cfg, _broadcast, _save_config, _base_dir, _is_windows
+    _cfg          = cfg
+    _broadcast    = broadcast_fn
+    _save_config  = save_config_fn
+    _base_dir     = base_dir
+    _is_windows   = is_windows
+
+
+# ─── tool detection ──────────────────────────────────────────────────────────
+
+def find_go() -> str:
+    """Locate the go executable on PATH, with Windows fallbacks."""
+    go = shutil.which("go")
+    if go:
+        return go
+    if _is_windows:
+        candidates = [
+            r"C:\Program Files\Go\bin\go.exe",
+            r"C:\Go\bin\go.exe",
+            os.path.expandvars(r"%USERPROFILE%\go\bin\go.exe"),
+            os.path.expandvars(r"%LOCALAPPDATA%\Programs\Go\bin\go.exe"),
+        ]
+        for c in candidates:
+            if os.path.isfile(c):
+                return c
+    return "go"
+
+
+def check_docker_installed() -> tuple[bool, str]:
+    """Return (installed, path_or_error)."""
+    docker = shutil.which("docker")
+    if docker:
+        try:
+            r = subprocess.run(
+                [docker, "info", "--format", "{{.ServerVersion}}"],
+                capture_output=True, text=True, timeout=5,
+            )
+            if r.returncode == 0:
+                return True, docker
+            return False, "Docker installed but daemon not running"
+        except Exception as e:
+            return False, str(e)
+    for p in [r"C:\Program Files\Docker\Docker\resources\bin\docker.exe"]:
+        if os.path.isfile(p):
+            try:
+                r = subprocess.run(
+                    [p, "info", "--format", "{{.ServerVersion}}"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if r.returncode == 0:
+                    return True, p
+            except Exception:
+                pass
+            return False, "Docker found but daemon not running — start Docker Desktop"
+    return False, "Docker not installed"
+
+
+def tool_path(name: str) -> Optional[str]:
+    """Check if a tool exists on PATH or in base_dir/tools."""
+    found = shutil.which(name)
+    if found:
+        return found
+    local = _base_dir / "tools" / (name + (".exe" if _is_windows else ""))
+    if local.exists():
+        return str(local)
+    if _is_windows:
+        candidates: list[str] = {
+            "go": [
+                r"C:\Program Files\Go\bin\go.exe",
+                r"C:\Go\bin\go.exe",
+                os.path.expandvars(r"%USERPROFILE%\go\bin\go.exe"),
+            ],
+            "MP4Box": [
+                r"C:\Program Files\GPAC\MP4Box.exe",
+                r"C:\Program Files (x86)\GPAC\MP4Box.exe",
+            ],
+            "mp4decrypt": [
+                str(_base_dir / "tools" / "mp4decrypt.exe"),
+                os.path.expandvars(r"%APPDATA%\bento4\bin\mp4decrypt.exe"),
+            ],
+        }.get(name, [])
+        for c in candidates:
+            if os.path.isfile(c):
+                return c
+    return None
+
+
+def _detect_gamdl_flags() -> set[str]:
+    """Parse gamdl --help once and cache available CLI flags."""
+    global _gamdl_flags
+    if _gamdl_flags:
+        return _gamdl_flags
+    try:
+        gamdl_exe = shutil.which("gamdl") or "gamdl"
+        r = subprocess.run(
+            [gamdl_exe, "--help"],
+            capture_output=True, text=True, timeout=10,
+        )
+        flags = set(re.findall(r"--([a-z][a-z0-9-]+)", r.stdout + r.stderr))
+        _gamdl_flags = flags
+        print(f"[gamdl] Detected {len(flags)} flags: {sorted(flags)[:10]}…", flush=True)
+    except Exception as e:
+        print(f"[gamdl] Could not detect flags: {e}", flush=True)
+        _gamdl_flags = set()
+    return _gamdl_flags
+
+
+def _gamdl_flag(name: str, *args) -> list[str]:
+    """Return [--name, *args] only if the flag exists in this gamdl version."""
+    flags = _detect_gamdl_flags()
+    if not flags or name in flags:
+        return [f"--{name}"] + [str(a) for a in args]
+    print(f"[gamdl] Skipping unknown flag: --{name}", flush=True)
+    return []
+
+
+async def check_tools() -> dict:
+    """Return status of all required tools."""
+    engine = _cfg.get("engine", "zhaarey")
+    tools = {
+        "go":          {"label": "Go (zhaarey engine)",         "required": engine == "zhaarey"},
+        "git":         {"label": "Git",                          "required": True},
+        "gamdl":       {"label": "gamdl (Python)",              "required": engine == "gamdl"},
+        "ffmpeg":      {"label": "FFmpeg",                       "required": False},
+        "MP4Box":      {"label": "MP4Box (GPAC)",               "required": engine == "zhaarey"},
+        "mp4decrypt":  {"label": "mp4decrypt (Bento4)",         "required": False},
+        "N_m3u8DL-RE": {"label": "N_m3u8DL-RE (fast)",         "required": False},
+    }
+    result: dict = {}
+    for name, info in tools.items():
+        path = tool_path(name)
+        result[name] = {
+            "label":    info["label"],
+            "required": info["required"],
+            "found":    bool(path),
+            "path":     path or "",
+        }
+        if path:
+            try:
+                r = subprocess.run(
+                    [path, "version" if name == "go" else "--version"],
+                    capture_output=True, text=True, timeout=5,
+                )
+                ver = (r.stdout or r.stderr or "").strip().splitlines()[0][:60]
+                result[name]["version"] = ver
+            except Exception:
+                result[name]["version"] = "?"
+        else:
+            result[name]["version"] = "NOT FOUND"
+
+    docker_ok, docker_msg = check_docker_installed()
+    result["docker"] = {
+        "label":    "Docker (zhaarey wrapper)",
+        "required": engine == "zhaarey",
+        "found":    docker_ok,
+        "path":     docker_msg if docker_ok else "",
+        "version":  "daemon running" if docker_ok else docker_msg,
+    }
+
+    main_go = Path(_cfg.get("main-go-path", _base_dir / "main.go"))
+    result["downloader"] = {
+        "label":    "apple-music-downloader (main.go)",
+        "required": engine == "zhaarey",
+        "found":    main_go.exists(),
+        "path":     str(main_go),
+        "version":  "present" if main_go.exists() else "NOT FOUND",
+    }
+    return result
+
+
+# ─── environment + subprocess helpers ────────────────────────────────────────
+
+def _build_env() -> dict:
+    env = os.environ.copy()
+    extras = [
+        r"C:\Program Files\Go\bin", r"C:\Go\bin",
+        os.path.expandvars(r"%USERPROFILE%\go\bin"),
+        os.path.expandvars(r"%LOCALAPPDATA%\Programs\Go\bin"),
+        r"C:\Program Files\GPAC", r"C:\Program Files (x86)\GPAC",
+        os.path.expandvars(r"%APPDATA%\bento4\bin"),
+        str(_base_dir / "tools"),
+        r"C:\Windows\System32",
+    ] if _is_windows else []
+    for p in extras:
+        if p and p not in env.get("PATH", ""):
+            env["PATH"] = p + os.pathsep + env.get("PATH", "")
+    return env
+
+
+async def ilog(text: str, level: str = "info") -> None:
+    entry = {"text": text, "level": level, "ts": datetime.now().strftime("%H:%M:%S")}
+    install_log.append(entry)
+    if _broadcast:
+        await _broadcast({"type": "install_log", "entry": entry})
+
+
+async def istep(name: str, status: str = "running") -> None:
+    """Broadcast current install step to UI (running / done / error / skip)."""
+    if _broadcast:
+        await _broadcast({"type": "install_step", "name": name, "status": status})
+
+
+async def irun(cmd: list, cwd: Optional[str] = None) -> tuple[int, str]:
+    """Run a command, stream every line to setup console, return (rc, output)."""
+    env   = _build_env()
+    flags: dict = {}
+    if _is_windows:
+        flags["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+
+    cmd_str = " ".join(f'"{a}"' if " " in str(a) else str(a) for a in cmd)
+    await ilog(f"$ {cmd_str}", "stdout")
+    print(f"[irun] {cmd_str}", flush=True)
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *[str(c) for c in cmd],
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env,
+            cwd=cwd,
+            **flags,
+        )
+    except FileNotFoundError:
+        msg = f"Executable not found: {cmd[0]}"
+        await ilog(f"✗ {msg}", "error")
+        print(f"[irun] ERROR: {msg}", flush=True)
+        return -1, msg
+    except Exception as e:
+        await ilog(f"✗ Failed to start: {e}", "error")
+        print(f"[irun] ERROR: {e}", flush=True)
+        return -1, str(e)
+
+    out: list[str] = []
+    async for raw in proc.stdout:
+        line = raw.decode(errors="replace").rstrip()
+        if line:
+            out.append(line)
+            await ilog(line, "stdout")
+    await proc.wait()
+    return proc.returncode, "\n".join(out)
+
+
+# ─── download helpers ─────────────────────────────────────────────────────────
+
+async def download_file(url: str, dest: Path, label: str = "") -> bool:
+    """Download url→dest with live KB/s progress. Thread-safe."""
+    label = label or dest.name
+    await ilog(f"⬇ Downloading {label}…", "info")
+    await ilog(f"  URL: {url}", "stdout")
+
+    loop = asyncio.get_running_loop()
+    _last_pct = [-1]
+
+    def _reporthook(count, block, total):
+        if total <= 0:
+            return
+        pct = min(100, int(count * block * 100 / total))
+        if pct % 10 == 0 and pct != _last_pct[0]:
+            _last_pct[0] = pct
+            mb_done  = count * block / 1_048_576
+            mb_total = total  / 1_048_576
+            msg = f"  {pct:3d}%  {mb_done:.1f} / {mb_total:.1f} MB"
+            loop.call_soon_threadsafe(
+                lambda m=msg: asyncio.ensure_future(ilog(m, "stdout"), loop=loop)
+            )
+
+    def _blocking_dl():
+        opener = urllib.request.build_opener()
+        opener.addheaders = [("User-Agent", "Mozilla/5.0 amd-downloader")]
+        with opener.open(url) as resp, open(dest, "wb") as out_f:
+            total_size = int(resp.headers.get("Content-Length", 0))
+            block, count = 8192, 0
+            while chunk := resp.read(block):
+                out_f.write(chunk)
+                count += 1
+                _reporthook(count, block, total_size)
+
+    try:
+        await loop.run_in_executor(None, _blocking_dl)
+        size_mb = dest.stat().st_size / 1_048_576
+        await ilog(f"  ✓ Saved {dest.name} ({size_mb:.1f} MB)", "success")
+        return True
+    except Exception as e:
+        await ilog(f"  ✗ Download failed: {e}", "error")
+        print(f"[download] ERROR: {e}", flush=True)
+        return False
+
+
+async def download_file_no_ssl(url: str, dest: Path, label: str = "") -> bool:
+    """Same as download_file but with SSL cert verification disabled."""
+    import ssl
+    label = label or dest.name
+    await ilog(f"⬇ Downloading {label} (SSL relaxed)…", "info")
+    loop = asyncio.get_running_loop()
+    ctx  = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode    = ssl.CERT_NONE
+
+    def _blocking():
+        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
+        opener.addheaders = [("User-Agent", "Mozilla/5.0 amd-downloader")]
+        with opener.open(url, timeout=30) as r, open(dest, "wb") as f:
+            total    = int(r.headers.get("content-length", 0))
+            done     = 0
+            last_pct = -1
+            while True:
+                chunk = r.read(65536)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if total > 0:
+                    pct = min(100, int(done * 100 / total))
+                    if pct % 10 == 0 and pct != last_pct:
+                        last_pct = pct
+
+    try:
+        await loop.run_in_executor(None, _blocking)
+        size_mb = dest.stat().st_size / 1_048_576
+        await ilog(f"  ✓ Saved {dest.name} ({size_mb:.1f} MB)", "success")
+        return True
+    except Exception as e:
+        await ilog(f"  ✗ Failed: {e}", "error")
+        return False
+
+
+# ─── platform installers ──────────────────────────────────────────────────────
+
+async def install_go_windows() -> None:
+    """Download and install Go on Windows silently."""
+    global _need_restart
+    await ilog("📦 Fetching latest Go version info…")
+    try:
+        with urllib.request.urlopen("https://go.dev/VERSION?m=text", timeout=10) as r:
+            ver = r.read().decode().strip().split("\n")[0].strip()
+    except Exception:
+        ver = "go1.22.4"
+    await ilog(f"   Latest Go: {ver}")
+    arch = "amd64" if platform.machine().endswith("64") else "386"
+    url  = f"https://go.dev/dl/{ver}.windows-{arch}.msi"
+    tmp  = Path(tempfile.gettempdir()) / f"{ver}.windows-{arch}.msi"
+    ok   = await download_file(url, tmp, f"Go {ver} installer")
+    if not ok:
+        await ilog("   Please install manually: https://go.dev/dl/", "warn")
+        return
+    await ilog("🔧 Running Go MSI installer (silent)… this may take 30–60 seconds", "info")
+    msiexec = r"C:\Windows\System32\msiexec.exe"
+    rc, _   = await irun([msiexec, "/i", str(tmp), "/qn", "/norestart"])
+    if rc == 0 or rc == 3010:
+        await ilog("✓ Go installed successfully", "success")
+        _need_restart = True
+        if _broadcast:
+            await _broadcast({
+                "type":   "restart_required",
+                "reason": "Go was installed — click Restart now or close terminal and run python app.py again",
+            })
+    else:
+        await ilog(f"✗ Installer exit code {rc}", "error")
+        await ilog("   Try manual install: https://go.dev/dl/", "warn")
+
+
+async def install_gpac_windows() -> None:
+    """Download GPAC from the official gpac.io permalink — always the latest build."""
+    await ilog("📦 Fetching GPAC (MP4Box) installer from gpac.io…")
+    is64 = platform.machine().endswith("64")
+
+    GPAC_NIGHTLY_URL = (
+        "https://download.tsi.telecom-paristech.fr/gpac/new_builds/gpac_latest_head_win64.exe"
+        if is64 else
+        "https://download.tsi.telecom-paristech.fr/gpac/new_builds/gpac_latest_head_win32.exe"
+    )
+    GPAC_STABLE_URL = (
+        "https://download.tsi.telecom-paristech.fr/gpac/release/26.02/gpac-26.02-rev0-g118e60a9-master-x64.exe"
+        if is64 else
+        "https://download.tsi.telecom-paristech.fr/gpac/release/26.02/gpac-26.02-rev0-g118e60a9-master-win32.exe"
+    )
+
+    tmp = Path(tempfile.gettempdir()) / "gpac_latest_win.exe"
+    ok  = await download_file(GPAC_NIGHTLY_URL, tmp, "GPAC latest nightly build")
+    if not ok:
+        await ilog("   Nightly failed, trying stable 26.02…", "stdout")
+        ok = await download_file(GPAC_STABLE_URL, tmp, "GPAC 26.02 stable")
+    if not ok:
+        await ilog("✗ GPAC download failed", "error")
+        await ilog("   Download manually: https://gpac.io/downloads/gpac-nightly-builds/", "warn")
+        return
+
+    await ilog("🔧 Running GPAC installer (silent)… this may take 10–30 seconds", "info")
+    rc, _ = await irun([str(tmp), "/S"])
+    if rc == 0:
+        await ilog("✓ GPAC / MP4Box installed successfully", "success")
+    elif rc == 1:
+        if tool_path("MP4Box"):
+            await ilog("✓ GPAC / MP4Box installed (exit 1 but binary found)", "success")
+        else:
+            await ilog(f"⚠ Installer exit {rc} — try running manually if MP4Box is missing", "warn")
+    else:
+        await ilog(f"✗ Installer exit code {rc}", "error")
+        await ilog("   Run the downloaded installer manually if needed", "warn")
+
+
+async def install_mp4decrypt_windows() -> None:
+    """Download Bento4 SDK from bento4.com and extract mp4decrypt.exe."""
+    await ilog("📦 Downloading Bento4 SDK (mp4decrypt)…")
+    tools_dir = _base_dir / "tools"
+    tools_dir.mkdir(exist_ok=True)
+
+    BENTO4_VER  = "1-6-0-641"
+    name        = f"Bento4-SDK-{BENTO4_VER}.x86_64-microsoft-win32.zip"
+    PRIMARY_URL = f"https://www.bok.net/Bento4/binaries/{BENTO4_VER}/{name}"
+    tmp = Path(tempfile.gettempdir()) / name
+
+    await ilog(f"   URL: {PRIMARY_URL}", "stdout")
+    ok = await download_file(PRIMARY_URL, tmp, f"Bento4 SDK {BENTO4_VER}")
+    if not ok:
+        await ilog("   Retrying with relaxed SSL…", "stdout")
+        ok = await download_file_no_ssl(PRIMARY_URL, tmp, f"Bento4 SDK {BENTO4_VER} (no-ssl)")
+    if not ok:
+        await ilog("✗ Could not download Bento4", "error")
+        await ilog("  Download manually: https://www.bento4.com/downloads/", "warn")
+        return
+
+    try:
+        with zipfile.ZipFile(tmp) as z:
+            hits = [m for m in z.namelist()
+                    if "mp4decrypt" in m.lower() and m.lower().endswith(".exe")]
+            if not hits:
+                await ilog("✗ mp4decrypt.exe not found inside zip", "error")
+                return
+            data_bytes = z.read(hits[0])
+            out_path   = tools_dir / "mp4decrypt.exe"
+            out_path.write_bytes(data_bytes)
+            await ilog(f"✓ Extracted mp4decrypt.exe → {out_path}", "success")
+    except Exception as e:
+        await ilog(f"✗ Failed: {e}", "error")
+
+
+async def clone_downloader() -> bool:
+    """Clone or update zhaarey/apple-music-downloader next to app.py."""
+    main_go = _base_dir / "main.go"
+    git     = tool_path("git") or "git"
+    if main_go.exists():
+        await ilog("✓ main.go already present — skipping clone", "success")
+        return True
+    await ilog("📥 Cloning zhaarey/apple-music-downloader…")
+    tmp_dir = _base_dir / "_amd_clone"
+    rc, _   = await irun([git, "clone", "--depth=1",
+                           "https://github.com/zhaarey/apple-music-downloader.git",
+                           str(tmp_dir)])
+    if rc != 0:
+        await ilog(f"✗ git clone failed (exit {rc})", "error")
+        return False
+    for item in tmp_dir.iterdir():
+        dst = _base_dir / item.name
+        if not dst.exists():
+            if item.is_dir():
+                shutil.copytree(item, dst)
+            else:
+                shutil.copy2(item, dst)
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    _cfg["main-go-path"] = str(_base_dir / "main.go")
+    if _save_config:
+        _save_config(_cfg)
+    await ilog(f"✓ Cloned to {_base_dir / 'main.go'}", "success")
+    return True
+
+
+async def go_mod_download() -> None:
+    """Run go mod download to fetch Go dependencies."""
+    go = tool_path("go") or find_go()
+    if not go or (not shutil.which(go) and not os.path.isfile(go)):
+        await ilog("⚠ go not found, skipping go mod download", "warn")
+        return
+    main_go = Path(_cfg.get("main-go-path", _base_dir / "main.go"))
+    if not main_go.exists():
+        await ilog("⚠ main.go not found, skipping go mod download", "warn")
+        return
+    await ilog("📦 Running go mod download…")
+    rc, _ = await irun([go, "mod", "download"], cwd=str(main_go.parent))
+    if rc == 0:
+        await ilog("✓ Go modules downloaded", "success")
+    else:
+        await ilog(f"⚠ go mod download exit {rc} (may still work)", "warn")
+
+
+# ─── master setup routine ─────────────────────────────────────────────────────
+
+async def _run_full_setup_inner() -> None:
+    global _need_restart, _gamdl_flags
+    _need_restart = False
+    install_log.clear()
+
+    await ilog("══════════════════════════════════════════", "info")
+    await ilog("   🚀  Ripster — Auto-Setup", "info")
+    await ilog("══════════════════════════════════════════", "info")
+    await ilog(f"   Platform : {platform.system()} {platform.machine()}", "info")
+    await ilog(f"   App dir  : {_base_dir}", "info")
+    await ilog("", "info")
+
+    engine = _cfg.get("engine", "zhaarey")
+    await ilog(f"   Engine   : {engine}", "info")
+    await ilog("", "info")
+
+    tools = await check_tools()
+    if _broadcast:
+        await _broadcast({"type": "tools_status", "tools": tools})
+
+    # ── Step 1: Go / gamdl ───────────────────────────────────────────────────
+    await istep("go", "running")
+    if engine == "gamdl":
+        await ilog("┌─ Step 1/5 : gamdl Python package", "info")
+        rc1, out1 = await irun([sys.executable, "-m", "pip", "install",
+                                 "gamdl", "--upgrade", "--break-system-packages", "-q"])
+        if rc1 != 0:
+            await ilog(f"│  ⚠ gamdl install: {out1[:100]}", "warn")
+        await ilog("│  Upgrading protobuf (required by pywidevine)…", "info")
+        await irun([sys.executable, "-m", "pip", "install",
+                    "protobuf>=4.21.0", "--upgrade", "--break-system-packages", "-q"])
+        _gamdl_flags = set()
+        verify_rc, verify_out = await irun([sys.executable, "-c",
+            "import gamdl; print('gamdl', gamdl.__version__)"])
+        if verify_rc == 0:
+            await ilog(f"│  ✓ {verify_out.strip()}", "success")
+            api_rc, _ = await irun([sys.executable, "-c",
+                "from gamdl.api import AppleMusicApi; print('API OK')"])
+            if api_rc != 0:
+                await ilog("│  ⚠ Older gamdl API — some features may differ", "warn")
+            await istep("go", "done")
+        else:
+            await ilog("│  ✗ gamdl failed:", "error")
+            for line in verify_out.splitlines()[-5:]:
+                await ilog(f"│    {line}", "error")
+            await istep("go", "error")
+        await ilog("└" + "─" * 42, "info")
+        await ilog("", "info")
+    elif not tools["go"]["found"]:
+        await ilog("┌─ Step 1/5 : Installing Go runtime", "info")
+        if _is_windows:
+            await install_go_windows()
+            if _need_restart:
+                await ilog("│  ⚠ PATH will update after app restart", "warn")
+        else:
+            await ilog("│  ✗ Go not found — install manually:", "error")
+            await ilog("│    Linux : sudo apt install golang-go", "warn")
+            await ilog("│    Mac   : brew install go", "warn")
+            await ilog("│    URL   : https://go.dev/dl/", "warn")
+        await istep("go", "done" if (tool_path("go") or _need_restart) else "error")
+    else:
+        await ilog(f"┌─ Step 1/5 : Go — already installed", "success")
+        await ilog(f"│  {tools['go']['version']}", "info")
+        await istep("go", "skip")
+    await ilog("└" + "─" * 42, "info")
+    await ilog("", "info")
+
+    # ── Step 2: Downloader source ────────────────────────────────────────────
+    await istep("downloader", "running")
+    if not tools["downloader"]["found"]:
+        await ilog("┌─ Step 2/4 : Cloning apple-music-downloader", "info")
+        ok = await clone_downloader()
+        await istep("downloader", "done" if ok else "error")
+    else:
+        await ilog(f"┌─ Step 2/4 : main.go — already present", "success")
+        await ilog(f"│  {tools['downloader']['path']}", "info")
+        await istep("downloader", "skip")
+    await ilog("└" + "─" * 42, "info")
+    await ilog("", "info")
+
+    # ── Step 3: MP4Box ───────────────────────────────────────────────────────
+    await istep("MP4Box", "running")
+    if not tools["MP4Box"]["found"]:
+        await ilog("┌─ Step 3/4 : Installing MP4Box (GPAC)", "info")
+        if _is_windows:
+            await install_gpac_windows()
+        else:
+            await ilog("│  ✗ MP4Box not found — install manually:", "error")
+            await ilog("│    Linux : sudo apt install gpac", "warn")
+            await ilog("│    Mac   : brew install gpac", "warn")
+            await ilog("│    URL   : https://gpac.io/downloads/", "warn")
+        await istep("MP4Box", "done" if tool_path("MP4Box") else "error")
+    else:
+        await ilog(f"┌─ Step 3/4 : MP4Box — already installed", "success")
+        await ilog(f"│  {tools['MP4Box']['version']}", "info")
+        await istep("MP4Box", "skip")
+    await ilog("└" + "─" * 42, "info")
+    await ilog("", "info")
+
+    # ── Step 4: mp4decrypt ───────────────────────────────────────────────────
+    await istep("mp4decrypt", "running")
+    if not tools["mp4decrypt"]["found"]:
+        await ilog("┌─ Step 4/4 : Installing mp4decrypt (Bento4) [optional]", "info")
+        if _is_windows:
+            await install_mp4decrypt_windows()
+        else:
+            await ilog("│  ⚠ mp4decrypt not found (only needed for MV)", "warn")
+            await ilog("│    URL: https://www.bento4.com/downloads/", "warn")
+        await istep("mp4decrypt", "done" if tool_path("mp4decrypt") else "warn")
+    else:
+        await ilog(f"┌─ Step 4/4 : mp4decrypt — already installed", "success")
+        await ilog(f"│  {tools['mp4decrypt']['version']}", "info")
+        await istep("mp4decrypt", "skip")
+    await ilog("└" + "─" * 42, "info")
+    await ilog("", "info")
+
+    # ── Go mod download ──────────────────────────────────────────────────────
+    if not _need_restart:
+        await ilog("┌─ Bonus    : go mod download", "info")
+        await go_mod_download()
+        await ilog("└" + "─" * 42, "info")
+        await ilog("", "info")
+
+    # ── Final summary ────────────────────────────────────────────────────────
+    tools2 = await check_tools()
+    if _broadcast:
+        await _broadcast({"type": "tools_status", "tools": tools2})
+    missing = [k for k, v in tools2.items() if v["required"] and not v["found"]]
+
+    await ilog("══════════════════════════════════════════", "info")
+    if _need_restart:
+        await ilog("  ⚠  RESTART REQUIRED", "warn")
+        await ilog("", "info")
+        await ilog("  Go was installed. Close this terminal,", "warn")
+        await ilog("  then run:  python app.py  again.", "warn")
+        await ilog("  The PATH will update on restart.", "warn")
+    elif missing:
+        await ilog("  ⚠  Some tools still missing:", "warn")
+        for m in missing:
+            await ilog(f"     ✗ {tools2[m]['label']}", "error")
+        await ilog("  Install manually and restart app.py", "warn")
+    else:
+        await ilog("  ✅  All dependencies ready!", "success")
+        await ilog("  You can start downloading now.", "success")
+    await ilog("══════════════════════════════════════════", "info")
+
+    if _broadcast:
+        await _broadcast({"type": "setup_done", "missing": missing, "need_restart": _need_restart})
+
+
+async def run_full_setup() -> None:
+    """Wrapper that catches all exceptions and reports them."""
+    try:
+        await _run_full_setup_inner()
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[setup] FATAL ERROR:\n{tb}", flush=True)
+        await ilog(f"✗ FATAL ERROR: {e}", "error")
+        for line in tb.splitlines():
+            await ilog(f"  {line}", "error")
+        if _broadcast:
+            await _broadcast({"type": "setup_done", "missing": ["error"], "need_restart": False})
+
+
+__all__ = [
+    "install",
+    "install_log",
+    "ilog", "istep", "irun",
+    "check_tools", "tool_path",
+    "find_go", "check_docker_installed",
+    "_gamdl_flag", "_build_env",
+    "download_file", "download_file_no_ssl",
+    "install_go_windows", "install_gpac_windows", "install_mp4decrypt_windows",
+    "clone_downloader", "go_mod_download",
+    "run_full_setup",
+]
