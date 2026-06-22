@@ -39,7 +39,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
 [Files]
 ; Bundle the whole app tree INCLUDING the embedded Python (python\) so the
@@ -48,7 +48,7 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; interpreter needs python.exe / pythonw.exe / *.dll); we exclude only the
 ; installer's own output and any stray packaged exe instead.
 Source: "{#SrcDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion; \
-  Excludes: "\.git\*,\.git,\.venv\*,\.venv,installer\output\*,dist\*,RipsterSetup*.exe,apple-music-downloader.exe,downloads\*,tokens\*,logs\*,backups\*,*.wvd,frida-server*,tools\widevine\*,_widevine_setup\_keydive_out\*,config.yaml"
+  Excludes: "\.git\*,\.git,\.venv\*,\.venv,run.bat,installer\output\*,dist\*,RipsterSetup*.exe,apple-music-downloader.exe,downloads\*,tokens\*,logs\*,backups\*,*.wvd,frida-server*,tools\widevine\*,_widevine_setup\_keydive_out\*,config.yaml"
 
 ; Seed config.yaml from the example only if the user doesn't already have one.
 Source: "{#SrcDir}\config.example.yaml"; DestDir: "{app}"; DestName: "config.yaml"; \
