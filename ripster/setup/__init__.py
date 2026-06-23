@@ -466,8 +466,13 @@ async def install_gpac_windows() -> None:
 
 
 async def install_mp4decrypt_windows() -> None:
-    """Download Bento4 SDK from bento4.com and extract mp4decrypt.exe."""
-    await ilog("📦 Downloading Bento4 SDK (mp4decrypt)…")
+    """Download Bento4 SDK and extract the FULL CLI toolset into tools/.
+
+    AMD's mp4.py extract_song shells out to BOTH `mp4decrypt` AND `mp4extract`
+    (ALAC: `mp4extract …/alac …`). Extracting only mp4decrypt.exe (the old
+    behaviour) left mp4extract.exe missing → every ALAC track died at the decrypt
+    step with a cryptic `[WinError 2]` in EVERY region. Grab all bin/*.exe."""
+    await ilog("📦 Downloading Bento4 SDK (mp4decrypt + mp4extract + …)…")
     tools_dir = _base_dir / "tools"
     tools_dir.mkdir(exist_ok=True)
 
@@ -489,17 +494,117 @@ async def install_mp4decrypt_windows() -> None:
 
     try:
         with zipfile.ZipFile(tmp) as z:
-            hits = [m for m in z.namelist()
-                    if "mp4decrypt" in m.lower() and m.lower().endswith(".exe")]
-            if not hits:
-                await ilog("✗ mp4decrypt.exe not found inside zip", "error")
+            # Prefer the SDK's bin/ folder; fall back to any .exe in the archive.
+            exes = [m for m in z.namelist()
+                    if m.lower().endswith(".exe")
+                    and "/bin/" in m.replace("\\", "/").lower()]
+            if not exes:
+                exes = [m for m in z.namelist() if m.lower().endswith(".exe")]
+            if not exes:
+                await ilog("✗ Bento4 .exe не найдены внутри zip", "error")
                 return
-            data_bytes = z.read(hits[0])
-            out_path   = tools_dir / "mp4decrypt.exe"
-            out_path.write_bytes(data_bytes)
-            await ilog(f"✓ Extracted mp4decrypt.exe → {out_path}", "success")
+            n = 0
+            for m in exes:
+                (tools_dir / Path(m).name).write_bytes(z.read(m))
+                n += 1
+            have_dec = (tools_dir / "mp4decrypt.exe").exists()
+            have_ext = (tools_dir / "mp4extract.exe").exists()
+            ok = have_dec and have_ext
+            await ilog(
+                f"✓ Bento4: распаковано {n} бинарей в {tools_dir} "
+                f"(mp4decrypt={'OK' if have_dec else '✗'}, mp4extract={'OK' if have_ext else '✗'})",
+                "success" if ok else "warn")
+            if not ok:
+                await ilog("⚠ Ключевые бинари Bento4 не извлеклись — ALAC-декрипт может падать.", "warn")
     except Exception as e:
         await ilog(f"✗ Failed: {e}", "error")
+
+
+async def install_ffmpeg_windows() -> None:
+    """Download a portable FFmpeg (Gyan 'essentials' build) and drop ffmpeg.exe +
+    ffprobe.exe into tools/. CRITICAL for the AMD/gamdl Apple engines: AMD shells
+    out to a bare `ffmpeg` to remux the decrypted track and reads the output
+    WITHOUT checking the return code — so on a machine with no ffmpeg it 'decrypts'
+    but never writes a file ('downloaded 0'). No admin needed (plain zip extract)."""
+    if tool_path("ffmpeg"):
+        await ilog("✓ FFmpeg already present", "success")
+        return
+    await ilog("📦 Downloading FFmpeg (portable, no admin)…")
+    tools_dir = _base_dir / "tools"
+    tools_dir.mkdir(exist_ok=True)
+    URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    tmp = Path(tempfile.gettempdir()) / "ffmpeg-release-essentials.zip"
+    await ilog(f"   URL: {URL}", "stdout")
+    ok = await download_file(URL, tmp, "FFmpeg (essentials)")
+    if not ok:
+        await ilog("   Retrying with relaxed SSL…", "stdout")
+        ok = await download_file_no_ssl(URL, tmp, "FFmpeg (no-ssl)")
+    if not ok:
+        await ilog("✗ Could not download FFmpeg", "error")
+        await ilog("  Install manually: winget install Gyan.FFmpeg", "warn")
+        return
+    try:
+        wanted = {"ffmpeg.exe", "ffprobe.exe"}
+        got = 0
+        with zipfile.ZipFile(tmp) as z:
+            for member in z.namelist():
+                base = member.rsplit("/", 1)[-1].lower()
+                if base in wanted and member.lower().endswith(".exe"):
+                    (tools_dir / base).write_bytes(z.read(member))
+                    got += 1
+                    await ilog(f"✓ Extracted {base} → {tools_dir / base}", "success")
+        if got:
+            # usable immediately this session; on PATH for app subprocesses too
+            os.environ["PATH"] = str(tools_dir) + os.pathsep + os.environ.get("PATH", "")
+        else:
+            await ilog("✗ ffmpeg.exe not found inside zip", "error")
+    except Exception as e:
+        await ilog(f"✗ FFmpeg extract failed: {e}", "error")
+
+
+async def install_node_windows() -> Optional[str]:
+    """Download a portable Node.js LTS into tools/node (no admin) and return the
+    path to node.exe. SoundCloud's Lucida engine needs node + npm; a fresh PC has
+    neither, so the SC install/build dies with 'node not found'. Extracts the zip,
+    flattens node-vXX-win-x64/ → tools/node, and puts it on PATH for this session."""
+    node_exe = tool_path("node")
+    if node_exe:
+        await ilog(f"✓ Node.js already present: {node_exe}", "success")
+        return node_exe
+    tools_dir = _base_dir / "tools"
+    node_dir  = tools_dir / "node"
+    tools_dir.mkdir(exist_ok=True)
+    NODE_VER = "v20.18.1"
+    arch = "x64" if platform.machine().endswith("64") else "x86"
+    name = f"node-{NODE_VER}-win-{arch}"
+    url  = f"https://nodejs.org/dist/{NODE_VER}/{name}.zip"
+    tmp  = Path(tempfile.gettempdir()) / f"{name}.zip"
+    await ilog(f"📦 Downloading Node.js {NODE_VER} (portable, no admin)…")
+    await ilog(f"   URL: {url}", "stdout")
+    ok = await download_file(url, tmp, f"Node.js {NODE_VER}")
+    if not ok:
+        ok = await download_file_no_ssl(url, tmp, f"Node.js {NODE_VER} (no-ssl)")
+    if not ok:
+        await ilog("✗ Could not download Node.js", "error")
+        await ilog("  Install manually: winget install OpenJS.NodeJS.LTS", "warn")
+        return None
+    try:
+        if node_dir.exists():
+            shutil.rmtree(node_dir, ignore_errors=True)
+        with zipfile.ZipFile(tmp) as z:
+            z.extractall(tools_dir)               # creates tools/node-vXX-win-x64/
+        extracted = tools_dir / name
+        if extracted.exists():
+            extracted.rename(node_dir)            # flatten → tools/node
+        node_exe = node_dir / "node.exe"
+        if node_exe.exists():
+            os.environ["PATH"] = str(node_dir) + os.pathsep + os.environ.get("PATH", "")
+            await ilog(f"✓ Node.js installed (portable) → {node_dir}", "success")
+            return str(node_exe)
+        await ilog("✗ node.exe missing after extract", "error")
+    except Exception as e:
+        await ilog(f"✗ Node.js extract failed: {e}", "error")
+    return None
 
 
 async def ensure_git() -> Optional[str]:
@@ -608,13 +713,35 @@ async def _run_full_setup_inner() -> None:
     await ilog(f"   App dir  : {_base_dir}", "info")
     await ilog("", "info")
 
-    engine = _cfg.get("engine", "zhaarey")
+    engine = _cfg.get("engine", "amd")
     await ilog(f"   Engine   : {engine}", "info")
     await ilog("", "info")
 
     tools = await check_tools()
     if _broadcast:
         await _broadcast({"type": "tools_status", "tools": tools})
+
+    # ── AMD engine: clone AppleMusicDecrypt + install its deps (the DEFAULT,
+    # public Apple path — no Apple ID, no Docker). Done here so the single
+    # "Auto-install everything" button makes the default engine actually work.
+    # Previously AMD lived ONLY in a separate /api/setup/amd call, so a fresh
+    # user's first Apple download died with "AppleMusicDecrypt не установлен"
+    # (no tester had a working Apple download — they only ran Setup, not a DL).
+    if engine == "amd":
+        from ripster import amd as _amd
+        await istep("amd", "running")
+        await ilog("┌─ AMD      : AppleMusicDecrypt (public Apple wrapper, no Apple ID)", "info")
+        await ensure_git()                       # clone needs git on a clean PC
+        if await _amd.clone_amd() and await _amd.install_amd_deps():
+            await ilog("│  ✓ AppleMusicDecrypt ready", "success")
+            await istep("amd", "done")
+            if _broadcast:
+                await _broadcast({"type": "amd_ready"})
+        else:
+            await ilog("│  ✗ AppleMusicDecrypt setup failed — see log above", "error")
+            await istep("amd", "error")
+        await ilog("└" + "─" * 42, "info")
+        await ilog("", "info")
 
     # ── Step 1: Go / gamdl ───────────────────────────────────────────────────
     await istep("go", "running")
@@ -644,6 +771,9 @@ async def _run_full_setup_inner() -> None:
             await istep("go", "error")
         await ilog("└" + "─" * 42, "info")
         await ilog("", "info")
+    elif engine == "amd":
+        await ilog("┌─ Step 1/5 : Go runtime — not needed for amd engine", "success")
+        await istep("go", "skip")
     elif not tools["go"]["found"]:
         await ilog("┌─ Step 1/5 : Installing Go runtime", "info")
         if _is_windows:
@@ -665,12 +795,15 @@ async def _run_full_setup_inner() -> None:
 
     # ── Step 2: Downloader source ────────────────────────────────────────────
     await istep("downloader", "running")
-    if not tools["downloader"]["found"]:
-        await ilog("┌─ Step 2/4 : Cloning apple-music-downloader", "info")
+    if engine == "amd":
+        await ilog("┌─ Step 2/5 : Go downloader — not needed for amd engine", "success")
+        await istep("downloader", "skip")
+    elif not tools["downloader"]["found"]:
+        await ilog("┌─ Step 2/5 : Cloning apple-music-downloader", "info")
         ok = await clone_downloader()
         await istep("downloader", "done" if ok else "error")
     else:
-        await ilog(f"┌─ Step 2/4 : main.go — already present", "success")
+        await ilog(f"┌─ Step 2/5 : main.go — already present", "success")
         await ilog(f"│  {tools['downloader']['path']}", "info")
         await istep("downloader", "skip")
     await ilog("└" + "─" * 42, "info")
@@ -679,7 +812,7 @@ async def _run_full_setup_inner() -> None:
     # ── Step 3: MP4Box ───────────────────────────────────────────────────────
     await istep("MP4Box", "running")
     if not tools["MP4Box"]["found"]:
-        await ilog("┌─ Step 3/4 : Installing MP4Box (GPAC)", "info")
+        await ilog("┌─ Step 3/5 : Installing MP4Box (GPAC)", "info")
         if _is_windows:
             await install_gpac_windows()
         else:
@@ -689,7 +822,7 @@ async def _run_full_setup_inner() -> None:
             await ilog("│    URL   : https://gpac.io/downloads/", "warn")
         await istep("MP4Box", "done" if tool_path("MP4Box") else "error")
     else:
-        await ilog(f"┌─ Step 3/4 : MP4Box — already installed", "success")
+        await ilog(f"┌─ Step 3/5 : MP4Box — already installed", "success")
         await ilog(f"│  {tools['MP4Box']['version']}", "info")
         await istep("MP4Box", "skip")
     await ilog("└" + "─" * 42, "info")
@@ -698,7 +831,7 @@ async def _run_full_setup_inner() -> None:
     # ── Step 4: mp4decrypt ───────────────────────────────────────────────────
     await istep("mp4decrypt", "running")
     if not tools["mp4decrypt"]["found"]:
-        await ilog("┌─ Step 4/4 : Installing mp4decrypt (Bento4) [optional]", "info")
+        await ilog("┌─ Step 4/5 : Installing mp4decrypt (Bento4) [optional]", "info")
         if _is_windows:
             await install_mp4decrypt_windows()
         else:
@@ -706,9 +839,25 @@ async def _run_full_setup_inner() -> None:
             await ilog("│    URL: https://www.bento4.com/downloads/", "warn")
         await istep("mp4decrypt", "done" if tool_path("mp4decrypt") else "warn")
     else:
-        await ilog(f"┌─ Step 4/4 : mp4decrypt — already installed", "success")
+        await ilog(f"┌─ Step 4/5 : mp4decrypt — already installed", "success")
         await ilog(f"│  {tools['mp4decrypt']['version']}", "info")
         await istep("mp4decrypt", "skip")
+    await ilog("└" + "─" * 42, "info")
+    await ilog("", "info")
+
+    # ── Step 5: FFmpeg (AMD/gamdl remux — without it Apple "decrypts 0 files") ─
+    await istep("ffmpeg", "running")
+    if not tool_path("ffmpeg"):
+        await ilog("┌─ Step 5/5 : Installing FFmpeg (Apple/AMD remux)", "info")
+        if _is_windows:
+            await install_ffmpeg_windows()
+        else:
+            await ilog("│  ⚠ ffmpeg not found — install via your package manager", "warn")
+        await istep("ffmpeg", "done" if tool_path("ffmpeg") else "warn")
+    else:
+        await ilog("┌─ Step 5/5 : FFmpeg — already installed", "success")
+        await ilog(f"│  {tools.get('ffmpeg', {}).get('version', '')}", "info")
+        await istep("ffmpeg", "skip")
     await ilog("└" + "─" * 42, "info")
     await ilog("", "info")
 
@@ -770,6 +919,7 @@ __all__ = [
     "_gamdl_flag", "_build_env",
     "download_file", "download_file_no_ssl",
     "install_go_windows", "install_gpac_windows", "install_mp4decrypt_windows",
+    "install_ffmpeg_windows", "install_node_windows",
     "clone_downloader", "go_mod_download",
     "run_full_setup",
 ]

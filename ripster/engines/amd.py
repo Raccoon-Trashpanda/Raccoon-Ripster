@@ -219,6 +219,11 @@ class AMDEngine(EngineBase):
         return None
 
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
+        # Preflight abort: Bento4 (mp4decrypt/mp4extract) missing → amd_runner exits
+        # early with AMD_FATAL instead of rotating ~17 regions. Surface it clearly.
+        if "AMD_FATAL" in log_text or "Bento4 не найден" in log_text:
+            return EngineResult(False, error="AMD: не установлен Bento4 (mp4decrypt/mp4extract). "
+                                             "Открой Setup → «Bento4 (mp4decrypt)» и установи.")
         if _RE_CONN_FAIL.search(log_text):
             return EngineResult(False, error="wrapper-manager unreachable (wm.wol.moe)")
         # Per-track signals: a freshly-saved track logs "SUCCESS - Finished

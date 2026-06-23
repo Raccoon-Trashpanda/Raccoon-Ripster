@@ -67,6 +67,7 @@ _SECRET_KEYS = {
     "tl1001-password",
     "yandex-token",
     "amazon-token",
+    "ripster-repo-token",           # PAT for self-update from a private repo
     "spotify-push-secret",          # 32-char push secret (Spotify extension) — real secret
     "qobuz-token",                  # dead/typo key but redact for completeness (never non-empty)
     "app-password-hash", "session-secret",

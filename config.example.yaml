@@ -6,7 +6,10 @@
 # Leave a service's credentials blank to simply not use it.
 
 # ── General ──────────────────────────────────────────────────────────────────
-engine: zhaarey            # default Apple engine: zhaarey | gamdl | amd
+engine: amd                # default Apple engine: amd | gamdl | zhaarey.
+                           # 'amd' = AppleMusicDecrypt via the public wrapper —
+                           # NO Apple ID, NO Docker, works after one Setup click.
+                           # 'zhaarey' needs Docker + your OWN premium Apple ID.
 quality: alac              # default quality: alac | aac | atmos
 save-path: downloads       # where finished files land (relative or absolute)
 queue-autostart: true      # start downloading as soon as a link is added

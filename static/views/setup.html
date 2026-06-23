@@ -1,6 +1,6 @@
       <div class="view-header">
         <div class="view-title">Setup &amp; Dependencies</div>
-        <div class="view-sub">Auto-install Go · MP4Box · mp4decrypt · apple-music-downloader</div>
+        <div class="view-sub">Каждый компонент ставится отдельно — кнопкой в его строке (видно статус каждого), либо отметь несколько галочками и нажми «Установить выбранное»</div>
       </div>
       <div class="view-body" style="gap:0;padding:0;display:flex;flex-direction:column;height:100%">
 
@@ -16,23 +16,44 @@
           </div>
         </div>
 
-        <!-- Top area: tools + button -->
+        <!-- Top area: component checklist + install -->
         <div style="padding:16px 28px 0;flex-shrink:0">
-          <!-- Step indicators -->
-          <div id="step-track" style="display:flex;gap:6px;margin-bottom:14px;flex-wrap:wrap"></div>
 
-          <!-- Tools status grid -->
-          <div id="tools-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:14px"></div>
-
-          <!-- Controls -->
-          <div class="row" style="gap:10px;margin-bottom:14px">
-            <button class="btn-red" id="btn-setup" onclick="runSetup()">⚡ Auto-install everything</button>
-            <button class="btn-ghost btn-sm" onclick="checkTools()">↺ Re-check</button>
-            <div id="setup-spinner" style="display:none;align-items:center;gap:7px">
-              <span id="setup-spinner-dot" style="width:8px;height:8px;border-radius:50%;background:var(--red);display:inline-block;animation:amd-blink 1s infinite"></span>
-              <span id="setup-running-label" style="font-size:11px;color:var(--muted);font-family:var(--mono)"></span>
+          <!-- Overall progress bar (shown while installing) -->
+          <div id="setup-overall" style="display:none;margin-bottom:14px">
+            <div style="display:flex;justify-content:space-between;align-items:center;font-size:11px;margin-bottom:5px">
+              <span id="setup-overall-label" style="color:var(--text);font-weight:800;font-family:var(--display)">Установка…</span>
+              <span id="setup-overall-pct" style="color:var(--muted);font-family:var(--mono)">0%</span>
+            </div>
+            <div style="height:9px;background:rgba(255,255,255,.07);border-radius:6px;overflow:hidden">
+              <div id="setup-overall-bar" style="height:100%;width:0%;background:linear-gradient(90deg,#fc3c44,#ef9f27);border-radius:6px;transition:width .35s ease"></div>
             </div>
           </div>
+
+          <!-- Component checklist (rendered by renderChecklist) -->
+          <div id="setup-checklist" style="display:flex;flex-direction:column;gap:9px;margin-bottom:14px"></div>
+
+          <!-- Controls -->
+          <div class="row" style="gap:10px;margin-bottom:16px;flex-wrap:wrap;align-items:center">
+            <button class="btn-red" id="btn-setup" onclick="installSelected()">⚡ Установить выбранное</button>
+            <button class="btn-ghost btn-sm" onclick="checkTools()">↺ Перепроверить</button>
+            <label style="display:flex;align-items:center;gap:6px;font-size:11px;color:var(--muted);cursor:pointer;margin-left:auto">
+              <input type="checkbox" id="setup-selectall" onchange="setupSelectAll(this.checked)" style="width:auto;padding:0;background:none;border:none"/> выбрать всё
+            </label>
+          </div>
+        </div>
+
+        <!-- Ripster self-update -->
+        <div style="padding:0 28px 14px;flex-shrink:0">
+          <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-family:var(--display);margin-bottom:8px">🆕 Обновления Ripster</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:8px">Скачивает один релиз-пакет и применяет на месте (код + интерфейс). Твои настройки, токены, ключи и загрузки <b>не трогаются</b>. После обновления — рестарт.</div>
+          <div class="row" style="gap:8px;margin-bottom:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn-ghost btn-sm" id="btn-update-check" onclick="checkRipsterUpdate(false)">🔄 Проверить обновления</button>
+            <button class="btn-red btn-sm" id="btn-update-apply" style="display:none" onclick="applyRipsterUpdate()">⬆️ Обновить сейчас</button>
+            <span id="ripster-version-line" style="font-size:11px;color:var(--muted2);font-family:var(--mono);margin-left:auto"></span>
+          </div>
+          <div id="ripster-update-status" style="font-size:12px;color:var(--muted)">Нажми «Проверить обновления».</div>
+          <pre id="ripster-update-changelog" style="display:none;white-space:pre-wrap;font-size:11px;font-family:var(--mono);color:var(--muted);background:rgba(0,0,0,.25);border-radius:8px;padding:10px 12px;margin-top:8px;max-height:180px;overflow:auto"></pre>
         </div>
 
         <!-- Python dependency updates -->
@@ -46,18 +67,22 @@
           <div id="deps-list" data-i18n="setup.deps_hint" style="font-size:12px;color:var(--muted)">Нажми «Проверить обновления».</div>
         </div>
 
-        <!-- Live console — fills remaining space -->
-        <div style="padding:0 28px 16px;flex:1;display:flex;flex-direction:column;min-height:0">
+        <!-- Live console — fills remaining space (collapsible) -->
+        <div id="setup-console-wrap" style="padding:0 28px 16px;flex:1;display:flex;flex-direction:column;min-height:0">
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-            <div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-family:var(--display)">📋 Live install log</div>
+            <button onclick="toggleSetupConsole()" title="Свернуть / развернуть консоль"
+              style="display:flex;align-items:center;gap:6px;background:none;border:none;cursor:pointer;padding:0;font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.8px;font-family:var(--display)">
+              <span id="setup-console-caret" style="display:inline-block;transition:transform .15s;font-size:9px">▼</span>📋 Live install log
+            </button>
             <div style="display:flex;gap:6px;align-items:center">
               <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);cursor:pointer">
                 <input type="checkbox" id="setup-autoscroll" checked style="width:auto;padding:0;background:none;border:none"/> auto-scroll
               </label>
+              <button class="btn-ghost btn-sm" style="padding:3px 9px;font-size:10px" onclick="copyConsole('setup-console',this)">📋 Копировать</button>
               <button class="btn-ghost btn-sm" style="padding:3px 9px;font-size:10px" onclick="clearSetupConsole()">Clear</button>
             </div>
           </div>
-          <div class="console" id="setup-console" style="flex:1;max-height:none;min-height:200px"></div>
+          <div class="console" id="setup-console" style="flex:1;max-height:none;min-height:380px"></div>
         </div>
 
       </div>

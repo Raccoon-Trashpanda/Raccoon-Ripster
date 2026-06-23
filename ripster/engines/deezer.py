@@ -11,6 +11,7 @@ config directory (``%APPDATA%\\deemix\\.arl`` on Windows,
 from __future__ import annotations
 import os
 import re
+import sys
 import shutil
 import platform
 from pathlib import Path
@@ -132,7 +133,14 @@ class DeezerEngine(EngineBase):
         arl      = (config.get("deezer-arl") or "").strip()
         out_path = config.get("deezer-save-path") or config.get("save-path", "downloads")
         bitrate  = _BITRATE.get(quality, "3")
-        deemix   = shutil.which("deemix") or "deemix"
+        # Resolve the deemix CLI. A standalone `deemix` exe is only on PATH for a
+        # from-source pip install; the bundled embeddable Python has the deemix
+        # package but its Scripts dir is NOT on PATH, so shutil.which() returns
+        # None and spawning bare "deemix" dies with WinError 2. Fall back to
+        # running it as a module on the SAME interpreter (deemix ships __main__,
+        # so `python -m deemix` works in the bundle).
+        _deemix_exe = shutil.which("deemix")
+        deemix_cmd  = [_deemix_exe] if _deemix_exe else [sys.executable, "-m", "deemix"]
 
         # Ensure output folder exists so deemix doesn't bail on a missing path
         try:
@@ -154,7 +162,7 @@ class DeezerEngine(EngineBase):
                 # and is_finished() will map that to a user-visible error.
                 print(f"[deezer] cannot write ARL file: {e}", flush=True)
 
-        return [deemix, "--bitrate", bitrate, "--path", str(out_path), url]
+        return [*deemix_cmd, "--bitrate", bitrate, "--path", str(out_path), url]
 
     def classify_line(self, line: str) -> str:
         low = line.lower()
@@ -368,10 +376,27 @@ class DeezerEngine(EngineBase):
             async with _HTTP.ashared() as c:
                 r = await c.get(f"https://api.deezer.com/album/{album_id}")
                 a = r.json()
-            if a.get("error"):
-                return {"error": a["error"].get("message", "Deezer error")}
+                if a.get("error"):
+                    return {"error": a["error"].get("message", "Deezer error")}
+                # The EMBEDDED tracklist (a.tracks.data) omits track_position +
+                # disk_number, so multi-disc albums looked single-disc. The
+                # dedicated /album/{id}/tracks endpoint includes both — page
+                # through it so disc + per-disc numbering are correct.
+                raw, index = [], 0
+                while True:
+                    rt = await c.get(f"https://api.deezer.com/album/{album_id}/tracks",
+                                     params={"limit": 100, "index": index})
+                    jt = rt.json()
+                    data = jt.get("data", []) or []
+                    raw.extend(data)
+                    if not data or not jt.get("next") or index > 2000:
+                        break
+                    index += len(data)
+            # Fallback to the embedded list if the tracks endpoint returned nothing.
+            if not raw:
+                raw = (a.get("tracks") or {}).get("data", [])
             tracks = []
-            for t in (a.get("tracks") or {}).get("data", []):
+            for t in raw:
                 tracks.append({
                     "id":       str(t.get("id", "")),
                     "title":    t.get("title", ""),

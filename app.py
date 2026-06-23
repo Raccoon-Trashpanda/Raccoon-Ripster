@@ -10,16 +10,31 @@ Open: http://127.0.0.1:7799
 import asyncio, os, sys, time
 import platform
 
-# Bundled-Python (embeddable, ._pth) runs ISOLATED and resolves ._pth entries
-# against CWD, so neither the app package nor the bundled deps are reliably on
-# sys.path. Fix it in pure Python: add the app dir (for `import ripster`) AND the
-# bundled site-packages (for `import uvicorn` etc.), absolute, so it works from
-# any CWD / launch method.
+# Belt-and-suspenders sys.path setup. The bundled installer ships an embeddable
+# Python whose python3xx._pth already puts the app dir (`..`) AND bundled
+# site-packages on sys.path natively at startup — that's the primary fix. This
+# runtime insert covers the OTHER launch modes that have no ._pth (from-source
+# .venv, IDE/double-click run from a foreign cwd): add the app dir (for
+# `import ripster`) and bundled site-packages (for `import uvicorn` etc.), as
+# absolute paths so it works regardless of cwd.
 _APPDIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _APPDIR)
 _BUNDLED_SP = os.path.join(_APPDIR, "python", "Lib", "site-packages")
 if os.path.isdir(_BUNDLED_SP):
     sys.path.insert(0, _BUNDLED_SP)
+
+# Put two dirs on PATH that the embeddable Python otherwise hides, so engines and
+# their child processes can find their tools:
+#   • <python>\Scripts — pip console-scripts (deemix, rip/streamrip, gamdl). Without
+#     this shutil.which("deemix"/"rip") → None → download dies "[WinError 2]".
+#   • <app>\tools — Setup-installed binaries (ffmpeg, mp4decrypt, N_m3u8DL-RE …).
+#     AMD shells out to bare `ffmpeg`; missing it means AMD "decrypts" but writes
+#     no file. Putting tools/ on PATH lets amd_runner's shutil.which("ffmpeg") find it.
+for _pdir in (os.path.join(os.path.dirname(sys.executable), "Scripts"),
+              os.path.join(_APPDIR, "tools"),
+              os.path.join(_APPDIR, "tools", "node")):       # portable Node for SoundCloud/Lucida
+    if os.path.isdir(_pdir) and _pdir.lower() not in os.environ.get("PATH", "").lower():
+        os.environ["PATH"] = _pdir + os.pathsep + os.environ.get("PATH", "")
 
 # Ensure UTF-8 output on Windows (avoids cp1251 crash on box-drawing chars)
 if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
@@ -127,7 +142,7 @@ except ImportError:
 import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -210,14 +225,32 @@ try:
             continue
         __import__(f"ripster.engines.{_mod_info.name}")
 except ModuleNotFoundError as _e:
-    print("\n" + "=" * 68, file=sys.stderr)
-    print("  RIPSTER: не нашёл пакет 'ripster' рядом с app.py", file=sys.stderr)
-    print("=" * 68, file=sys.stderr)
-    print(f"  Script dir: {_SCRIPT_DIR}", file=sys.stderr)
-    print(f"  Ищу:        {_SCRIPT_DIR / 'ripster' / '__init__.py'}", file=sys.stderr)
+    # Distinguish the THREE real failure modes instead of always blaming a
+    # missing 'ripster' package (the old message lied: it printed "не нашёл
+    # ripster" even when ripster was present but an inner dependency — or a
+    # broken bundled-Python path — was the real culprit). ALWAYS surface the
+    # actual exception + a full traceback so the cause is diagnosable on a user's
+    # machine without code spelunking.
+    import traceback as _tb
     _has_pkg = (_SCRIPT_DIR / "ripster" / "__init__.py").exists()
-    print(f"  Существует: {_has_pkg}", file=sys.stderr)
-    if not _has_pkg:
+    _missing = (getattr(_e, "name", "") or "").split(".")[0]
+    _dep_problem = _has_pkg and _missing and _missing != "ripster"
+    print("\n" + "=" * 68, file=sys.stderr)
+    if _dep_problem:
+        print(f"  RIPSTER: пакет 'ripster' на месте, но НЕ ХВАТАЕТ зависимости '{_missing}'", file=sys.stderr)
+    else:
+        print("  RIPSTER: не нашёл пакет 'ripster' рядом с app.py", file=sys.stderr)
+    print("=" * 68, file=sys.stderr)
+    print(f"  Точная ошибка: {type(_e).__name__}: {_e}", file=sys.stderr)
+    print(f"  Script dir:    {_SCRIPT_DIR}", file=sys.stderr)
+    print(f"  Python:        {sys.executable}", file=sys.stderr)
+    print(f"  ripster/__init__.py есть: {_has_pkg}", file=sys.stderr)
+    if _dep_problem:
+        print(f"\n  Зависимость '{_missing}' не установлена в ЭТОТ интерпретатор.", file=sys.stderr)
+        print("  Доустанови зависимости именно в него:", file=sys.stderr)
+        print(f'    "{sys.executable}" -m pip install -r requirements.txt', file=sys.stderr)
+        print(f'  или только её:  "{sys.executable}" -m pip install {_missing}', file=sys.stderr)
+    elif not _has_pkg:
         print("\n  Похоже, при распаковке архива не извлеклись подпапки.", file=sys.stderr)
         print("  Рядом с app.py должны лежать:", file=sys.stderr)
         print("    ripster/__init__.py", file=sys.stderr)
@@ -227,6 +260,15 @@ except ModuleNotFoundError as _e:
         print("    static/index.html", file=sys.stderr)
         print("\n  Перераспакуй архив (через 7-Zip / WinRAR, а не 'Extract' из", file=sys.stderr)
         print("  Проводника — он иногда пропускает вложенные папки).", file=sys.stderr)
+    else:
+        # ripster present AND the unresolved name IS 'ripster' → the interpreter
+        # can't see its own app dir. On bundled-Python that's a broken ._pth
+        # (missing 'import site' or 'Lib\\site-packages').
+        print("\n  Пакет на месте, но интерпретатор его не видит — обычно битый", file=sys.stderr)
+        print("  bundled-Python: в python\\python3xx._pth нет строки 'import site'", file=sys.stderr)
+        print("  или 'Lib\\site-packages'. Пересобери бандл build_embedded_python.ps1.", file=sys.stderr)
+    print("\n  ── полная трасса ──", file=sys.stderr)
+    _tb.print_exc()
     print("=" * 68 + "\n", file=sys.stderr)
     raise SystemExit(1)
 
@@ -239,6 +281,11 @@ QUEUE_FILE     = BASE_DIR / "queue_pending.json"
 WATCHLIST_FILE = BASE_DIR / "watchlist.json"
 
 APP_VERSION = "3.0.0"
+# Distributable release tag — what the self-updater compares against GitHub release
+# tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
+# version lines don't collide. MUST be bumped together with
+# github_setup/installer/ripster.iss AppVersion on every packaged build.
+RELEASE_VERSION = "1.0.12"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -350,6 +397,57 @@ def _svc_of(line: str) -> str:
     return name if name in _KNOWN_SERVICES else ""
 
 
+# ── Persistent console log → logs/console.log (rotating) ──────────────────────
+# broadcast() is the single chokepoint EVERY console line passes through (stdout
+# tee → _stdout_pump → broadcast, plus direct ilog/log/engine-event broadcasts),
+# so tee-ing "log" messages to disk here captures the FULL real-time console
+# stream. This is what a remote tester sends us — the in-memory buffers (_LOG_TAIL,
+# the browser ring buffer) die with the window, so without this we're blind to
+# anything that scrolled off or happened before a screenshot.
+import logging as _logging
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+
+_CONSOLE_LOG_PATH = BASE_DIR / "logs" / "console.log"
+_console_file_logger = None
+
+
+def _init_console_file_logger():
+    global _console_file_logger
+    try:
+        (BASE_DIR / "logs").mkdir(parents=True, exist_ok=True)
+        lg = _logging.getLogger("ripster.console")
+        lg.setLevel(_logging.DEBUG)
+        lg.propagate = False
+        if not lg.handlers:
+            h = _RotatingFileHandler(_CONSOLE_LOG_PATH, maxBytes=5_000_000,
+                                     backupCount=3, encoding="utf-8")
+            h.setFormatter(_logging.Formatter("%(message)s"))
+            lg.addHandler(h)
+        _console_file_logger = lg
+        lg.info(f"\n===== console log opened {datetime.now():%Y-%m-%d %H:%M:%S} "
+                f"| Ripster {RELEASE_VERSION} =====")
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[startup] console file logger init failed: {e}", flush=True)
+
+
+_init_console_file_logger()
+
+
+def _console_file_write(msg: dict) -> None:
+    """Append one console line to logs/console.log. Best-effort, never raises."""
+    lg = _console_file_logger
+    if lg is None:
+        return
+    try:
+        ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        svc  = msg.get("service") or ""
+        lvl  = (msg.get("level") or "info").upper()
+        text = msg.get("text") or msg.get("msg") or ""
+        lg.info(f"{ts} {lvl:<5} {('['+svc+'] ') if svc else ''}{text}")
+    except Exception:
+        pass
+
+
 class _StdoutTee:
     """Mirror stdout writes line-by-line into a bounded deque AND the real tty."""
     def __init__(self, original):
@@ -424,6 +522,7 @@ async def broadcast(msg: dict):
     if msg.get("type") == "log":
         if "text" not in msg and "msg" in msg:
             msg = {**msg, "text": msg["msg"]}
+        _console_file_write(msg)               # persist the full stream to disk
     if msg.get("type") == "queue_update":
         save_pending_queue()
     for ws in _ws_broker.clients:
@@ -543,6 +642,44 @@ class _NoGuestManager:
 _guest_mgr = _NoGuestManager()
 _app_auth.set_guest_checker(lambda r: _guest_mgr.is_guest_request(r))
 _app_auth.add_public_path("/api/session-info")
+_app_auth.add_public_path("/api/ping")
+
+
+# Unauthenticated liveness/identity probe. The launcher hits this to tell OUR
+# server apart from a foreign app squatting the port (so it can pick a free port
+# instead of opening a window onto the wrong app). Returns no secrets.
+@app.get("/api/ping")
+async def _ping():
+    return {"app": "ripster", "version": RELEASE_VERSION}
+
+
+@app.get("/api/logs/download")
+async def _logs_download():
+    """Owner-gated: bundle the diagnostic logs into one zip the user can hand us.
+    NOT a public path (logs may contain URLs/tokens), so the app's auth gate
+    requires a valid session. Skips the huge bot.log; includes console + errors +
+    launcher + rotated console backups."""
+    import io as _io, zipfile as _zip
+    logs_dir = BASE_DIR / "logs"
+    wanted = ["console.log", "console.log.1", "console.log.2", "console.log.3",
+              "errors.log", "launcher.log", "app_err.log"]
+    buf = _io.BytesIO()
+    with _zip.ZipFile(buf, "w", _zip.ZIP_DEFLATED) as zf:
+        # errors.log lives at the repo root (runner.py writes it there), not logs/
+        for p in [BASE_DIR / "errors.log"] + [logs_dir / n for n in wanted]:
+            try:
+                if p.exists() and p.stat().st_size > 0:
+                    zf.write(p, p.name)
+            except Exception:
+                pass
+        zf.writestr("_meta.txt",
+                    f"Ripster {RELEASE_VERSION}\ngenerated {datetime.now():%Y-%m-%d %H:%M:%S}\n")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="ripster-logs-{stamp}.zip"'},
+    )
 
 
 @app.middleware("http")
@@ -662,11 +799,20 @@ _coder_routes.install(app, _ctx)
 
 # ── Hot-restart ────────────────────────────────────────────────────────────────
 def _spawn_restart(delay: float = 0.4) -> None:
-    """Spawn a fresh detached app.py and exit this one. Shared by the manual
-    restart endpoint and the idle-restart watcher."""
+    """Restart the server. Shared by the manual restart endpoint and the idle
+    watcher.
+
+    Under the standalone launcher (Ripster.exe / ripster_launcher sets
+    RIPSTER_LAUNCHER=1) the launcher SUPERVISES us — we must ONLY exit cleanly and
+    let it respawn the server windowless. Spawning our own replacement here would
+    duel the launcher's respawn over the port → the "cmd windows keep popping"
+    loop. Standalone (dev `python app.py`) we spawn a fresh detached replacement."""
     import subprocess, threading
     def _do_restart():
         time.sleep(delay)   # let any in-flight HTTP response arrive first
+        if os.environ.get("RIPSTER_LAUNCHER") == "1":
+            os._exit(0)     # launcher respawns us (single owner, no console flash)
+            return
         restart_env = {**os.environ, "RIPSTER_IS_RESTART": "1"}
         subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:],

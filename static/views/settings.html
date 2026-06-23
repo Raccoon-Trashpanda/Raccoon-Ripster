@@ -526,20 +526,30 @@
             <b style="color:var(--text)">AMD v2</b> — Python, ALAC/Atmos без Apple ID
           </div>
 
-          <!-- Wrapper preference for lossless (local premium vs public pool) -->
+          <!-- Wrapper preference for lossless. The "Локальный" (own-premium-Apple-ID
+               Docker) path is ADVANCED: it needs a self-built ripster-wrapper image
+               with your OWN account. Hidden until you either configure wrapper creds
+               or click "advanced", so a clean install only sees the two modes that
+               work with zero setup (Авто / Публичный). -->
           <div style="margin-top:14px;font-size:11px;font-weight:700" data-i18n="s.wrapper_for">Wrapper для ALAC/Atmos</div>
           <div style="display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:9px;overflow:hidden;padding:3px;gap:2px;margin-top:6px">
             <button id="aw-auto" onclick="setAppleWrapper('auto')"
               style="flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_auto">Авто</button>
             <button id="aw-local" onclick="setAppleWrapper('local')"
-              style="flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_local">Локальный</button>
+              style="display:none;flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_local">Локальный</button>
             <button id="aw-public" onclick="setAppleWrapper('public')"
               style="flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_public">Публичный</button>
           </div>
           <div data-i18n-html="s.wrapper_modes_desc" style="margin-top:6px;font-size:11px;color:var(--muted);line-height:1.5">
-            <b>Локальный</b> — твой Docker-wrapper с премиум Apple ID (надёжно, без зависаний).
-            <b>Публичный</b> — пул wm.wol.moe (без Apple ID, но бывают зависания).
-            <b>Авто</b> — локальный для своего региона, публичный для чужих.
+            <b>Публичный</b> — пул wm.wol.moe (без Apple ID, работает сразу).
+            <b>Авто</b> — публичный, а при своём wrapper'е — локальный для своего региона.
+          </div>
+          <!-- Advanced reveal for the own-premium local wrapper -->
+          <div id="aw-advanced-link" style="margin-top:6px;font-size:11px">
+            <a href="#" onclick="revealLocalWrapper();return false" style="color:var(--blue);text-decoration:none">⚙️ Свой premium-wrapper (advanced)</a>
+          </div>
+          <div id="aw-local-desc" data-i18n-html="s.wrapper_local_desc" style="display:none;margin-top:6px;font-size:11px;color:var(--muted);line-height:1.5">
+            <b>Локальный</b> — свой Docker-образ <code>ripster-wrapper</code> со <b>своим</b> премиум Apple ID (надёжно, без зависаний). Требует Docker + сборку образа со своей учёткой ниже.
           </div>
           <!-- Traffic-light: Docker is only ever needed for Apple lossless via the
                local wrapper. Everything else (and "Публичный") works without it. -->
@@ -555,7 +565,17 @@
           <script>
           // Highlight-only (no save) — used by applyConfig() on load so reflecting
           // the saved choice never re-writes config.
+          // Reveal the advanced "Локальный" (own-premium) button. Auto-called when
+          // the saved mode is already 'local' or the user has wrapper creds, so an
+          // existing owner setup keeps working; a clean install keeps it hidden.
+          function revealLocalWrapper(){
+            var b=document.getElementById('aw-local'); if(b) b.style.display='';
+            var link=document.getElementById('aw-advanced-link'); if(link) link.style.display='none';
+            var d=document.getElementById('aw-local-desc'); if(d) d.style.display='';
+          }
           function _hlAppleWrapper(v){
+            var c=((window.S && S.config) || {});
+            if(v==='local' || (c['wrapper-apple-id'] && c['wrapper-password'])) revealLocalWrapper();
             ['auto','local','public'].forEach(function(k){
               var b=document.getElementById('aw-'+k); if(!b) return;
               var on=(k===v);
@@ -648,6 +668,9 @@
               placeholder="# Netscape HTTP Cookie File&#10;.apple.com  TRUE  /  TRUE  ...  media-user-token  ..."
               style="width:100%;font-family:monospace;font-size:11px;background:rgba(0,0,0,.25);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px;resize:vertical"></textarea>
             <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
+                onclick="document.getElementById('apple-cookies-file').click()" title="Выбрать файл cookies.txt из проводника">📂 Выбрать файл cookies.txt</button>
+              <input type="file" id="apple-cookies-file" accept=".txt,text/plain" style="display:none" onchange="importAppleCookiesFile(this)"/>
               <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
                 onclick="(async()=>{const el=document.getElementById('apple-cookies'),st=document.getElementById('apple-cookies-status');st.textContent='…';try{const r=await api('POST','/api/apple/cookies',{text:el.value});st.textContent=r&&r.ok?(r.exists?('✅ Сохранено: '+r.lines+' cookies'+(r.looks_apple?'':' ⚠ нет apple.com')):'🗑 очищено'):('✗ '+((r&&r.error)||'ошибка'));st.style.color=r&&r.ok?'var(--green,#30d158)':'#fc3c44';}catch(e){st.textContent='✗ '+e;st.style.color='#fc3c44';}})()">💾 Сохранить cookies</button>
               <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.08);color:#fc3c44;border:1px solid rgba(252,60,68,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
@@ -1546,10 +1569,10 @@
 
           <!-- Engine install -->
           <div style="margin-top:8px;padding:10px 12px;background:rgba(255,85,0,.04);border:1px solid rgba(255,85,0,.12);border-radius:8px">
-            <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
-              <span id="sc-engine-status" style="font-size:12px;color:var(--muted);flex:1;min-width:160px" data-i18n="sc.checking_engine">Проверяю движок…</span>
-              <button id="sc-install-btn" class="btn-sm" onclick="scInstallEngine()"
-                style="padding:6px 12px;background:rgba(255,85,0,.18);color:#ff5500;border:1px solid rgba(255,85,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="sc.install_engine">⬇ Установить движок</button>
+            <div style="font-size:11px;color:var(--muted);line-height:1.6">
+              ⬇ Установка движка SoundCloud (Node.js + Lucida) — во вкладке
+              <b style="color:#ff5500">⚙️ Setup</b> → кнопка «SoundCloud (Node + Lucida)».
+              Здесь — только OAuth-токен и настройки.
             </div>
           </div>
 

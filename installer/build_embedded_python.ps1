@@ -36,9 +36,16 @@ Invoke-WebRequest "https://www.python.org/ftp/python/$PythonVersion/python-$Pyth
 Expand-Archive $zip $dest -Force
 
 # Enable `import site` (so pip + Lib\site-packages load) and add site-packages.
+# CRITICAL: also add `..` — embeddable ._pth entries resolve RELATIVE TO THE
+# python.exe DIRECTORY (proven empirically; NOT relative to cwd as once believed),
+# so `..` = the app dir one level up (…\Ripster), which is where `import ripster`
+# must find its package. This makes ripster importable at interpreter startup,
+# at the C level, independent of any runtime sys.path hack in app.py — the real
+# fix for the "не нашёл пакет 'ripster' … Существует: True" launch crash.
 $pth = Get-ChildItem (Join-Path $dest "python*._pth") | Select-Object -First 1
 (Get-Content $pth.FullName) -replace '^#\s*import site', 'import site' | Set-Content $pth.FullName -Encoding ASCII
 Add-Content $pth.FullName "Lib\site-packages"
+Add-Content $pth.FullName ".."
 
 Write-Host "[build] bootstrapping pip"
 $getpip = Join-Path $tmp "get-pip.py"
@@ -58,4 +65,13 @@ if ($code -ne 0) { throw "pip install into embedded Python failed (exit $code)" 
 # Sanity: the app's critical imports must resolve in the bundled interpreter.
 & $py -c "import fastapi,uvicorn,streamrip,deemix,mutagen,httpx,yaml,multipart,webview; print('[build] embedded interpreter OK')"
 if ($LASTEXITCODE -ne 0) { throw "embedded interpreter import check failed" }
+
+# Sanity: `import ripster` must resolve NATIVELY (via the `..` ._pth entry) from a
+# FOREIGN cwd — this is exactly the user's launch scenario and the bug that the
+# `..` entry fixes. Run from a dir that has no `ripster` of its own.
+Push-Location $env:TEMP
+try {
+    & $py -c "import ripster; print('[build] native ripster import OK ->', ripster.__file__)"
+    if ($LASTEXITCODE -ne 0) { throw "native 'import ripster' check failed — ._pth missing '..' app-dir entry" }
+} finally { Pop-Location }
 Write-Host "[build] done -> $dest"

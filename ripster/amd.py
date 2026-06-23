@@ -381,10 +381,12 @@ async def install_amd_deps() -> bool:
     await _setup.ilog("  Installing AMD dependencies (this may take ~2 min)…", "info")
     deps = [
         "httpx>=0.28", "grpcio>=1.78", "grpcio-tools>=1.78",
-        # HARD pin: the committed _pb2 modules need the protobuf 6.31.x runtime.
-        # Listing it here keeps pip from resolving a different version while it
-        # installs the rest (the recurring "wrapper doesn't download" bug).
-        "protobuf==6.31.1",
+        # FLOOR, not a hard pin. AMD's committed _pb2 modules were built against
+        # protobuf 6.31.x gencode, but a NEWER runtime loads older gencode fine —
+        # so >=6.31.1 keeps the bundle's 6.33.4 (which OrpheusDL/pywidevine need)
+        # instead of DOWNGRADING it and breaking those (VersionError). Do not
+        # change back to ==6.31.1.
+        "protobuf>=6.31.1",
         "pydantic>=2", "loguru", "m3u8", "mutagen", "tenacity",
         "prompt-toolkit", "lxml", "beautifulsoup4", "hishel[async]",
         "tabulate", "anysqlite", "async-lru", "creart", "six",
@@ -401,7 +403,7 @@ async def install_amd_deps() -> bool:
     if rc2 != 0:
         await _setup.irun([sys.executable, "-m", "pip", "install",
                            "--break-system-packages", "-q",
-                           "pywidevine", "protobuf==6.31.1"])
+                           "pywidevine", "protobuf>=6.31.1"])
         await _setup.ilog("  ⚠ Using standard pywidevine (some features may differ)", "warn")
     else:
         await _setup.ilog("  ✓ pywidevine (AMD fork) installed", "success")

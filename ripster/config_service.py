@@ -245,8 +245,13 @@ DEFAULT_CONFIG: dict = {
     "authorization-token": "",
     "storefront": "us",
     "language": "en-US",
-    "engine": "zhaarey",
+    "engine": "amd",
     "quality": "alac",
+    # GitHub repo for in-app self-update (Setup tab → check/apply update).
+    "ripster-repo": "Raccoon-Trashpanda/Raccoon-Ripster",
+    # Optional PAT — only needed to self-update from a PRIVATE repo (public works
+    # token-less). Ships empty in the distributable; owner sets it locally.
+    "ripster-repo-token": "",
     # ── AMD v2 (AppleMusicDecrypt) ───────────────────────────────────────────
     "amd-dir":           "",
     "amd-instance-url":  "wm.wol.moe",

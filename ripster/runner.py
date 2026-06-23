@@ -856,6 +856,35 @@ async def _amd_preflight(task: dict, quality: str) -> bool:
         _try_advance_task(task, TaskStatus.ERROR)
         return False
 
+    # ── Bento4 turnkey: ALAC/AAC decrypt shells out to mp4extract + mp4decrypt.
+    # A fresh install never has them (the installer ships none) → every track dies
+    # at the "Decrypting song…" step with a cryptic [WinError 2], in every region.
+    # Auto-install the FULL Bento4 toolset ONCE here so a clean user can rip ALAC
+    # without ever knowing about the Setup → Bento4 button. Search the dirs
+    # amd_runner adds to PATH (<base>/tools, AMD dir) plus the live PATH.
+    import shutil as _shutil
+    _b4_dirs = [_BASE_DIR / "tools", amd_dir]
+    def _have_bento4() -> bool:
+        for _t in ("mp4decrypt", "mp4extract"):
+            if any((d / f"{_t}.exe").exists() for d in _b4_dirs) or _shutil.which(_t):
+                continue
+            return False
+        return True
+    if not _have_bento4():
+        await _log("📦 Bento4 (mp4extract/mp4decrypt) не найден — ставлю автоматически…", "info", tid)
+        try:
+            from ripster.setup import install_mp4decrypt_windows as _install_b4
+            await _install_b4()
+        except Exception as _be:
+            await _log(f"⚠ Авто-установка Bento4 не удалась: {_be}", "warn", tid)
+        if not _have_bento4():
+            await _log("✗ Bento4 не установился — ALAC/AAC-декрипт невозможен. "
+                       "Открой Setup → «Bento4 (mp4decrypt)» и установи вручную "
+                       "(или проверь интернет/файрвол).", "error", tid)
+            _try_advance_task(task, TaskStatus.ERROR)
+            return False
+        await _log("✓ Bento4 установлен — продолжаю.", "success", tid)
+
     from ripster.engines.amd import _CODEC_MAP as _AMD_CODEC_MAP
     codec = _AMD_CODEC_MAP.get(quality, "alac")
     await _amd_mod.patch_amd_for_headless(amd_dir)

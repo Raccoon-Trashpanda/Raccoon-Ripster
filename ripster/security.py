@@ -61,6 +61,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "remote-enabled", "public-url", "ngrok-",
     "service-colors",
     "player-",
+    "ripster-repo",   # ripster-repo + ripster-repo-token (self-update)
 )
 
 

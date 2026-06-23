@@ -508,6 +508,7 @@ class TidalEngine(EngineBase):
                 tracks.append({
                     "id":       tr_id,
                     "track_no": t.get("trackNumber"),
+                    "disc":     t.get("volumeNumber"),   # multi-disc support
                     "title":    t.get("title", ""),
                     "artist":   (t.get("artist") or {}).get("name", ""),
                     "duration": t.get("duration", 0),

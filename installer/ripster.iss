@@ -9,7 +9,7 @@
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\ripster.iss
 
 #define AppName "Ripster"
-#define AppVersion "1.0.0"
+#define AppVersion "1.0.12"
 #define AppPublisher "Raccoon-Trashpanda"
 #define AppURL "https://github.com/Raccoon-Trashpanda/Raccoon-Ripster"
 #define SrcDir ".."
@@ -41,6 +41,16 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 
+[InstallDelete]
+; Nuke the package + python folders BEFORE extracting. Windows is case-INSENSITIVE
+; on disk but Python imports are case-SENSITIVE: a stale capital-cased 'Ripster'
+; (or '..\Ripster' bundled-python) left by an OLDER install keeps its old case on
+; a plain overwrite, so `import ripster` then fails with "No module named
+; 'ripster'" even though the folder is right there. Deleting first forces the
+; fresh, correctly-cased lowercase 'ripster' from the source manifest.
+Type: filesandordirs; Name: "{app}\ripster"
+Type: filesandordirs; Name: "{app}\__pycache__"
+
 [Files]
 ; Bundle the whole app tree INCLUDING the embedded Python (python\) so the
 ; install is a pure file copy -- no download, no PowerShell, no pip at install
@@ -55,15 +65,17 @@ Source: "{#SrcDir}\config.example.yaml"; DestDir: "{app}"; DestName: "config.yam
   Flags: onlyifdoesntexist uninsneveruninstall
 
 [Run]
-; Offer to launch after install (opens Ripster's own window, no browser).
-Filename: "{app}\Ripster.vbs"; Description: "{cm:LaunchProgram,{#AppName}}"; \
-  Flags: postinstall nowait shellexec skipifsilent
+; Offer to launch after install — Ripster's OWN native window, no browser/terminal.
+Filename: "{app}\Ripster.exe"; Description: "{cm:LaunchProgram,{#AppName}}"; \
+  WorkingDir: "{app}"; Flags: postinstall nowait skipifsilent
 
 [Icons]
-Name: "{group}\Ripster";             Filename: "{app}\Ripster.vbs"; WorkingDir: "{app}"
+; Primary launch = Ripster.exe (frozen launcher → native pywebview window; no
+; .cmd/.vbs/terminal). It auto-falls-back to the browser if WebView2 is missing.
+Name: "{group}\Ripster";             Filename: "{app}\Ripster.exe"; WorkingDir: "{app}"; IconFilename: "{app}\ripster.ico"
 Name: "{group}\Ripster (browser)";   Filename: "{app}\Ripster (browser).cmd"; WorkingDir: "{app}"; Comment: "Use this if the main Ripster window doesn't open"
 Name: "{group}\Uninstall Ripster";   Filename: "{uninstallexe}"
-Name: "{autodesktop}\Ripster";     Filename: "{app}\Ripster (browser).cmd"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\Ripster";       Filename: "{app}\Ripster.exe"; WorkingDir: "{app}"; IconFilename: "{app}\ripster.ico"; Tasks: desktopicon
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\.venv"

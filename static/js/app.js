@@ -8,7 +8,13 @@ const QUALITIES = [];
 // ── i18n ───────────────────────────────────────────────────────
 // LANG loaded from /static/js/i18n.js (loaded BEFORE this file)
 
-const t = key => (LANG[S.lang||'ru']||LANG.ru)[key] ?? key;
+// Lookup order: current locale → English → Russian → the raw key. So a string
+// that's only translated in ru+en still renders in en for hi/ja/zh instead of
+// dumping the raw key on screen — partial translations degrade gracefully.
+const t = key => {
+  const L = LANG[S.lang || 'ru'] || LANG.ru;
+  return L[key] ?? (LANG.en && LANG.en[key]) ?? LANG.ru[key] ?? key;
+};
 // Interpolating translate: fills {named} placeholders from `params`. Returns the
 // raw key if missing (same as `t`) — callers that need a fallback should check
 // the dict for the key first (see case 'log').
@@ -140,12 +146,45 @@ function connectWS() {
   };
   ws.onerror = () => ws.close();
   ws.onmessage = (e) => {
+    _wsLastMsg = Date.now();
     const msg = JSON.parse(e.data);
     handleMessage(msg);
   };
 }
 
+// WS health watchdog: a dropped TCP connection without a close frame leaves the
+// socket half-open — onclose never fires, so reconnect never runs and live
+// queue_update/log events silently stop arriving (the "only F5 shows it" bug).
+// Detect a stale/dead socket and force a fresh connection, which re-sends `init`
+// (config+queue) and restores live updates without a page reload.
+let _wsLastMsg = Date.now();
+function _wsWatchdog() {
+  const st = ws && ws.readyState;
+  if (st === WebSocket.CLOSED || st === WebSocket.CLOSING || st === undefined) {
+    connectWS();
+  } else if (st === WebSocket.OPEN && Date.now() - _wsLastMsg > 45000) {
+    // Open but silent far past the server's heartbeat → probably half-open. Cycle it.
+    try { ws.close(); } catch {}  // triggers onclose → reconnect in 2s
+  }
+}
+setInterval(_wsWatchdog, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) _wsWatchdog(); });
+
+// Pull the authoritative queue over REST and re-render. A safety net so a
+// successful add reflects immediately even if the WS push is lagging/dead.
+async function pullQueue() {
+  try {
+    const q = await (await fetch('/api/queue')).json();
+    if (Array.isArray(q)) { S.queue = q; renderQueue(); updateTransport(); }
+  } catch {}
+}
+
 function handleMessage(msg) {
+  // Resolve any Setup-checklist waiter keyed on this message type (e.g. a
+  // 'soundcloud_installed' that unblocks the next component in installSelected).
+  if(typeof _wsWaiters !== 'undefined' && _wsWaiters.has(msg.type)) {
+    try { _wsWaiters.get(msg.type)(); } catch {}
+  }
   switch(msg.type) {
     case 'init':
       S.config  = msg.config  || {};
@@ -169,6 +208,7 @@ function handleMessage(msg) {
       S.queue = msg.queue || [];
       renderQueue(); updateTransport(); renderConfig();
       // Restructure the per-guest lamps/bars when a download starts/stops.
+      if (document.getElementById('admin-links-list')?.offsetParent) loadAdminLinks();
       break;
     case 'dl_counter': {
       const task = S.queue.find(t=>t.id===msg.task_id);
@@ -218,6 +258,7 @@ function handleMessage(msg) {
         updateQueueItem(task);
       }
       updateTransport();
+      updateGuestDownloadBars();   // move per-guest bars live (cheap, visibility-guarded)
       break;
     }
     case 'log': {
@@ -272,7 +313,9 @@ function handleMessage(msg) {
     case 'history_updated': {
       // If the History or Stats view is currently showing, refresh it live.
       const histActive  = document.getElementById('view-history')?.classList.contains('active');
+      const statsActive = document.getElementById('view-stats')?.classList.contains('active');
       if(histActive)  loadHistory();
+      if(statsActive) loadStats();
       break;
     }
     case 'show_fix_deps_btn': {
@@ -301,6 +344,28 @@ function handleMessage(msg) {
     case 'apple_authed': {
       refreshAppleAuthStatus();
       toast('🍎 Apple Music токен обновлён!', '#0a84ff');
+      break;
+    }
+    case 'watchlist_new_release': {
+      const txt = `Новый релиз: ${msg.release || ''} — ${msg.artist || ''}`;
+      toast(txt, 'var(--green)');
+      // Refresh watchlist if open
+      if(document.getElementById('view-watchlist')?.style.display !== 'none') loadWatchlist();
+      break;
+    }
+    case 'watchlist_check_start': {
+      setWatchlistStatus(`⟳ Проверяю ${msg.total} артистов…`, 0, msg.total);
+      break;
+    }
+    case 'watchlist_check_progress': {
+      setWatchlistStatus(`⟳ ${msg.current}/${msg.total} · ${msg.artist}`, msg.current, msg.total);
+      break;
+    }
+    case 'watchlist_check_done': {
+      if(msg.new > 0) setWatchlistStatus(`✓ Проверено ${msg.checked} · новых релизов: ${msg.new}`, msg.checked, msg.checked, 'var(--green)');
+      else            setWatchlistStatus(`✓ Проверено ${msg.checked} · новых нет`, msg.checked, msg.checked);
+      // Auto-clear after 4s
+      setTimeout(() => clearWatchlistStatus(), 4000);
       break;
     }
     case 'releases_scan_start': {
@@ -426,8 +491,20 @@ function handleMessage(msg) {
           lbl.textContent = msg.entry.text.replace(/[┌│└═▸⬇🔧📦✓✗⚠🚀]/gu,'').trim().slice(0,55); }
       break;
     case 'install_step':
-      if(typeof stepState !== 'undefined'){ stepState[msg.name] = msg.status; renderStepTrack(); } break;
-    case 'tools_status': renderTools(msg.tools); break;
+      if(typeof renderChecklist === 'function') renderChecklist(); break;
+    case 'tunnel_status':
+      updateTunnelUI(msg.running, msg.connecting || false, msg.url || '');
+      if (msg.running && msg.url) {
+        toast('🔌 Туннель готов: ' + msg.url, '#22c55e');
+        updateRemoteUI(true, msg.url, 0);
+      } else if (!msg.running && !msg.connecting) {
+        // tunnel died unexpectedly
+        if (document.getElementById('tunnel-stop-btn')?.style.display !== 'none') {
+          toast('Туннель serveo отключился', 'var(--red)');
+        }
+      }
+      break;
+    case 'tools_status': break;
     case 'restart_required': {
       const banner = document.getElementById('restart-banner');
       const reason = document.getElementById('restart-reason');
@@ -543,6 +620,535 @@ async function loadQualities() {
 
 // ── GUEST / ADMIN ─────────────────────────────────────────────
 
+let _guestExpiryInterval = null;
+
+async function checkSessionMode() {
+  try {
+    const r = await fetch('/api/session-info');
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.mode === 'guest') {
+      S.guestMode = true;
+      document.body.classList.add('guest-mode');
+      const lbl    = document.getElementById('guest-label');
+      const expEl  = document.getElementById('guest-expiry');
+      const quota  = document.getElementById('guest-quota');
+      if (lbl && d.label) lbl.textContent = d.label;
+      if (quota && d.quota) {
+        const q = d.quota;
+        if (q.type === 'count')
+          quota.textContent = `${q.limit - q.used} загр. осталось`;
+        else if (q.type === 'time')
+          quota.textContent = `⏱ ${d.quota_minutes_left ?? '?'} мин.`;
+      }
+      // Session expiry countdown
+      if (d.expires_at && expEl) {
+        const expiresMs = new Date(d.expires_at).getTime();
+        const tick = () => {
+          const left = Math.max(0, expiresMs - Date.now());
+          const h = Math.floor(left / 3600000);
+          const m = Math.floor((left % 3600000) / 60000);
+          expEl.textContent = left > 0
+            ? `· ⏱ ${h}ч ${m}м`
+            : '· ссылка истекла';
+        };
+        tick();
+        if (_guestExpiryInterval) clearInterval(_guestExpiryInterval);
+        _guestExpiryInterval = setInterval(tick, 30000);
+      }
+      // Load guest download history + service status into the tokens view
+      loadGuestHistory();
+      loadGuestSvcStatus();
+    } else if (d.mode === 'owner') {
+      S.guestMode = false;
+      loadAdminLinks();
+      loadRemoteStatus();
+      loadTunnelStatus();
+    }
+  } catch(e) {}
+}
+
+async function loadGuestSvcStatus() {
+  const el = document.getElementById('gt-svc-status-body');
+  if (!el) return;
+  const labels = {
+    apple: {icon:'🍎', name:'Apple Music'},
+    deezer: {icon:'🎵', name:'Deezer'},
+    qobuz: {icon:'🎼', name:'Qobuz'},
+    tidal: {icon:'🔵', name:'Tidal'},
+    spotify: {icon:'🟢', name:'Spotify'},
+    beatport: {icon:'🎧', name:'Beatport'},
+    soundcloud: {icon:'🟠', name:'SoundCloud'},
+  };
+  try {
+    const status = await fetch('/api/services/status').then(r => r.json());
+    el.innerHTML = Object.entries(labels).map(([key, {icon, name}]) => {
+      const on = status[key];
+      return `<span style="display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:20px;font-size:12px;font-weight:600;background:${on ? 'rgba(74,222,128,.12)' : 'rgba(255,255,255,.05)'};color:${on ? '#4ade80' : 'var(--muted)'};border:1px solid ${on ? 'rgba(74,222,128,.25)' : 'var(--border)'}">
+        ${icon} ${name}
+        <span style="width:6px;height:6px;border-radius:50%;background:${on ? '#4ade80' : '#555'};flex-shrink:0"></span>
+      </span>`;
+    }).join('');
+  } catch { el.innerHTML = '<span style="font-size:12px;color:var(--muted)">Ошибка загрузки</span>'; }
+}
+
+async function loadGuestHistory() {
+  const container = document.getElementById('guest-history-list');
+  if (!container) return;
+  try {
+    const r = await fetch('/api/guest/history');
+    if (!r.ok) return;
+    const d = await r.json();
+    const acts = d.activity || [];
+    if (!acts.length) {
+      container.innerHTML = `<div style="font-size:12px;color:var(--muted);text-align:center;padding:12px">${t('act.empty')||'Нет загрузок'}</div>`;
+      return;
+    }
+    const SVC_ICON = {apple:'🍎',qobuz:'🎵',deezer:'🎧',tidal:'🌊',spotify:'💚',soundcloud:'☁',bbc:'📻'};
+    // Summary
+    const done = acts.filter(a=>a.status==='done').length;
+    const errs = acts.filter(a=>a.status==='error').length;
+    const svcs = [...new Set(acts.map(a=>a.service).filter(Boolean))];
+    const svcStr = svcs.map(s=>`${SVC_ICON[s]||'🎶'} ${s}`).join(' · ');
+    container.innerHTML = `
+      <div style="display:flex;gap:14px;font-size:11px;color:var(--muted);margin-bottom:8px;flex-wrap:wrap">
+        <span>✓ <b style="color:#22c55e">${done}</b></span>
+        ${errs?`<span>✗ <b style="color:var(--red)">${errs}</b></span>`:''}
+        ${svcStr?`<span>${svcStr}</span>`:''}
+      </div>
+      <div style="display:flex;flex-direction:column;gap:3px;max-height:200px;overflow-y:auto">
+        ${acts.map(a => {
+          const ts  = a.ts ? new Date(a.ts).toLocaleTimeString() : '';
+          const svc = (a.service||'').toLowerCase();
+          const ico = SVC_ICON[svc] || '🎶';
+          const ok  = a.status === 'done';
+          const col = ok ? '#22c55e' : 'var(--red)';
+          const lbl = a.title || a.url || '—';
+          return `<div style="display:flex;align-items:baseline;gap:5px;font-size:11px">
+            <span style="color:var(--muted);flex-shrink:0">${ts}</span>
+            <span>${ico}</span>
+            <span style="color:${col};flex-shrink:0">${ok?'✓':'✗'}</span>
+            <span style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px" title="${esc(lbl)}">${esc(lbl)}</span>
+            ${a.quality?`<span style="color:var(--muted);font-size:10px">${esc(a.quality)}</span>`:''}
+          </div>`;
+        }).join('')}
+      </div>`;
+  } catch(e) {}
+}
+
+function guestDownloadTask(taskId) { downloadTask(taskId); }
+
+async function saveGuestTokens() {
+  const body = {
+    'media-user-token':       document.getElementById('gt-apple-mut')?.value || '',
+    'qobuz-auth-token':       document.getElementById('gt-qobuz-token')?.value || '',
+    'qobuz-user-id':          document.getElementById('gt-qobuz-uid')?.value || '',
+    'deezer-arl':             document.getElementById('gt-deezer-arl')?.value || '',
+    'tidal-token':            document.getElementById('gt-tidal-token')?.value || '',
+    'soundcloud-oauth-token': document.getElementById('gt-sc-token')?.value || '',
+  };
+  const msg = document.getElementById('gt-msg');
+  try {
+    const r = await api('POST', '/api/guest/tokens', body);
+    if (r.ok) {
+      if(msg) msg.textContent = '✓ Сохранено';
+      _refreshSearchSvcSelect();
+    } else {
+      if(msg) msg.textContent = r.detail || 'Ошибка';
+    }
+  } catch(e) { if(msg) msg.textContent = 'Ошибка сети'; }
+}
+
+// ── Per-guest live download lamp/bar helpers (admin links view) ────────────
+// A queue task carries the session_id that created it; lk.sessions lists a
+// guest's live sessions — match them to know if THIS guest is downloading now.
+function _guestRunningTask(sidSet) {
+  return (S.queue || []).find(tk => {
+    if (!sidSet.has(tk.session_id)) return false;
+    const st = (tk.status || '').toLowerCase();
+    return st === 'running' || st === 'downloading' || st === 'processing';
+  }) || null;
+}
+function _guestTaskPct(task) {
+  if (!task) return 0;
+  const p = (task.progress != null ? task.progress : (task.pct != null ? task.pct : 0));
+  return Math.max(0, Math.min(100, Math.round(p || 0)));
+}
+// Lightweight live tick: move existing guest bars straight from the queue with no
+// refetch (called on every 'progress'). Structural changes — a download starting/
+// stopping (bar appears/vanishes) and lamp colour — come from loadAdminLinks on
+// 'queue_update'.
+function updateGuestDownloadBars() {
+  const list = document.getElementById('admin-links-list');
+  if (!list || !list.offsetParent) return;            // not mounted/visible → skip
+  for (const lk of (S._adminLinks || [])) {
+    const fill = document.getElementById(`dlbar-fill-${lk.token}`);
+    if (!fill) continue;
+    const pct = _guestTaskPct(_guestRunningTask(new Set(lk.sessions || [])));
+    fill.style.width = pct + '%';
+    const pe = document.getElementById(`dlbar-pct-${lk.token}`);
+    if (pe) pe.textContent = pct + '%';
+  }
+}
+
+async function loadAdminLinks() {
+  const container = document.getElementById('admin-links-list');
+  if (!container) return;
+  try {
+    const [linksRes, cfgRes] = await Promise.all([
+      fetch('/api/admin/links'),
+      fetch('/api/config'),
+    ]);
+    if (!linksRes.ok) { container.innerHTML = '<div style="font-size:12px;color:var(--muted);text-align:center;padding:16px">Нет доступа</div>'; return; }
+    const links = await linksRes.json();
+    S._adminLinks = links;   // cache for the lightweight live bar updater
+    const freshCfg = cfgRes.ok ? await cfgRes.json() : {};
+    if (freshCfg['public-url']) Object.assign(S.config || {}, {'public-url': freshCfg['public-url']});
+    if (!links.length) {
+      container.innerHTML = `<div style="font-size:12px;color:var(--muted);text-align:center;padding:16px">${t('s.admin_no_links')||'Нет ссылок'}</div>`;
+      return;
+    }
+    const _baseUrl = (freshCfg['public-url'] || S.config?.['public-url'] || '').replace(/\/$/, '') || window.location.origin;
+    container.innerHTML = links.map(lk => {
+      const active = lk.active && new Date(lk.expires_at) > new Date();
+      const exp    = lk.expires_at ? new Date(lk.expires_at).toLocaleString() : '—';
+      const q      = lk.quota || {};
+      let qtxt     = t('s.admin_unlimited');
+      if (q.type === 'count') qtxt = `${q.used||0} / ${q.limit} ${t('s.admin_count')}`;
+      if (q.type === 'time')  qtxt = `${q.limit} ${t('s.admin_time')}`;
+      // 3-state traffic-light lamp + live download bar. Correlate the queue with
+      // this guest via their active session ids (lk.sessions): a task carries the
+      // session_id that created it, so we know if THIS guest is downloading now.
+      const _sids = new Set(lk.sessions || []);
+      const _run  = _guestRunningTask(_sids);
+      const _pct  = _guestTaskPct(_run);
+      const lamp  = lk.session_count > 0 ? (_run ? '🟢' : '🟡') : '○';
+      const lampTxt = lk.session_count > 0
+        ? (_run ? (t('act.downloading') || 'качает') : t('act.online'))
+        : t('act.offline');
+      const onlineDot = `${lamp} <span style="color:var(--muted)">${lampTxt}${lk.session_count > 1 ? ' (' + lk.session_count + ')' : ''}</span>`;
+      const dlBar = _run
+        ? `<div style="margin-top:6px">
+             <div style="display:flex;align-items:center;gap:7px">
+               <div style="flex:1;height:5px;border-radius:3px;background:rgba(255,255,255,.08);overflow:hidden">
+                 <div id="dlbar-fill-${lk.token}" style="height:100%;width:${_pct}%;background:linear-gradient(90deg,#22c55e,#16a34a);transition:width .4s"></div>
+               </div>
+               <span id="dlbar-pct-${lk.token}" style="font-size:10px;color:#22c55e;font-weight:700;white-space:nowrap">${_pct}%</span>
+             </div>
+             <div style="font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(_run.title || _run.url || '')}</div>
+           </div>`
+        : '';
+      const statusColor = active ? '#22c55e' : 'var(--muted)';
+      const tok = lk.token;
+      const guestUrl = `${_baseUrl}/guest/${tok}`;
+      return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;font-size:12px">
+        <div style="display:flex;align-items:center;gap:8px;padding:9px 12px">
+          <div style="width:7px;height:7px;border-radius:50%;background:${statusColor};flex-shrink:0"></div>
+          <div style="flex:1;min-width:0">
+            <div style="font-weight:700;color:var(--text)">${esc(lk.label||'—')}
+              <span style="font-weight:400;font-size:11px;color:var(--muted);margin-left:6px">${onlineDot}</span>
+            </div>
+            <div style="color:var(--muted);font-size:11px;margin-top:1px">
+              ${active?t('admin.until')+' '+exp:t('admin.expired')} · ${qtxt} · ${lk.token_mode==='owner'?t('s.admin_owner_tok'):t('s.admin_guest_tok')}
+            </div>
+            ${dlBar}
+            <!-- URL row — always visible, click to copy -->
+            <div style="display:flex;align-items:center;gap:6px;margin-top:5px">
+              <code style="flex:1;min-width:0;font-size:10.5px;font-family:var(--mono);color:${active?'#c084fc':'var(--muted)'};background:rgba(0,0,0,.18);padding:3px 7px;border-radius:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(guestUrl)}</code>
+              <button onclick="navigator.clipboard.writeText('${escJ(guestUrl)}').then(()=>toast(t('toast.copied'),'var(--green)')).catch(()=>{const ta=document.createElement('textarea');ta.value='${escJ(guestUrl)}';document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);toast(t('toast.copied'),'var(--green)')})"
+                style="padding:3px 9px;border-radius:6px;border:1px solid rgba(175,82,222,.3);background:rgba(175,82,222,.12);color:#c084fc;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;white-space:nowrap">
+                ⎘ Копировать
+              </button>
+            </div>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0;align-items:flex-end">
+            <div style="display:flex;gap:5px">
+              <button onclick="showGuestActivity('${tok}')"
+                id="act-btn-${tok}"
+                style="padding:4px 9px;border-radius:7px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);font-size:11px;cursor:pointer">
+                ${t('act.show')||'▾ Активность'}
+              </button>
+              ${active?`<button onclick="revokeGuestLink('${tok}')"
+                style="padding:4px 9px;border-radius:7px;border:1px solid rgba(252,60,68,.25);background:rgba(252,60,68,.08);color:var(--red);font-size:11px;cursor:pointer">
+                ${t('admin.revoke')}
+              </button>`:''}
+            </div>
+            ${active?`<button onclick="toggleTokenMode('${tok}','${lk.token_mode==='owner'?'guest':'owner'}')"
+              style="padding:3px 9px;border-radius:7px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);font-size:10px;cursor:pointer;white-space:nowrap">
+              ${lk.token_mode==='owner'?t('admin.to_guest'):t('admin.to_owner')}
+            </button>`:''}
+          </div>
+        </div>
+        <div id="act-panel-${tok}" style="display:none;border-top:1px solid var(--border);padding:10px 12px;background:var(--bg)">
+          <div style="font-size:11px;color:var(--muted)">${t('act.loading')}</div>
+        </div>
+      </div>`;
+    }).join('');
+  } catch(e) {
+    container.innerHTML = `<div style="font-size:12px;color:var(--red);text-align:center;padding:16px">${t('act.error_load')}</div>`;
+  }
+}
+
+async function showGuestActivity(token) {
+  const panel = document.getElementById(`act-panel-${token}`);
+  const btn   = document.getElementById(`act-btn-${token}`);
+  if (!panel) return;
+  if (panel.style.display !== 'none') {
+    panel.style.display = 'none';
+    if (btn) btn.textContent = t('act.show')||'▾ Активность';
+    return;
+  }
+  panel.style.display = 'block';
+  if (btn) btn.textContent = t('act.hide')||'▴ Скрыть';
+  try {
+    const r = await fetch(`/api/admin/links/${token}/activity`);
+    const d = await r.json();
+    const acts = d.activity || [];
+    const exp  = d.expires_at ? new Date(d.expires_at) : null;
+    const now  = Date.now();
+    const timeLeft = exp ? Math.max(0, exp.getTime() - now) : 0;
+    const h = Math.floor(timeLeft / 3600000);
+    const m = Math.floor((timeLeft % 3600000) / 60000);
+    const expStr = exp
+      ? (timeLeft > 0 ? `⏱ ${h}ч ${m}м` : 'истекла')
+      : '';
+    const q = d.quota || {};
+    let qStr = '';
+    if (q.type === 'count') qStr = ` · ${q.used||0}/${q.limit} загр.`;
+    else if (q.type === 'time') qStr = ` · лимит ${q.limit} мин.`;
+    const sessStr = d.session_count > 0
+      ? `<span style="color:#22c55e">● ${d.session_count} онлайн</span>`
+      : `<span style="color:var(--muted)">○ офлайн</span>`;
+
+    const SVC_ICON = {apple:'🍎',qobuz:'🎵',deezer:'🎧',tidal:'🌊',spotify:'💚',soundcloud:'☁',bbc:'📻'};
+    const done = acts.filter(a=>a.status==='done'||a.event==='dl_ok').length;
+    const errs = acts.filter(a=>a.status==='error'||a.event==='dl_error'||a.event==='add_blocked').length;
+    const svcs = [...new Set(acts.map(a=>a.service).filter(Boolean))];
+    const svcStr = svcs.map(s=>`${SVC_ICON[s]||'🎶'} ${s}`).join(' · ');
+
+    const header = `<div style="display:flex;gap:12px;font-size:11px;flex-wrap:wrap;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid var(--border)">
+      ${sessStr}
+      ${expStr?`<span style="color:var(--muted)">${expStr}</span>`:''}
+      ${qStr?`<span style="color:var(--muted)">${qStr}</span>`:''}
+      ${done?`<span>✓ <b style="color:#22c55e">${done}</b></span>`:''}
+      ${errs?`<span>✗ <b style="color:var(--red)">${errs}</b></span>`:''}
+      ${svcStr?`<span style="color:var(--muted)">${svcStr}</span>`:''}
+    </div>`;
+
+    if (!acts.length) {
+      panel.innerHTML = header + `<div style="font-size:11px;color:var(--muted)">${t('act.empty')||'Нет загрузок'}</div>`;
+      return;
+    }
+    const _BR = {'quota_exceeded':'квота','rate_limit':'лимит запросов'};
+    const _DR = {'task_not_found':'нет задачи','not_finished':'не готово',
+                 'access_denied':'нет доступа','files_missing':'нет файлов','no_audio_files':'нет аудио'};
+    panel.innerHTML = header + `<div style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto">` +
+      acts.slice().reverse().map(a => {
+        const ts     = a.ts ? new Date(a.ts).toLocaleTimeString() : '';
+        const svc    = (a.service||'').toLowerCase();
+        const svcIco = SVC_ICON[svc] || '';
+        let evtIco, col, lbl;
+        if (a.event === 'queued') {
+          evtIco = '⬇'; col = 'var(--blue)';
+          lbl = a.url || '—';
+        } else if (a.event === 'add_blocked') {
+          evtIco = '🚫'; col = 'var(--red)';
+          lbl = (_BR[a.reason]||a.reason||'заблокировано') + (a.url ? ' · '+a.url : '');
+        } else if (a.event === 'dl_ok') {
+          evtIco = '📥'; col = '#22c55e';
+          lbl = a.filename || a.title || '—';
+        } else if (a.event === 'dl_error') {
+          evtIco = '❌'; col = 'var(--red)';
+          lbl = (_DR[a.reason]||a.reason||'ошибка') + (a.title ? ' — '+a.title : '');
+        } else if (a.status === 'done') {
+          evtIco = '✓'; col = '#22c55e';
+          lbl = a.title || a.url || '—';
+        } else {
+          evtIco = '✗'; col = 'var(--red)';
+          lbl = a.title || a.url || '—';
+        }
+        return `<div style="display:flex;align-items:baseline;gap:6px;font-size:11px">
+          <span style="color:var(--muted);flex-shrink:0">${ts}</span>
+          ${svcIco?`<span>${svcIco}</span>`:''}
+          <span style="flex-shrink:0">${evtIco}</span>
+          <span style="color:${col};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:220px" title="${esc(lbl)}">${esc(lbl)}</span>
+          ${a.quality?`<span style="color:var(--muted);font-size:10px">${esc(a.quality)}</span>`:''}
+        </div>`;
+      }).join('') + `</div>`;
+  } catch(e) {
+    panel.innerHTML = `<div style="font-size:11px;color:var(--red)">Ошибка загрузки активности</div>`;
+  }
+}
+
+// ── Remote access ─────────────────────────────────────────────
+
+function updateRemoteUI(enabled, publicUrl, activeSessions) {
+  const pill  = document.getElementById('remote-status-pill');
+  const cnt   = document.getElementById('remote-sessions-count');
+  const startBtn = document.getElementById('remote-start-btn');
+  const stopBtn  = document.getElementById('remote-stop-btn');
+  const urlInput = document.getElementById('remote-public-url');
+  if (pill) {
+    pill.textContent  = enabled ? t('remote.on') : t('remote.off');
+    pill.style.background = enabled ? 'rgba(34,197,94,.15)' : 'rgba(252,60,68,.15)';
+    pill.style.color      = enabled ? '#22c55e' : 'var(--red)';
+  }
+  if (cnt) cnt.textContent = activeSessions > 0 ? `${activeSessions} ${t('remote.sessions')||'активных сессий'}` : '';
+  if (startBtn) startBtn.style.display = enabled ? 'none'  : '';
+  if (stopBtn)  stopBtn.style.display  = enabled ? '' : 'none';
+  if (urlInput && publicUrl) urlInput.value = publicUrl;
+}
+
+async function loadRemoteStatus() {
+  try {
+    const r = await fetch('/api/remote/status');
+    if (!r.ok) return;
+    const d = await r.json();
+    updateRemoteUI(d.enabled, d.public_url, d.active_links);
+  } catch(e) {}
+}
+
+async function remoteStart() {
+  const pub = (document.getElementById('remote-public-url')?.value || '').trim();
+  try {
+    const r = await api('POST', '/api/remote/start', { public_url: pub });
+    if (r.ok) {
+      updateRemoteUI(true, r.public_url, 0);
+      toast(S.lang==='en'?'Remote access enabled':'Удалённый доступ включён', '#22c55e');
+      await loadAdminLinks();
+    } else {
+      toast(r.detail || 'Error', 'var(--red)');
+    }
+  } catch(e) { toast(t('err.generic') + ': ' + e.message, 'var(--red)'); }
+}
+
+async function remoteStop() {
+  try {
+    const r = await api('POST', '/api/remote/stop');
+    if (r.ok) {
+      updateRemoteUI(false, '', 0);
+      toast(S.lang==='en'?`Remote stopped, ${r.revoked} links revoked`:`Остановлено, ${r.revoked} ссылок отозвано`, 'var(--red)');
+      await loadAdminLinks();
+    } else {
+      toast(r.detail || 'Error', 'var(--red)');
+    }
+  } catch(e) { toast(t('err.generic') + ': ' + e.message, 'var(--red)'); }
+}
+
+async function saveRemoteUrl() {
+  const pub = (document.getElementById('remote-public-url')?.value || '').trim();
+  if (!pub) return;
+  try { await api('POST', '/api/remote/start', { public_url: pub }); } catch(e) {}
+}
+
+// ── Serveo tunnel ──────────────────────────────────────────────────────────
+function updateTunnelUI(running, connecting, url) {
+  const pill     = document.getElementById('tunnel-status-pill');
+  const urlRow   = document.getElementById('tunnel-url-row');
+  const urlInput = document.getElementById('tunnel-url-display');
+  const startBtn = document.getElementById('tunnel-start-btn');
+  const stopBtn  = document.getElementById('tunnel-stop-btn');
+  if (pill) {
+    if (connecting) {
+      pill.textContent = '⏳ Подключение…';
+      pill.style.background = 'rgba(234,179,8,.15)'; pill.style.color = '#eab308';
+    } else if (running) {
+      pill.textContent = '● Активен';
+      pill.style.background = 'rgba(34,197,94,.15)'; pill.style.color = '#22c55e';
+    } else {
+      pill.textContent = '● Выключен';
+      pill.style.background = 'rgba(252,60,68,.15)'; pill.style.color = 'var(--red)';
+    }
+  }
+  if (urlRow)   urlRow.style.display   = url ? '' : 'none';
+  if (urlInput && url) urlInput.value  = url;
+  if (startBtn) { startBtn.style.display = running || connecting ? 'none' : ''; startBtn.textContent = '▶ Запустить'; startBtn.disabled = false; }
+  if (stopBtn)  stopBtn.style.display  = running || connecting ? '' : 'none';
+  if (url) {
+    const pubInput = document.getElementById('remote-public-url');
+    if (pubInput) pubInput.value = url;
+  }
+}
+
+async function tunnelStart() {
+  const startBtn = document.getElementById('tunnel-start-btn');
+  if (startBtn) { startBtn.textContent = '⏳…'; startBtn.disabled = true; }
+  updateTunnelUI(false, true, '');
+  try {
+    const r = await api('POST', '/api/tunnel/start', {});
+    if (!r.ok) {
+      updateTunnelUI(false, false, '');
+      toast('Ошибка туннеля: ' + (r.error || '?'), 'var(--red)');
+    }
+    // URL arrives via WebSocket tunnel_status event
+  } catch(e) {
+    updateTunnelUI(false, false, '');
+    toast(t('err.generic') + ': ' + e.message, 'var(--red)');
+  }
+}
+
+async function tunnelStop() {
+  try {
+    await api('POST', '/api/tunnel/stop');
+    updateTunnelUI(false, false, '');
+    toast('Туннель остановлен');
+  } catch(e) { toast(t('err.generic') + ': ' + e.message, 'var(--red)'); }
+}
+
+async function loadTunnelStatus() {
+  try {
+    const r = await fetch('/api/tunnel/status');
+    if (!r.ok) return;
+    const d = await r.json();
+    updateTunnelUI(d.running, d.connecting, d.url || '');
+  } catch(e) {}
+}
+
+async function createGuestLink() {
+  const label     = document.getElementById('gl-label')?.value.trim() || '';
+  const qtype     = document.getElementById('gl-quota-type')?.value || 'unlimited';
+  const qlimit    = parseInt(document.getElementById('gl-quota-val')?.value) || 20;
+  const tokenMode = document.getElementById('gl-token-mode')?.value || 'owner';
+  const quota     = qtype === 'unlimited' ? {type:'unlimited'} : {type:qtype, limit:qlimit};
+  try {
+    const r = await api('POST', '/api/admin/links/create', {label, quota, token_mode: tokenMode});
+    if (r.ok) {
+      const box = document.getElementById('gl-new-link');
+      if (box) { box.style.display = 'block'; setTimeout(() => { box.style.display = 'none'; }, 3000); }
+      document.getElementById('gl-label').value = '';
+      await loadAdminLinks();
+    } else {
+      toast(r.detail || 'Ошибка создания ссылки', 'var(--red)');
+    }
+  } catch(e) { toast(t('err.generic') + ': ' + e.message, 'var(--red)'); }
+}
+
+function copyGuestLink() {
+  const url = document.getElementById('gl-new-link-url')?.textContent || '';
+  if (!url) return;
+  navigator.clipboard.writeText(url).then(() => toast(t('toast.link_copied'))).catch(() => {
+    const ta = document.createElement('textarea');
+    ta.value = url; document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    toast(t('toast.link_copied'));
+  });
+}
+
+async function revokeGuestLink(token) {
+  try {
+    await api('POST', '/api/admin/links/revoke', {token});
+    await loadAdminLinks();
+    toast('Ссылка отозвана');
+  } catch(e) { toast(t('err.generic') + ': ' + e.message, 'var(--red)'); }
+}
+
+async function toggleTokenMode(token, newMode) {
+  try {
+    await api('POST', '/api/admin/links/token-mode', {token, token_mode: newMode});
+    await loadAdminLinks();
+  } catch(e) { toast(t('err.generic') + ': ' + e.message, 'var(--red)'); }
+}
+
 // ── INIT ─────────────────────────────────────────────────────
 window.addEventListener('load', async () => {
   // PWA service worker — registered lazily so a SW bug never blocks app boot.
@@ -553,6 +1159,7 @@ window.addEventListener('load', async () => {
   await _loadAllViews();
   applyLang();
   await loadQualities();
+  await checkSessionMode();
   connectWS();
   // Seed queue from REST while WS establishes (critical on HTTPS/ngrok where
   // WSS handshake may lag, leaving the queue empty until the first init message)
@@ -586,7 +1193,7 @@ async function checkWrapperStatus() {
 
 async function recheckWrapper() {
   await checkWrapperStatus();
-  toast('Wrapper: обновлено');
+  toast(t('s.wrapper_updated'));
 }
 
 function updateWrapperUI(running, port, dockerOk, dockerMsg, hasSession) {
@@ -935,13 +1542,17 @@ function showView(name, el) {
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('view-'+name)?.classList.add('active');
   el?.classList.add('active');
-  if(name==='setup')     { checkTools(); loadDeps?.(); }
+  if(name==='setup')     { checkTools(); loadDeps?.(); checkRipsterUpdate?.(true); }
   if(name==='history')   loadHistory();
+  if(name==='watchlist') loadWatchlist();
   if(name==='releases')  { loadSpotifyStatus(); _syncReleasePillsFromConfig(); loadReleasesIfStale(); }
   if(name==='bbc')       { bbcInit(); }
   if(name==='soundcloud') scInit();
   if(name==='coder')     { coderInit(); coderFmtChange(); }
+  if(name==='tagger')    taggerInit();
+  if(name==='stats')     loadStats();
   if(name==='console')   _refreshConsole();
+  if(name==='guest-tokens') loadGuestSvcStatus();
   if(name==='settings') {
     loadTokensToUI();
     renderQualityGrid();
@@ -1324,6 +1935,7 @@ async function _doAddUrl(url, quality, svc) {
     document.getElementById('url-input').value='';
     detectUrlService(''); // clear indicator
     toast(r.count > 1 ? `Добавлено ${r.count} треков в очередь` : 'Добавлено в очередь');
+    pullQueue();   // reflect immediately even if the WS push is lagging/dead
     // ISRC cross-service check (non-blocking; skip for tidal — no metadata ISRC)
     if(svc !== 'tidal') _checkIsrc(url, svc);
   } else if(r.spotify) {
@@ -2131,6 +2743,175 @@ async function coderDownloadConvert() {
 // ── Теггер (Mp3tag-style) ───────────────────────────────────────
 let _tagRows = [];
 let _tagFolders = [];
+async function taggerInit() {
+  const tree = document.getElementById('tag-tree');
+  if(tree) await mountFolderTree(tree, (path, name, tracks)=>{
+    document.getElementById('tag-path').value = path || '';
+    if(path) taggerLoad();           // auto-load tags on selection
+  });
+}
+function taggerPickFolder() {
+  const f = _tagFolders[+document.getElementById('tag-src').value];
+  if(f) document.getElementById('tag-path').value = f.dir;
+}
+function _tagCell(v, minw=90) {
+  return `<input value="${(v||'').replace(/"/g,'&quot;')}" style="width:100%;min-width:${minw}px;background:transparent;border:1px solid transparent;border-radius:4px;color:var(--text);font-size:12px;padding:3px 5px" onfocus="this.style.borderColor='var(--border2)'" onblur="this.style.borderColor='transparent'"/>`;
+}
+function _tagRender() {
+  const tb = document.getElementById('tag-tbody');
+  if(!_tagRows.length){ tb.innerHTML = '<tr><td colspan="9" style="padding:18px;text-align:center;color:var(--muted)">Пусто</td></tr>'; return; }
+  tb.innerHTML = _tagRows.map((r,i)=>`<tr data-i="${i}" style="border-top:1px solid var(--border)">
+    <td style="padding:3px 8px;color:var(--muted)">${r.track||i+1}</td>
+    <td style="padding:3px 8px;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc((r.subdir?r.subdir+'/':'')+r.file)}">${r.subdir?`<span style="color:#5ec8e0">${esc(r.subdir)}/</span>`:''}${esc(r.file)}</td>
+    <td style="padding:3px 4px" class="tc-title">${_tagCell(r.title)}</td>
+    <td style="padding:3px 4px" class="tc-artist">${_tagCell(r.artist)}</td>
+    <td style="padding:3px 4px" class="tc-album">${_tagCell(r.album)}</td>
+    <td style="padding:3px 4px" class="tc-albumartist">${_tagCell(r.albumartist)}</td>
+    <td style="padding:3px 4px" class="tc-track">${_tagCell(r.track,40)}</td>
+    <td style="padding:3px 4px" class="tc-year">${_tagCell(r.year,46)}</td>
+    <td style="padding:3px 4px" class="tc-genre">${_tagCell(r.genre,70)}</td></tr>`).join('');
+}
+async function taggerLoad() {
+  const dir = document.getElementById('tag-path').value.trim();
+  if(!dir){ toast('Выбери папку или путь','var(--red)'); return; }
+  try {
+    const r = await api('POST','/api/tagger/read',{dir});
+    _tagRows = r.rows || [];
+    _tagRender();
+    document.getElementById('tag-srcinfo').textContent = `${_tagRows.length} файлов загружено`;
+  } catch(e){ toast('Теггер: '+e.message,'var(--red)'); }
+}
+async function taggerFetchAlbum() {
+  const url = document.getElementById('tag-url').value.trim();
+  if(!url){ toast('Вставь ссылку альбома','var(--red)'); return; }
+  if(!_tagRows.length){ toast('Сначала загрузи папку','var(--red)'); return; }
+  try {
+    const a = await api('POST','/api/tagger/album',{url});
+    const tracks = a.tracks || [];
+    document.getElementById('tag-albuminfo').innerHTML =
+      `<span style="color:var(--green)">«${esc(a.album)}» — ${a.count} тр. · ${esc(a.albumartist||'')} · ${esc(a.year||'')}</span>`;
+    // Show the canonical tracklist so you can verify it's the right release
+    // (and spot a track-count mismatch) BEFORE it overwrites your files.
+    const tl = document.getElementById('tag-tracklist');
+    if(tl){
+      const mism = tracks.length !== _tagRows.length;
+      tl.style.display = 'block';
+      tl.innerHTML =
+        `<div style="position:sticky;top:0;background:var(--surface2);padding:5px 10px;font-size:11px;font-weight:700;display:flex;justify-content:space-between;align-items:center">
+           <span>Треклист релиза — ${tracks.length} тр.</span>
+           ${mism?`<span style="color:var(--orange)">⚠ файлов загружено ${_tagRows.length}</span>`:`<span style="color:var(--green)">✓ совпадает с файлами (${_tagRows.length})</span>`}
+         </div>` +
+        tracks.map(t=>`<div style="display:flex;gap:8px;padding:3px 10px;font-size:11px;border-top:1px solid var(--border)">
+          <span style="color:var(--muted);min-width:22px;text-align:right">${t.num||''}</span>
+          <span style="color:var(--text);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.title||'')}</span>
+          <span style="color:var(--muted);max-width:42%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right">${esc(t.artist||'')}</span>
+        </div>`).join('');
+    }
+    const byNum = {}; tracks.forEach(t=>{ if(t.num) byNum[t.num]=t; });
+    // When track count matches file count, map SEQUENTIALLY by position — this
+    // is what makes multi-disc releases line up (disc1 then disc2…), since both
+    // the files and the tracklist are ordered disc-major. Otherwise fall back to
+    // matching by the file's own track number.
+    const seq = tracks.length === _tagRows.length;
+    const trs = document.querySelectorAll('#tag-tbody tr');
+    _tagRows.forEach((r,i)=>{
+      const t = seq ? tracks[i] : (byNum[parseInt(r.track)] || tracks[i]);
+      r._albumartist=a.albumartist; r._year=a.year; r._label=a.label; r._cover=a.cover; r._tracktotal=a.count;
+      const tr = trs[i]; if(!tr || !t) return;
+      const set=(cls,v)=>{ const inp=tr.querySelector('.'+cls+' input'); if(inp){ inp.value=v||''; inp.style.background='rgba(94,200,224,.12)'; } };
+      r._disc = t.disc || r.disc || '';
+      set('tc-title',t.title); set('tc-artist',t.artist); set('tc-album',a.album);
+      set('tc-albumartist',a.albumartist); set('tc-track',t.num||r.track); set('tc-year',a.year);
+    });
+    toast('Треклист лёг на файлы — проверь и применяй','var(--green)');
+  } catch(e){ toast('Теггер: '+e.message,'var(--red)'); }
+}
+async function taggerSearch() {
+  const q = document.getElementById('tag-q').value.trim();
+  const svc = document.getElementById('tag-svc').value;
+  if(!q){ toast('Введи запрос','var(--red)'); return; }
+  const box = document.getElementById('tag-results');
+  box.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:6px">Ищу…</div>';
+  try {
+    const r = await api('POST','/api/tagger/search',{query:q,service:svc});
+    const res = r.results||[];
+    if(!res.length){ box.innerHTML='<div style="font-size:11px;color:var(--muted);padding:6px">Ничего не найдено</div>'; return; }
+    box.innerHTML = res.map(x=>`<div onclick="taggerPickResult('${encodeURIComponent(x.url)}')" style="display:flex;align-items:center;gap:9px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;margin-bottom:4px;cursor:pointer" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='transparent'">
+      ${x.cover?`<img src="${esc(x.cover)}" style="width:34px;height:34px;border-radius:5px;object-fit:cover"/>`:'<div style="width:34px;height:34px;border-radius:5px;background:var(--surface2);display:flex;align-items:center;justify-content:center">🎵</div>'}
+      <div style="min-width:0"><div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(x.title)}</div>
+      <div style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text)">${esc(x.artist||'—')}</span><span style="color:var(--muted)">${x.year?' · '+esc(x.year):''}${x.tracks?' · '+x.tracks+' тр.':''}</span></div></div></div>`).join('');
+  } catch(e){ box.innerHTML=`<div style="font-size:11px;color:var(--red);padding:6px">${esc(e.message)}</div>`; }
+}
+function taggerPickResult(encUrl) {
+  const url = decodeURIComponent(encUrl);
+  document.getElementById('tag-url').value = url;
+  document.getElementById('tag-results').innerHTML = '';
+  taggerFetchAlbum();
+}
+async function taggerApplyAll() {
+  if(!_tagRows.length){ toast('Нет файлов','var(--red)'); return; }
+  const clear = document.getElementById('tag-clear').checked;
+  const keep  = document.getElementById('tag-keepcover').checked;
+  const embed = document.getElementById('tag-embedcover')?.checked;
+  const res   = document.getElementById('tag-applyres');
+  const btn   = document.getElementById('tag-apply'); btn.disabled = true;
+  const box   = document.getElementById('tag-progress'); const bar = document.getElementById('tag-pbar');
+  if(box){ box.style.display='block'; if(bar) bar.style.width='0'; }
+  const trs = document.querySelectorAll('#tag-tbody tr');
+  let ok=0, fail=0, coversDone=0; const total=_tagRows.length;
+  for(let i=0;i<total;i++){
+    const r=_tagRows[i], tr=trs[i]; if(!tr) continue;
+    const numCell = tr.querySelector('td');                 // first cell = #
+    if(numCell) numCell.innerHTML = '<span class="qi-spinner"></span>';
+    const g=cls=>tr.querySelector('.'+cls+' input')?.value.trim()||'';
+    const fields={ title:g('tc-title'), artist:g('tc-artist'), album:g('tc-album'), year:g('tc-year'),
+      albumartist:g('tc-albumartist')||r._albumartist||'', track:g('tc-track')||r.track||(i+1),
+      disc:r._disc||r.disc||'', genre:g('tc-genre'), tracktotal:r._tracktotal||total, label:r._label||'' };
+    const payload={path:r.path,fields,clear,keep_cover:keep};
+    if(embed && r._cover){ payload.cover=r._cover; payload.embed_cover=true; }
+    let good=false, cov=false;
+    try { const rr=await api('POST','/api/tagger/apply',payload); good=!!rr.ok; cov=!!rr.cover; }
+    catch(e){}
+    good?ok++:fail++; if(cov) coversDone++;
+    if(numCell) numCell.innerHTML = good ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--red)">✗</span>';
+    res.textContent=`Применяю… ${ok+fail}/${total}`;
+    if(bar) bar.style.width = Math.round((ok+fail)/total*100)+'%';
+  }
+  btn.disabled=false;
+  res.innerHTML=`<span style="color:var(--green)">✓ ${ok} применено</span>${coversDone?` · <span style="color:var(--muted)">🖼 ${coversDone} обложек</span>`:''}${fail?` · <span style="color:var(--red)">${fail} ошибок</span>`:''}`;
+  if(box) setTimeout(()=>{ box.style.display='none'; }, 1800);
+  toast('🏷 Теги записаны','var(--green)');
+}
+
+async function taggerRename(dry) {
+  const template = document.getElementById('tag-mask').value.trim();
+  if(!template){ toast('Введи маску','var(--red)'); return; }
+  if(!_tagRows.length){ toast('Сначала загрузи папку','var(--red)'); return; }
+  const files = _tagRows.map(r=>r.path);
+  const prev  = document.getElementById('tag-renamepreview');
+  const res   = document.getElementById('tag-renameres');
+  const btn   = document.getElementById('tag-renamebtn');
+  try {
+    const r = await api('POST','/api/tagger/rename',{files,template,dry_run:dry});
+    if(dry){
+      const rows = r.preview||[];
+      prev.style.display='block';
+      prev.innerHTML = rows.map(x=>`<div style="display:flex;gap:8px;align-items:center;padding:3px 10px;border-top:1px solid var(--border)">
+        <span style="flex:1;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(x.old)}">${esc(x.old)}</span>
+        <span style="color:${x.change?'var(--orange)':'var(--muted)'}">→</span>
+        <span style="flex:1;color:${x.change?'var(--text)':'var(--muted)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(x.new)}">${esc(x.new)}</span></div>`).join('');
+      res.innerHTML = `<span style="color:var(--muted)">Изменится: ${r.count} из ${rows.length}</span>`;
+      const can = r.count>0;
+      btn.disabled=!can; btn.style.opacity=can?'1':'.5';
+    } else {
+      res.innerHTML = `<span style="color:var(--green)">✓ Переименовано ${r.renamed}</span>`;
+      prev.style.display='none'; btn.disabled=true; btn.style.opacity='.5';
+      toast(`✏️ Переименовано ${r.renamed}`,'var(--green)');
+      await taggerLoad();   // reload so the table shows the new filenames
+    }
+  } catch(e){ toast('Переименование: '+e.message,'var(--red)'); }
+}
+
 function toggleTaskLog(id, btn) {
   const panel = document.getElementById(`qi-log-${id}`);
   if(!panel) return;
@@ -2254,7 +3035,24 @@ async function retryTask(id) {
 }
 
 async function clearDone() {
-  S.queue.filter(t=>t.status==='done'||t.status==='error').forEach(t=>api('DELETE',`/api/queue/${t.id}`));
+  // Finished = done / error / cancelled.
+  const done = S.queue.filter(t => t.status==='done' || t.status==='error' || t.status==='cancelled');
+  if(!done.length){ toast('Нет готовых задач для очистки','var(--muted)'); return; }
+  const removed = [];
+  for(const t of done){
+    try { await api('DELETE',`/api/queue/${t.id}`); removed.push(t.id); }
+    catch(e){ /* keep it; reported below */ }
+  }
+  // Self-refresh: don't depend on the WS queue_update arriving — right after a
+  // server restart / reconnect it can be missed, which made the button look dead.
+  if(removed.length){
+    const gone = new Set(removed);
+    S.queue = S.queue.filter(t => !gone.has(t.id));
+    renderQueue(); updateTransport();
+  }
+  const failed = done.length - removed.length;
+  if(failed) toast(`Не удалось убрать ${failed} — сервер ответил ошибкой`,'var(--orange)');
+  else toast(`Убрано: ${removed.length}`,'var(--green)');
 }
 
 // ── TRANSPORT ─────────────────────────────────────────────────
@@ -2293,7 +3091,7 @@ function renderQualityGrid() {
   //   • thin caption row with brand-coloured badge + bitrate + req
   grid.innerHTML = `
     <div class="field-group">
-      <label class="lbl">Качество по умолчанию</label>
+      <label class="lbl">${t('s.default_quality')}</label>
       <select id="q-select" onchange="selectQuality(this.value)" style="width:100%">
         ${QUALITIES.map(q =>
           `<option value="${q.id}" ${q.id===cur?'selected':''}>${q.label}${q.sub?' — '+q.sub.replace(/—.*/,'').trim():''}</option>`
@@ -2303,7 +3101,7 @@ function renderQualityGrid() {
         <span style="font-size:9px;font-weight:800;padding:2px 8px;border-radius:5px;background:${curQ.color}22;color:${curQ.color};letter-spacing:.4px">${esc(curQ.badge)}</span>
         <span style="color:${curQ.color};font-weight:700">${esc(curQ.bitrate)}</span>
         <span>·</span>
-        <span>${curQ.req==='wrapper'?'⚙️ Требует wrapper':'🔑 Требует media-user-token'}</span>
+        <span>${curQ.req==='wrapper'?t('s.req_wrapper'):t('s.req_mut')}</span>
         <span>·</span>
         <span style="font-family:var(--mono);font-size:10px">.${esc(curQ.ext)}</span>
       </div>
@@ -2742,7 +3540,7 @@ function _setSecret(id, v) {
   if (document.activeElement === el) return; // user is typing — don't clobber
   if (_isMasked(v)) {
     const m = v.match(/\((\d+)\s/);
-    el.placeholder = m ? `сохранено (${m[1]} chars) — вставьте новый, чтобы заменить` : 'сохранено — вставьте новый, чтобы заменить';
+    el.placeholder = m ? ti('s.saved_chars', {n: m[1]}) : t('s.saved_replace');
     el.value = '';
   } else {
     el.placeholder = el.dataset.ph || '••••••••';
@@ -2761,13 +3559,13 @@ function loadTokensToUI() {
   if(mutEl){
     if(_isMasked(mut)){
       mutEl.value = '';
-      mutEl.placeholder = `✓ Сохранён (${mut.match(/\d+/)?.[0]||'?'} символов) — вставь новый чтобы заменить`;
+      mutEl.placeholder = ti('s.saved_chars2', {n: mut.match(/\d+/)?.[0]||'?'});
     } else { mutEl.value = mut; }
   }
   if(bearerEl){
     if(_isMasked(bearer)){
       bearerEl.value = '';
-      bearerEl.placeholder = `✓ Сохранён (${bearer.match(/\d+/)?.[0]||'?'} символов) — вставь новый чтобы заменить`;
+      bearerEl.placeholder = ti('s.saved_chars2', {n: bearer.match(/\d+/)?.[0]||'?'});
     } else { bearerEl.value = bearer; }
   }
   setVal('t-sf', sf);
@@ -3189,6 +3987,60 @@ function clearConsole() {
   if (cntEl) cntEl.textContent = '0 logs';
 }
 
+// Copy a whole console's text to the clipboard. WebView2 often blocks manual
+// text-selection / right-click in the log panel, so a one-click "Copy all" is the
+// reliable way for the user to grab error logs. Tries the async Clipboard API
+// (127.0.0.1 is a secure context + the click is a user gesture) and falls back to
+// the legacy textarea+execCommand path if that's unavailable.
+async function copyConsole(elId, btn) {
+  const el = document.getElementById(elId || 'console-out');
+  if (!el) return;
+  const text = (el.innerText || el.textContent || '').trim();
+  if (!text) { if (window.toast) toast('Консоль пуста', 'var(--muted)'); return; }
+  let ok = false;
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    }
+  } catch (e) { ok = false; }
+  if (!ok) {
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+    } catch (e) { ok = false; }
+  }
+  if (btn) {
+    const orig = btn.textContent;
+    btn.textContent = ok ? '✓ Скопировано' : '✗ Не вышло';
+    setTimeout(() => { btn.textContent = orig; }, 1500);
+  }
+  if (window.toast) toast(ok ? `📋 Скопировано (${text.length} симв.)` : 'Не удалось скопировать — выдели вручную', ok ? 'var(--green)' : 'var(--red)');
+}
+
+// Download ALL diagnostic logs as one zip (console + errors + launcher). The
+// best way for a remote tester to hand us the full picture — one file to attach,
+// no copy-paste, nothing scrolled off. Same-origin nav carries the session cookie.
+function downloadLogs(btn) {
+  try {
+    const a = document.createElement('a');
+    a.href = '/api/logs/download';
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    if (btn) { const o = btn.textContent; btn.textContent = '⬇ Готово'; setTimeout(() => { btn.textContent = o; }, 1500); }
+    if (window.toast) toast('⬇ Скачиваю zip с логами — пришли этот файл для диагностики', 'var(--green)', 6000);
+  } catch (e) {
+    if (window.toast) toast('Не удалось скачать лог: ' + ((e && e.message) || e), 'var(--red)');
+  }
+}
+
 // Convenience for the user / us: dump the last N entries to DevTools
 window.ripsterDumpLogs = function(n = 50) {
   console.table(_LOG.slice(-n).map(e => ({ time: e.hms, level: e.level, text: e.text })));
@@ -3373,88 +4225,286 @@ function _closeNotif(id) {
 // ── SETUP ────────────────────────────────────────────────────
 
 
-function renderStepTrack() {
-  const el = document.getElementById('step-track');
-  if(!el) return;
-  el.innerHTML = STEP_DEFS.map(d => {
-    const s = stepState[d.key];
-    const cfg = {
-      idle:    { bg:'rgba(255,255,255,.06)', color:'var(--muted)',  icon: d.icon,  label:'waiting' },
-      running: { bg:'rgba(10,132,255,.18)',  color:'var(--blue)',   icon: '⏳',    label:'installing…', anim:true },
-      done:    { bg:'rgba(62,207,170,.18)',   color:'var(--green)',  icon: '✓',     label:'done' },
-      skip:    { bg:'rgba(62,207,170,.10)',   color:'var(--green)',  icon: '✓',     label:'already installed' },
-      error:   { bg:'rgba(226,75,74,.18)',   color:'var(--danger)', icon: '✗',     label:'failed' },
-      warn:    { bg:'rgba(239,159,39,.18)',  color:'var(--orange)', icon: '⚠',     label:'check manually' },
-    }[s] || {};
-    const animStyle = cfg.anim ? 'animation:amd-blink 1s infinite' : '';
-    return `<div style="display:flex;align-items:center;gap:6px;padding:6px 10px;background:${cfg.bg};border-radius:8px;border:1px solid ${cfg.color}22;min-width:0">
-      <span style="color:${cfg.color};font-size:13px;${animStyle}">${cfg.icon}</span>
-      <div>
-        <div style="font-size:10px;font-weight:700;color:${cfg.color};font-family:var(--display)">${d.label}</div>
-        <div style="font-size:9px;color:${cfg.color};opacity:.7">${cfg.label}</div>
-      </div>
-    </div>`;
-  }).join('');
+// Component checklist model. Each row = a checkbox the user ticks; install runs
+// the selected components in order, with a per-item bar + an overall bar.
+// Each row installs ONE component and shows ITS OWN status — no bundling several
+// packages under a single button, so the user can see exactly what landed and
+// what didn't. Shared tools (ffmpeg / Bento4 / Node) are their own rows. Every
+// install streams to the Setup console.
+const SETUP_COMPONENTS = [
+  // ── Apple Music ───────────────────────────────────────────────────────────
+  { key:'apple', icon:'🍎', label:'Apple Music (AMD v2)', tag:'рекомендуется', color:'#fc3c44', def:true,
+    desc:'Движок AppleMusicDecrypt — ALAC / AAC / Atmos через публичный wrapper (wm.wol.moe), БЕЗ Apple ID, БЕЗ Docker, БЕЗ токена. Для расшифровки нужны ещё ffmpeg и Bento4 (ниже).',
+    endpoint:'/api/setup/component/apple', status:'apple' },
+  { key:'ffmpeg', icon:'🎞️', label:'ffmpeg', tag:'для Apple', color:'#fc8a44', def:true,
+    desc:'Ремукс/перекодирование. Нужен для Apple ALAC и общей конвертации формата вывода.',
+    endpoint:'/api/setup/component/ffmpeg', status:'ffmpeg' },
+  { key:'mp4decrypt', icon:'🔓', label:'Bento4 (mp4decrypt)', tag:'для Apple', color:'#fc8a44', def:true,
+    desc:'Извлечение/декрипт MP4-фрагментов. Нужен для Apple ALAC и музыкальных видео.',
+    endpoint:'/api/setup/component/mp4decrypt', status:'mp4decrypt' },
+  // ── SoundCloud ────────────────────────────────────────────────────────────
+  { key:'node', icon:'🟩', label:'Node.js', tag:'для SoundCloud', color:'#3c873a',
+    desc:'Среда выполнения для Lucida. Ставится автоматически вместе с SoundCloud, но можно отдельно.',
+    endpoint:'/api/setup/component/node', status:'node' },
+  { key:'soundcloud', icon:'🎧', label:'SoundCloud (Lucida)', color:'#ff5500',
+    desc:'Node.js + Lucida (клон исходников + npm-сборка, ~1–2 мин). Нужен только для скачивания с SoundCloud.',
+    endpoint:'/api/setup/component/soundcloud', status:'soundcloud' },
+  { key:'wvd', icon:'🔐', label:'Widevine L3 ключ', tag:'опционально', color:'#c084e0',
+    desc:'⚠ НЕ быстро и занимает НЕСКОЛЬКО ГБ места. Минтит ТВОЙ собственный L3-ключ (Android-эмулятор + KeyDive) в отдельном окне-мастере. Только для DRM-треков SoundCloud (миксы, приваты). Готовый .wvd грузится в Настройках → SoundCloud.',
+    endpoint:'/api/widevine/mint-wizard', wizard:true, status:'wvd' },
+  // ── Spotify / Beatport (OrpheusDL) ────────────────────────────────────────
+  { key:'orpheus', icon:'🟢', label:'OrpheusDL (Spotify)', color:'#1db954',
+    desc:'База для Spotify и Beatport — клонирует OrpheusDL + модуль Spotify. БЕЗ секретов (вход настраивается потом в Настройки → Spotify). Нативный Spotify-декрипт требует ещё Spotify.dll (отдельно).',
+    endpoint:'/api/setup/component/orpheus', status:'orpheus' },
+  { key:'beatport', icon:'🎚️', label:'Beatport', color:'#01f49c',
+    desc:'Модуль orpheusdl-beatport поверх OrpheusDL. Если OrpheusDL не стоит — поставится автоматически.',
+    endpoint:'/api/setup/component/beatport', status:'beatport' },
+  // ── Advanced ──────────────────────────────────────────────────────────────
+  { key:'zhaarey', icon:'⚙️', label:'Apple wrapper (zhaarey)', tag:'продвинутое', color:'#af52de',
+    desc:'Go + Docker + ТВОЙ premium Apple ID (~71 МБ Go). Для ALAC/Atmos через локальный wrapper. Большинству НЕ нужно — публичного Apple Music выше достаточно для lossless.',
+    endpoint:'/api/setup/component/zhaarey', advanced:true, status:'go' },
+];
+let setupCompState = {};   // key -> { checked, installed, running, pct, error }
+let _activeSetupKey = null;
+const _wsWaiters = new Map();
+
+async function fetchSetupStatuses() {
+  const st = {};
+  try { const t = await api('GET','/api/tools');
+        st.go         = !!(t && t.go         && t.go.found);
+        st.ffmpeg     = !!(t && t.ffmpeg     && t.ffmpeg.found);
+        st.mp4decrypt = !!(t && t.mp4decrypt && t.mp4decrypt.found);
+  } catch {}
+  try { const a = await api('GET','/api/amd/status'); st.apple = !!(a && a.cloned); } catch {}
+  try { const s = await api('GET','/api/soundcloud/status');
+        st.soundcloud = !!(s && s.installed);
+        st.node       = !!(s && s.node_ok);
+  } catch {}
+  try { const w = await api('GET','/api/widevine/status'); st.wvd = !!(w && w.installed); } catch {}
+  try { const o = await api('GET','/api/orpheus/status'); st.orpheus = !!(o && o.installed); } catch {}
+  try { const b = await api('GET','/api/beatport/status'); st.beatport = !!(b && b.module_installed); } catch {}
+  return st;
 }
 
 async function checkTools() {
-  const r = await fetch('/api/tools');
-  const tools = await r.json();
-  toolsState = tools;
-  renderTools(tools);
-  renderStepTrack();
+  const st = await fetchSetupStatuses();
+  SETUP_COMPONENTS.forEach(c => {
+    if(!setupCompState[c.key]) setupCompState[c.key] = {};
+    setupCompState[c.key].installed = !!st[c.status];
+  });
+  renderChecklist();
+  updateSetupBadge();
 }
 
-function renderTools(tools) {
-  const grid = document.getElementById('tools-grid');
-  if(!grid) return;
-  const badge = document.getElementById('setup-badge');
-  const anyMissing = Object.values(tools).some(t => t.required && !t.found);
-  if(badge){ badge.style.display = anyMissing ? '' : 'none'; badge.textContent = anyMissing ? '!' : ''; }
-
-  grid.innerHTML = Object.entries(tools).map(([key, t]) => {
-    const ok = t.found;
-    const color = ok ? 'var(--green)' : (t.required ? 'var(--red)' : 'var(--orange)');
-    const icon  = ok ? '✓' : (t.required ? '✗' : '⚠');
-    return `<div style="background:var(--surface);border:1px solid ${color}28;border-radius:10px;padding:10px 12px">
-      <div style="display:flex;align-items:center;gap:7px;margin-bottom:4px">
-        <span style="color:${color};font-size:14px;font-weight:900;line-height:1">${icon}</span>
-        <span style="font-size:12px;font-weight:700;color:${color};font-family:var(--display)">${t.label}</span>
-        ${!t.required ? '<span style="font-size:8px;background:rgba(239,159,39,.15);color:var(--orange);padding:1px 5px;border-radius:8px;font-weight:700;margin-left:auto">OPT</span>' : ''}
+function renderChecklist() {
+  const wrap = document.getElementById('setup-checklist');
+  if(!wrap) return;
+  wrap.innerHTML = SETUP_COMPONENTS.map(c => {
+    const s = setupCompState[c.key] || (setupCompState[c.key] = {});
+    if(s.checked === undefined) s.checked = !!c.def;
+    const badge = s.running
+      ? `<span style="font-size:9px;color:var(--blue,#0a84ff);font-weight:800">⏳ устанавливаю…</span>`
+      : s.error ? `<span style="font-size:9px;color:#fc3c44;font-weight:800">✗ ошибка</span>`
+      : s.installed ? `<span style="font-size:9px;color:#30d158;font-weight:800">✓ установлено</span>`
+      : `<span style="font-size:9px;color:var(--muted)">не установлено</span>`;
+    const pct = Math.max(0, Math.min(100, s.pct || 0));
+    const barShow = !!s.running || (pct > 0 && pct < 100);
+    const animate = s.running && !pct;
+    const tag = c.tag ? `<span style="font-size:8px;background:${c.color}22;color:${c.color};padding:1px 6px;border-radius:8px;font-weight:800;margin-left:6px">${c.tag}</span>` : '';
+    const btnLabel = s.running ? '⏳ устанавливаю…'
+      : c.wizard   ? '🧙 Открыть мастер'
+      : s.installed ? '↻ Переустановить'
+      : '⚡ Установить';
+    return `<div style="background:var(--surface);border:1px solid ${c.color}28;border-radius:11px;padding:11px 13px">
+      <label style="display:flex;align-items:flex-start;gap:10px;cursor:pointer;margin:0">
+        <input type="checkbox" ${s.checked?'checked':''} onchange="setupToggle('${c.key}',this.checked)" style="width:auto;margin-top:2px;padding:0;background:none;border:none;flex-shrink:0"/>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+            <span style="font-size:14px">${c.icon}</span>
+            <span style="font-size:12.5px;font-weight:800;color:${c.color};font-family:var(--display)">${c.label}</span>
+            ${tag}
+            <span style="margin-left:auto">${badge}</span>
+          </div>
+          <div style="font-size:10.5px;color:var(--muted);line-height:1.55;margin-top:4px">${c.desc}</div>
+          <div style="height:6px;background:rgba(255,255,255,.06);border-radius:5px;overflow:hidden;margin-top:8px;display:${barShow?'block':'none'}">
+            <div style="height:100%;width:${animate?100:pct}%;background:${c.color};border-radius:5px;transition:width .3s${animate?';animation:amd-blink 1s infinite':''}"></div>
+          </div>
+        </div>
+      </label>
+      <div style="display:flex;justify-content:flex-end;margin-top:8px">
+        <button class="btn-ghost btn-sm" style="padding:3px 11px;font-size:10.5px;border-color:${c.color}55;color:${c.color}"
+          ${s.running||setupRunning?'disabled':''} onclick="installOne('${c.key}')">${btnLabel}</button>
       </div>
-      <div style="font-family:var(--mono);font-size:10px;color:${ok?'rgba(255,255,255,.5)':'var(--red)'};word-break:break-all">
-        ${ok ? t.version : 'Not installed'}
-      </div>
-      ${ok && t.path ? `<div style="font-family:var(--mono);font-size:9px;color:var(--muted2);margin-top:2px;word-break:break-all">${t.path}</div>` : ''}
     </div>`;
   }).join('');
 }
 
-async function runSetup() {
+function setupToggle(key, checked){ (setupCompState[key] = setupCompState[key]||{}).checked = checked; }
+function setupSelectAll(on){ SETUP_COMPONENTS.forEach(c => { (setupCompState[c.key]=setupCompState[c.key]||{}).checked = on; }); renderChecklist(); }
+
+function updateSetupBadge(){
+  // Nav badge = selected-but-missing components + (1 if a Ripster update is available).
+  const missing = SETUP_COMPONENTS.filter(c => { const s=setupCompState[c.key]||{}; return s.checked && !s.installed; }).length;
+  const upd = (_ripsterUpdate && _ripsterUpdate.available) ? 1 : 0;
+  const n = missing + upd;
+  const badge = document.getElementById('setup-badge');
+  if(badge){ badge.style.display = n ? '' : 'none'; badge.textContent = n || ''; }
+}
+
+// ── Ripster self-update ────────────────────────────────────────────────────
+let _ripsterUpdate = null;   // last /api/update/check result
+let _updateApplying = false;
+
+async function checkRipsterUpdate(silent){
+  const st = document.getElementById('ripster-update-status');
+  const verLine = document.getElementById('ripster-version-line');
+  const applyBtn = document.getElementById('btn-update-apply');
+  const log = document.getElementById('ripster-update-changelog');
+  if(!silent && st){ st.textContent = 'Проверяю GitHub…'; st.style.color = 'var(--muted)'; }
+  try {
+    const d = await api('GET','/api/update/check');
+    _ripsterUpdate = d;
+    if(verLine) verLine.textContent = d.current ? ('v'+d.current) : '';
+    if(!d.ok){
+      if(st){ st.textContent = '✗ ' + (d.error || 'не удалось проверить'); st.style.color = '#c084a0'; }
+      if(applyBtn) applyBtn.style.display = 'none';
+      updateSetupBadge();
+      return d;
+    }
+    if(d.available){
+      if(st){ st.innerHTML = `🆕 Доступна <b style="color:#30d158">v${esc(d.latest)}</b> (у тебя v${esc(d.current)}).`; st.style.color = 'var(--text)'; }
+      if(applyBtn) applyBtn.style.display = '';
+      if(log && d.changelog){ log.style.display = 'block'; log.textContent = d.changelog; }
+    } else {
+      if(st){ st.textContent = `✓ Установлена последняя версия (v${d.current}).`; st.style.color = '#30d158'; }
+      if(applyBtn) applyBtn.style.display = 'none';
+      if(log) log.style.display = 'none';
+    }
+    updateSetupBadge();
+    return d;
+  } catch(e){
+    if(!silent && st){ st.textContent = '✗ ' + e.message; st.style.color = '#c084a0'; }
+    return null;
+  }
+}
+
+async function applyRipsterUpdate(){
+  if(_updateApplying) return;
+  if(!_ripsterUpdate || !_ripsterUpdate.available){ toast('Сначала проверь обновления','var(--orange)'); return; }
+  if(!confirm(`Обновить Ripster до v${_ripsterUpdate.latest}?\n\nФайлы кода и интерфейса будут перезаписаны, затем потребуется рестарт. Настройки/токены/ключи/загрузки не трогаются. При сбое — автоматический откат.`)) return;
+  _updateApplying = true;
+  const st = document.getElementById('ripster-update-status');
+  const applyBtn = document.getElementById('btn-update-apply');
+  if(applyBtn){ applyBtn.disabled = true; applyBtn.textContent = '⏳ Обновляю…'; }
+  if(st){ st.textContent = '⏳ Скачиваю и применяю обновление… (не закрывай окно)'; st.style.color = 'var(--orange)'; }
+  try {
+    const d = await api('POST','/api/update/apply');
+    if(d && d.ok){
+      if(st){ st.innerHTML = '✅ Обновление применено. Нужен рестарт, чтобы новая версия заработала.'; st.style.color = '#30d158'; }
+      _ripsterUpdate = null;
+      showRestartBanner('Ripster обновлён — перезапусти, чтобы применить новую версию.');
+      toast('Обновление готово — нажми «Restart now»','var(--green)');
+    } else {
+      const rb = d && d.rolled_back ? ' (откат выполнен — установка в порядке)' : '';
+      if(st){ st.textContent = `✗ Сбой на этапе «${(d&&d.stage)||'?'}»: ${(d&&d.error)||'?'}${rb}`; st.style.color = '#c084a0'; }
+    }
+  } catch(e){
+    if(st){ st.textContent = '✗ ' + e.message; st.style.color = '#c084a0'; }
+  } finally {
+    _updateApplying = false;
+    if(applyBtn){ applyBtn.disabled = false; applyBtn.textContent = '⬆️ Обновить сейчас'; }
+    updateSetupBadge();
+  }
+}
+
+// Show the existing "restart required" banner with a custom reason.
+function showRestartBanner(reason){
+  const b = document.getElementById('restart-banner');
+  const r = document.getElementById('restart-reason');
+  if(r && reason) r.textContent = reason;
+  if(b) b.style.display = 'block';
+}
+
+function setOverall(label, pct){
+  const l=document.getElementById('setup-overall-label'), p=document.getElementById('setup-overall-pct'), b=document.getElementById('setup-overall-bar');
+  if(l) l.textContent = label; if(p) p.textContent = pct+'%'; if(b) b.style.width = pct+'%';
+}
+
+// Resolve when a given WS message type arrives (consumed in the WS switch), or time out.
+function waitForWs(type, timeoutMs){
+  return new Promise((resolve,reject)=>{
+    const to = setTimeout(()=>{ _wsWaiters.delete(type); reject(new Error('timeout')); }, timeoutMs||60000);
+    _wsWaiters.set(type, ()=>{ clearTimeout(to); _wsWaiters.delete(type); resolve(); });
+  });
+}
+
+// Install ONE component (used by both the bulk run and each row's own button).
+// Sets s.running/installed/error and renders; returns nothing. Caller owns
+// _activeSetupKey, console clearing and the final checkTools().
+async function _runComponentInstall(c) {
+  const s = setupCompState[c.key] = setupCompState[c.key] || {};
+  s.running = true; s.error = false; s.pct = 0;
+  renderChecklist();
+  try {
+    if(c.wizard){
+      const r = await api('POST', c.endpoint);
+      if(window.toast) toast(r&&r.ok?(r.msg||'Мастер открылся'):('✗ '+((r&&r.error)||'ошибка')), r&&r.ok?c.color:'var(--red)', 7000);
+      s.running=false; s.pct=100;              // wizard runs in its own window
+    } else if(c.wsdone){
+      await api('POST', c.endpoint);            // fire-and-forget; wait for completion WS
+      await waitForWs(c.wsdone, 900000).catch(()=>{});
+      s.running=false; s.pct=100; s.installed=true;
+    } else {
+      const r = await api('POST', c.endpoint);  // await-style component endpoint
+      s.running=false; s.pct=100; s.installed = !!(r&&r.ok);
+      if(r && !r.ok){ s.error = true; if(window.toast) toast(c.label+': '+(r.error||'ошибка'),'var(--red)'); }
+    }
+  } catch(e){ s.running=false; s.error=true; if(window.toast) toast(c.label+': '+((e&&e.message)||e),'var(--red)'); }
+  renderChecklist();
+}
+
+// Install a single component from its own row button.
+async function installOne(key) {
   if(setupRunning) return;
+  const c = SETUP_COMPONENTS.find(x => x.key === key);
+  if(!c) return;
   setupRunning = true;
-  const btn  = document.getElementById('btn-setup');
-  const spin = document.getElementById('setup-spinner');
-  const lbl  = document.getElementById('setup-running-label');
-  btn.disabled = true;
-  btn.textContent = '⏳ Installing…';
-  if(spin) spin.style.display = 'flex';
-  if(lbl)  lbl.textContent = 'Initializing…';
   clearSetupConsole();
-  // Reset step states
-  Object.keys(stepState).forEach(k => stepState[k] = 'idle');
-  renderStepTrack();
-  // Auto-switch to Setup tab
   const setupNav = document.querySelector('.nav-item[data-view="setup"]');
   if(setupNav) showView('setup', setupNav);
-  const r = await fetch('/api/setup', {method:'POST'});
-  if(!r.ok){
-    toast('Setup failed to start','var(--red)');
-    setupRunning = false;
-    btn.disabled = false;
-    btn.textContent = '⚡ Auto-install everything';
-    if(spin) spin.style.display = 'none';
+  _activeSetupKey = key;
+  renderChecklist();          // disable other buttons while running
+  await _runComponentInstall(c);
+  _activeSetupKey = null;
+  setupRunning = false;
+  checkTools();
+}
+
+async function installSelected() {
+  if(setupRunning) return;
+  const sel = SETUP_COMPONENTS.filter(c => (setupCompState[c.key]||{}).checked);
+  if(!sel.length){ toast('Отметь галочками, что установить','var(--orange)'); return; }
+  setupRunning = true;
+  const btn = document.getElementById('btn-setup');
+  if(btn){ btn.disabled = true; btn.textContent = '⏳ Устанавливаю…'; }
+  const overall = document.getElementById('setup-overall');
+  if(overall) overall.style.display = 'block';
+  clearSetupConsole();
+  const setupNav = document.querySelector('.nav-item[data-view="setup"]');
+  if(setupNav) showView('setup', setupNav);
+  let done = 0;
+  for(const c of sel){
+    _activeSetupKey = c.key;
+    setOverall(c.label, Math.round(done/sel.length*100));
+    await _runComponentInstall(c);
+    done++;
+    setOverall(c.label, Math.round(done/sel.length*100));
   }
+  _activeSetupKey = null;
+  setOverall('Готово ✓', 100);
+  if(btn){ btn.disabled=false; btn.textContent='⚡ Установить выбранное'; }
+  setupRunning = false;
+  checkTools();
 }
 
 function appendSetupLog(entry) {
@@ -3469,11 +4519,33 @@ function appendSetupLog(entry) {
   }
   // Also mirror to main console
   appendLog(`[SETUP] ${entry.text}`, entry.level || 'info');
+  // Route a download "NN%" line to the active checklist item's progress bar.
+  if(typeof _activeSetupKey !== 'undefined' && _activeSetupKey) {
+    const m = /(^|\s)(\d{1,3})%\s/.exec(entry.text || '');
+    if(m) {
+      const s = setupCompState[_activeSetupKey];
+      const v = Math.min(100, parseInt(m[2], 10));
+      if(s && v > (s.pct || 0)) { s.pct = v; renderChecklist(); }
+    }
+  }
 }
 
 function clearSetupConsole() {
   const el = document.getElementById('setup-console');
   if(el) el.innerHTML = '';
+}
+
+// Collapse / expand the Setup live-console. When collapsed the wrapper stops
+// claiming the flex space so the panels above breathe; when open it fills the rest.
+function toggleSetupConsole() {
+  const con   = document.getElementById('setup-console');
+  const wrap  = document.getElementById('setup-console-wrap');
+  const caret = document.getElementById('setup-console-caret');
+  if(!con) return;
+  const hidden = con.style.display === 'none';
+  con.style.display = hidden ? '' : 'none';
+  if(wrap)  wrap.style.flex = hidden ? '1' : '0 0 auto';
+  if(caret) caret.style.transform = hidden ? '' : 'rotate(-90deg)';
 }
 
 async function restartApp() {
@@ -3583,9 +4655,7 @@ function updateEngineUI(engine) {
   const isAMD   = engine === 'amd';
   const isZhaar = engine === 'zhaarey';
   // Switch step track defs
-  if(typeof STEP_DEFS_AMD!=='undefined')
-    STEP_DEFS = isAMD ? STEP_DEFS_AMD : isGamdl ? STEP_DEFS_GAMDL : STEP_DEFS_ZHAAREY;
-  renderStepTrack();
+  if(typeof renderChecklist === 'function') renderChecklist();
   // Topbar buttons
   const zh  = document.getElementById('eng-zh');
   const gm  = document.getElementById('eng-gm');
@@ -3670,6 +4740,29 @@ async function importCookiesFile(input) {
     toast('cookies.txt импортирован ✓','var(--green)');
     checkCookies();
   } else toast('Ошибка: '+(r.detail||r.msg||''),'var(--red)');
+  input.value='';
+}
+
+// Pick a cookies.txt from the file explorer for the gamdl Apple section: read it,
+// drop it into the #apple-cookies textarea, and save via the same /api/apple/cookies
+// endpoint as the manual paste — so users don't have to open + copy the file by hand.
+async function importAppleCookiesFile(input) {
+  const file = input.files[0];
+  if(!file) return;
+  const st = document.getElementById('apple-cookies-status');
+  try {
+    const text = await file.text();
+    const el = document.getElementById('apple-cookies');
+    if(el) el.value = text;                         // reflect what was loaded
+    if(st){ st.textContent='…'; st.style.color='var(--muted)'; }
+    const r = await api('POST','/api/apple/cookies',{text});
+    if(r&&r.ok){
+      if(st){ st.textContent = r.exists?('✅ Сохранено: '+r.lines+' cookies'+(r.looks_apple?'':' ⚠ нет apple.com')):'🗑 очищено'; st.style.color='var(--green,#30d158)'; }
+      toast('cookies.txt загружен из файла ✓','var(--green)');
+    } else {
+      if(st){ st.textContent='✗ '+((r&&r.error)||'ошибка'); st.style.color='#fc3c44'; }
+    }
+  } catch(e){ if(st){ st.textContent='✗ '+e; st.style.color='#fc3c44'; } }
   input.value='';
 }
 
@@ -4344,6 +5437,16 @@ function renderAlbumPage(){
   const _emptyMsg = service === 'apple'
     ? 'DJ-миксы и live-записи Apple Music не возвращают отдельные треки — скачать можно весь альбом целиком.'
     : 'Трек-лист недоступен — скачать можно весь альбом целиком.';
+  // Per-track selection toolbar (checkboxes + select-all / per-disc / clear all).
+  const _discsSet = [...new Set(tracks.map(t => t.disc || 1))].sort((a,b)=>(+a)-(+b));
+  const _selBtnCss = 'padding:5px 11px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)';
+  const _selToolbar = tracks.length === 0 ? '' : `
+    <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:10px">
+      <button onclick="albumSelectAll(true)" style="${_selBtnCss}">☑ Выбрать всё</button>
+      <button onclick="albumSelectAll(false)" style="${_selBtnCss}">☐ Снять все</button>
+      ${_discsSet.length>1 ? _discsSet.map(d=>`<button onclick="albumSelectDisc('${d}')" style="${_selBtnCss}">💿 Диск ${d}</button>`).join('') : ''}
+      <button id="alb-dl-sel" onclick="albumDownloadSelected()" disabled style="margin-left:auto;padding:6px 14px;background:var(--red);color:#fff;border:none;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font);opacity:.5">⬇ Скачать выбранное (0)</button>
+    </div>`;
   const tracksList = tracks.length === 0
     ? `<div style="text-align:center;padding:40px 0;color:var(--muted)">
         <div style="font-size:28px;margin-bottom:8px">📻</div>
@@ -4351,9 +5454,10 @@ function renderAlbumPage(){
         <div style="font-size:11px;margin-bottom:14px">${_emptyMsg}</div>
         <button onclick="albumAddAll()" style="padding:7px 16px;background:var(--red);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">${t('btn.download_album')}</button>
       </div>`
-    : `<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">
+    : _selToolbar + `<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">
         ${tracks.map((t, i) => `
           <div id="alb-row-${t.id}" style="display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid var(--border);${i===tracks.length-1?'border-bottom:none':''}" onmouseover="this.style.background='rgba(255,255,255,.03)'" onmouseout="this.style.background=''">
+            <input type="checkbox" class="alb-trk-cb" data-disc="${t.disc||1}" data-url="${esc(t.url||'')}" ${t.url?'':'disabled'} onchange="_albumUpdateSelCount()" style="width:auto;margin:0;padding:0;background:none;border:none;flex-shrink:0;cursor:pointer" title="Выбрать для скачивания"/>
             <div style="width:26px;text-align:center;color:var(--muted);font-size:11px;font-family:var(--mono);flex-shrink:0">${t.track_no||i+1}</div>
             ${canStream
               ? `<button id="alb-play-${t.id}" onclick="playAlbumStreamTrack(${_streamIdx[t.id]??0})" style="width:28px;height:28px;border-radius:50%;background:rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.12);color:${streamColor};border:1px solid rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.25);cursor:pointer;font-size:10px;flex-shrink:0;transition:background .12s,color .12s;display:inline-flex;align-items:center;justify-content:center;line-height:1" title="Полный трек ▶">▶</button>`
@@ -4420,6 +5524,30 @@ async function albumAddAll(){
   const r = await api('POST', '/api/queue/add', {url: album.url, quality: resolveQuality(detectSvcFromUrl(album.url) || 'apple'), title: album.title, artist: album.artist});
   if(r.ok) toast(`+ ${album.title} → очередь`);
   else toast('Ошибка: '+(r.detail||'?'),'var(--red)');
+}
+
+// ── Album per-track selection: checkboxes + select-all / per-disc / clear ──────
+function _albumSelCbs(){ return Array.from(document.querySelectorAll('#detail-content .alb-trk-cb')); }
+function albumSelectAll(on){ _albumSelCbs().forEach(cb => { if(!cb.disabled) cb.checked = !!on; }); _albumUpdateSelCount(); }
+function albumSelectDisc(d){ _albumSelCbs().forEach(cb => { cb.checked = !cb.disabled && String(cb.dataset.disc) === String(d); }); _albumUpdateSelCount(); }
+function _albumUpdateSelCount(){
+  const n = _albumSelCbs().filter(cb => cb.checked).length;
+  const b = document.getElementById('alb-dl-sel');
+  if(b){ b.textContent = `⬇ Скачать выбранное (${n})`; b.disabled = n === 0; b.style.opacity = n ? '1' : '.5'; }
+}
+async function albumDownloadSelected(){
+  const sel = _albumSelCbs().filter(cb => cb.checked && cb.dataset.url);
+  if(!sel.length){ toast('Отметь треки галочками','var(--orange)'); return; }
+  const svc = (typeof Detail !== 'undefined' && Detail.currentAlbum) ? Detail.currentAlbum.service : 'apple';
+  const q = resolveQuality(svc);
+  const b = document.getElementById('alb-dl-sel');
+  if(b){ b.disabled = true; b.textContent = '⏳ Добавляю…'; }
+  let ok = 0;
+  for(const cb of sel){
+    try { const r = await api('POST','/api/queue/add',{url: cb.dataset.url, quality: q}); if(r && r.ok) ok++; } catch {}
+  }
+  toast(`+ ${ok}/${sel.length} ${ok===1?'трек':'треков'} → очередь`, ok ? 'var(--green)' : 'var(--red)');
+  if(b){ b.textContent = `⬇ Скачать выбранное (${sel.length})`; b.disabled = false; b.style.opacity = '1'; }
 }
 
 async function artistReleaseDownload(service, releaseId, title, artist) {
@@ -4624,6 +5752,89 @@ async function clearHistory() {
 }
 
 // ══ WATCHLIST ═════════════════════════════════════════════════════
+async function loadWatchlist() {
+  const r = await api('GET','/api/watchlist');
+  const items = r.items||[];
+  const list  = document.getElementById('wl-list');
+  const emp   = document.getElementById('wl-empty');
+  if(emp) emp.style.display = items.length?'none':'';
+  if(!list) return;
+  list.innerHTML = items.map(w => `
+    <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:7px">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600;color:var(--text)">${w.name||w.url}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:2px">
+          ${w.service||'apple'} · ${w.auto_download?'Авто-скачивание':'Только уведомление'}
+          ${w.last_check?' · Проверено: '+new Date(w.last_check).toLocaleString('ru'):''}
+          ${w.last_release?'<span style="color:var(--green);margin-left:6px">Новый релиз!</span>':''}
+        </div>
+      </div>
+      <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);cursor:pointer;white-space:nowrap">
+        <input type="checkbox" ${w.auto_download?'checked':''} onchange="wlToggleAuto('${w.id}',this.checked)"/> Авто
+      </label>
+      <button onclick="wlRemove('${w.id}')"
+        style="padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)">
+        ✕
+      </button>
+    </div>`).join('');
+}
+
+async function wlAdd() {
+  const name = document.getElementById('wl-name')?.value?.trim();
+  const url  = document.getElementById('wl-url')?.value?.trim();
+  const svc  = document.getElementById('wl-svc')?.value||'apple';
+  const auto = document.getElementById('wl-auto')?.checked !== false;
+  if(!name && !url){ toast('Введи имя артиста'); return; }
+  const r = await api('POST','/api/watchlist',{name,url,service:svc,auto_download:auto});
+  if(r.ok){ toast(`+ ${name||url} → watchlist`,'var(--green)'); loadWatchlist(); document.getElementById('wl-name').value=''; document.getElementById('wl-url').value=''; }
+  else toast('Ошибка: '+(r.detail||''),'var(--red)');
+}
+
+async function wlRemove(id) {
+  await api('DELETE','/api/watchlist/'+id);
+  loadWatchlist();
+}
+
+async function wlToggleAuto(id, val) {
+  // Update via re-add (simple)
+  toast(val?'Авто-скачивание включено':'Только уведомление');
+}
+
+async function wlCheckNow() {
+  // The WS events (watchlist_check_*) drive the status line now.
+  // A toast would be redundant.
+  await api('POST','/api/watchlist/check');
+}
+
+// ── Watchlist status line (driven by WS events) ───────────────────────────
+// Shown while `/api/watchlist/check` (or the 6-hour background loop) runs.
+// Design: single row with text + count + thin progress bar. Auto-hides via
+// clearWatchlistStatus() 4s after completion.
+function setWatchlistStatus(text, current, total, color){
+  const bar   = document.getElementById('wl-status-bar');
+  const txt   = document.getElementById('wl-status-text');
+  const cnt   = document.getElementById('wl-status-count');
+  const fill  = document.getElementById('wl-status-fill');
+  if(!bar) return;
+  bar.style.display = '';
+  if(txt) txt.textContent = text || '';
+  if(cnt) cnt.textContent = total ? `${current}/${total}` : '';
+  if(fill) {
+    const pct = total > 0 ? Math.round(100 * current / total) : 0;
+    fill.style.width = pct + '%';
+    fill.style.background = color || 'var(--red)';
+  }
+}
+function clearWatchlistStatus(){
+  const bar = document.getElementById('wl-status-bar');
+  if(bar) bar.style.display = 'none';
+}
+
+// ── Releases view status line (Spotify scan progress) ─────────────────────
+// The Spotify releases scan walks every followed artist and their albums —
+// easily 30+ seconds for well-followed users. Without status, "Загружаю
+// релизы…" looks frozen. These helpers render a live progress bar driven by
+// WS events (releases_scan_start / _progress / _done).
 function setReleasesStatus(text, current, total, color){
   const bar   = document.getElementById('rel-status-bar');
   const txt   = document.getElementById('rel-status-text');
@@ -4791,6 +6002,12 @@ function showStab(id, btn) {
     setVal('s-amazon-qual', c['amazon-quality']||'High');
     setVal('s-amazon-path', c['amazon-save-path']||'');
   }
+  if(id==='admin') {
+    loadAdminLinks();
+    loadRemoteStatus();
+    loadTunnelStatus();
+  }
+  if(id==='bot') loadBotConfig();
   if(id==='global')  {
     loadAuthStatus();
     setChk('s-queue-autostart', c['queue-autostart']!==false);
@@ -4799,6 +6016,67 @@ function showStab(id, btn) {
     const vl = document.getElementById('s-max-parallel-val');
     if(sl) sl.value = mp;
     if(vl) vl.textContent = mp;
+  }
+}
+
+// ══ BOT CONFIG TAB ════════════════════════════════════════════════════
+// Reads/writes tgbot/config.json via /api/admin/bot-config so the bot token,
+// owner id, local Bot API, cache channel etc. are edited from the UI instead of
+// hand-editing the file (TASKS #12). Secrets (bot_token/api_hash) are never sent
+// back from the server — only a "set" flag — and a blank secret field leaves the
+// stored value untouched.
+async function loadBotConfig(){
+  const setSet = (elId, on) => { const e=document.getElementById(elId); if(e){ e.textContent = on ? '✓ задан' : '— не задан'; e.style.color = on ? 'var(--green)' : 'var(--muted)'; } };
+  try {
+    const c = await api('GET','/api/admin/bot-config');
+    setVal('b-owner-id',        c['owner_id'] ?? '');
+    setVal('b-api-id',          c['api_id'] ?? '');
+    setVal('b-local-api',       c['local_bot_api'] ?? '');
+    setVal('b-max-upload',      c['max_upload_mb'] ?? '');
+    setVal('b-cache-id',        c['cache_channel_id'] ?? '');
+    setVal('b-cache-link',      c['cache_channel_link'] ?? '');
+    setVal('b-backend-url',     c['backend_url'] ?? '');
+    setVal('b-default-quality', c['default_quality'] ?? '');
+    // Secrets: never populate the input, just show whether one is stored.
+    const tok=document.getElementById('b-bot-token'); if(tok) tok.value='';
+    const ah =document.getElementById('b-api-hash');  if(ah)  ah.value='';
+    setSet('bot-token-set',   c['bot_token_set']);
+    setSet('bot-apihash-set', c['api_hash_set']);
+  } catch(e) {
+    const s=document.getElementById('bot-config-status');
+    if(s){ s.textContent=t('err.generic')+': '+e.message; s.style.color='var(--red)'; }
+  }
+}
+
+async function saveBotConfig(){
+  const s = document.getElementById('bot-config-status');
+  const v = id => (document.getElementById(id)?.value ?? '').trim();
+  // Non-secret fields are pre-filled by loadBotConfig, so they carry the current
+  // value unless the user changed them. Blank secrets are skipped server-side.
+  const body = {
+    bot_token:          v('b-bot-token'),
+    owner_id:           v('b-owner-id'),
+    api_id:             v('b-api-id'),
+    api_hash:           v('b-api-hash'),
+    local_bot_api:      v('b-local-api'),
+    max_upload_mb:      v('b-max-upload'),
+    cache_channel_id:   v('b-cache-id'),
+    cache_channel_link: v('b-cache-link'),
+    backend_url:        v('b-backend-url'),
+    default_quality:    v('b-default-quality'),
+  };
+  if(s){ s.textContent='…'; s.style.color='var(--muted)'; }
+  try {
+    const r = await api('POST','/api/admin/bot-config', body);
+    const n = (r.changed||[]).length;
+    let msg = n ? `✓ Сохранено (${n})` : '✓ Без изменений';
+    if(r.restart_required) msg += ' — нужен рестарт бота';
+    if(s){ s.textContent=msg; s.style.color = r.restart_required ? 'var(--orange)' : 'var(--green)'; }
+    try { toast(msg, r.restart_required ? 'var(--orange)' : 'var(--green)'); } catch {}
+    loadBotConfig();
+  } catch(e) {
+    if(s){ s.textContent=t('err.generic')+': '+e.message; s.style.color='var(--red)'; }
+    try { toast('✗ '+e.message, 'var(--red)'); } catch {}
   }
 }
 
@@ -5012,10 +6290,10 @@ async function showGuestServiceInfo() {
 // ── Token probe: show live auth status for Qobuz/Tidal/Deezer ─────────────
 async function testAuth(service){
   const out = document.getElementById('test-auth-' + service);
-  if(out){ out.textContent = 'Проверяю…'; out.style.color = 'var(--muted)'; }
+  if(out){ out.textContent = t('s.checking'); out.style.color = 'var(--muted)'; }
   try {
     const r = await fetch('/api/test-auth/' + service, {method: 'POST'});
-    const d = await r.json().catch(()=>({ok:false,error:'Неверный ответ сервера'}));
+    const d = await r.json().catch(()=>({ok:false,error:t('s.bad_response')}));
     if(d.ok) {
       const u = d.user || {};
       const parts = [];
@@ -5034,12 +6312,12 @@ async function testAuth(service){
       if(u.note) parts.push(`<span style="color:var(--muted)">${esc(u.note)}</span>`);
       const tag = parts.length ? ' &nbsp;' + parts.join(' · ') : '';
       const _lbl = (typeof _svcLabel === 'function' ? _svcLabel(service) : service);
-      if(out){ out.innerHTML = `<span style="color:var(--green);font-weight:700">✓ ${esc(_lbl)} работает</span>` + tag; }
+      if(out){ out.innerHTML = `<span style="color:var(--green);font-weight:700">✓ ${esc(_lbl)} ${t('s.works')}</span>` + tag; }
     } else {
-      if(out){ out.innerHTML = '<span style="color:var(--red)">✗ ' + esc(d.error || 'Неизвестная ошибка') + '</span>'; }
+      if(out){ out.innerHTML = '<span style="color:var(--red)">✗ ' + esc(d.error || t('s.unknown_error')) + '</span>'; }
     }
   } catch(e) {
-    if(out){ out.innerHTML = '<span style="color:var(--red)">✗ Ошибка сети: ' + esc(e.message) + '</span>'; }
+    if(out){ out.innerHTML = '<span style="color:var(--red)">✗ ' + t('s.net_error') + ': ' + esc(e.message) + '</span>'; }
   }
 }
 
@@ -5330,6 +6608,190 @@ async function autoExtractSpDc() {
 // ── Statistics ────────────────────────────────────────────────────
 let _statsPeriod = 'week';
 
+async function loadStats(period) {
+  if (period) _statsPeriod = period;
+
+  // Period tab highlight
+  document.querySelectorAll('#stats-period-tabs .stab').forEach(b => {
+    const on = b.dataset.p === _statsPeriod;
+    b.style.borderBottomColor = on ? 'var(--green)' : 'transparent';
+    b.style.color      = on ? 'var(--text)' : '';
+    b.style.fontWeight = on ? '700' : '';
+  });
+
+  const set = (id, html) => { const el = document.getElementById(id); if (el) el.innerHTML = html; };
+  const note = msg => set('stats-hero', `<div style="grid-column:1/-1;color:var(--muted);font-size:12px;padding:8px 0">${msg}</div>`);
+
+  let d = null, httpStatus = 0;
+  try {
+    const resp = await fetch(`/api/stats?period=${_statsPeriod}`);
+    httpStatus = resp.status;
+    d = await resp.json().catch(() => null);
+  } catch (_) { d = null; }
+
+  if (httpStatus === 401 || (d && d.error === 'unauthorized')) {
+    note('🔒 Сессия не авторизована — обнови страницу (Ctrl+F5) и войди заново.');
+    return;
+  }
+  if (!d || d.error) {
+    note(`Статистика недоступна${d && d.error ? ': ' + esc(d.error) : ''}`);
+    return;
+  }
+  const t = d.totals || {};
+
+  // ── Hero cards ──
+  const hero = [
+    { icon: '⬇',  label: 'Загрузок',     val: t.downloads,       color: 'var(--green)'  },
+    { icon: '♪',  label: 'Треков',        val: t.tracks,          color: 'var(--blue)'   },
+    { icon: '🎧', label: 'Прослушиваний', val: t.stream_sessions, color: 'var(--red)'    },
+    { icon: '👤', label: 'Гостей',        val: t.guests,          color: 'var(--purple)' },
+  ];
+  set('stats-hero', hero.map(c => `
+    <div class="card" style="padding:14px 16px;display:flex;align-items:center;gap:12px">
+      <div style="font-size:24px;line-height:1">${c.icon}</div>
+      <div style="min-width:0">
+        <div style="font-size:24px;font-weight:800;color:${c.color};font-family:var(--mono);line-height:1.1">${_fmt(c.val || 0)}</div>
+        <div style="font-size:11px;color:var(--muted);margin-top:1px">${c.label}</div>
+      </div>
+    </div>`).join(''));
+
+  // ── Bar-list helper ──
+  function bars(items, opts) {
+    opts = opts || {};
+    const nameKey  = opts.nameKey  || 'name';
+    const countKey = opts.countKey || 'count';
+    const color    = opts.color    || 'var(--green)';
+    const lw       = opts.labelWidth || 120;
+    if (!items || !items.length)
+      return '<div style="color:var(--muted);font-size:11px;padding:3px 0">Нет данных</div>';
+    const max = opts.max || Math.max(...items.map(r => r[countKey] || 0), 1);
+    return items.map(r => {
+      const pct  = Math.round((r[countKey] || 0) / max * 100);
+      const name = r[nameKey] || '—';
+      const bcol = typeof color === 'function' ? color(r) : color;
+      const bdg  = opts.badge ? opts.badge(r) : '';
+      return `<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+        <div style="width:${lw}px;font-size:11px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:0" title="${esc(name)}">${esc(name)}</div>
+        ${bdg}
+        <div style="flex:1;height:8px;background:var(--surface2);border-radius:4px;overflow:hidden;min-width:24px">
+          <div style="width:${pct}%;height:100%;background:${bcol};border-radius:4px;transition:width .4s"></div>
+        </div>
+        <div style="font-size:10px;color:var(--muted);font-family:var(--mono);width:32px;text-align:right;flex-shrink:0">${_fmt(r[countKey] || 0)}</div>
+      </div>`;
+    }).join('');
+  }
+
+  const STREAM_COLOR = { qobuz:'#1870f5', tidal:'#00d4b3', deezer:'#a238ff', bbc:'#e4003b', generic:'var(--muted2)' };
+  const STREAM_LABEL = { qobuz:'Qobuz', tidal:'Tidal', deezer:'Deezer', bbc:'BBC', generic:'Другое' };
+
+  // ── Listening: split tiles ──
+  const splitTiles = [
+    { label: 'Превью треков', val: t.preview_sessions || 0, color: 'var(--green)' },
+    { label: 'BBC Sounds',    val: t.bbc_sessions || 0,     color: '#e4003b'      },
+  ].map(c => `
+    <div style="background:var(--surface2);border-radius:9px;padding:10px 12px">
+      <div style="font-size:20px;font-weight:800;color:${c.color};font-family:var(--mono)">${_fmt(c.val)}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">${c.label}</div>
+    </div>`).join('');
+  const typeTiles = (d.by_stream_type || []).map(r => `
+    <div style="background:var(--surface2);border-radius:9px;padding:10px 12px">
+      <div style="font-size:20px;font-weight:800;color:${STREAM_COLOR[r.name] || 'var(--muted2)'};font-family:var(--mono)">${_fmt(r.count || 0)}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">${STREAM_LABEL[r.name] || esc(r.name || '—')}</div>
+    </div>`).join('');
+  set('stats-listen-split', splitTiles + typeTiles);
+
+  // ── Listening: top played ──
+  const topL = d.top_streams || [];
+  set('stats-listen-top', topL.length
+    ? '<div style="font-size:11px;color:var(--muted);margin-bottom:7px">Топ прослушанного</div>' +
+      bars(topL, {
+        color: r => STREAM_COLOR[r.stream_type] || 'var(--green)',
+        badge: r => {
+          const st = r.stream_type || 'generic';
+          const c  = STREAM_COLOR[st] || 'var(--muted2)';
+          return `<div style="font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:${c};background:${c}22;border-radius:4px;padding:2px 6px;flex-shrink:0">${STREAM_LABEL[st] || esc(st)}</div>`;
+        },
+      })
+    : '<div style="color:var(--muted);font-size:11px">Пока ничего не слушали</div>');
+
+  // ── Listening history — recent plays, newest first ──
+  const recent = d.recent_listens || [];
+  set('stats-listen-recent', recent.length
+    ? '<div style="font-size:11px;color:var(--muted);margin-bottom:7px">История прослушки</div>' +
+      recent.slice(0, 40).map(e => {
+        const st  = e.type || 'generic';
+        const c   = STREAM_COLOR[st] || 'var(--muted2)';
+        const dt  = new Date((e.ts || 0) * 1000);
+        const tm  = dt.toDateString() === new Date().toDateString()
+          ? dt.toTimeString().slice(0, 5)
+          : `${dt.getDate()}.${String(dt.getMonth()+1).padStart(2,'0')} ${dt.toTimeString().slice(0,5)}`;
+        return `<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:11px;border-top:1px solid var(--surface2)">
+          <span style="color:var(--muted2);font-family:var(--mono);width:78px;flex-shrink:0">${tm}</span>
+          <span style="font-size:8px;font-weight:700;text-transform:uppercase;color:${c};background:${c}22;border-radius:4px;padding:2px 6px;flex-shrink:0">${STREAM_LABEL[st] || esc(st)}</span>
+          <span style="color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(e.name)}">${esc(e.name)}</span>
+        </div>`;
+      }).join('')
+    : '');
+
+  // ── Service / quality ──
+  set('stats-by-service', bars((d.by_service || []).map(r => ({ name: r.label || r.name || '—', count: r.count })), { color:'var(--green)' }));
+  set('stats-by-quality', bars((d.by_quality || []).map(r => ({ name: (r.name || '—').toUpperCase(), count: r.count })), { color:'var(--orange)' }));
+
+  // ── Top artists ──
+  set('stats-by-artist', bars((d.by_artist || []).slice(0, 20), { color:'var(--purple)', labelWidth:110 }));
+
+  // ── Timeline by day ──
+  const days = d.by_day || [];
+  const tlMax = Math.max(...days.map(r => r.count || 0), 1);
+  set('stats-timeline', days.length
+    ? days.map(r => {
+        const pct = Math.max(Math.round((r.count || 0) / tlMax * 100), 2);
+        return `<div title="${esc(r.date || '')}: ${_fmt(r.count || 0)}" style="flex:1;min-width:11px;max-width:30px;background:var(--green);border-radius:3px 3px 0 0;height:${pct}%;min-height:2px;opacity:.85"></div>`;
+      }).join('')
+    : '<div style="color:var(--muted);font-size:11px">Нет данных</div>');
+  const tlStep = days.length > 30 ? Math.ceil(days.length / 10) : (days.length > 14 ? 3 : 1);
+  set('stats-tl-labels', days.map((r, i) =>
+    `<div style="flex:1;min-width:11px;max-width:30px;text-align:center;overflow:hidden">${i % tlStep === 0 ? (r.date || '').slice(5) : ''}</div>`).join(''));
+
+  // ── By hour ──
+  const hours = Array.isArray(d.by_hour) ? d.by_hour : [];
+  const hMax = Math.max(...hours.map(h => h.count || 0), 1);
+  set('stats-by-hour', hours.map(h => {
+    const pct = Math.round((h.count || 0) / hMax * 100);
+    const col = h.hour < 6 ? 'var(--muted2)' : h.hour < 12 ? 'var(--blue)' : h.hour < 18 ? 'var(--green)' : 'var(--purple)';
+    return `<div title="${String(h.hour).padStart(2,'0')}:00 — ${_fmt(h.count || 0)}" style="flex:1;background:${col};opacity:${0.25 + pct/100*0.75};border-radius:2px 2px 0 0;height:${Math.max(pct,3)}%;min-height:3px"></div>`;
+  }).join(''));
+  set('stats-hour-labels', [0,6,12,18,23].map(h =>
+    `<div style="flex:${h===0?1:h===23?1:6};text-align:${h===0?'left':h===23?'right':'center'}">${String(h).padStart(2,'0')}</div>`).join(''));
+
+  // ── By weekday ──
+  const wd = d.by_weekday || [];
+  set('stats-by-weekday', bars(wd, {
+    labelWidth: 28,
+    color: r => r.day >= 5 ? 'var(--orange)' : 'var(--blue)',
+    max: Math.max(...wd.map(r => r.count || 0), 1),
+  }));
+
+  // ── Guests ──
+  set('stats-guests', `
+    <div style="display:flex;gap:28px;flex-wrap:wrap">
+      <div><span style="font-size:20px;font-weight:800;color:var(--purple);font-family:var(--mono)">${_fmt(t.guests || 0)}</span>
+        <span style="font-size:12px;color:var(--muted);margin-left:6px">уникальных гостей</span></div>
+      <div><span style="font-size:20px;font-weight:800;color:var(--orange);font-family:var(--mono)">${_fmt(Math.round(t.guest_minutes || 0))}</span>
+        <span style="font-size:12px;color:var(--muted);margin-left:6px">минут онлайн</span></div>
+    </div>`);
+
+  const footEl = document.getElementById('stats-footer');
+  if (footEl) footEl.textContent = 'Данные за: ' +
+    ({ day:'24 часа', week:'7 дней', month:'30 дней', year:'365 дней', all:'всё время' }[_statsPeriod] || _statsPeriod);
+}
+
+function _fmt(n) {
+  if (n == null) return '0';
+  return n >= 1000 ? (n/1000).toFixed(1)+'k' : String(n);
+}
+
+// ── OrpheusDL (Spotify) ───────────────────────────────────────────
 async function loadOrpheusStatus() {
   const r = await api('GET', '/api/orpheus/status').catch(()=>null);
   const badge   = document.getElementById('orp-badge');
@@ -5520,8 +6982,8 @@ async function loadBeatportStatus() {
 async function installBeatportModule() {
   const btn = document.getElementById('btn-bp-install');
   if(btn){ btn.disabled=true; btn.textContent='⏳ Устанавливаю…'; }
-  const nav = document.querySelector('.nav-item[data-view="log"]');
-  if(nav) showView('log', nav);
+  const nav = document.querySelector('.nav-item[data-view="setup"]');
+  if(nav) showView('setup', nav);   // install streams to the Setup console now
   toast('⬇ Устанавливаю orpheusdl-beatport…','#01f49c');
   try {
     await api('POST', '/api/setup/beatport');
@@ -6263,6 +7725,112 @@ function _updateMediaSession(item, sub) {
 // ── Local library (downloaded files) ──────────────────────────────────────
 const _LIB = { items: [], ts: 0, loaded: false, loading: false };
 
+function libInit() {
+  if (!_LIB.loaded && !_LIB.loading) loadLibrary(false);
+}
+
+async function loadLibrary(refresh = false) {
+  const status  = document.getElementById('lib-status');
+  const btn     = document.getElementById('lib-refresh-btn');
+  const rootsEl = document.getElementById('lib-roots');
+  const empty   = document.getElementById('lib-empty');
+  if (status) { status.textContent = '⟳ Сканирую…'; status.style.display = 'block'; }
+  if (btn) btn.disabled = true;
+  _LIB.loading = true;
+  try {
+    const r = await fetch(`/api/library/scan${refresh ? '?refresh=1' : ''}`);
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || 'scan failed');
+    _LIB.items  = d.items || [];
+    _LIB.ts     = d.ts || Date.now() / 1000;
+    _LIB.loaded = true;
+    if (rootsEl) rootsEl.textContent = (d.roots || []).map(x => '📂 ' + x).join('   ');
+    const badge = document.getElementById('lib-badge');
+    if (badge) {
+      badge.textContent     = _LIB.items.length;
+      badge.style.display   = _LIB.items.length ? '' : 'none';
+    }
+    if (status) status.style.display = 'none';
+    if (empty)  empty.style.display  = _LIB.items.length ? 'none' : '';
+    _libApplyFilter();
+  } catch (e) {
+    if (status) { status.textContent = '✗ ' + e.message; status.style.color = 'var(--red)'; }
+  } finally {
+    _LIB.loading = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+function _libApplyFilter() {
+  const q = (document.getElementById('lib-q')?.value || '').toLowerCase().trim();
+  const sort = document.getElementById('lib-sort')?.value || 'recent';
+  let items = _LIB.items.slice();
+  if (q) {
+    items = items.filter(it =>
+      (it.title  || '').toLowerCase().includes(q) ||
+      (it.artist || '').toLowerCase().includes(q) ||
+      (it.album  || '').toLowerCase().includes(q)
+    );
+  }
+  switch (sort) {
+    case 'artist': items.sort((a,b) => (a.artist||'').localeCompare(b.artist||'') || (a.album||'').localeCompare(b.album||'')); break;
+    case 'album':  items.sort((a,b) => (a.album ||'').localeCompare(b.album ||'')); break;
+    case 'title':  items.sort((a,b) => (a.title ||'').localeCompare(b.title ||'')); break;
+    default:       items.sort((a,b) => (b.mtime||0) - (a.mtime||0));   // recent first
+  }
+  const list = document.getElementById('lib-list');
+  if (!list) return;
+  // Render up to 500 rows at once — past that it's a virtualization problem (Phase 2).
+  const slice = items.slice(0, 500);
+  list.innerHTML = slice.map(_libRow).join('');
+  if (items.length > 500) {
+    list.insertAdjacentHTML('beforeend',
+      `<div style="padding:14px;text-align:center;color:var(--muted);font-size:11px">+${items.length - 500} ещё — уточни поиск</div>`);
+  }
+}
+
+function _libRow(it) {
+  const dur = it.duration ? fmtDur(it.duration) : '';
+  const cov = it.has_cover ? `<img src="/api/library/cover/${it.id}" style="width:34px;height:34px;border-radius:4px;object-fit:cover;flex-shrink:0;background:var(--surface2)" loading="lazy" onerror="this.style.display='none'"/>`
+                           : `<div style="width:34px;height:34px;border-radius:4px;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:14px;color:var(--muted);flex-shrink:0">♪</div>`;
+  const extBadge = `<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(192,132,160,.12);color:#c084a0;font-family:var(--mono);font-weight:700">${(it.ext||'').toUpperCase()}</span>`;
+  return `<div onclick="playLibraryTrack('${escJ(it.id)}')" style="display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:background .12s,border-color .12s" onmouseover="this.style.background='rgba(192,132,160,.05)';this.style.borderColor='rgba(192,132,160,.3)'" onmouseout="this.style.background='var(--surface)';this.style.borderColor='var(--border)'">
+    ${cov}
+    <div style="flex:1;min-width:0">
+      <div style="font-size:13px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.title)}">${esc(it.title)}</div>
+      <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(it.artist)} — ${esc(it.album)}">${esc(it.artist || '—')}${it.album ? ' · ' + esc(it.album) : ''}</div>
+    </div>
+    <div style="font-size:11px;color:var(--muted2);font-family:var(--mono);flex-shrink:0">${dur}</div>
+    ${extBadge}
+    <button onclick="event.stopPropagation();_libCopyPath('${escJ(it.path)}')" style="padding:3px 7px;background:transparent;border:1px solid var(--border);border-radius:5px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font);flex-shrink:0" title="Скопировать путь">⎘</button>
+  </div>`;
+}
+
+function _libCopyPath(p) {
+  try { navigator.clipboard.writeText(p); toast('Путь скопирован', 'var(--muted)', '', 1500); } catch {}
+}
+
+function playLibraryTrack(cid) {
+  const it = _LIB.items.find(x => x.id === cid);
+  if (!it) { toast('Трек не найден в индексе', 'var(--red)'); return; }
+  _setupAudioEvents();
+  const url = `/api/library/file?p=${encodeURIComponent(it.path)}`;
+  Preview.queue = [{
+    url,
+    title:  it.title,
+    artist: it.artist,
+    cover:  it.has_cover ? `/api/library/cover/${it.id}` : '',
+    full:   true,
+    label:  `Библиотека · ${it.album || ''}`.trim(),
+    posKey: 'lib:' + it.id,
+  }];
+  Preview.idx = 0;
+  _playPreviewAt(0);
+}
+
+// ── Play any album by service+id directly (without opening the album page) ──
+// Used from search-result tiles — fetches /api/album/<svc>/<id>, builds the
+// play queue, and starts. Only meaningful for Qobuz/Tidal/Deezer.
 async function playAlbumById(service, albumId, fallbackTitle, fallbackArtist, fallbackCover) {
   if (!(service === 'qobuz' || service === 'tidal' || service === 'deezer')) {
     toast(t('toast.stream_only_premium'), 'var(--orange)');
@@ -6510,6 +8078,41 @@ function setMobileTab(btn) {
   if (btn) btn.classList.add('active');
 }
 
+function setMobileGuestTab(btn) {
+  document.querySelectorAll('#mobile-guest-tabbar .mobile-tab').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+}
+
+async function mobileGuestSubmit() {
+  const inp = document.getElementById('mg-url');
+  const btn = document.getElementById('mg-btn');
+  const url = (inp?.value || '').trim();
+  if (!url) { inp?.focus(); return; }
+  if (btn) { btn.textContent = '⏳'; btn.disabled = true; btn.style.opacity = '.6'; }
+  try {
+    const r = await api('POST', '/api/queue/add', { url });
+    if (r.ok) {
+      inp.value = '';
+      toast('Добавлено в очередь');
+      const qt = document.getElementById('mgt-queue');
+      if (qt) qt.click();
+    } else {
+      toast(r.detail || r.msg || 'Ошибка', 'var(--red)');
+    }
+  } catch(e) {
+    toast(t('err.generic') + ': ' + e.message, 'var(--red)');
+  } finally {
+    if (btn) { btn.textContent = '⬇'; btn.disabled = false; btn.style.opacity = '1'; }
+  }
+}
+// Close drawer when a nav item is clicked on mobile
+document.querySelectorAll('.nav-item').forEach(item => {
+  item.addEventListener('click', () => {
+    if (window.innerWidth <= 699) closeMobileDrawer();
+  });
+});
+
+/* ── Unified download helpers (owner + guest) ── */
 async function _triggerDownload(url) {
   // Preflight with ?check=1 — server validates auth/files without building the ZIP.
   // Only one HTTP request triggers actual file transfer (the anchor click below).

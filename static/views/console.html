@@ -18,6 +18,8 @@
           <option value="warn">Warn+</option>
           <option value="info">Info+</option>
         </select>
+        <button class="btn-ghost btn-sm" onclick="copyConsole('console-out',this)">📋 Копировать</button>
+        <button class="btn-ghost btn-sm" onclick="downloadLogs(this)" title="Скачать все логи одним zip — пришли нам этот файл для диагностики">⬇ Скачать лог</button>
         <button class="btn-ghost btn-sm" data-i18n="h.clear" onclick="clearConsole()">Очистить</button>
         <button class="btn-ghost btn-sm owner-only" onclick="ripsterDumpLogs(100)">Dump to DevTools</button>
         <button class="btn-ghost btn-sm" data-i18n="con.refresh" onclick="_refreshConsole()">Обновить</button>

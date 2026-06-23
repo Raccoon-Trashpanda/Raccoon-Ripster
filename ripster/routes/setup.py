@@ -54,6 +54,112 @@ def install(app, ctx) -> None:
     app.include_router(router)
 
 
+# ── Widevine L3 (DRM SoundCloud) ──────────────────────────────────────────────
+# Each user mints their OWN device.wvd locally; Ripster ships none. The minting
+# pipeline (Android AVD + KeyDive) is interactive, multi-GB and admin-touching, so
+# it runs in its own console window — we launch the guided wizard, the user follows
+# it. The resulting .wvd is uploaded + shown installed in the SoundCloud SETTINGS
+# tab (that part deliberately stays there); this is only the "mint a new one" help.
+
+@router.get("/api/widevine/status")
+async def widevine_status():
+    # Honour a user-configured device path first, then the bundled default —
+    # same resolution order as /api/soundcloud/wvd-status so the Setup badge and
+    # the SoundCloud settings status never disagree. Validate by actually loading
+    # the device so a corrupt/wrong-format .wvd reads as installed-but-invalid.
+    p_cfg = (_cfg.get("sc-widevine-device") or "").strip()
+    candidates = [Path(p_cfg)] if p_cfg else []
+    candidates.append(_base_dir / "tools" / "widevine" / "device.wvd")
+    for c in candidates:
+        if c and c.is_file():
+            try:
+                from pywidevine.device import Device
+                Device.load(c)
+                return {"installed": True, "path": str(c),
+                        "size": c.stat().st_size, "valid": True}
+            except Exception as e:
+                return {"installed": True, "path": str(c),
+                        "size": c.stat().st_size, "valid": False, "error": str(e)}
+    return {"installed": False, "path": str(candidates[-1])}
+
+
+@router.post("/api/widevine/mint-wizard")
+async def widevine_mint_wizard():
+    import subprocess
+    bat = _base_dir / "_widevine_setup" / "wvd.bat"
+    if sys.platform != "win32":
+        return {"ok": False, "error": "Мастер WVD доступен только на Windows."}
+    if not bat.exists():
+        return {"ok": False, "error": "_widevine_setup/wvd.bat не найден в установке."}
+    try:
+        subprocess.Popen(
+            ["cmd", "/c", "start", "Ripster WVD L3 minter", "cmd", "/k", str(bat)],
+            cwd=str(bat.parent),
+            creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
+        )
+    except Exception as e:
+        return {"ok": False, "error": f"не удалось запустить мастер: {e}"}
+    return {"ok": True, "msg": "Мастер WVD открылся в отдельном окне — следуй инструкциям там."}
+
+
+# ── Setup checklist: install ONE component synchronously ──────────────────────
+# The redesigned Setup tab is a checklist; each ticked row calls this and AWAITS
+# completion (progress streams to the Setup console via WS log/step events). Async
+# install_* helpers yield to the loop, so WS broadcasts keep flowing meanwhile.
+# SoundCloud + WVD keep their own dedicated endpoints (npm build / console wizard).
+
+@router.post("/api/setup/component/{key}")
+async def setup_component(key: str):
+    # NOTE: each component installs ONLY its own thing and reports its own status,
+    # so the user can see exactly what landed and what didn't. Shared tools
+    # (ffmpeg / Bento4 / Node) are their own rows — NOT bundled into an engine.
+    # The install log is NOT cleared here (the frontend clears the console once at
+    # the start of a run) so a multi-component install keeps the full history.
+    try:
+        if key == "apple":
+            # Apple Music engine (AMD v2): clone AppleMusicDecrypt + its Python deps.
+            # It needs ffmpeg + Bento4 to actually decrypt — those are separate rows.
+            await _setup.istep("amd", "running")
+            await _setup.ensure_git()
+            ok = await _amd.clone_amd() and await _amd.install_amd_deps()
+            await _setup.istep("amd", "done" if ok else "error")
+            if _broadcast:
+                await _broadcast({"type": "amd_ready"})
+            done = ok
+        elif key == "ffmpeg":
+            await _setup.install_ffmpeg_windows()
+            done = bool(_setup.tool_path("ffmpeg"))
+        elif key == "mp4decrypt":
+            await _setup.install_mp4decrypt_windows()
+            done = bool(_setup.tool_path("mp4decrypt"))
+        elif key == "node":
+            await _setup.install_node_windows()
+            done = bool(_setup.tool_path("node"))
+        elif key == "soundcloud":
+            done = await _install_soundcloud_component()
+        elif key == "orpheus":
+            done = await _install_orpheus_component()
+        elif key == "beatport":
+            done = await _install_beatport_component()
+        elif key == "zhaarey":
+            # Advanced: the Go downloader toolchain (own premium Apple ID + Docker).
+            await _setup.ensure_git()
+            if not _setup.tool_path("go"):
+                await _setup.install_go_windows()
+            await _setup.clone_downloader()
+            if not _setup.tool_path("MP4Box"):
+                await _setup.install_gpac_windows()
+            await _setup.install_mp4decrypt_windows()
+            await _setup.go_mod_download()
+            done = bool(_setup.tool_path("go"))
+        else:
+            return {"ok": False, "error": f"неизвестный компонент: {key}"}
+    except Exception as e:                                # noqa: BLE001
+        await _setup.ilog(f"✗ {key}: {e}", "error")
+        return {"ok": False, "error": str(e)}
+    return {"ok": done}
+
+
 # ── Tools / Setup ─────────────────────────────────────────────────────────────
 
 @router.get("/api/tools")
@@ -419,154 +525,183 @@ async def beatport_status():
 
 @router.post("/api/setup/beatport")
 async def beatport_install():
-    """Clone orpheusdl-beatport into orpheus/modules/beatport/ and install its requirements."""
-    import subprocess, asyncio
-    from ripster.engines.orpheus_beatport import _module_path, _orpheus_dir
-
-    mod_path  = _module_path()
-    orph_dir  = _orpheus_dir()
-
-    async def _stream(label: str, *cmd, cwd=None):
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT,
-            cwd=str(cwd) if cwd else None,
-        )
-        async for line in proc.stdout:
-            txt = line.decode("utf-8", "replace").rstrip()
-            if _broadcast:
-                await _broadcast({"type": "log", "msg": f"[beatport-install] {txt}", "level": "info"})
-        return await proc.wait()
-
+    """Clone orpheusdl-beatport into orpheus/modules/beatport/ and install its
+    requirements. Progress streams to the Setup console (install_log)."""
     async def _do():
-        try:
-            if not orph_dir.exists():
-                if _broadcast:
-                    await _broadcast({"type": "log",
-                                      "msg": "✗ Папка orpheus/ не найдена — сначала нужен OrpheusDL.",
-                                      "level": "error"})
-                return
-
-            modules_dir = orph_dir / "modules"
-            modules_dir.mkdir(parents=True, exist_ok=True)
-
-            if mod_path.exists():
-                # Reinstall: git pull
-                if _broadcast:
-                    await _broadcast({"type": "log", "msg": "↻ orpheusdl-beatport: git pull…", "level": "info"})
-                rc = await _stream("git-pull", "git", "pull", cwd=mod_path)
-            else:
-                if _broadcast:
-                    await _broadcast({"type": "log", "msg": "⬇ Клонирую orpheusdl-beatport…", "level": "info"})
-                rc = await _stream(
-                    "git-clone",
-                    "git", "clone",
-                    "https://github.com/Dniel97/orpheusdl-beatport",
-                    str(mod_path),
-                )
-                if rc != 0:
-                    if _broadcast:
-                        await _broadcast({"type": "log", "msg": "✗ Ошибка git clone", "level": "error"})
-                    return
-
-            # Install module requirements if present
-            req = mod_path / "requirements.txt"
-            if req.exists():
-                if _broadcast:
-                    await _broadcast({"type": "log", "msg": "📦 pip install requirements.txt…", "level": "info"})
-                await _stream("pip", sys.executable, "-m", "pip", "install", "-r", str(req),
-                              "--quiet", cwd=mod_path)
-
-            if _broadcast:
-                await _broadcast({"type": "log", "msg": "✓ orpheusdl-beatport установлен.", "level": "info"})
-        except Exception as exc:
-            if _broadcast:
-                await _broadcast({"type": "log", "msg": f"✗ beatport install error: {exc}", "level": "error"})
-
+        await _install_beatport_component()
     asyncio.create_task(_do())
-    return {"ok": True, "msg": "Установка запущена — смотри Лог"}
+    return {"ok": True, "msg": "Установка запущена — смотри Setup-лог"}
+
+
+async def _install_soundcloud_component() -> bool:
+    """SoundCloud/Lucida turnkey: ensure git + node, clone the Lucida source,
+    `npm install` its deps (incl. TypeScript) and build it (TypeScript → build/).
+
+    A plain `npm install` of the git package does NOT work: lucida ships
+    ``files:["build/**"]`` with a non-build ``prepare`` script, so the npm tarball
+    contains no code at all — clone + `npm run build` is required.
+
+    Streams every line to the SETUP console (install_log) — NOT the main log — so
+    the Setup tab shows live progress. Returns True iff build/index.js was produced.
+    """
+    import shutil
+    lucida_dir = _lucida_dir()
+    lucida_dir.mkdir(parents=True, exist_ok=True)
+    src_dir = lucida_dir / "lucida-src"
+
+    await _setup.ilog("── SoundCloud (Lucida) ─────────────────", "info")
+    if not (lucida_dir / "runner.mjs").exists():
+        await _setup.ilog("✗ runner.mjs не найден в tools/lucida/ — обнови/переустанови "
+                          "Ripster (файл должен идти в сборке).", "error")
+        return False
+
+    # Turnkey on a fresh PC: SoundCloud/Lucida needs git + node(npm), which a clean
+    # machine lacks. Provision both here so the user never installs anything by hand.
+    await _setup.ensure_git()
+    await _setup.install_node_windows()
+    if not _setup.tool_path("node"):
+        await _setup.ilog("✗ Node.js не установлен — поставь компонент «Node.js» отдельной "
+                          "строкой выше.", "error")
+        return False
+    git = shutil.which("git") or "git"
+    npm = shutil.which("npm") or "npm"
+
+    # 1 — clone (or update) the Lucida source
+    if (src_dir / ".git").is_dir():
+        await _setup.ilog("⟳ Обновляю исходники Lucida…", "info")
+        rc, _ = await _setup.irun([git, "pull", "--ff-only"], cwd=str(src_dir))
+    else:
+        await _setup.ilog("⬇ Клонирую Lucida…", "info")
+        rc, _ = await _setup.irun([git, "clone", "--depth", "1", _LUCIDA_REPO, str(src_dir)],
+                                  cwd=str(lucida_dir))
+    if rc != 0:
+        await _setup.ilog(f"✗ git: код {rc}", "error")
+        return False
+
+    # 2 — install Lucida's own deps. --ignore-scripts skips the husky `prepare` hook.
+    await _setup.ilog("⬇ npm install зависимостей Lucida (~1–2 мин)…", "info")
+    rc, _ = await _setup.irun([npm, "install", "--ignore-scripts"], cwd=str(src_dir))
+    if rc != 0:
+        await _setup.ilog(f"✗ npm install: код {rc}", "error")
+        return False
+
+    # 3 — build TypeScript → build/
+    await _setup.ilog("🔧 Сборка Lucida (tsc)…", "info")
+    await _setup.irun([npm, "run", "build"], cwd=str(src_dir))
+
+    if (src_dir / "build" / "index.js").exists():
+        await _setup.ilog("✓ Lucida установлена и собрана — SoundCloud готов", "success")
+        if _broadcast:
+            await _broadcast({"type": "soundcloud_installed"})
+        return True
+    await _setup.ilog("✗ Сборка не дала build/index.js — смотри лог выше", "error")
+    return False
+
+
+async def _install_orpheus_component() -> bool:
+    """OrpheusDL core + Spotify module + pip deps. Clones the OFFICIAL repos at
+    install time — NO secrets/config shipped (the dev's orpheus/config holds personal
+    Spotify/Tidal credentials and must never be packaged). This is the base that
+    Spotify and Beatport sit on. NOTE: native Spotify *decryption* additionally needs
+    Spotify.dll (~42 MB, not in any repo) — separate; this gets the engine installed
+    so Beatport + metadata work and Spotify login can be set up."""
+    import shutil
+    orph_dir = _orpheus_dir()
+    await _setup.ilog("── OrpheusDL (база Spotify / Beatport) ──", "info")
+    await _setup.ensure_git()
+    git = shutil.which("git") or "git"
+
+    if (orph_dir / "orpheus.py").exists():
+        await _setup.ilog("↻ OrpheusDL уже есть — git pull…", "info")
+        await _setup.irun([git, "pull"], cwd=str(orph_dir))
+    else:
+        await _setup.ilog("⬇ Клонирую OrpheusDL…", "info")
+        rc, _ = await _setup.irun(
+            [git, "clone", "https://github.com/OrfiTeam/OrpheusDL", str(orph_dir)])
+        if rc != 0:
+            await _setup.ilog("✗ Ошибка git clone OrpheusDL", "error")
+            return False
+
+    # Spotify module (separate repo) → orpheus/modules/spotify
+    (orph_dir / "modules").mkdir(parents=True, exist_ok=True)
+    sp_dir = orph_dir / "modules" / "spotify"
+    if (sp_dir / "interface.py").exists():
+        await _setup.ilog("↻ Модуль Spotify — git pull…", "info")
+        await _setup.irun([git, "pull"], cwd=str(sp_dir))
+    else:
+        await _setup.ilog("⬇ Клонирую модуль Spotify…", "info")
+        await _setup.irun(
+            [git, "clone", "https://github.com/bascurtiz/orpheusdl-spotify", str(sp_dir)])
+
+    req = orph_dir / "requirements.txt"
+    if req.exists():
+        await _setup.ilog("📦 pip install OrpheusDL requirements…", "info")
+        await _setup.irun([sys.executable, "-m", "pip", "install", "-r", str(req), "--quiet"],
+                          cwd=str(orph_dir))
+
+    from ripster.engines.orpheus_spotify import is_installed
+    ok = is_installed()
+    if ok:
+        await _setup.ilog("✓ OrpheusDL установлен. Spotify-вход — Настройки → Spotify. "
+                          "Нативный Spotify-декрипт требует ещё Spotify.dll (отдельно).", "success")
+    else:
+        await _setup.ilog("✗ OrpheusDL не определяется (нет orpheus.py) — смотри лог.", "error")
+    return ok
+
+
+async def _install_beatport_component() -> bool:
+    """Beatport (orpheusdl-beatport): clone into orpheus/modules/beatport + pip
+    deps. Needs OrpheusDL present. Streams to the SETUP console. Returns
+    is_installed()."""
+    import shutil
+    from ripster.engines.orpheus_beatport import _module_path, _orpheus_dir, is_installed
+    mod_path = _module_path()
+    orph_dir = _orpheus_dir()
+
+    await _setup.ilog("── Beatport (orpheusdl-beatport) ───────", "info")
+    # Beatport is a module ON TOP of OrpheusDL. Auto-install the base if it's
+    # missing so a single click just works (turnkey).
+    if not (orph_dir / "orpheus.py").exists():
+        await _setup.ilog("ℹ OrpheusDL не найден — ставлю его сначала (база для Beatport)…", "info")
+        if not await _install_orpheus_component():
+            await _setup.ilog("✗ Не удалось поставить OrpheusDL — Beatport прерван.", "error")
+            return False
+    (orph_dir / "modules").mkdir(parents=True, exist_ok=True)
+    git = shutil.which("git") or "git"
+
+    if mod_path.exists():
+        await _setup.ilog("↻ orpheusdl-beatport уже есть — git pull…", "info")
+        await _setup.irun([git, "pull"], cwd=str(mod_path))
+    else:
+        await _setup.ilog("⬇ Клонирую orpheusdl-beatport…", "info")
+        rc, _ = await _setup.irun(
+            [git, "clone", "https://github.com/Dniel97/orpheusdl-beatport", str(mod_path)])
+        if rc != 0:
+            await _setup.ilog("✗ Ошибка git clone", "error")
+            return False
+
+    req = mod_path / "requirements.txt"
+    if req.exists():
+        await _setup.ilog("📦 pip install requirements.txt…", "info")
+        await _setup.irun([sys.executable, "-m", "pip", "install", "-r", str(req), "--quiet"],
+                          cwd=str(mod_path))
+
+    ok = is_installed()
+    await _setup.ilog("✓ orpheusdl-beatport установлен." if ok
+                      else "✗ Модуль не определяется как установленный — смотри лог.",
+                      "success" if ok else "error")
+    return ok
 
 
 @router.post("/api/soundcloud/install")
 async def soundcloud_install():
-    """Clone the Lucida source, install its deps and build it (TypeScript →
-    build/). A plain `npm install` of the git package does NOT work: lucida
-    ships ``files:["build/**"]`` with a non-build ``prepare`` script, so the
-    npm tarball contains no code at all. Clone + `npm run build` is required.
-    """
+    """Install/build Lucida (SoundCloud). Progress streams to the Setup console;
+    the SC settings tab polls scEngineCheck and reacts to the WS
+    'soundcloud_installed' on completion."""
     async def _do():
-        import shutil
-        lucida_dir = _lucida_dir()
-        lucida_dir.mkdir(parents=True, exist_ok=True)
-        src_dir = lucida_dir / "lucida-src"
-
-        if not (lucida_dir / "runner.mjs").exists():
-            if _broadcast:
-                await _broadcast({"type": "log",
-                                   "msg": "✗ runner.mjs не найден в tools/lucida/",
-                                   "level": "error"})
-            return
-
-        git = shutil.which("git") or "git"
-        npm = shutil.which("npm") or "npm"
-
-        async def _step(label: str, *cmd, cwd: Path) -> int:
-            if _broadcast:
-                await _broadcast({"type": "log", "msg": label, "level": "info"})
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd, cwd=str(cwd),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.STDOUT,
-                )
-                out, _ = await proc.communicate()
-            except Exception as e:
-                if _broadcast:
-                    await _broadcast({"type": "log", "msg": f"✗ {e}", "level": "error"})
-                return -1
-            for ln in out.decode("utf-8", errors="replace").splitlines()[-15:]:
-                if ln.strip() and _broadcast:
-                    await _broadcast({"type": "log", "msg": ln.strip(), "level": "stdout"})
-            return proc.returncode if proc.returncode is not None else -1
-
-        # 1 — clone (or update) the Lucida source
-        if (src_dir / ".git").is_dir():
-            rc = await _step("⟳ Обновляю исходники Lucida…", git, "pull", "--ff-only", cwd=src_dir)
-        else:
-            rc = await _step("⬇ Клонирую Lucida…", git, "clone", "--depth", "1",
-                             _LUCIDA_REPO, str(src_dir), cwd=lucida_dir)
-        if rc != 0:
-            if _broadcast:
-                await _broadcast({"type": "log", "msg": f"✗ git: код {rc}", "level": "error"})
-            return
-
-        # 2 — install Lucida's own deps (incl. TypeScript). --ignore-scripts
-        #     skips the husky `prepare` hook we don't need.
-        rc = await _step("⬇ npm install зависимостей Lucida (~1–2 мин)…",
-                         npm, "install", "--ignore-scripts", cwd=src_dir)
-        if rc != 0:
-            if _broadcast:
-                await _broadcast({"type": "log", "msg": f"✗ npm install: код {rc}", "level": "error"})
-            return
-
-        # 3 — build TypeScript → build/
-        await _step("🔧 Сборка Lucida (tsc)…", npm, "run", "build", cwd=src_dir)
-
-        if (src_dir / "build" / "index.js").exists():
-            if _broadcast:
-                await _broadcast({"type": "log",
-                                   "msg": "✓ Lucida установлена и собрана — SoundCloud готов",
-                                   "level": "success"})
-                await _broadcast({"type": "soundcloud_installed"})
-        else:
-            if _broadcast:
-                await _broadcast({"type": "log",
-                                   "msg": "✗ Сборка не дала build/index.js — смотри лог выше",
-                                   "level": "error"})
-
+        await _install_soundcloud_component()
     asyncio.create_task(_do())
-    return {"ok": True, "msg": "Installing Lucida — watch log"}
+    return {"ok": True, "msg": "Installing Lucida — watch Setup log"}
 
 
 # ── gamdl deps ────────────────────────────────────────────────────────────────
@@ -605,11 +740,14 @@ async def fix_gamdl_deps():
 # ── Self-update ───────────────────────────────────────────────────────────────
 
 def _app_version() -> str:
-    """Current Ripster version (app.APP_VERSION), read lazily to avoid a circular
-    import at module load (app.py imports this routes module)."""
+    """Installed Ripster RELEASE tag (app.RELEASE_VERSION, e.g. '1.0.6') — this is
+    what the self-updater compares against GitHub release tags. Falls back to the
+    internal APP_VERSION, then 0.0.0. Read lazily to avoid a circular import at
+    module load (app.py imports this routes module)."""
     try:
         import app as _app_mod
-        return getattr(_app_mod, "APP_VERSION", "0.0.0")
+        return getattr(_app_mod, "RELEASE_VERSION", None) \
+            or getattr(_app_mod, "APP_VERSION", "0.0.0")
     except Exception:
         return "0.0.0"
 
@@ -644,7 +782,17 @@ async def restart_app():
     def _do():
         import time
         time.sleep(1.5)
-        os.execv(sys.executable, [sys.executable] + sys.argv)
+        # When started by the standalone launcher (Ripster.exe / ripster_launcher),
+        # that process SUPERVISES us: a clean exit makes it respawn the server
+        # WINDOWLESS. os.execv must NOT be used there — on Windows it spawns a fresh
+        # console-subsystem python WITHOUT the no-window flag, flashing a cmd window
+        # every restart, and races the launcher's respawn (the "cmd windows keep
+        # popping" bug). Outside the launcher (dev `python app.py`), os.execv is
+        # correct — it re-execs in the existing console.
+        if os.environ.get("RIPSTER_LAUNCHER") == "1":
+            os._exit(0)
+        else:
+            os.execv(sys.executable, [sys.executable] + sys.argv)
 
     threading.Thread(target=_do, daemon=True).start()
     return {"ok": True}
