@@ -285,7 +285,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "1.0.12"
+RELEASE_VERSION = "1.0.13"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -516,6 +516,28 @@ async def _stdout_pump():
             await asyncio.sleep(1.0)
 
 
+async def _ws_heartbeat():
+    """Emit a tiny periodic ping to every WS client.
+
+    The client's health watchdog (static/js/app.js) treats an OPEN socket that
+    has been SILENT for >45 s as half-open and force-cycles it. When the app is
+    idle — or stuck in one of AMD's long silent decrypt/tagging windows — no
+    events flow, so without this the status flaps Connected↔Disconnected every
+    ~45 s (and the queue UI churns mid-download). A 20 s ping keeps the
+    watchdog's last-message clock fresh on healthy sockets, so it only ever
+    fires on a genuinely dead connection. `type: "ping"` is ignored by the
+    client switch (and not persisted/logged by broadcast)."""
+    while True:
+        try:
+            await asyncio.sleep(20)
+            if _ws_broker.clients:
+                await broadcast({"type": "ping"})
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            await asyncio.sleep(5)
+
+
 async def broadcast(msg: dict):
     """Fan a message out to every WS client through the broker. Per-client
     queues mean a slow client never blocks the others — see ws_broker.py."""
@@ -595,6 +617,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_soundcloud_routes._prewarm_client_id())
     # Start the stdout→WS pump so every print() reaches the UI console.
     asyncio.create_task(_stdout_pump())
+    # Periodic WS heartbeat so the client watchdog doesn't false-trip on an idle
+    # or silently-downloading socket (status flapping Connected↔Disconnected).
+    asyncio.create_task(_ws_heartbeat())
 
     # Time-based disk cleanup: delete finished release folders N minutes after
     # completion (auto-delete-minutes config, 0 = off). Keeps the disk from
