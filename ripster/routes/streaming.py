@@ -190,7 +190,7 @@ async def stream_qobuz(track_id: str, request: Request, format_id: int = 27,
     """
     import hashlib as _hashlib
 
-    app_id = (_cfg.get("qobuz-app-id") or "").strip() or "798273057"
+    app_id = (_cfg.get("qobuz-app-id") or "").strip() or "312369995"
     token  = (_cfg.get("qobuz-auth-token") or "").strip()
     secret = (_cfg.get("qobuz-secrets") or _cfg.get("qobuz-secret") or "").strip()
 

@@ -36,7 +36,7 @@ from .streamrip_utils import (
     write_config,
 )
 
-_QOBUZ_DEFAULT_APP_ID = "798273057"
+_QOBUZ_DEFAULT_APP_ID = "312369995"
 
 _RE_AUTHFAIL = re.compile(
     r'auth.*(failed|invalid)|invalid.*(token|credentials)|'

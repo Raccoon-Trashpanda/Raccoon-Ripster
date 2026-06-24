@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Request
 router = APIRouter()
 _config: dict = {}   # populated by install()
 
-_QOBUZ_DEFAULT_APP_ID = "798273057"   # streamrip's public app_id; works for search without auth
+_QOBUZ_DEFAULT_APP_ID = "312369995"   # public QobuzDownloaderX-compatible app_id (old 798273057 now 401s); works for search without auth
 
 # ── In-process caches ────────────────────────────────────────────────────────
 _sp_app_token:   dict = {"token": "", "expires_at": 0.0}

@@ -311,7 +311,7 @@ async def _deezer_playlist(playlist_id: str) -> list[dict]:
 
 # ── Qobuz ─────────────────────────────────────────────────────────────────────
 
-_QOBUZ_APP_ID = "798273057"
+_QOBUZ_APP_ID = "312369995"
 
 
 async def _resolve_qobuz(url: str) -> list[dict]:

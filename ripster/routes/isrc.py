@@ -168,7 +168,7 @@ async def resolve_isrc(body: dict):
         return {"ok": False, "error": "ISRC не найден в метаданных"}
 
     qobuz_token = (_config.get("qobuz-auth-token") or "").strip()
-    qobuz_appid = (_config.get("qobuz-app-id") or "798273057").strip()
+    qobuz_appid = (_config.get("qobuz-app-id") or "312369995").strip()
     tidal_token = (_config.get("tidal-token") or "").strip()
     tidal_cc    = (_config.get("tidal-country") or "US").strip().upper()
 
@@ -263,7 +263,7 @@ async def smart_resolve(body: dict):
     # Qobuz / Tidal / Deezer by ISRC (only when we have an ISRC)
     if isrc:
         qtoken = (_config.get("qobuz-auth-token") or "").strip()
-        qappid = (_config.get("qobuz-app-id") or "798273057").strip()
+        qappid = (_config.get("qobuz-app-id") or "312369995").strip()
         ttoken = (_config.get("tidal-token") or "").strip()
         tcc    = (_config.get("tidal-country") or "US").strip().upper()
         q, t, d = await asyncio.gather(

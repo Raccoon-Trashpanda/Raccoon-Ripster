@@ -36,7 +36,7 @@ def _cutoff(days: int) -> str:
     return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
 def _qobuz_app_id() -> str:
-    return (_config.get("qobuz-app-id") or "").strip() or "798273057"
+    return (_config.get("qobuz-app-id") or "").strip() or "312369995"
 
 def _qobuz_token() -> str:
     return (_config.get("qobuz-auth-token") or "").strip()

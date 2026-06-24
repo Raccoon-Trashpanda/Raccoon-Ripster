@@ -9,7 +9,7 @@ from ripster import http_client as _HTTP
 
 _cfg: dict = {}
 
-_DEFAULT_APP_ID = "798273057"
+_DEFAULT_APP_ID = "312369995"
 
 
 def install(cfg: dict) -> None:

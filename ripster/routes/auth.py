@@ -211,7 +211,7 @@ async def _probe_qobuz() -> dict:
     email      = str(_cfg.get("qobuz-email")      or "").strip()
     password   = str(_cfg.get("qobuz-password")   or "").strip()
     custom_app = str(_cfg.get("qobuz-app-id")     or "").strip()
-    app_id     = custom_app or "798273057"
+    app_id     = custom_app or "312369995"
 
     if user_id and auth_token:
         return await _qobuz_probe_token(user_id, auth_token, app_id)
