@@ -307,10 +307,16 @@ class QobuzEngine(StreamripMixin, EngineBase):
         # parsed nothing / matched no tracks (unrecognised URL, empty album, or a
         # raw UPC it couldn't resolve). That is the real 0-tracks failure — surface
         # it instead of a fake "done".
+        # The #1 cause for testers: no Qobuz account configured. Qobuz DOWNLOADS
+        # need your own paid Qobuz login (search works without one) — without
+        # credentials streamrip logs in with empty fields and silently fetches 0
+        # tracks. Say so plainly; only mention link/availability as the fallback.
         return EngineResult(
             success=False,
-            error="Qobuz: 0 треков — streamrip не распознал ссылку или альбом недоступен. "
-                  "Проверь ссылку/подписку; запусти `rip --version`, если повторяется.",
+            error=("Qobuz: 0 треков. Скорее всего не задан аккаунт Qobuz — для СКАЧИВАНИЯ "
+                   "нужна своя платная подписка Qobuz (поиск работает и без неё). Добавь "
+                   "qobuz-auth-token + qobuz-user-id (или email/пароль) в Настройки → Qobuz. "
+                   "Если аккаунт уже есть — проверь ссылку и актуальность токена."),
         )
 
     async def search(self, query: str, search_type: str, limit: int, config: dict) -> list[dict]:
