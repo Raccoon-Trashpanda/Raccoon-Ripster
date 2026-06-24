@@ -119,7 +119,7 @@ def set_guest_checker(fn) -> None:
 _CSRF_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # Paths exempt from the Origin-based CSRF guard (secret-authenticated, meant to
 # be called cross-origin — e.g. the browser-extension Spotify token push).
-_CSRF_EXEMPT_PATHS = {"/api/spotify-token-push"}
+_CSRF_EXEMPT_PATHS = {"/api/spotify-token-push", "/api/telemetry/ingest"}
 
 # Module-level state set by ``install()``. These are small enough that holding
 # references here rather than threading them through every helper is cleaner.
