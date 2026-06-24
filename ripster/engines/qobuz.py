@@ -245,12 +245,22 @@ class QobuzEngine(StreamripMixin, EngineBase):
         cfg_copy = dict(config)
         cfg_copy["quality"] = quality
         cfg_path = _write_config(cfg_copy, save_path)
-        # NOTE: do NOT pass --no-progress. streamrip 2.0.6 then prints nothing at
-        # all when piped (non-TTY), so is_finished can't tell a real download from
-        # a no-op. Without it, rich suppresses the live bar on a non-TTY but still
-        # prints the "---- Downloading <title> ----" header we use as the success
-        # signal. (No progress-bar spam results — rich detects the non-TTY.)
-        return [find_rip(), "--config-path", str(cfg_path), "url", url]
+        # Diagnostic: record the credential SHAPE (booleans only, no values) so a
+        # 0-tracks failure can name the real cause via telemetry instead of guessing
+        # — the #1 unknown was "did the tester set token correctly / a custom app_id".
+        _uid = bool((config.get("qobuz-user-id") or "").strip())
+        _tok = bool((config.get("qobuz-auth-token") or "").strip())
+        _eml = bool((config.get("qobuz-email") or "").strip())
+        _cust_app = bool((config.get("qobuz-app-id") or "").strip())
+        _cust_sec = bool((config.get("qobuz-secrets") or "").strip())
+        _mode = "token" if (_uid and _tok) else "email" if _eml else "NONE"
+        self._cfg_diag = (f" [cfg: auth={_mode} uid={'Y' if _uid else 'N'} "
+                          f"tok={'Y' if _tok else 'N'} app_id={'custom' if _cust_app else 'default'} "
+                          f"secret={'custom' if _cust_sec else ('default' if not _cust_app else 'MISSING')}]")
+        # NOTE: do NOT pass --no-progress (streamrip 2.0.6 then prints nothing on a
+        # non-TTY). `-v` makes it emit the real auth/region/API error to stderr (we
+        # capture stderr→stdout) so a silent 0-tracks failure becomes diagnosable.
+        return [find_rip(), "-v", "--config-path", str(cfg_path), "url", url]
 
     def classify_line(self, line: str) -> str:
         return _classify_line(line)
@@ -335,7 +345,8 @@ class QobuzEngine(StreamripMixin, EngineBase):
                    "(поиск работает и без неё). Проверь: 1) qobuz-user-id И qobuz-auth-token "
                    "ОБА заданы и токен не протух; 2) подписка активна; 3) альбом доступен в "
                    "регионе аккаунта; 4) если задал свой qobuz-app-id — задай и свой "
-                   "qobuz-secrets (дефолтный секрет к чужому app_id не подходит)." + _tail_s),
+                   "qobuz-secrets (дефолтный секрет к чужому app_id не подходит)."
+                   + getattr(self, "_cfg_diag", "") + _tail_s),
         )
 
     async def search(self, query: str, search_type: str, limit: int, config: dict) -> list[dict]:

@@ -176,14 +176,27 @@ async def _search_apple(q: str, ent: str, limit: int, country: str) -> dict:
     sf = (country or _cc or "US").lower()
     regions = [sf] + (["nz"] if sf != "nz" else [])
 
+    _is_track = ent in ("track", "song", "video")
     def _map(item):
         full_date = (item.get("releaseDate") or "")[:10]
+        if _is_track:
+            # TRACK search → identify by the SONG, not its album. Using collection*
+            # here showed album names as "tracks" and made the download grab the
+            # whole album / "some track from it".
+            _id    = str(item.get("trackId") or item.get("collectionId") or item.get("artistId",""))
+            _title = item.get("trackName") or item.get("collectionName") or item.get("artistName","")
+            _url   = item.get("trackViewUrl") or item.get("collectionViewUrl") or item.get("artistViewUrl","")
+        else:
+            _id    = str(item.get("collectionId") or item.get("artistId") or item.get("trackId",""))
+            _title = item.get("collectionName") or item.get("trackName") or item.get("artistName","")
+            _url   = item.get("collectionViewUrl") or item.get("trackViewUrl") or item.get("artistViewUrl","")
         return {
-            "id":       str(item.get("collectionId") or item.get("artistId") or item.get("trackId","")),
-            "title":    item.get("collectionName") or item.get("trackName") or item.get("artistName",""),
+            "id":       _id,
+            "title":    _title,
             "artist":   item.get("artistName",""),
+            "album":    item.get("collectionName","") if _is_track else "",
             "type":     ent,
-            "url":      item.get("collectionViewUrl") or item.get("trackViewUrl") or item.get("artistViewUrl",""),
+            "url":      _url,
             "cover":    (item.get("artworkUrl100") or "").replace("100x100","200x200"),
             "year":     full_date[:4],
             "date":     full_date,
