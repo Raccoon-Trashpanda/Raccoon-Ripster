@@ -249,6 +249,14 @@ class OrpheusBeatportEngine(EngineBase):
         return current, total
 
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
+        # Territory restriction is a 403 too, but it is NOT an auth failure — must be
+        # checked first so it isn't mislabelled "неверный логин" (which sent the bot
+        # down the wrong path / looked like a freeze). The track exists but isn't
+        # licensed in this Beatport account's region; retrying can't help → no-retry.
+        if re.search(r'Territory\s+Restricted|territory.?restrict|not.*available.*your.*(region|country)', log_text, re.I):
+            return EngineResult(False, error="Beatport: трек недоступен в регионе твоего аккаунта "
+                                             "(Territory Restricted) — нужен Beatport-аккаунт/прокси в "
+                                             "разрешённой стране. Скачать нельзя.")
         if "BEATPORT_NOT_AUTHED" in log_text or _RE_AUTH_FAIL.search(log_text):
             return EngineResult(False, error="BEATPORT_NOT_AUTHED: неверный логин/пароль Beatport")
 
