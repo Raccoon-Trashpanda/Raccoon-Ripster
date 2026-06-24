@@ -224,6 +224,14 @@ class AMDEngine(EngineBase):
         if "AMD_FATAL" in log_text or "Bento4 не найден" in log_text:
             return EngineResult(False, error="AMD: не установлен Bento4 (mp4decrypt/mp4extract). "
                                              "Открой Setup → «Bento4 (mp4decrypt)» и установи.")
+        # Global decrypt stream died (public wrapper Core threw a gRPC INTERNAL/
+        # UNAVAILABLE mid-decrypt). amd_runner aborts fast (exit 4) instead of
+        # rotating doomed regions. This is a transient server-side overload — the
+        # queue patient-retries (a fresh runner re-opens the decrypt stream).
+        if "AMD_WRAPPER_DECRYPT_ERROR" in log_text or "DECRYPT STREAM DOWN" in log_text:
+            return EngineResult(False, error="wm.wol.moe: публичный Apple-wrapper вернул внутреннюю "
+                                             "ошибку декрипта (перегрузка сервера, не токен). "
+                                             "Повтори позже, выбери обычный ALAC или смени инстанс.")
         if _RE_CONN_FAIL.search(log_text):
             return EngineResult(False, error="wrapper-manager unreachable (wm.wol.moe)")
         # Per-track signals: a freshly-saved track logs "SUCCESS - Finished

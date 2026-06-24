@@ -137,6 +137,12 @@ try:
     import src.utils as _u
 
     _task_log: dict[str, dict] = {}  # task_id -> {name, start, state}
+    # Set when the GLOBAL decrypt stream (wm.decrypt_init) dies — e.g. the public
+    # wrapper's Core throws a gRPC INTERNAL/UNAVAILABLE mid-decrypt. That stream is
+    # established once for the whole run, so once it's dead NO region can decrypt:
+    # rotating storefronts is pointless. The main loop polls this and aborts fast so
+    # the queue can patient-retry with a FRESH runner (and a fresh decrypt stream).
+    _decrypt_dead: dict = {"v": False, "why": ""}
 
     def _safe_task(coro, _name=None):
         loop = asyncio.get_event_loop()
@@ -170,6 +176,21 @@ try:
                 # so log it concisely instead of a scary pydantic traceback.
                 if "AlbumMeta" in _es and ("40400" in _es or "'404'" in _es):
                     diag("TASK", f"SKIP [{tid}] {name}: album not in this storefront (404) — next region", "WARN")
+                elif name == "decrypt_init" or "decrypt_keepalive" in name:
+                    # The global decrypt stream died. Don't dump the scary gRPC
+                    # traceback — flag it so the main loop aborts fast and the queue
+                    # patient-retries with a fresh wrapper connection.
+                    _is_grpc = "RpcError" in type(exc).__name__ or "StatusCode" in _es
+                    _decrypt_dead["v"]   = True
+                    _decrypt_dead["why"] = f"{type(exc).__name__}: {_es[:160]}"
+                    diag("TASK", f"DECRYPT STREAM DOWN [{name}] after {elapsed:.1f}s: "
+                                 f"{type(exc).__name__} — публичный wrapper вернул внутреннюю ошибку "
+                                 f"декрипта{' (gRPC)' if _is_grpc else ''}. Прерываю и повторю с новым подключением.",
+                                 "ERROR")
+                    print("AMD_WRAPPER_DECRYPT_ERROR: публичный Apple-wrapper (декрипт) вернул "
+                          "внутреннюю ошибку — соединение разорвано. Это перегрузка/сбой бесплатного "
+                          "сервера, не твой токен. Повтори позже, выбери обычный ALAC (не Hi-Res) или "
+                          "смени инстанс в Настройках.", flush=True)
                 else:
                     diag("TASK", f"FAILED [{tid}] {name} after {elapsed:.1f}s: {type(exc).__name__}: {exc}", "ERROR")
                     diag("TASK", f"  Traceback: {''.join(traceback.format_tb(exc.__traceback__)).strip()}", "ERROR")
@@ -820,6 +841,18 @@ async def main():
             # on disk (resume) so only the still-missing ones decrypt this round.
             while not rip_task.done():
                 await asyncio.sleep(1)
+                # Global decrypt stream died → rotating regions can't help (the
+                # stream is established once for the whole run). Abort fast and let
+                # the queue patient-retry with a fresh runner/connection.
+                if _decrypt_dead["v"]:
+                    diag("REGION", f"region={region}: decrypt stream down ({_decrypt_dead['why']}) "
+                                   f"— aborting (rotation can't recover a dead global stream)", "ERROR")
+                    rip_task.cancel()
+                    try:
+                        await asyncio.wait_for(asyncio.shield(rip_task), timeout=8)
+                    except (asyncio.CancelledError, Exception):
+                        pass
+                    return 4   # distinct exit code: wrapper decrypt failure → retryable
                 _last_act = max(_prog["last"], _LAST_ACTIVITY[0])
                 if (time.time() - _last_act) > STALL_SEC:
                     diag("REGION", f"region={region}: no progress for {STALL_SEC}s — cancel + rotate", "WARN")
