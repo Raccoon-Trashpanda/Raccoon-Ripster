@@ -26,7 +26,7 @@ _RE_NO_RETRY = _re.compile(
     # Qobuz "0 tracks" is a permanent no-account / bad-link condition (downloads
     # need the user's own paid Qobuz login) — retrying just spins the tile ~28 min.
     r'Qobuz:\s*0\s+треков|'
-    r'Territory\s+Restricted|недоступен в регионе',
+    r'Territory\s+Restricted|недоступен в регионе|region\s+locked',
     _re.I,
 )
 _MAX_AUTO_RETRIES = 3

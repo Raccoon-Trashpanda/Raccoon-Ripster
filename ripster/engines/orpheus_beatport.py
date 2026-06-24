@@ -253,7 +253,7 @@ class OrpheusBeatportEngine(EngineBase):
         # checked first so it isn't mislabelled "неверный логин" (which sent the bot
         # down the wrong path / looked like a freeze). The track exists but isn't
         # licensed in this Beatport account's region; retrying can't help → no-retry.
-        if re.search(r'Territory\s+Restricted|territory.?restrict|not.*available.*your.*(region|country)', log_text, re.I):
+        if re.search(r'Territory\s+Restricted|territory.?restrict|region\s+locked|BeatportError.*region|not.*available.*your.*(region|country)', log_text, re.I):
             return EngineResult(False, error="Beatport: трек недоступен в регионе твоего аккаунта "
                                              "(Territory Restricted) — нужен Beatport-аккаунт/прокси в "
                                              "разрешённой стране. Скачать нельзя.")

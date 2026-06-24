@@ -80,8 +80,17 @@ def _write_config(user_cfg: dict, save_path: str) -> Path:
     auth_token  = str(user_cfg.get("qobuz-auth-token") or "").strip()
     email       = str(user_cfg.get("qobuz-email")      or "").strip()
     password    = str(user_cfg.get("qobuz-password")   or "").strip()
-    app_id      = str(user_cfg.get("qobuz-app-id")     or "").strip() or _QOBUZ_DEFAULT_APP_ID
-    secrets_raw = str(user_cfg.get("qobuz-secrets")    or "").strip() or _QOBUZ_DEFAULT_SECRET
+    # app_id ↔ secret are a PAIR: the default secret only signs for the default
+    # app_id. If the user set their OWN app_id we must NOT inject the default secret
+    # (mismatch → downloads silently return 0 tracks); use their secret (or none).
+    _app_id_custom = str(user_cfg.get("qobuz-app-id")  or "").strip()
+    _secret_custom = str(user_cfg.get("qobuz-secrets") or "").strip()
+    if _app_id_custom:
+        app_id      = _app_id_custom
+        secrets_raw = _secret_custom            # their app_id → their secret only
+    else:
+        app_id      = _QOBUZ_DEFAULT_APP_ID
+        secrets_raw = _secret_custom or _QOBUZ_DEFAULT_SECRET
 
     if user_id and auth_token:
         use_token   = "true"
@@ -313,16 +322,20 @@ class QobuzEngine(StreamripMixin, EngineBase):
         # parsed nothing / matched no tracks (unrecognised URL, empty album, or a
         # raw UPC it couldn't resolve). That is the real 0-tracks failure — surface
         # it instead of a fake "done".
-        # The #1 cause for testers: no Qobuz account configured. Qobuz DOWNLOADS
-        # need your own paid Qobuz login (search works without one) — without
-        # credentials streamrip logs in with empty fields and silently fetches 0
-        # tracks. Say so plainly; only mention link/availability as the fallback.
+        # 0 tracks with rc==0 and no markers. Cause is config-specific (bad/partial
+        # token, free account, region, app_id/secret mismatch). DON'T guess — attach
+        # the last meaningful streamrip lines so telemetry shows the REAL reason.
+        _noise = re.compile(r'^\s*$|rich|Progress|━|■|FutureWarning|DeprecationWarning', re.I)
+        _tail = [l.strip() for l in log_text.splitlines()
+                 if l.strip() and not _noise.search(l)][-4:]
+        _tail_s = (" | streamrip: " + " ⏎ ".join(_tail)) if _tail else ""
         return EngineResult(
             success=False,
             error=("Qobuz: 0 треков. Для СКАЧИВАНИЯ нужна своя платная подписка Qobuz "
-                   "(поиск работает и без неё). Проверь: 1) задан qobuz-auth-token + "
-                   "qobuz-user-id (или email/пароль) в Настройки → Qobuz и токен не протух; "
-                   "2) этот альбом доступен в регионе твоего аккаунта; 3) ссылка верная."),
+                   "(поиск работает и без неё). Проверь: 1) qobuz-user-id И qobuz-auth-token "
+                   "ОБА заданы и токен не протух; 2) подписка активна; 3) альбом доступен в "
+                   "регионе аккаунта; 4) если задал свой qobuz-app-id — задай и свой "
+                   "qobuz-secrets (дефолтный секрет к чужому app_id не подходит)." + _tail_s),
         )
 
     async def search(self, query: str, search_type: str, limit: int, config: dict) -> list[dict]:
