@@ -193,6 +193,7 @@ function handleMessage(msg) {
       S.paused  = msg.paused  || false;
       if(typeof STEP_DEFS_GAMDL!=='undefined') STEP_DEFS = (S.config['engine']==='gamdl') ? STEP_DEFS_GAMDL : STEP_DEFS_ZHAAREY;
       applyConfig(); renderQueue(); updateTransport(); updatePills(); renderQualityGrid(); renderConfig(); _syncReleasesSettingsTab();
+      setTimeout(_maybeAskTelemetryName, 2500);  // first-run: ask the tester for a name so the dev can tell instances apart
       setTimeout(autoValidateServices, 1500);   // probe all configured tokens on startup — no need to open each tab
       if(S.config['engine']==='gamdl') setTimeout(checkCookies, 1200);
       if(S.config['engine']==='amd')   setTimeout(checkAMDStatus, 800);
@@ -8250,3 +8251,23 @@ async function uploadToCloud(taskId, btn) {
   }
 }
 
+
+// First-run: ask a forwarding (tester) instance for a display name so the
+// developer's Diagnostics tab can tell instances apart. Only when forwarding is on
+// (NOT the owner/ingest instance) and no name set yet. Asks once per machine.
+async function _maybeAskTelemetryName(){
+  try {
+    const c = S.config || {};
+    if (c['telemetry-ingest-enabled']) return;
+    if (String(c['telemetry-forward']) === 'false') return;
+    if ((c['telemetry-name']||'').trim()) return;
+    if (localStorage.getItem('tlm_named') === '1') return;
+    let name = prompt('Как тебя подписать для разработчика? (имя/ник — поможет понять, чей это Ripster при диагностике)', '');
+    localStorage.setItem('tlm_named','1');
+    name = (name||'').trim();
+    if (!name) return;
+    await api('POST','/api/config', {'telemetry-name': name.slice(0,48)});
+    if (S.config) S.config['telemetry-name'] = name.slice(0,48);
+    toast('Спасибо! Имя сохранено','var(--green)');
+  } catch(e){}
+}

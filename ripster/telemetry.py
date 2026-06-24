@@ -114,6 +114,7 @@ async def _flush_once(client) -> None:
         batch.append(_buf.popleft())
     payload = {
         "instance_id": _instance_id(),
+        "name":        (_cfg.get("telemetry-name") or "").strip()[:48],
         "app_version": str(_cfg.get("_release_version") or ""),
         "platform":    f"{os.name}",
         "token":       (_cfg.get("telemetry-token") or "").strip(),
@@ -223,6 +224,7 @@ def _update_index(iid: str, payload: dict, client_ip: str, n: int) -> None:
     rec = idx.get(iid) or {"instance_id": iid, "first_seen": int(time.time()),
                            "total": 0, "errors": 0}
     rec["last_seen"]   = int(time.time())
+    rec["name"]        = str(payload.get("name") or rec.get("name") or "")[:48]   # tester-chosen
     rec["app_version"] = str(payload.get("app_version") or rec.get("app_version") or "")
     rec["platform"]    = str(payload.get("platform") or rec.get("platform") or "")
     rec["ip"]          = (client_ip or rec.get("ip") or "")[:45]
@@ -260,6 +262,23 @@ def get_instance_lines(iid: str, limit: int = 500, level: str = "") -> list:
         if _LEVEL_RANK.get(str(d.get("level", "info")).lower(), 1) >= floor:
             out.append(d)
     return out[-limit:]
+
+
+def set_label(iid: str, label: str) -> bool:
+    """Owner-side rename: store a label that overrides the tester-reported name in
+    the owner UI (e.g. real person). Persists in the index."""
+    try:
+        iid = _safe_id(iid)
+        idx = _read_index()
+        rec = idx.get(iid)
+        if not rec:
+            return False
+        rec["label"] = str(label or "")[:48]
+        idx[iid] = rec
+        _index_path().write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+        return True
+    except Exception:
+        return False
 
 
 def clear_instance(iid: str) -> bool:

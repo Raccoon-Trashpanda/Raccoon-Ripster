@@ -69,6 +69,11 @@ async def instance_lines(iid: str, limit: int = 500, level: str = ""):
     return {"instance_id": iid, "lines": _t.get_instance_lines(iid, limit=limit, level=level)}
 
 
+@router.post("/api/telemetry/instance/{iid}/label")
+async def instance_label(iid: str, body: dict):
+    return {"ok": _t.set_label(iid, str(body.get("label") or ""))}
+
+
 @router.delete("/api/telemetry/instance/{iid}")
 async def instance_clear(iid: str):
     return {"ok": _t.clear_instance(iid)}

@@ -89,8 +89,11 @@ def _write_config(user_cfg: dict, save_path: str) -> Path:
         app_id      = _app_id_custom
         secrets_raw = _secret_custom            # their app_id → their secret only
     else:
+        # Default app_id MUST pair with the default secret. A leftover custom secret
+        # (entered for a different app_id) would mismatch → silent 0 tracks. So the
+        # default pair is used as a UNIT — ignore any stray custom secret here.
         app_id      = _QOBUZ_DEFAULT_APP_ID
-        secrets_raw = _secret_custom or _QOBUZ_DEFAULT_SECRET
+        secrets_raw = _QOBUZ_DEFAULT_SECRET
 
     if user_id and auth_token:
         use_token   = "true"
