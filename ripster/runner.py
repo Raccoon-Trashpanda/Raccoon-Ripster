@@ -22,7 +22,10 @@ _RE_NO_RETRY = _re.compile(
     r'бесплатный\s+аккаунт|free\s+account|IneligibleError|subscription|'
     r'Не\s+найден\s+исполняемый|binary\s+not\s+found|No\s+such\s+file|'
     r'токен\s+недействителен|wrapper\s+not\s+responding|ORPHEUS_NOT_AUTHED|'
-    r'-1002|KeyError.*AUDIO-SESSION|codec\s+not\s+found|cookies',
+    r'-1002|KeyError.*AUDIO-SESSION|codec\s+not\s+found|cookies|'
+    # Qobuz "0 tracks" is a permanent no-account / bad-link condition (downloads
+    # need the user's own paid Qobuz login) — retrying just spins the tile ~28 min.
+    r'Qobuz:\s*0\s+треков',
     _re.I,
 )
 _MAX_AUTO_RETRIES = 3
@@ -36,8 +39,11 @@ _RETRY_BACKOFF    = [15, 45, 120]   # seconds before each retry attempt
 # 'directory error' that followed an empty download). A genuine no-lossless
 # asset is matched by _RE_NO_RETRY-style messages and is NOT patient-retried.
 _RE_PATIENT = _re.compile(
+    # do NOT match a bare "0 треков" — that also matches Qobuz's permanent
+    # no-account failure (must not patient-retry). AMD/wrapper cases still match
+    # via wm.wol.moe / "не вернул device" / ready=false.
     r'wm\.wol\.moe|wrapper-manager unreachable|ready=false|не\s+ready|'
-    r'не\s+вернул device|0\s+треков|wrapper\s+не\s+ready|no\s+device',
+    r'не\s+вернул device|wrapper\s+не\s+ready|no\s+device',
     _re.I,
 )
 _MAX_PATIENT_RETRIES = 15   # ~28 min of patient retrying through an overload blip
