@@ -62,6 +62,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "service-colors",
     "player-",
     "ripster-repo",   # ripster-repo + ripster-repo-token (self-update)
+    "telemetry-",     # diagnostics forwarding (telemetry-forward/url/level/token/...)
 )
 
 

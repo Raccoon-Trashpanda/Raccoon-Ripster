@@ -285,7 +285,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "1.0.15"
+RELEASE_VERSION = "1.0.16"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -545,6 +545,11 @@ async def broadcast(msg: dict):
         if "text" not in msg and "msg" in msg:
             msg = {**msg, "text": msg["msg"]}
         _console_file_write(msg)               # persist the full stream to disk
+        try:                                   # forward warn/error to the owner (tester builds)
+            from ripster import telemetry as _tlm
+            _tlm.record(msg.get("level", "info"), msg.get("text", ""))
+        except Exception:
+            pass
     if msg.get("type") == "queue_update":
         save_pending_queue()
     for ws in _ws_broker.clients:
@@ -620,6 +625,11 @@ async def lifespan(app: FastAPI):
     # Periodic WS heartbeat so the client watchdog doesn't false-trip on an idle
     # or silently-downloading socket (status flapping Connected↔Disconnected).
     asyncio.create_task(_ws_heartbeat())
+    # Diagnostics telemetry forwarder (tester builds → owner). No-op when disabled.
+    try:
+        asyncio.create_task(_telemetry.run_forwarder())
+    except Exception as _e:
+        print(f"[telemetry] forwarder wiring error: {_e}", flush=True)
 
     # Time-based disk cleanup: delete finished release folders N minutes after
     # completion (auto-delete-minutes config, 0 = off). Keeps the disk from
@@ -800,6 +810,8 @@ from ripster.routes import download    as _download_routes
 from ripster.routes import beatport    as _beatport_routes
 from ripster.routes import soundcloud  as _soundcloud_routes
 from ripster.routes import ripster_coder as _coder_routes
+from ripster.routes import telemetry    as _telemetry_routes
+from ripster import telemetry as _telemetry
 from ripster import tl1001 as _tl1001
 
 _tl1001.install(config)          # 1001Tracklists source (login optional, disk-cached)
@@ -821,6 +833,12 @@ _download_routes.install(app, _ctx)
 _beatport_routes.install(app, _ctx)
 _soundcloud_routes.install(app, _ctx)
 _coder_routes.install(app, _ctx)
+_telemetry_routes.install(app, _ctx)
+# Diagnostics telemetry: this (tester) build forwards warn/error to the owner.
+# configure() mints an anon instance id; ingest endpoint is PUBLIC (token-gated).
+config["_release_version"] = RELEASE_VERSION
+_telemetry.configure(config, save_config, BASE_DIR)
+_app_auth.add_public_path("/api/telemetry/ingest")
 
 # ── Hot-restart ────────────────────────────────────────────────────────────────
 def _spawn_restart(delay: float = 0.4) -> None:
