@@ -95,3 +95,6 @@ telemetry-url: https://raccoon-ripster.serveousercontent.com
 telemetry-level: warn      # warn = warnings + errors · error = errors only
 telemetry-token: rptlm_61f4cee4c61a06e9c3dd
 telemetry-instance-id: ''  # auto-generated anonymous id on first run
+
+# ── Updates ──────────────────────────────────────────────────────────────────
+ripster-repo: Raccoon-Trashpanda/Raccoon-Ripster   # self-update source (in-app)

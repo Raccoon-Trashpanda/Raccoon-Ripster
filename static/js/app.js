@@ -4400,10 +4400,10 @@ async function applyRipsterUpdate(){
   try {
     const d = await api('POST','/api/update/apply');
     if(d && d.ok){
-      if(st){ st.innerHTML = '✅ Обновление применено. Нужен рестарт, чтобы новая версия заработала.'; st.style.color = '#30d158'; }
+      if(st){ st.innerHTML = '✅ Обновление скачано и применено на диск.<br><b>ПОЛНОСТЬЮ ЗАКРОЙ Ripster и открой заново</b>, чтобы новая версия заработала.'; st.style.color = '#30d158'; }
       _ripsterUpdate = null;
-      showRestartBanner('Ripster обновлён — перезапусти, чтобы применить новую версию.');
-      toast('Обновление готово — нажми «Restart now»','var(--green)');
+      showRestartBanner('Ripster обновлён — ПОЛНОСТЬЮ закрой окно Ripster и открой заново, чтобы применить.');
+      toast('Готово! Закрой и открой Ripster заново','var(--green)', '', 12000);
     } else {
       const rb = d && d.rolled_back ? ' (откат выполнен — установка в порядке)' : '';
       if(st){ st.textContent = `✗ Сбой на этапе «${(d&&d.stage)||'?'}»: ${(d&&d.error)||'?'}${rb}`; st.style.color = '#c084a0'; }

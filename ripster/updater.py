@@ -88,8 +88,11 @@ def verify_import_smoke() -> tuple[bool, str]:
 
 
 # ── network / git orchestration (best-effort; integration, not unit-tested) ──
+_DEFAULT_REPO = "Raccoon-Trashpanda/Raccoon-Ripster"
 def _repo(config) -> str:
-    return (config.get("ripster-repo") or "").strip()      # e.g. "owner/Ripster"
+    # Default so a fresh install (whose config.yaml may predate the ripster-repo
+    # key) can still self-update without the user configuring anything.
+    return (config.get("ripster-repo") or "").strip() or _DEFAULT_REPO
 
 
 def _gh_headers(config) -> dict:
@@ -152,6 +155,7 @@ def _snapshot_source(base_dir: Path) -> Path | None:
             if src.is_dir():
                 shutil.copytree(src, dst / sub, dirs_exist_ok=True)
             elif src.is_file():
+                (dst / sub).parent.mkdir(parents=True, exist_ok=True)  # nested paths (tools/lucida/…)
                 shutil.copy2(src, dst / sub)
         return dst
     except Exception as e:                            # noqa: BLE001
