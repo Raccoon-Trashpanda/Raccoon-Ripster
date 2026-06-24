@@ -40,8 +40,8 @@ save-cover-to-folder: true
 
 # ── Qobuz ────────────────────────────────────────────────────────────────────
 qobuz-auth-token: ''
-qobuz-app-id: ''
-qobuz-secrets: ''
+qobuz-app-id: '312369995'
+qobuz-secrets: e79f8b9be485692b0e5f9dd895826368
 qobuz-email: ''
 qobuz-password: ''        # hashed (MD5) before use; never stored in clear
 qobuz-quality: '27'       # 5=MP3 320 · 6=CD · 7=24/96 · 27=24/192

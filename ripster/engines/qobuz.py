@@ -37,6 +37,12 @@ from .streamrip_utils import (
 )
 
 _QOBUZ_DEFAULT_APP_ID = "312369995"
+# Secret PAIRED with the default app_id above (public QobuzDownloaderX-compatible
+# pair). DOWNLOADS sign track/getFileUrl with md5(secret+params+ts); without the
+# matching secret streamrip silently returns 0 tracks even with a valid account
+# (SEARCH needs no secret, which is why search worked but downloads didn't). A
+# user who sets their own qobuz-app-id should also set their own qobuz-secrets.
+_QOBUZ_DEFAULT_SECRET = "e79f8b9be485692b0e5f9dd895826368"
 
 _RE_AUTHFAIL = re.compile(
     r'auth.*(failed|invalid)|invalid.*(token|credentials)|'
@@ -75,7 +81,7 @@ def _write_config(user_cfg: dict, save_path: str) -> Path:
     email       = str(user_cfg.get("qobuz-email")      or "").strip()
     password    = str(user_cfg.get("qobuz-password")   or "").strip()
     app_id      = str(user_cfg.get("qobuz-app-id")     or "").strip() or _QOBUZ_DEFAULT_APP_ID
-    secrets_raw = str(user_cfg.get("qobuz-secrets")    or "").strip()
+    secrets_raw = str(user_cfg.get("qobuz-secrets")    or "").strip() or _QOBUZ_DEFAULT_SECRET
 
     if user_id and auth_token:
         use_token   = "true"
@@ -313,10 +319,10 @@ class QobuzEngine(StreamripMixin, EngineBase):
         # tracks. Say so plainly; only mention link/availability as the fallback.
         return EngineResult(
             success=False,
-            error=("Qobuz: 0 треков. Скорее всего не задан аккаунт Qobuz — для СКАЧИВАНИЯ "
-                   "нужна своя платная подписка Qobuz (поиск работает и без неё). Добавь "
-                   "qobuz-auth-token + qobuz-user-id (или email/пароль) в Настройки → Qobuz. "
-                   "Если аккаунт уже есть — проверь ссылку и актуальность токена."),
+            error=("Qobuz: 0 треков. Для СКАЧИВАНИЯ нужна своя платная подписка Qobuz "
+                   "(поиск работает и без неё). Проверь: 1) задан qobuz-auth-token + "
+                   "qobuz-user-id (или email/пароль) в Настройки → Qobuz и токен не протух; "
+                   "2) этот альбом доступен в регионе твоего аккаунта; 3) ссылка верная."),
         )
 
     async def search(self, query: str, search_type: str, limit: int, config: dict) -> list[dict]:
