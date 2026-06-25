@@ -421,6 +421,34 @@ def load_config(config_file: _Path, tokens_dir: _Path) -> dict:
             print(f"[config] load failed ({config_file}): {e}. Using defaults.",
                   file=_sys.stderr, flush=True)
     merged.update(_load_token_files(tokens_dir))
+
+    # ── Normalize save paths → always absolute & user-writable ──────────────────
+    # A relative save-path (e.g. the default "downloads") resolves against the
+    # process CWD = the install dir. If that's a protected Program Files dir, the
+    # app runs un-elevated and Windows UAC *virtualizes* the write into
+    # %LocalAppData%\VirtualStore\... — the download "succeeds" but the file is
+    # nowhere the user looks. Redirect any relative / Program Files save path to
+    # %USERPROFILE%\Music\Ripster. Deliberate absolute paths elsewhere are kept.
+    import os as _os
+    _home    = _os.environ.get("USERPROFILE") or str(_Path.home())
+    _safe_dl = str(_Path(_home) / "Music" / "Ripster")
+
+    def _bad_path(p: str) -> bool:
+        p = (p or "").strip()
+        return (not p) or (not _os.path.isabs(p)) or ("program files" in p.lower())
+
+    if _bad_path(str(merged.get("save-path", ""))):
+        merged["save-path"] = _safe_dl
+    for _k in list(merged.keys()):
+        if (_k.endswith("-save-path") or _k.endswith("-save-folder")) and _k != "save-path":
+            _v = str(merged.get(_k) or "").strip()
+            if _v and ((not _os.path.isabs(_v)) or ("program files" in _v.lower())):
+                merged[_k] = _safe_dl
+    try:
+        _Path(merged["save-path"]).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
     return merged
 
 
