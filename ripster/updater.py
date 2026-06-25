@@ -95,6 +95,24 @@ def _repo(config) -> str:
     return (config.get("ripster-repo") or "").strip() or _DEFAULT_REPO
 
 
+def _git_remote_is_repo(base_dir: Path, repo: str) -> bool:
+    """True only if base_dir is a git clone whose `origin` IS the Ripster repo.
+    A STRAY .git from another project (observed in the wild: the zhaarey Go
+    `apple-music-downloader` clone leaves an origin pointing at zhaarey, NOT
+    Raccoon-Ripster) must NOT hijack apply_update into a no-op `git pull
+    --ff-only` ("Already up to date" → false success, the real release-zip overlay
+    never runs). When the remote doesn't match, callers fall through to the
+    zipball overlay path."""
+    try:
+        r = subprocess.run(["git", "-C", str(base_dir), "remote", "get-url", "origin"],
+                           capture_output=True, text=True, timeout=15)
+        url  = (r.stdout or "").strip().lower()
+        slug = (repo or "").strip().lower()
+        return bool(url) and bool(slug) and (slug in url or slug.split("/")[-1] in url)
+    except Exception:                                  # noqa: BLE001
+        return False
+
+
 def _gh_headers(config) -> dict:
     """GitHub API headers, with a Bearer token when one is configured. A token is
     only needed for PRIVATE repos (public-repo self-update works token-less). Read
@@ -333,7 +351,7 @@ async def apply_update(config, base_dir: Path) -> dict:
     #   • git clone  → git pull --ff-only (dev installs)
     #   • portable   → download the release zipball and overlay code/static
     #                  (the distributed exe install has no .git)
-    if (base_dir / ".git").exists():
+    if (base_dir / ".git").exists() and _git_remote_is_repo(base_dir, _repo(config)):
         try:
             r = subprocess.run(["git", "-C", str(base_dir), "pull", "--ff-only"],
                                capture_output=True, text=True, timeout=120)

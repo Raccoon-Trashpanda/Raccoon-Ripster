@@ -3025,7 +3025,12 @@ function statusLabel(task) {
 }
 
 async function removeTask(id) {
-  await api('DELETE',`/api/queue/${id}`);
+  // Self-refresh: don't depend on the WS queue_update arriving — right after a
+  // server restart / reconnect it can be missed, which made the ✕ look dead.
+  try { await api('DELETE',`/api/queue/${id}`); }
+  catch(e){ toast('Не удалось удалить задачу','var(--red)'); return; }
+  S.queue = S.queue.filter(t => t.id !== id);
+  renderQueue(); updateTransport();
 }
 
 async function retryTask(id) {
