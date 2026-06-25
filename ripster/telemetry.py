@@ -132,8 +132,20 @@ async def _flush_once(client) -> None:
             _buf.appendleft(ln)
 
 
+def _enqueue_heartbeat() -> None:
+    """Register presence even with ZERO warn/error: append a heartbeat line so an
+    idle / error-free instance still shows up in the owner's tester list (otherwise
+    only instances that hit a warn/error ever appear). Appended directly — bypasses
+    the telemetry-level filter that record() applies."""
+    try:
+        _buf.append({"t": int(time.time()), "level": "info", "text": "● online"})
+    except Exception:
+        pass
+
+
 async def run_forwarder() -> None:
-    """Background loop: flush the client buffer every ~15 s. No-op if disabled."""
+    """Background loop: flush the client buffer every ~15 s, plus a presence
+    heartbeat on launch and every ~10 min. No-op if disabled."""
     global _started
     if _started:
         return
@@ -143,10 +155,21 @@ async def run_forwarder() -> None:
     except Exception:
         return
     async with httpx.AsyncClient() as client:
+        if forwarding_enabled():
+            _enqueue_heartbeat()                 # announce presence the moment we start
+            try:
+                await _flush_once(client)
+            except Exception:
+                pass
+        _since_hb = 0
         while True:
             try:
                 await asyncio.sleep(15)
                 if forwarding_enabled():
+                    _since_hb += 15
+                    if _since_hb >= 600:         # heartbeat every ~10 min
+                        _enqueue_heartbeat()
+                        _since_hb = 0
                     await _flush_once(client)
             except asyncio.CancelledError:
                 return
