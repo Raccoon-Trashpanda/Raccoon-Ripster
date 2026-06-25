@@ -139,6 +139,9 @@ function connectWS() {
     }
     setStatus('● Connected', 'var(--green)');
     appendLog('WebSocket connected — ready', 'success');
+    pullQueue();   // re-sync the queue over REST on EVERY (re)connect — heals a
+                   // half-open socket that silently missed queue_update pushes
+                   // (the "task didn't appear / console empty, only F5 fixes it" bug)
   };
   ws.onclose = () => {
     setStatus('● Disconnected', 'var(--red)');
@@ -162,8 +165,10 @@ function _wsWatchdog() {
   const st = ws && ws.readyState;
   if (st === WebSocket.CLOSED || st === WebSocket.CLOSING || st === undefined) {
     connectWS();
-  } else if (st === WebSocket.OPEN && Date.now() - _wsLastMsg > 45000) {
-    // Open but silent far past the server's heartbeat → probably half-open. Cycle it.
+  } else if (st === WebSocket.OPEN && Date.now() - _wsLastMsg > 30000) {
+    // Open but silent past ~1.5× the server's 20s heartbeat → probably half-open.
+    // Cycle it (a needless cycle on a live server is cheap: reconnect re-sends init
+    // + pullQueue re-syncs instantly). Was 45s — too slow to feel responsive.
     try { ws.close(); } catch {}  // triggers onclose → reconnect in 2s
   }
 }
