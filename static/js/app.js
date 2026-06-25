@@ -4406,11 +4406,11 @@ async function applyRipsterUpdate(){
   try {
     const d = await api('POST','/api/update/apply');
     if(d && d.ok){
-      if(st){ st.innerHTML = '✅ Обновлено! Приложение сейчас перезапустится само (~5 сек).<br>Если окно не вернулось через ~15 сек — <b>открой Ripster заново</b>.'; st.style.color = '#30d158'; }
+      if(st){ st.innerHTML = '✅ Обновлено! Перезапускаю — страница обновится сама, как только поднимется новая версия.'; st.style.color = '#30d158'; }
       _ripsterUpdate = null;
-      showRestartBanner('Ripster обновляется — приложение перезапустится. Если не вернулось — открой Ripster заново.');
-      toast('Обновлено! Перезапуск…','var(--green)', '', 12000);
-      _restartPending = true;
+      toast('Обновлено! Перезапускаю…','var(--green)', '', 9000);
+      _restartPending = true;       // WS-reconnect auto-reload as a backup
+      restartApp();                 // actually trigger the restart: server self-respawns (3.0.13) → ping-poll → reload
     } else {
       const rb = d && d.rolled_back ? ' (откат выполнен — установка в порядке)' : '';
       if(st){ st.textContent = `✗ Сбой на этапе «${(d&&d.stage)||'?'}»: ${(d&&d.error)||'?'}${rb}`; st.style.color = '#c084a0'; }
