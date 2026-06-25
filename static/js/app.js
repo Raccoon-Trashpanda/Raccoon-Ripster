@@ -4557,8 +4557,26 @@ function toggleSetupConsole() {
 
 async function restartApp() {
   await fetch('/api/restart', {method:'POST'}).catch(()=>{});
-  toast('Restarting… reconnecting in 3s', 'var(--orange)');
-  setTimeout(() => { location.reload(); }, 3500);
+  toast('Перезапуск… жду новый сервер', 'var(--orange)');
+  // Don't blind-reload after a fixed delay — the fresh server may not be bound yet
+  // (you'd land on a dead page, the "обновление зависло" bug). Poll /api/ping:
+  // reload once the NEW server answers — either after we saw the old one drop, or
+  // after enough time that the old (1.5s-delayed) exit + restart is surely done.
+  const started = Date.now();
+  let sawDown = false;
+  const ping = async () => {
+    try { const r = await fetch('/api/ping', {cache:'no-store'}); return r.ok; }
+    catch(e){ return false; }
+  };
+  const tick = async () => {
+    const elapsed = Date.now() - started;
+    if (elapsed > 90000) { location.reload(); return; }   // fallback: reload anyway
+    const up = await ping();
+    if (!up) sawDown = true;
+    if (up && (sawDown || elapsed > 8000)) { location.reload(); return; }
+    setTimeout(tick, 800);
+  };
+  setTimeout(tick, 1000);
 }
 
 

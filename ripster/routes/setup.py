@@ -792,6 +792,32 @@ async def update_apply():
     return await updater.apply_update(_cfg, _base_dir)
 
 
+def _respawn_detached() -> bool:
+    """Spawn a fresh, WINDOWLESS, detached server before this process exits — so a
+    restart no longer depends on the launcher respawning us. The launcher only
+    respawns a server it OWNS; when it merely ATTACHED to an already-running server
+    (multiple Ripster.exe instances, or the owner launcher having died) nothing
+    brings the server back after os._exit → the window hangs on a dead page. A
+    self-spawned successor grabs the port regardless; a duelling launcher respawn
+    just loses the bind and exits silently. CREATE_NO_WINDOW keeps it windowless,
+    so this does NOT reintroduce the old 'cmd windows keep popping' flash."""
+    try:
+        import subprocess
+        env   = {**os.environ, "RIPSTER_IS_RESTART": "1"}
+        flags = 0
+        if os.name == "nt":
+            flags = (subprocess.DETACHED_PROCESS
+                     | subprocess.CREATE_NEW_PROCESS_GROUP
+                     | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        subprocess.Popen([sys.executable, str(_base_dir / "app.py")],
+                         cwd=str(_base_dir), env=env, creationflags=flags,
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
+        return True
+    except Exception:
+        return False
+
+
 # ── Log / restart ─────────────────────────────────────────────────────────────
 
 @router.get("/api/install-log")
@@ -814,6 +840,7 @@ async def restart_app():
         # popping" bug). Outside the launcher (dev `python app.py`), os.execv is
         # correct — it re-execs in the existing console.
         if os.environ.get("RIPSTER_LAUNCHER") == "1":
+            _respawn_detached()    # don't rely on the launcher (it may have only attached)
             os._exit(0)
         else:
             os.execv(sys.executable, [sys.executable] + sys.argv)
