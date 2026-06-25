@@ -779,7 +779,7 @@ _ctx = AppContext(
     get_qualities     = get_qualities,
     auto_fetch_bearer = _metadata.auto_fetch_bearer,
     load_html         = _load_html_page,
-    app_info          = {"version": APP_VERSION, "build": APP_BUILD,
+    app_info          = {"version": RELEASE_VERSION, "build": APP_BUILD,
                          "name": "Ripster", "authors": APP_AUTHORS, "repo": APP_REPO},
     queue_snapshot    = queue_snapshot,
     validate_url      = _validate_url,
