@@ -12,7 +12,6 @@ from __future__ import annotations
 import os
 import re
 import sys
-import shutil
 import platform
 from pathlib import Path
 from .base import EngineBase, EngineResult
@@ -133,14 +132,15 @@ class DeezerEngine(EngineBase):
         arl      = (config.get("deezer-arl") or "").strip()
         out_path = config.get("deezer-save-path") or config.get("save-path", "downloads")
         bitrate  = _BITRATE.get(quality, "3")
-        # Resolve the deemix CLI. A standalone `deemix` exe is only on PATH for a
-        # from-source pip install; the bundled embeddable Python has the deemix
-        # package but its Scripts dir is NOT on PATH, so shutil.which() returns
-        # None and spawning bare "deemix" dies with WinError 2. Fall back to
-        # running it as a module on the SAME interpreter (deemix ships __main__,
-        # so `python -m deemix` works in the bundle).
-        _deemix_exe = shutil.which("deemix")
-        deemix_cmd  = [_deemix_exe] if _deemix_exe else [sys.executable, "-m", "deemix"]
+        # ALWAYS run deemix as a module on the SAME interpreter — never the
+        # deemix.exe console-script shim and never shutil.which("deemix"). The
+        # setuptools .exe shim does NOT execute under the isolated embeddable
+        # Python (exits 1 with ZERO output) → the engine sees no output and lies
+        # "нет 'All done!'". which() is a trap: app.py prepends <python>\Scripts to
+        # PATH (so AMD can find ffmpeg), so which("deemix") SUCCEEDS in-server and
+        # returns that broken shim — it's None only in a bare shell, which is why
+        # standalone tests passed. deemix ships __main__, so `-m deemix` is correct.
+        deemix_cmd = [sys.executable, "-m", "deemix"]
 
         # Ensure output folder exists so deemix doesn't bail on a missing path
         try:
@@ -167,7 +167,8 @@ class DeezerEngine(EngineBase):
     def classify_line(self, line: str) -> str:
         low = line.lower()
         # "Finished downloading" and "All done!" are endgame signals, not errors
-        if "error" in low or "failed" in low or "invalid arl" in low:
+        if ("error" in low or "failed" in low or "invalid arl" in low
+                or "paste here your arl" in low or "aborted!" in low):
             return "error"
         if "completed download" in low or "finished downloading" in low or "all done" in low:
             return "success"
@@ -187,6 +188,18 @@ class DeezerEngine(EngineBase):
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
         low = log_text.lower()
         tracks_ok = len(_RE_TRACK_DONE.findall(log_text))
+        # ARL missing OR invalid/expired: deemix VALIDATES the .arl file and, if it's
+        # absent or rejected, falls back to an interactive prompt ("Paste here your
+        # arl:") which immediately aborts under our stdin=DEVNULL subprocess →
+        # "Aborted!" with 0 tracks. Both wordings are the SAME root cause and the old
+        # catch-all hid it behind "no 'All done'". Surface the real fix instead.
+        if tracks_ok == 0 and ("paste here your arl" in low or "aborted!" in low):
+            return EngineResult(
+                False,
+                error="Deezer: ARL не задан или протух. Открой deezer.com в браузере → "
+                      "DevTools → Application → Cookies → скопируй значение cookie `arl` и "
+                      "вставь в Настройки → Deezer. Для FLAC/320 нужен ARL от Premium-аккаунта.",
+            )
         # Bitrate gate: deemix prints "All done!" with NO audio file when the track
         # isn't available in the requested bitrate. Two distinct wordings:
         #   • "can't stream the track at the desired bitrate"  → free/expired ARL
@@ -227,7 +240,20 @@ class DeezerEngine(EngineBase):
                 break
         if last_err:
             return EngineResult(False, error=last_err)
-        return EngineResult(False, error="Deezer: неожиданное завершение (нет 'All done!' в логе)")
+        # Unexpected exit with no recognised marker. Attach the real last lines +
+        # exit code so telemetry shows WHAT happened instead of a bare "no All done"
+        # (e.g. a network ConnectError, a killed/terminated process, or a deemix crash).
+        _noise = re.compile(r'^\s*$|Logging in|Found|deemix', re.I)
+        _tail = [l.strip() for l in log_text.splitlines()
+                 if l.strip() and not _noise.search(l)][-3:]
+        _tail_s = (" | deemix: " + " ⏎ ".join(_tail)) if _tail else ""
+        _rc_s = f" [rc={rc}]" if rc not in (-1, 0) else ""
+        return EngineResult(
+            False,
+            error="Deezer: неожиданное завершение (нет 'All done!' в логе) — обычно сетевой "
+                  "обрыв или протухший ARL, повтори; если повторяется — обнови ARL."
+                  + _rc_s + _tail_s,
+        )
 
     async def search(self, query: str, search_type: str, limit: int, config: dict) -> list[dict]:
         import httpx as _httpx

@@ -26,6 +26,14 @@ _RE_NO_RETRY = _re.compile(
     # Qobuz "0 tracks" is a permanent no-account / bad-link condition (downloads
     # need the user's own paid Qobuz login) — retrying just spins the tile ~28 min.
     r'Qobuz:\s*0\s+треков|'
+    # Qobuz precise diagnostics (geo/licensing lock, wrong custom app_id/secret,
+    # missing creds) are ALL permanent until the user changes something.
+    r'гео-?/?лицензионное\s+ограничение|app_id/secret\s+не\s+подошли|'
+    r'не\s+заданы\s+данные\s+входа|'
+    # Deezer ARL missing/expired — permanent until ARL updated.
+    r'ARL\s+не\s+задан|'
+    # SoundCloud engine not installed / no Node — permanent.
+    r'движок\s+не\s+установлен|'
     r'Territory\s+Restricted|недоступен в регионе|region\s+locked',
     _re.I,
 )

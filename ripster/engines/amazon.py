@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import sys
 from pathlib import Path
 
@@ -40,29 +39,14 @@ _RE_PCT   = re.compile(r"(\d{1,3})\s*%")
 _RE_FRAC  = re.compile(r"(\d+)\s*/\s*(\d+)")
 
 
-def _amz_exe() -> str:
-    """Locate the `amz` console script (it's often NOT on PATH after a user pip
-    install). Order: PATH → the interpreter's Scripts dir → common per-user
-    Scripts dirs. (A config override `amazon-cli-path` is checked in build_cmd.)"""
-    found = shutil.which("amz")
-    if found:
-        return found
-    cands = []
-    try:
-        cands.append(Path(sys.executable).parent / "Scripts" / "amz.exe")
-        cands.append(Path(sys.executable).parent / "amz.exe")
-    except Exception:
-        pass
-    base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-    for pyv in ("Python314", "Python313", "Python312", "Python311"):
-        cands.append(Path(base) / "Python" / pyv / "Scripts" / "amz.exe")
-    for c in cands:
-        try:
-            if c.is_file():
-                return str(c)
-        except Exception:
-            pass
-    return "amz"   # last resort — relies on PATH
+def _amz_exe() -> list[str]:
+    """argv PREFIX that runs the `amz` (amazon-music) CLI on the SAME interpreter
+    (sys.executable) — NOT the amz.exe console-script shim, which does NOT execute
+    under the isolated embeddable Python (exits 1 with ZERO output). amazon_music
+    ships no __main__, so call its entry point directly (`amz = amz.cli:main`).
+    Callers splat; an explicit `amazon-cli-path` override (a real exe) is handled
+    at the call site."""
+    return [sys.executable, "-c", "from amz.cli import main; sys.exit(main())"]
 
 
 @register
@@ -76,12 +60,13 @@ class AmazonEngine(EngineBase):
         token    = (config.get("amazon-token") or "").strip()
         out_path = config.get("amazon-save-path") or config.get("save-path", "downloads")
         q        = quality if quality in _VALID else "High"
-        amz      = (config.get("amazon-cli-path") or "").strip() or _amz_exe()
+        _amz_override = (config.get("amazon-cli-path") or "").strip()
+        amz      = [_amz_override] if _amz_override else _amz_exe()
         try:
             Path(out_path).mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        cmd = [amz, url, "-q", q, "-t", "auto", "-o", str(out_path), "--overwrite"]
+        cmd = [*amz, url, "-q", q, "-t", "auto", "-o", str(out_path), "--overwrite"]
         if token:
             cmd += ["--token", token]
         return cmd

@@ -1,4 +1,4 @@
-<#
+﻿<#
   Build the bundled Python interpreter for the installer.
 
       powershell -ExecutionPolicy Bypass -File installer\build_embedded_python.ps1

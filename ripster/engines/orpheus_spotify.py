@@ -132,7 +132,10 @@ _QUALITY_ORPHEUS = {
 
 
 def is_installed() -> bool:
-    return (_orpheus_dir() / "orpheus.py").exists()
+    # Both the entry script AND the inner orpheus/ package must exist — a partial
+    # clone with only orpheus.py crashes with "ModuleNotFoundError: orpheus.core".
+    return ((_orpheus_dir() / "orpheus.py").exists()
+            and (_orpheus_dir() / "orpheus" / "core.py").exists())
 
 
 def _blob_path() -> Path:
@@ -289,8 +292,19 @@ class OrpheusSpotifyEngine(EngineBase):
             _conv = None
         _update_orpheus_settings(orpheus_quality, save_path, config, convert_mp3=_conv)
 
+        # Bundled embeddable Python runs ISOLATED (sys.flags.isolated==1 via ._pth) so
+        # it does NOT add the script dir to sys.path and ignores PYTHONPATH → a plain
+        # `python orpheus.py` fails with "ModuleNotFoundError: orpheus.core". Bootstrap
+        # via -c to put the OrpheusDL dir on sys.path before running orpheus.py.
+        orph_dir   = str(_orpheus_dir())
         orpheus_py = str(_orpheus_dir() / "orpheus.py")
-        cmd = [sys.executable, orpheus_py]
+        _boot = (
+            "import sys, runpy; "
+            f"sys.path.insert(0, {orph_dir!r}); "
+            f"sys.argv = [{orpheus_py!r}] + sys.argv[1:]; "
+            f"runpy.run_path({orpheus_py!r}, run_name='__main__')"
+        )
+        cmd = [sys.executable, "-c", _boot]
         if save_path:
             cmd += ["-o", save_path.rstrip("/\\")]
         cmd.append(url)

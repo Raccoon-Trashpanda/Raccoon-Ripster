@@ -263,7 +263,7 @@ class QobuzEngine(StreamripMixin, EngineBase):
         # NOTE: do NOT pass --no-progress (streamrip 2.0.6 then prints nothing on a
         # non-TTY). `-v` makes it emit the real auth/region/API error to stderr (we
         # capture stderr→stdout) so a silent 0-tracks failure becomes diagnosable.
-        return [find_rip(), "-v", "--config-path", str(cfg_path), "url", url]
+        return [*find_rip(), "-v", "--config-path", str(cfg_path), "url", url]
 
     def classify_line(self, line: str) -> str:
         return _classify_line(line)
@@ -308,6 +308,45 @@ class QobuzEngine(StreamripMixin, EngineBase):
                       "в Settings → Qobuz (DevTools → Cookies → play.qobuz.com).",
             )
 
+        # Гео-/лицензионное ограничение. streamrip логирует «Album X not available
+        # to stream on qobuz» / «Track X not available for stream on qobuz», когда
+        # релиз недоступен для скачивания в этом аккаунте/регионе. Если так упали ВСЕ
+        # треки → 0 файлов, но это НЕ баг Ripster и НЕ проблема токена — аккаунт
+        # просто не имеет прав на этот контент. Раньше это пряталось за общим
+        # «0 треков» (ошибка логируется в середине прогона, а хвост брал последние
+        # строки — мусор от чистки artwork).
+        if re.search(r"not available (?:to|for) stream on", log_text, re.I):
+            n_blocked = len(re.findall(r"not available (?:to|for) stream", log_text, re.I))
+            return EngineResult(
+                success=False,
+                error=("Qobuz: альбом/треки недоступны для скачивания в твоём аккаунте "
+                       f"(гео-/лицензионное ограничение Qobuz, недоступно позиций: {n_blocked}). "
+                       "Это ограничение самого Qobuz, не Ripster — попробуй аккаунт другого "
+                       "региона или поищи релиз на другом сервисе."
+                       + getattr(self, "_cfg_diag", "")),
+            )
+
+        # Неверная пара app_id/secret (свои креды введены с ошибкой или ротировались).
+        # streamrip подписывает getFileUrl через md5(secret+…); плохой секрет → 400 →
+        # InvalidAppSecretError; плохой app_id → InvalidAppIdError.
+        if "InvalidAppSecretError" in log_text or "InvalidAppIdError" in log_text:
+            return EngineResult(
+                success=False,
+                error=("Qobuz: app_id/secret не подошли (подпись запроса отклонена Qobuz). "
+                       "Если ты задавал свои qobuz-app-id и qobuz-secrets — очисти ОБА поля "
+                       "в Настройки → Qobuz (Ripster подставит рабочую пару сам) и повтори."
+                       + getattr(self, "_cfg_diag", "")),
+            )
+
+        # Креды вообще не заданы → streamrip 2.0.5 интерактивно спрашивает
+        # «Enter your Qobuz email» в stdin, который у нас закрыт → Aborted.
+        if "MissingCredentialsError" in log_text or "Enter your Qobuz email" in log_text:
+            return EngineResult(
+                success=False,
+                error="Qobuz: не заданы данные входа. Введи qobuz-user-id + qobuz-auth-token "
+                      "(или email + пароль) в Настройки → Qobuz.",
+            )
+
         actual_q    = _detect_actual_quality(log_text)
         err_markers = re.findall(r'Failed to download|\berror:', log_text, re.I)
         if err_markers:
@@ -337,11 +376,23 @@ class QobuzEngine(StreamripMixin, EngineBase):
         # it instead of a fake "done".
         # 0 tracks with rc==0 and no markers. Cause is config-specific (bad/partial
         # token, free account, region, app_id/secret mismatch). DON'T guess — attach
-        # the last meaningful streamrip lines so telemetry shows the REAL reason.
-        _noise = re.compile(r'^\s*$|rich|Progress|━|■|FutureWarning|DeprecationWarning', re.I)
-        _tail = [l.strip() for l in log_text.splitlines()
-                 if l.strip() and not _noise.search(l)][-4:]
-        _tail_s = (" | streamrip: " + " ⏎ ".join(_tail)) if _tail else ""
+        # the REAL streamrip error line so telemetry shows the actual reason.
+        # IMPORTANT: prefer a genuine ERROR line from ANYWHERE in the log — the cause
+        # is logged mid-run (NonStreamable/auth/secret), while the LAST lines are just
+        # artwork cleanup ("Removing dirs") that tells the user nothing. The previous
+        # last-4-lines tail surfaced only Ripster's own banner → useless diagnostics.
+        _err_lines = [l.strip() for l in log_text.splitlines()
+                      if re.search(r'\bERROR\b|not available|Could not stream|'
+                                   r'Invalid\w*Error|AuthenticationError|IneligibleError|'
+                                   r'NonStreamable|Aborted', l)]
+        if _err_lines:
+            _tail_s = " | streamrip: " + _err_lines[-1][:300]
+        else:
+            _noise = re.compile(r'^\s*$|rich|Progress|━|■|FutureWarning|DeprecationWarning|'
+                                r'Removing dirs|Showing all debug', re.I)
+            _tail = [l.strip() for l in log_text.splitlines()
+                     if l.strip() and not _noise.search(l)][-4:]
+            _tail_s = (" | streamrip: " + " ⏎ ".join(_tail)) if _tail else ""
         return EngineResult(
             success=False,
             error=("Qobuz: 0 треков. Для СКАЧИВАНИЯ нужна своя платная подписка Qobuz "

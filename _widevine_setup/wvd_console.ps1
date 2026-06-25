@@ -1,9 +1,9 @@
 # ============================================================================
-#  Widevine L3 Console — one place for the whole device.wvd pipeline.
+#  Widevine L3 Console - one place for the whole device.wvd pipeline.
 #  Launch:  wvd.bat   (or:  powershell -ExecutionPolicy Bypass -File wvd_console.ps1)
 #
 #  Method that WORKS: Android Studio AVD (google_apis x86_64 ships real Widevine
-#  L3) + KeyDive. MEmu/LDPlayer ship ClearKey-only — dead end, removed.
+#  L3) + KeyDive. MEmu/LDPlayer ship ClearKey-only - dead end, removed.
 # ============================================================================
 $ErrorActionPreference = "SilentlyContinue"
 $HERE   = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -44,7 +44,7 @@ function Show-Status {
 function Boot-Emulator {
     if((Get-Process qemu-system-x86_64 -EA SilentlyContinue)){ Write-Host "Emulator already running." -ForegroundColor Yellow; return $true }
     if(-not ((sc.exe query aehd 2>$null | Select-String "RUNNING"))){
-        Write-Host "!! AEHD hypervisor not running — x86_64 emulator can't boot." -ForegroundColor Red
+        Write-Host "!! AEHD hypervisor not running - x86_64 emulator can't boot." -ForegroundColor Red
         Write-Host "   Install it (one-time, needs admin/UAC):" -ForegroundColor Red
         Write-Host "   $SDK\extras\google\Android_Emulator_Hypervisor_Driver\silent_install.bat" -ForegroundColor Red
         return $false
@@ -81,7 +81,7 @@ function Ensure-Frida {
 
 function Extract-Wvd {
     if(-not (Boot-Emulator)){ return }
-    Write-Host "Running KeyDive (-a web → Chrome plays DRM → captures CDM)..." -ForegroundColor Cyan
+    Write-Host "Running KeyDive (-a web -> Chrome plays DRM -> captures CDM)..." -ForegroundColor Cyan
     if(Test-Path "$HERE\_keydive_out"){ Remove-Item "$HERE\_keydive_out" -Recurse -Force }
     Push-Location $HERE
     & $KEYDIVE -s $SERIAL --output "_keydive_out" -w -a web
@@ -93,7 +93,7 @@ function Extract-Wvd {
 
 function Install-Wvd {
     $wvd = Get-ChildItem "$HERE\_keydive_out" -Recurse -Filter *.wvd | Select-Object -First 1
-    if(-not $wvd){ Write-Host "No extracted .wvd to install — run Extract first." -ForegroundColor Red; return }
+    if(-not $wvd){ Write-Host "No extracted .wvd to install - run Extract first." -ForegroundColor Red; return }
     New-Item -ItemType Directory -Force "$ROOT\tools\widevine" | Out-Null
     Copy-Item $wvd.FullName $WVDDST -Force
     Write-Host "Installed -> $WVDDST" -ForegroundColor Green

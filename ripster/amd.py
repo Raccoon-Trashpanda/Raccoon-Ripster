@@ -263,6 +263,11 @@ async def clone_amd() -> bool:
     amd_dir = get_amd_dir()
     if (amd_dir / "main.py").exists():
         await _setup.ilog(f"  AppleMusicDecrypt already cloned at {amd_dir}", "success")
+        # Re-apply patches even on an EXISTING clone — patch_amd_for_headless is
+        # idempotent (marker-guarded) and now carries the mp4.py KeyError:0 fix,
+        # which MUST reach AMD trees cloned by an older build (the patcher used to
+        # run only on a fresh clone, so existing installs never received it).
+        await patch_amd_for_headless(amd_dir)
         return True
     git = shutil.which("git") or "git"
     await _setup.ilog(f"  Cloning AppleMusicDecrypt v2 → {amd_dir}", "info")
@@ -368,6 +373,37 @@ async def patch_amd_for_headless(amd_dir: Path) -> None:
             await _setup.ilog("  ✓ Patched src/cmd.py (headless + background_tasks wait)", "success")
         else:
             await _setup.ilog("  ✓ src/cmd.py already patched", "info")
+
+    # m3u8 lib drift: AMD indexes M3U8.segment_map as a list, but the currently
+    # bundled m3u8 exposes it as a dict → "KeyError: 0" on EVERY track (after the
+    # m3u8 is fetched OK) → the UI lies "контент удалён". Patch extract_media to be
+    # version-agnostic (prefer per-segment init_section). Idempotent.
+    mp4_py = amd_dir / "src" / "mp4.py"
+    if mp4_py.exists():
+        src = mp4_py.read_text(encoding="utf-8", errors="replace")
+        if "init_section.absolute_uri" not in src:
+            patched = src
+            if "from urllib.parse import urljoin" not in patched:
+                patched = patched.replace(
+                    "from typing import Tuple",
+                    "from typing import Tuple\nfrom urllib.parse import urljoin", 1)
+            patched = patched.replace(
+                "    return M3U8Info(uri=stream.segment_map[0].absolute_uri, keys=keys, "
+                "codec_id=selected_codec, bit_depth=bit_depth,\n                    sample_rate=sample_rate)",
+                "    seg_map = stream.segment_map\n"
+                "    if isinstance(seg_map, list) and seg_map:\n"
+                "        init_uri = seg_map[0].absolute_uri\n"
+                "    elif stream.segments and stream.segments[0].init_section:\n"
+                "        init_uri = stream.segments[0].init_section.absolute_uri\n"
+                "    elif isinstance(seg_map, dict) and seg_map.get(\"uri\"):\n"
+                "        init_uri = urljoin(stream.base_uri or \"\", seg_map[\"uri\"])\n"
+                "    else:\n"
+                "        raise CodecNotFoundException\n"
+                "    return M3U8Info(uri=init_uri, keys=keys, codec_id=selected_codec, "
+                "bit_depth=bit_depth,\n                    sample_rate=sample_rate)", 1)
+            if patched != src:
+                mp4_py.write_text(patched, encoding="utf-8")
+                await _setup.ilog("  ✓ Patched src/mp4.py (m3u8 segment_map KeyError:0 fix)", "success")
 
 
 async def install_amd_deps() -> bool:

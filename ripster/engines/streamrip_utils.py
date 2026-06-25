@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-import shutil
 import sys
 from pathlib import Path
 
@@ -26,22 +25,18 @@ def write_config(toml_text: str) -> Path:
     return p
 
 
-def find_rip() -> str:
-    """Return path to the `rip` binary that belongs to the SAME interpreter the
-    app runs on (sys.executable), so streamrip's version matches the importable
-    `streamrip` package. Critical: pip puts `rip.exe` next to python.exe in a
-    venv (python is in Scripts/), but under a SYSTEM python it lands in the
-    `Scripts/` subdir. The old code only checked the adjacent path, so on a
-    system-python install it fell through to PATH and picked a STALE rip from a
-    different env (e.g. .venv's streamrip 2.0.5, whose config schema lacks
-    `disc_subdirectories` → 'unexpected keyword argument' → every Tidal/Qobuz
-    download died with 'без треков'). Check both layouts."""
-    exe_dir = Path(sys.executable).parent
-    for cand in (exe_dir / "rip.exe", exe_dir / "rip",
-                 exe_dir / "Scripts" / "rip.exe", exe_dir / "Scripts" / "rip"):
-        if cand.exists():
-            return str(cand)
-    return shutil.which("rip") or "rip"
+def find_rip() -> list[str]:
+    """argv PREFIX that runs streamrip's `rip` CLI via the SAME interpreter
+    (sys.executable) — the package entry point, NOT the `rip.exe` console-script
+    shim. The setuptools .exe shim does NOT execute under the isolated embeddable
+    Python (exits 1 with ZERO output) → the engine reads no tracks and lies
+    "0 треков / нужна подписка". streamrip ships no __main__ (so `-m streamrip`
+    fails), so call its click entry point directly. Callers splat the result:
+    `[*find_rip(), ...]`. sys.executable also guarantees the running streamrip
+    version matches the importable `streamrip` package (the old path-probing could
+    pick a stale rip.exe from another env)."""
+    return [sys.executable, "-c",
+            "import sys; from streamrip.rip import rip; sys.exit(rip())"]
 
 
 # ── Shared regex patterns ──────────────────────────────────────────────────────

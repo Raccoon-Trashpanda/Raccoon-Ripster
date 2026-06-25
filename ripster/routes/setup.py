@@ -633,6 +633,30 @@ async def _install_orpheus_component() -> bool:
         await _setup.irun(
             [git, "clone", "https://github.com/bascurtiz/orpheusdl-spotify", str(sp_dir)])
 
+    # Resilient module init: a newer Spotify module imports symbols the bundled
+    # utils lacks (find_system_ffmpeg / vendor_bootstrap) → ImportError that aborts
+    # init for ALL modules, taking Beatport/Tidal-via-orpheus down too. Wrap the
+    # per-module import so a broken module is skipped, not fatal. Idempotent.
+    try:
+        _core_py = orph_dir / "orpheus" / "core.py"
+        if _core_py.exists():
+            _src = _core_py.read_text(encoding="utf-8", errors="replace")
+            _old = ("        for module in module_list:  # Loading module information into module_settings\n"
+                    "            module_information: ModuleInformation = getattr("
+                    "importlib.import_module(f'modules.{module}.interface'), 'module_information', None)\n")
+            _new = ("        for module in module_list:  # Loading module information into module_settings\n"
+                    "            try:\n"
+                    "                _iface = importlib.import_module(f'modules.{module}.interface')\n"
+                    "            except Exception as _e:\n"
+                    "                logging.warning(f'Orpheus: skipping module \"{module}\" — failed to import: {_e}')\n"
+                    "                continue\n"
+                    "            module_information: ModuleInformation = getattr(_iface, 'module_information', None)\n")
+            if "_iface = importlib.import_module" not in _src and _old in _src:
+                _core_py.write_text(_src.replace(_old, _new, 1), encoding="utf-8")
+                await _setup.ilog("✓ Patched orpheus/core.py (resilient module init — Beatport fix)", "success")
+    except Exception as _e:
+        await _setup.ilog(f"⚠ orpheus/core.py patch skipped: {_e}", "warn")
+
     req = orph_dir / "requirements.txt"
     if req.exists():
         await _setup.ilog("📦 pip install OrpheusDL requirements…", "info")

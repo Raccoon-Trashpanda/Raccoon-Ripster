@@ -4,6 +4,14 @@ config.yaml
 tokens/
 cookies.txt
 *.session
+# Stray token/secret notes & exports — NEVER commit (this is taboo)
+*token*.txt
+*secret*.txt
+*.arl
+guest_links.json
+guest_sessions.json
+# Local portable bundles (shipped as release assets, not committed)
+*-portable.zip
 # OrpheusDL per-service secret blobs (Spotify/Tidal auth)
 orpheus/
 # Widevine L3 device — never publish (each user mints their own locally)

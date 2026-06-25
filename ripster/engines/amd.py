@@ -234,14 +234,35 @@ class AMDEngine(EngineBase):
                                              "Повтори позже, выбери обычный ALAC или смени инстанс.")
         if _RE_CONN_FAIL.search(log_text):
             return EngineResult(False, error="wrapper-manager unreachable (wm.wol.moe)")
+        # Wrapper served NO stream manifest: "failed to get m3u8 of adamId" (repeated),
+        # which then raises "Error processing song: 0" ([0] index on the empty m3u8).
+        # This is the free public wrapper being overloaded (ready=false) — the track is
+        # NOT removed. Catch it BEFORE the per-track/GONE fallback so it doesn't get
+        # mislabelled "контент удалён / фантомная ссылка" (wrong + sends the user
+        # chasing a dead link that isn't dead). Message names wm.wol.moe → patient-retry.
+        if len(re.findall(r"failed to get m3u8", log_text, re.I)) >= 2:
+            return EngineResult(
+                False,
+                error="Apple: бесплатный wrapper wm.wol.moe перегружен — не отдаёт стрим (m3u8) "
+                      "для треков. Это сервер, НЕ твой токен и НЕ ссылка (релиз на месте). "
+                      "Повтори позже, выбери обычный ALAC, либо подними локальный wrapper "
+                      "в Настройки → Apple → Wrapper для стабильности.")
         # Per-track signals: a freshly-saved track logs "SUCCESS - Finished
         # ripping"; an already-downloaded one logs "Song already exists" (still a
         # success — the file IS there). Both count as OK. `ready=false` on the
         # public wrapper is NOT itself a failure — it decrypts fine anyway, so we
         # trust the actual per-track + summary counters, not the readiness flag.
-        n_saved  = len(re.findall(r"SUCCESS - Finished ripping", log_text))
+        # DISK TRUTH: "SONG: SAVED id=" fires from amd_runner's save patch ONLY after
+        # a file actually landed on disk — the single authoritative "a track exists"
+        # signal. "SUCCESS - Finished ripping" is a best-effort fallback that some
+        # builds don't emit, so take the max of the two as the real saved count.
+        n_disk   = len(re.findall(r"\bSONG:\s+SAVED\s+id=", log_text, re.I))
+        n_saved  = max(n_disk, len(re.findall(r"SUCCESS - Finished ripping", log_text)))
         n_exists = len(re.findall(r"already exists", log_text, re.I))
         n_ok     = n_saved + n_exists
+        # Per-song processing failures (e.g. the Cyrillic-%TEMP% Bento4 break →
+        # "Error processing song: [Errno 2] ...atom", or any decrypt/mux error).
+        n_proc_err = len(re.findall(r"Error processing song|SongNotPass|integrity", log_text, re.I))
 
         # amd_runner prints an authoritative summary line:
         #   "DONE: Finished in Ns — tasks: N total, X OK, Y failed, Z cancelled"
@@ -255,6 +276,16 @@ class AMDEngine(EngineBase):
         if no_audio and n_saved == 0 and n_exists == 0:
             return EngineResult(False, tracks_err=1,
                                 error="AMD: у этого релиза нет lossless-ассета (ALAC/Atmos недоступны) — попробуй AAC")
+
+        # DISK-TRUTH OVERRIDE of the false "downloaded N tracks": amd_runner's OK
+        # counter can include sibling tasks (album metadata, lyrics), so "N OK" does
+        # NOT prove N audio files exist. If songs hit processing errors and NOTHING
+        # actually saved, it's a real failure — never report a phantom success.
+        if n_saved == 0 and n_exists == 0 and n_proc_err > 0:
+            return EngineResult(False, tracks_err=n_proc_err,
+                                error="AMD: ни один трек не сохранён — ошибка обработки трека "
+                                      "(см. лог). Если профиль Windows кириллический — обнови "
+                                      "Ripster (фикс ASCII-temp для Bento4) и повтори.")
 
         if m_done:
             ok_count, failed = int(m_done.group(1)), int(m_done.group(2))

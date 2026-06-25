@@ -46,6 +46,72 @@ if _extra:
     os.environ["PATH"] = _extra + os.pathsep + os.environ.get("PATH", "")
     diag("INIT", f"PATH +Bento4: {_extra}", "INFO")
 
+# ── ASCII temp dir — Bento4/gpac/MP4Box can't handle a Cyrillic %TEMP% ───────────
+# AppleMusicDecrypt/src/mp4.py extracts ALAC atoms into tempfile.TemporaryDirectory()
+# under %TEMP%. On a Russian Windows the user profile is Cyrillic
+# (C:\Users\Юлия\AppData\Local\Temp), and mp4extract/mp4decrypt/gpac/MP4Box are C++
+# tools whose ANSI argv mangles that path → the .atom/.nhml temp files are written to
+# a broken path → every song dies with "[Errno 2] No such file ...atom" and the whole
+# Apple download silently produces 0 files. Redirect TMP/TEMP (and tempfile.tempdir)
+# to a guaranteed-ASCII, space-free dir BEFORE AppleMusicDecrypt is imported/run.
+import tempfile as _tempfile
+
+def _short_path(p: str) -> str:
+    """Windows 8.3 short path of an existing dir (pure ASCII). Returns '' on failure
+    or if the result still has non-ASCII (8.3 generation disabled for that volume)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        _GSPN = ctypes.windll.kernel32.GetShortPathNameW
+        _GSPN.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        _GSPN.restype = wintypes.DWORD
+        buf = ctypes.create_unicode_buffer(600)
+        if _GSPN(p, buf, 600) and buf.value and all(ord(c) < 128 for c in buf.value):
+            return buf.value
+    except Exception:
+        pass
+    return ""
+
+def _set_tempdir(path: str, why: str):
+    os.environ["TMP"] = path
+    os.environ["TEMP"] = path
+    os.environ["TMPDIR"] = path
+    _tempfile.tempdir = path
+    diag("INIT", f"ASCII temp redirect ({why}): {path}", "INFO")
+
+def _force_ascii_tempdir():
+    try:
+        cur = _tempfile.gettempdir()
+        if all(ord(c) < 128 for c in cur):
+            return  # already ASCII — leave it
+    except Exception:
+        cur = ""
+    # 1) BEST: 8.3 short name of the CURRENT temp — same writable dir, just ASCII.
+    #    No permission dependency (it IS the user's temp). Works whenever 8.3 name
+    #    generation is on for C: (the Windows default).
+    if cur:
+        short = _short_path(cur)
+        if short:
+            _set_tempdir(short, "8.3 short of Cyrillic %TEMP%")
+            return
+    # 2) Fallback: a guaranteed-ASCII system dir we can create + write.
+    for _cand in (r"C:\ProgramData\Ripster\tmp", r"C:\RipsterTmp", r"C:\Windows\Temp"):
+        if any(ord(c) >= 128 for c in _cand):
+            continue
+        try:
+            os.makedirs(_cand, exist_ok=True)
+            _probe = os.path.join(_cand, ".w")
+            with open(_probe, "w") as _f:
+                _f.write("ok")
+            os.remove(_probe)
+        except Exception:
+            continue
+        _set_tempdir(_cand, "Cyrillic %TEMP% breaks Bento4")
+        return
+    diag("INIT", "WARN: %TEMP% has non-ASCII, 8.3 short unavailable AND no ASCII fallback "
+                 "was writable — Apple ALAC extraction may fail on this profile", "WARNING")
+_force_ascii_tempdir()
+
 # ── Ensure ffmpeg is on PATH ────────────────────────────────────────────────
 # src/mp4.py `fix_encapsulate`/`fix_esds_box` call `ffmpeg` as a BARE name and
 # read its output file WITHOUT checking the return code, so if ffmpeg is missing

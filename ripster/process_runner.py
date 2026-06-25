@@ -152,6 +152,59 @@ class ProcessRunner:
         env.setdefault("PYTHONUNBUFFERED", "1")
         env.setdefault("NO_COLOR", "1")   # hint to CLIs that support it
         env.setdefault("TERM", "dumb")
+        # FORCE UTF-8 in every Python child (streamrip/deemix/gamdl/orpheus). On a
+        # Russian Windows the console code page is CP1251, and streamrip's `rich`
+        # logger encodes track metadata with that code page — a single accented char
+        # in a title/genre (e.g. "OceanLab", "Björk") raises UnicodeEncodeError INSIDE
+        # rich, which crashes the whole run → exit 1, 0 files. The owner box (UTF-8
+        # console) never hit it; testers on cp1251 got a phantom "Qobuz: 0 треков"
+        # even with a VALID paid token. PYTHONUTF8=1 + PYTHONIOENCODING=utf-8 makes the
+        # child use UTF-8 for stdio so rich never touches cp1251. Proven: the same
+        # album that returned 0 tracks downloads all 10 FLACs with these set.
+        # (Ignored by non-Python children like node/ffmpeg — harmless.)
+        env.setdefault("PYTHONUTF8", "1")
+        env.setdefault("PYTHONIOENCODING", "utf-8")
+        # ASCII temp for ANSI-only C++ tools. gamdl AND AppleMusicDecrypt shell out to
+        # Bento4 (mp4decrypt/mp4extract), whose ANSI argv can't open a Cyrillic %TEMP%
+        # (C:\Users\Юлия\...\Temp on a Russian profile) → every Apple track dies with
+        # "[Errno 2] No such file ...". Point all engine children at a guaranteed-ASCII,
+        # space-free temp dir when the inherited one is non-ASCII (ASCII profiles are
+        # left untouched). Mirrors amd_runner's own redirect, so gamdl is covered too.
+        try:
+            import tempfile as _tf
+            _cur = _tf.gettempdir()
+            if any(ord(c) > 127 for c in _cur):
+                _ascii = ""
+                # BEST: 8.3 short name of the current temp (same writable dir, ASCII).
+                if IS_WINDOWS:
+                    try:
+                        import ctypes
+                        from ctypes import wintypes
+                        _g = ctypes.windll.kernel32.GetShortPathNameW
+                        _g.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+                        _g.restype = wintypes.DWORD
+                        _b = ctypes.create_unicode_buffer(600)
+                        if _g(_cur, _b, 600) and _b.value and all(ord(c) < 128 for c in _b.value):
+                            _ascii = _b.value
+                    except Exception:
+                        _ascii = ""
+                # Fallback: a writable ASCII system dir.
+                if not _ascii:
+                    for _c in (r"C:\ProgramData\Ripster\tmp", r"C:\RipsterTmp"):
+                        try:
+                            os.makedirs(_c, exist_ok=True)
+                            _p = os.path.join(_c, ".w")
+                            with open(_p, "w") as _f:
+                                _f.write("ok")
+                            os.remove(_p)
+                        except Exception:
+                            continue
+                        _ascii = _c
+                        break
+                if _ascii:
+                    env["TMP"] = _ascii; env["TEMP"] = _ascii; env["TMPDIR"] = _ascii
+        except Exception:
+            pass
         _ensure_home_env(env)
 
         if self.use_thread:

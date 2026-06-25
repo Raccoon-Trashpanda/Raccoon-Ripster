@@ -156,6 +156,25 @@ class SoundcloudEngine(EngineBase):
             )
         if rc == 0:
             return EngineResult(success=True)
+        low = log_text.lower()
+        # Lucida не найден / Node отсутствует — реальная проблема установки.
+        if ("lucida не найден" in low or "cannot find module" in low
+                or "is not recognized" in low or "command not found" in low):
+            return EngineResult(
+                success=False,
+                error="SoundCloud: движок не установлен или нет Node.js. Открой "
+                      "Настройки → SoundCloud → «Установить движок» и проверь, что "
+                      "установлен Node.js 18+.",
+            )
+        # Сетевой обрыв (undici «terminated»/fetch failed) — после 3 ретраев в
+        # runner.mjs всё равно упало. Это не проблема установки, а сеть/CDN.
+        if re.search(r"terminated|fetch failed|econnreset|etimedout|socket hang|"
+                     r"network|premature close|und_err", low):
+            return EngineResult(
+                success=False,
+                error="SoundCloud: сетевой обрыв при загрузке (соединение с SoundCloud/CDN "
+                      "разорвано). Повтори позже; если повторяется — проверь VPN/сеть.",
+            )
         return EngineResult(
             success=False,
             error="SoundCloud: нет маркера завершения — проверь Node.js и установку Lucida",

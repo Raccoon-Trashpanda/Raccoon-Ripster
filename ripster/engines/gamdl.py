@@ -1,7 +1,6 @@
 """glomatico/gamdl engine."""
 from __future__ import annotations
 import re
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -36,14 +35,13 @@ _RE_DL_PCT = re.compile(r'\[download\]\s+(\d+(?:\.\d+)?)\s*%')
 _FLAG_CACHE: set[str] | None = None
 
 
-def _venv_gamdl() -> str:
-    """Prefer gamdl from the current venv over any system-wide install."""
-    venv = Path(sys.executable).with_name("gamdl")
-    if not venv.exists():
-        venv = venv.with_suffix(".exe")
-    if venv.exists():
-        return str(venv)
-    return shutil.which("gamdl") or "gamdl"
+def _venv_gamdl() -> list[str]:
+    """argv PREFIX that runs gamdl on the SAME interpreter (sys.executable) — NOT
+    the gamdl.exe console-script shim, which does NOT execute under the isolated
+    embeddable Python (exits 1 with ZERO output). gamdl ships __main__, so
+    `python -m gamdl` is correct in a venv AND in the bundle. Callers splat:
+    `[*_venv_gamdl(), ...]`."""
+    return [sys.executable, "-m", "gamdl"]
 
 
 def _get_flags() -> set[str]:
@@ -51,7 +49,7 @@ def _get_flags() -> set[str]:
     if _FLAG_CACHE is not None:
         return _FLAG_CACHE
     try:
-        r = subprocess.run([_venv_gamdl(), "--help"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([*_venv_gamdl(), "--help"], capture_output=True, text=True, timeout=10)
         _FLAG_CACHE = set(re.findall(r"--([a-z][a-z0-9-]+)", r.stdout + r.stderr))
     except Exception:
         _FLAG_CACHE = set()
@@ -77,7 +75,7 @@ class GamdlEngine(EngineBase):
         exe = _venv_gamdl()
         base_dir = Path(sys.argv[0]).parent if sys.argv else Path(".")
 
-        cmd = [exe]
+        cmd = list(exe)
 
         # Auth: wrapper mode or cookies.
         # Video (mv) and AAC decrypt fine with gamdl's bundled L3 CDM + cookies —

@@ -137,7 +137,11 @@ _QUALITY_ORPHEUS = {
 
 
 def is_installed() -> bool:
-    return (_orpheus_dir() / "orpheus.py").exists() and (_module_path() / "__init__.py").exists()
+    return ((_orpheus_dir() / "orpheus.py").exists()
+            # inner orpheus/ package must be present too — a partial clone with only
+            # orpheus.py crashes at runtime with "ModuleNotFoundError: orpheus.core".
+            and (_orpheus_dir() / "orpheus" / "core.py").exists()
+            and (_module_path() / "__init__.py").exists())
 
 
 def is_authenticated(config: dict) -> bool:
@@ -210,8 +214,22 @@ class OrpheusBeatportEngine(EngineBase):
         orpheus_quality = _QUALITY_ORPHEUS.get(quality, "hifi")
         _update_orpheus_settings(orpheus_quality, save_path, config)
 
+        # The bundled embeddable Python runs ISOLATED (sys.flags.isolated==1, a side
+        # effect of the ._pth) → it does NOT add the script's directory to sys.path AND
+        # ignores PYTHONPATH. So a plain `python orpheus.py` dies with
+        # "ModuleNotFoundError: No module named 'orpheus.core'" even though the inner
+        # orpheus/ package sits right next to orpheus.py (proven on a bundled install;
+        # the dev .venv is non-isolated so it never reproduced). Bootstrap via -c: put
+        # the OrpheusDL dir on sys.path, restore argv, then run orpheus.py as __main__.
+        orph_dir   = str(_orpheus_dir())
         orpheus_py = str(_orpheus_dir() / "orpheus.py")
-        cmd = [sys.executable, orpheus_py]
+        _boot = (
+            "import sys, runpy; "
+            f"sys.path.insert(0, {orph_dir!r}); "
+            f"sys.argv = [{orpheus_py!r}] + sys.argv[1:]; "
+            f"runpy.run_path({orpheus_py!r}, run_name='__main__')"
+        )
+        cmd = [sys.executable, "-c", _boot]
         if save_path:
             cmd += ["-o", save_path.rstrip("/\\")]
         cmd.append(url)
@@ -285,4 +303,19 @@ class OrpheusBeatportEngine(EngineBase):
         if rc == 0 and not log_text.strip():
             return EngineResult(False, error="OrpheusDL: нет вывода — проверь логин Beatport")
 
+        # Surface the REAL exception from a Python traceback instead of a bare
+        # "exit code 1" — the last "SomeError: message" line names the actual cause
+        # (a connection drop, a parse error, a missing track), which the generic
+        # message hid. A bare network error is also flagged so it reads as transient.
+        _exc = ""
+        for ln in reversed(log_text.splitlines()):
+            s = ln.strip()
+            if re.match(r'^[A-Za-z_][\w.]*(Error|Exception|Warning):\s', s):
+                _exc = s[:200]
+                break
+        if _exc:
+            if re.search(r'Connection|Timeout|terminated|Max retries|ConnectError|'
+                         r'temporarily|Read timed out', _exc, re.I):
+                return EngineResult(False, error=f"Beatport: сетевой обрыв ({_exc}) — повтори позже.")
+            return EngineResult(False, error=f"OrpheusDL Beatport: {_exc}")
         return EngineResult(False, error=f"OrpheusDL Beatport: завершился с кодом {rc}")

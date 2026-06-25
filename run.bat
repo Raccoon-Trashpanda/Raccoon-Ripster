@@ -1,5 +1,5 @@
 @echo off
-REM Ripster — launcher (Windows).
+REM Ripster - launcher (Windows).
 REM 1. First run: create venv + install deps if .venv is missing.
 REM 2. If pywebview is installed, open Ripster in its own native window.
 REM 3. Otherwise fall back to the default browser + plain app.py.
@@ -7,7 +7,7 @@ REM 3. Otherwise fall back to the default browser + plain app.py.
 cd /d "%~dp0"
 
 if not exist ".venv\Scripts\python.exe" (
-    echo [setup] First run — creating virtual environment...
+    echo [setup] First run - creating virtual environment...
     py -3 -m venv .venv 2>nul || python -m venv .venv
     .venv\Scripts\python.exe -m pip install --upgrade pip
     .venv\Scripts\python.exe -m pip install -r requirements.txt
@@ -27,7 +27,7 @@ if not errorlevel 1 (
     exit /b 0
 )
 
-echo pywebview not available — opening in your browser instead.
+echo pywebview not available - opening in your browser instead.
 start "" "http://127.0.0.1:7799"
 .venv\Scripts\python.exe app.py
 pause

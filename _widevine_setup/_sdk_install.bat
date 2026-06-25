@@ -1,6 +1,6 @@
 @echo off
 REM Detached, RESILIENT SDK component installer.
-REM Retries on any failure (router drops, timeouts) — sdkmanager resumes
+REM Retries on any failure (router drops, timeouts) - sdkmanager resumes
 REM partial downloads from .temp. Writes DONE_MARKER_0 only on real success.
 set "JAVA_HOME=C:\Android\jre17\jdk-17.0.19+10-jre"
 set "PATH=%JAVA_HOME%\bin;%PATH%"

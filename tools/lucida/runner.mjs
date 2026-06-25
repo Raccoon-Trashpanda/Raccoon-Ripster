@@ -101,6 +101,31 @@ async function withHeartbeat(label, intervalMs, fn) {
   finally { clearInterval(t) }
 }
 
+// Retry transient NETWORK failures (undici throws bare "Error: terminated" when a
+// SoundCloud/CDN connection drops mid-request). Without this a single blip during
+// the initial resolve or a track stream kills the ENTIRE job with no Summary line —
+// which the Python side could only report as the misleading "проверь Node.js/Lucida".
+// Permanent errors (404, "not a track", auth) are NOT retried — they don't match.
+const _TRANSIENT = /terminated|fetch failed|ECONNRESET|ETIMEDOUT|socket hang ?up|EAI_AGAIN|network|aborted|premature close|other side closed|UND_ERR/i
+async function withRetry(label, fn, tries = 3) {
+  let lastErr
+  for (let attempt = 1; attempt <= tries; attempt++) {
+    try { return await fn() }
+    catch (e) {
+      lastErr = e
+      const msg = (e?.message || String(e) || '').split('\n')[0]
+      if (attempt < tries && _TRANSIENT.test(msg)) {
+        const wait = 1500 * attempt
+        console.log(`  ↻ ${label}: сетевой обрыв (${msg}) — повтор ${attempt}/${tries - 1} через ${(wait / 1000).toFixed(0)}s`)
+        await new Promise(r => setTimeout(r, wait))
+        continue
+      }
+      throw e
+    }
+  }
+  throw lastErr
+}
+
 async function _downloadCover(url, dest) {
   if (!url) return false
   try {
@@ -173,18 +198,21 @@ async function downloadTrack(lucida, trackUrl, destDir, num, total) {
   const label = `${pad(num, total)}`
   let title = '?'
   try {
-    const tr = await lucida.getByUrl(trackUrl)
+    const tr = await withRetry('resolve', () => lucida.getByUrl(trackUrl))
     if (tr.type !== 'track') throw new Error('Not a track response')
 
     const artist = tr.metadata.artists?.[0]?.name || 'Unknown'
     title = tr.metadata.title || `Track ${num}`
     console.log(`${label} Downloading: ${title}`)
 
-    const sr  = await tr.getStream(hq)
-    const ext = mimeToExt(sr.mimeType)
-    const raw = path.join(destDir, sanitize(`${String(num).padStart(2, '0')} ${artist} - ${title}.${ext}`))
-    await withHeartbeat('качаю', 25_000, () =>
-      pipeline(sr.stream, createWriteStream(raw)))
+    let raw
+    await withRetry('качаю', async () => {
+      const sr  = await tr.getStream(hq)
+      const ext = mimeToExt(sr.mimeType)
+      raw = path.join(destDir, sanitize(`${String(num).padStart(2, '0')} ${artist} - ${title}.${ext}`))
+      await withHeartbeat('качаю', 25_000, () =>
+        pipeline(sr.stream, createWriteStream(raw)))
+    })
     await finalize(raw, _metaCover(tr.metadata))
     console.log(`${label} Success: ${title} - ${artist}`)
     return true
@@ -200,7 +228,7 @@ const lucida = new Lucida({
 })
 
 try {
-  const result = await lucida.getByUrl(url)
+  const result = await withRetry('resolve', () => lucida.getByUrl(url))
   await mkdir(outputDir, { recursive: true })
 
   if (result.type === 'track') {
@@ -222,11 +250,14 @@ try {
     await _downloadCover(_metaCover(result.metadata).coverUrl, path.join(trackDir, 'cover.jpg'))
 
     try {
-      const sr  = await result.getStream(hq)
-      const ext = mimeToExt(sr.mimeType)
-      const raw = path.join(trackDir, sanitize(`${artist} - ${title}.${ext}`))
-      await withHeartbeat('качаю', 25_000, () =>
-        pipeline(sr.stream, createWriteStream(raw)))
+      let raw
+      await withRetry('качаю', async () => {
+        const sr  = await result.getStream(hq)
+        const ext = mimeToExt(sr.mimeType)
+        raw = path.join(trackDir, sanitize(`${artist} - ${title}.${ext}`))
+        await withHeartbeat('качаю', 25_000, () =>
+          pipeline(sr.stream, createWriteStream(raw)))
+      })
       await finalize(raw, _metaCover(result.metadata))
       console.log(`[1/1] Success: ${title} - ${artist}`)
       console.log(`Summary: 1 Success, 0 Failed. Output dir: ${trackDir}`)
