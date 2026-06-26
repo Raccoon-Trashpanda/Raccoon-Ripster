@@ -56,17 +56,47 @@ _REDACT = [
 ]
 
 
+def _id_file() -> Path:
+    """A dedicated, stable home for the instance id so it survives even when
+    config.yaml can't be persisted (e.g. a read-only Program Files install) or
+    gets reset. Prefer a per-user writable dir; fall back to the app dir."""
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or ""
+    d = (Path(base) / "Ripster") if base else _base_dir
+    return d / "instance_id.txt"
+
+
 def configure(cfg: dict, save_cfg, base_dir: Path) -> None:
-    """Wire globals once at startup. Auto-mints an anonymous instance id."""
+    """Wire globals once at startup. Mint a STABLE anonymous instance id — assigned
+    on first start and never changing thereafter, so the owner can identify each
+    tester reliably. Recovered from a dedicated file even if config.yaml lost it."""
     global _cfg, _save_cfg, _base_dir
     _cfg, _save_cfg, _base_dir = cfg, save_cfg, Path(base_dir)
-    if not (_cfg.get("telemetry-instance-id") or "").strip():
+    iid = (_cfg.get("telemetry-instance-id") or "").strip()
+    # 1) recover from the dedicated id file if the config doesn't have it
+    if not iid:
         try:
-            _cfg["telemetry-instance-id"] = uuid.uuid4().hex[:12]
-            if _save_cfg:
-                _save_cfg(_cfg)
+            f = _id_file()
+            if f.is_file():
+                iid = (f.read_text(encoding="utf-8").strip() or "")[:12]
         except Exception:
             pass
+    # 2) mint exactly once if still missing
+    if not iid:
+        iid = uuid.uuid4().hex[:12]
+    _cfg["telemetry-instance-id"] = iid
+    # 3) persist to BOTH config and the dedicated file (idempotent → never changes)
+    try:
+        if _save_cfg:
+            _save_cfg(_cfg)
+    except Exception:
+        pass
+    try:
+        f = _id_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        if (not f.is_file()) or f.read_text(encoding="utf-8").strip() != iid:
+            f.write_text(iid, encoding="utf-8")
+    except Exception:
+        pass
 
 
 def _instance_id() -> str:

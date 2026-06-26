@@ -125,7 +125,15 @@ def get_amd_dir() -> Path:
 def write_amd_config(amd_dir: Path, codec: str = "alac") -> None:
     """Write config.toml for AMD v2 from current settings."""
     cfg        = _cfg
-    base_out   = str(Path(cfg.get("save-path", str(_base_dir / "downloads")))).replace("\\", "/")
+    # Resolve save-path to an ABSOLUTE dir anchored to the app's install dir — NOT
+    # AMD's OWN cwd (the AppleMusicDecrypt folder). A relative/empty save-path here
+    # used to make AMD write into AppleMusicDecrypt\downloads\… instead of the
+    # user's chosen folder (the "files ended up in AppleMusicDecrypt" report).
+    _sp        = (cfg.get("save-path") or "").strip()
+    _spp       = Path(_sp) if _sp else (_base_dir / "downloads")
+    if not _spp.is_absolute():
+        _spp   = _base_dir / _spp
+    base_out   = str(_spp).replace("\\", "/")
 
     if codec in ("ec3", "ac3", "atmos"):
         out = str(Path(cfg.get("atmos-save-folder") or cfg.get("atmos-path") or

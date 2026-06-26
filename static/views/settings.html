@@ -212,7 +212,8 @@
           <div class="settings-grid">
             <div class="field-group">
               <label class="lbl">Папка загрузок</label>
-              <input id="s-savepath" placeholder="downloads" oninput="saveSetting('save-path',this.value)"/>
+              <input id="s-savepath" placeholder="Музыка\Ripster (по умолчанию)" oninput="saveSetting('save-path',this.value)"/>
+              <div style="font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5">Пусто = <code>Музыка\Ripster</code>. Можно указать свою папку (напр. <code>D:\Музыка</code>) — туда пойдут ВСЕ загрузки, включая Apple.</div>
             </div>
             <div class="field-group">
               <label class="lbl">Путь к загрузчику / main.go</label>
