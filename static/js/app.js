@@ -2742,7 +2742,7 @@ async function coderDownloadConvert() {
   document.getElementById('url-input').value = url;
   await addUrl();
   document.getElementById('coder-url').value = '';
-  toast('Скачиваю в исходном качестве. После загрузки выбери папку тут и сконвертируй.','var(--green)',7000);
+  toast('Скачиваю в исходном качестве. После загрузки выбери папку тут и сконвертируй.','var(--green)','',7000);
   showView('queue', document.querySelector('[data-view=queue]'));
 }
 
@@ -4046,7 +4046,7 @@ function downloadLogs(btn) {
     a.click();
     a.remove();
     if (btn) { const o = btn.textContent; btn.textContent = '⬇ Готово'; setTimeout(() => { btn.textContent = o; }, 1500); }
-    if (window.toast) toast('⬇ Скачиваю zip с логами — пришли этот файл для диагностики', 'var(--green)', 6000);
+    if (window.toast) toast('⬇ Скачиваю zip с логами — пришли этот файл для диагностики', 'var(--green)', '', 6000);
   } catch (e) {
     if (window.toast) toast('Не удалось скачать лог: ' + ((e && e.message) || e), 'var(--red)');
   }
@@ -4260,8 +4260,11 @@ const SETUP_COMPONENTS = [
   { key:'soundcloud', icon:'🎧', label:'SoundCloud (Lucida)', color:'#ff5500',
     desc:'Node.js + Lucida (клон исходников + npm-сборка, ~1–2 мин). Нужен только для скачивания с SoundCloud.',
     endpoint:'/api/setup/component/soundcloud', status:'soundcloud' },
-  { key:'wvd', icon:'🔐', label:'Widevine L3 ключ', tag:'опционально', color:'#c084e0',
-    desc:'⚠ НЕ быстро и занимает НЕСКОЛЬКО ГБ места. Минтит ТВОЙ собственный L3-ключ (Android-эмулятор + KeyDive) в отдельном окне-мастере. Только для DRM-треков SoundCloud (миксы, приваты). Готовый .wvd грузится в Настройках → SoundCloud.',
+  { key:'widevine', icon:'🔐', label:'Widevine L3 — тулчейн (авто)', tag:'опционально', color:'#c084e0',
+    desc:'Автоустановка всего для L3 БЕЗ ручных .bat: JRE 17 + Android SDK + эмулятор + system-image + AEHD-гипервизор + AVD. Один запрос UAC на драйвер. ~неск. ГБ, 5–15 мин. Нужно только для DRM-треков SoundCloud (миксы, приваты). Прогресс — в консоли ниже.',
+    endpoint:'/api/setup/component/widevine', status:'widevine' },
+  { key:'wvd', icon:'🔑', label:'Widevine L3 — минт ключа', tag:'после тулчейна', color:'#c084e0',
+    desc:'Минтит ТВОЙ L3 device.wvd (эмулятор + KeyDive) — запусти ПОСЛЕ установки тулчейна выше. Готовый .wvd сам грузится в Настройки → SoundCloud.',
     endpoint:'/api/widevine/mint-wizard', wizard:true, status:'wvd' },
   // ── Spotify / Beatport (OrpheusDL) ────────────────────────────────────────
   { key:'orpheus', icon:'🟢', label:'OrpheusDL (Spotify)', color:'#1db954',
@@ -4462,7 +4465,7 @@ async function _runComponentInstall(c) {
   try {
     if(c.wizard){
       const r = await api('POST', c.endpoint);
-      if(window.toast) toast(r&&r.ok?(r.msg||'Мастер открылся'):('✗ '+((r&&r.error)||'ошибка')), r&&r.ok?c.color:'var(--red)', 7000);
+      if(window.toast) toast(r&&r.ok?(r.msg||'Мастер открылся'):('✗ '+((r&&r.error)||'ошибка')), r&&r.ok?c.color:'var(--red)', '', 7000);
       s.running=false; s.pct=100;              // wizard runs in its own window
     } else if(c.wsdone){
       await api('POST', c.endpoint);            // fire-and-forget; wait for completion WS
@@ -7602,7 +7605,7 @@ function _relShowAuthHint(err) {
   const sp_dc = lower.includes('sp_dc') || lower.includes('cookie') || lower.includes('не авторизован') || lower.includes('обновить oauth');
   if (!sp_dc) return;
   // Reuse the toast — keep wording concrete + action-oriented
-  try { toast('⚠ Spotify: ' + err + ' — Settings → Spotify', 'var(--orange)', 9000); } catch {}
+  try { toast('⚠ Spotify: ' + err + ' — Settings → Spotify', 'var(--orange)', '', 9000); } catch {}
 }
 
 async function loadReleases(force = false) {
@@ -7703,16 +7706,16 @@ async function loadReleases(force = false) {
   if(errors.length) {
     const has403 = errors.some(e => e && e.toLowerCase().includes('not registered'));
     if(has403) {
-      toast('⚠ Spotify 403: добавь аккаунт в developer.spotify.com/dashboard → Settings → User Management', 'var(--orange)', 8000);
+      toast('⚠ Spotify 403: добавь аккаунт в developer.spotify.com/dashboard → Settings → User Management', 'var(--orange)', '', 8000);
     } else {
-      toast('⚠ ' + errors.slice(0, 2).join('; '), 'var(--orange)', 4000);
+      toast('⚠ ' + errors.slice(0, 2).join('; '), 'var(--orange)', '', 4000);
     }
   }
 
   if(!allReleases.length) {
     // No new results — keep previous data visible if available
     if(hasPrev) {
-      toast('Нет новых релизов за выбранный период', 'var(--muted)', 3000);
+      toast('Нет новых релизов за выбранный период', 'var(--muted)', '', 3000);
     } else {
       if(empty) empty.style.display = '';
     }

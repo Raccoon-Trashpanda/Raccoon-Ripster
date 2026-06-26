@@ -410,7 +410,7 @@ function _bbcStartStream(url) {
       audio.removeEventListener('loadedmetadata', _r);
       if (audio.duration && _bbcResumeAt < audio.duration - 20) {
         try { audio.currentTime = _bbcResumeAt; } catch(_) {}
-        toast(`▶ Продолжаю с ${_bbcFmtDur(_bbcResumeAt)}`, 'var(--muted)', 2600);
+        toast(`▶ Продолжаю с ${_bbcFmtDur(_bbcResumeAt)}`, 'var(--muted)', '', 2600);
       }
     });
   }

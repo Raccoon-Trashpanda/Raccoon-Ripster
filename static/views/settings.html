@@ -685,6 +685,8 @@
           <div class="block-title" data-i18n="s.quality">🎚 Качество</div>
           <div id="quality-grid" class="qgrid"></div>
         </div>
+        <details class="adv-block" style="margin-top:12px">
+          <summary style="cursor:pointer;padding:11px 14px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:9px;font-size:12px;font-weight:700;color:var(--text);user-select:none">Расширенные настройки Apple <span style="font-weight:400;color:var(--muted)">— wrapper, декрипт, кодеки, лирика, порты</span></summary>
         <div class="block mt12" id="zhaarey-settings-block">
           <div class="block-title" data-i18n="s.wrapper_title">⚙️ Wrapper / Decryption</div>
           <div data-i18n-html="s.wrapper_help" style="font-size:10.5px;color:var(--muted);line-height:1.6;margin:2px 0 12px;padding:9px 12px;background:rgba(192,132,160,.06);border:1px solid rgba(192,132,160,.18);border-radius:8px">
@@ -1035,6 +1037,7 @@
   ghcr.io/itouakirai/wrapper:x86</div>
           </div>
 
+        </details><!-- /Расширенные Apple -->
           <!-- ── Unified save row (matches Qobuz/Deezer/Tidal/SC/BP layout) ── -->
           <div class="block mt12">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1077,8 +1080,10 @@
             </div>
           </div>
 
-          <!-- Fallback: email + password -->
-          <div style="background:rgba(0,0,0,.15);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-bottom:10px">
+          <!-- Fallback: email + password (advanced — token mode is preferred) -->
+          <details style="margin-bottom:10px">
+            <summary style="cursor:pointer;font-size:11px;color:var(--muted);padding:4px 0;user-select:none">▸ Или войти по email + паролю</summary>
+          <div style="background:rgba(0,0,0,.15);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-top:8px;margin-bottom:10px">
             <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px" data-i18n="s.qobuz_or_pass">Или email + пароль (если не удалось достать токен)</div>
             <div class="settings-grid">
               <div class="field-group">
@@ -1100,6 +1105,7 @@
               <div id="qobuz-pw-status" style="font-size:11px;color:var(--muted);flex:1;min-width:180px"></div>
             </div>
           </div>
+          </details><!-- /email+password -->
 
           <!-- Optional app_id / secrets override -->
           <details style="margin-bottom:10px">
@@ -1461,8 +1467,10 @@
             </details>
           </div>
 
-          <!-- ─ Блок 2: Скачивание ──────────────────────────────────────── -->
-          <div class="block mt12" style="border:1px solid rgba(29,185,84,.25);border-radius:10px;padding:14px">
+          <!-- ─ Блок 2: Скачивание (advanced — ручной web-player токен) ──── -->
+          <details style="margin-top:12px">
+            <summary style="cursor:pointer;padding:11px 14px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:9px;font-size:12px;font-weight:700;color:var(--text);user-select:none">Скачивание Spotify-треков напрямую <span style="font-weight:400;color:var(--muted)">— ручной Bearer-токен</span></summary>
+          <div class="block mt12" style="border:1px solid rgba(29,185,84,.25);border-radius:10px;padding:14px;margin-top:8px">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
               <span style="font-size:15px">⬇</span>
               <div style="font-weight:600;font-size:13px;color:var(--text)" data-i18n="sp.dl_title">Скачивание Spotify-треков</div>
@@ -1551,6 +1559,7 @@
                 onchange="setOrpheusMode(this.checked)"><div class="toggle-slider"></div></label>
             </div>
           </div>
+          </details><!-- /Spotify Скачивание -->
 
           <!-- ── Unified save row (matches Apple/Qobuz/Deezer/Tidal/SC/BP layout) ── -->
           <div class="block mt12">
@@ -1613,9 +1622,10 @@
                 <button class="btn-ghost btn-sm btn-icon" onclick="const f=document.getElementById('s-sc-oauth');f.type=f.type==='password'?'text':'password'" data-i18n-title="s.show_hide" title="Показать/скрыть">👁</button>
               </div>
             </div>
-            <!-- ── Widevine L3 CDM (для DRM треков, миксов и приватных ссылок) ── -->
-            <div class="block" style="margin-top:10px;background:rgba(255,85,0,.04);border:1px solid rgba(255,85,0,.18)">
-              <div class="block-title" style="color:#ff7a33;font-size:11px" data-i18n="sc.wvd_title">🔐 Widevine L3 CDM (опционально)</div>
+            <!-- ── Widevine L3 CDM (advanced — для DRM треков, миксов и приватных ссылок) ── -->
+            <details style="margin-top:10px">
+              <summary style="cursor:pointer;padding:10px 13px;background:rgba(255,85,0,.05);border:1px solid rgba(255,85,0,.18);border-radius:9px;font-size:12px;font-weight:700;color:#ff7a33;user-select:none">🔐 Widevine L3 CDM <span style="font-weight:400;color:var(--muted)">— для DRM-треков (миксы, приваты)</span></summary>
+            <div class="block" style="margin-top:8px;background:rgba(255,85,0,.04);border:1px solid rgba(255,85,0,.18)">
               <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:8px" data-i18n-html="sc.wvd_desc">
                 Lucida не дешифрует DRM-защищённые SC треки (миксы, приваты, большинство Go+ с 2024).
                 Загрузи L3 <code>device.wvd</code> — Ripster будет сам делать Widevine handshake и сохранять AAC 256k.
@@ -1657,6 +1667,7 @@
                 Полезно для релизов и популярных миксов (есть на Deezer/Apple). Бесполезно для приватных и эксклюзивных SC миксов — их нет нигде кроме SC.
               </div>
             </div>
+            </details><!-- /SoundCloud WVD -->
 
             <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('soundcloud')" style="padding:6px 12px;background:rgba(255,85,0,.18);color:#ff5500;border:1px solid rgba(255,85,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.save_btn">💾 Сохранить</button>

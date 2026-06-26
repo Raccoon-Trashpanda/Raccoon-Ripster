@@ -745,7 +745,7 @@ async function setStreamQuality(q) {
       audio.addEventListener('loadedmetadata', seekOnce);
       await _playPreviewAt(Preview.idx);
     }
-    if (typeof toast === 'function') toast(`Качество: ${_qualityShortLabel(item.service, q)}`, 'var(--green)', 2500);
+    if (typeof toast === 'function') toast(`Качество: ${_qualityShortLabel(item.service, q)}`, 'var(--green)', '', 2500);
   } catch (e) {
     console.warn('[quality] switch failed:', e?.message);
     if (typeof toast === 'function') toast('Не удалось переключить качество', 'var(--red)');
@@ -1379,7 +1379,7 @@ function _setupAudioEvents() {
         '/api/stream/qobuz/':  'Qobuz stream error — проверь токен (Settings → Qobuz)',
       };
       const hint = Object.entries(svcHints).find(([k]) => (item.url || '').includes(k));
-      toast(hint ? hint[1] : 'Ошибка воспроизведения аудио', 'var(--red)', 5000);
+      toast(hint ? hint[1] : 'Ошибка воспроизведения аудио', 'var(--red)', '', 5000);
       const btn = document.getElementById('pp-play'); if(btn) btn.textContent = '▶';
       const btnB = document.getElementById('pp-play-big'); if(btnB) btnB.textContent = '▶';
     }, 900);
@@ -1590,7 +1590,7 @@ async function _playPreviewAt(idx) {
         audio.removeEventListener('loadedmetadata', _seek);
         if (audio.duration && audio.duration > 600 && _resumeAt < audio.duration - 20) {
           try { audio.currentTime = _resumeAt; } catch(_) {}
-          toast(`▶ Продолжаю с ${fmtDur(_resumeAt)}`, 'var(--muted)', 2600);
+          toast(`▶ Продолжаю с ${fmtDur(_resumeAt)}`, 'var(--muted)', '', 2600);
         }
       });
     }

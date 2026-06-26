@@ -607,6 +607,154 @@ async def install_node_windows() -> Optional[str]:
     return None
 
 
+# ── Widevine L3 toolchain — autonomous, ZERO manual steps ────────────────────
+# A fresh PC has none of: JRE, Android SDK, cmdline-tools, emulator, system-image,
+# AEHD hypervisor, AVD. The old flow only PRINTED "run silent_install.bat as admin"
+# → dead end. This provisions the WHOLE chain itself (one UAC prompt for the kernel
+# driver, nothing else). Mirrors the install_node_windows download/extract pattern.
+_ANDROID_ROOT = Path(r"C:\Android")
+_WVD_AVD      = "wvd"
+_WVD_SYS_IMG  = "system-images;android-30;google_apis;x86_64"
+_NO_WIN       = 0x08000000  # CREATE_NO_WINDOW
+
+
+def _jre_java() -> Optional[Path]:
+    """java.exe under C:\\Android\\jre17 — version-agnostic (don't hardcode 17.0.x)."""
+    base = _ANDROID_ROOT / "jre17"
+    if base.is_dir():
+        for d in list(base.glob("jdk-*")) + [base]:
+            j = d / "bin" / "java.exe"
+            if j.exists():
+                return j
+    return None
+
+
+def _wvd_sdkmgr() -> Path:
+    return _ANDROID_ROOT / "Sdk" / "cmdline-tools" / "latest" / "bin" / "sdkmanager.bat"
+
+
+async def _wvd_install_jre17() -> bool:
+    if _jre_java():
+        await ilog("│  ✓ JRE 17 уже установлен", "success"); return True
+    jre_dir = _ANDROID_ROOT / "jre17"
+    jre_dir.mkdir(parents=True, exist_ok=True)
+    url = "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jre/hotspot/normal/eclipse"
+    tmp = Path(tempfile.gettempdir()) / "temurin17-jre.zip"
+    await ilog("│  ⬇ JRE 17 (Adoptium Temurin, ~45 МБ)…", "info")
+    ok = await download_file(url, tmp, "JRE 17") or await download_file_no_ssl(url, tmp, "JRE 17 (no-ssl)")
+    if not ok:
+        await ilog("│  ✗ Не удалось скачать JRE 17", "error"); return False
+    try:
+        with zipfile.ZipFile(tmp) as z:
+            z.extractall(jre_dir)                 # → jdk-17.x+y-jre/
+    except Exception as e:
+        await ilog(f"│  ✗ Распаковка JRE: {e}", "error"); return False
+    if _jre_java():
+        await ilog(f"│  ✓ JRE 17 → {jre_dir}", "success"); return True
+    await ilog("│  ✗ java.exe не найден после распаковки", "error"); return False
+
+
+async def _wvd_install_cmdline_tools() -> bool:
+    if _wvd_sdkmgr().exists():
+        await ilog("│  ✓ cmdline-tools уже установлены", "success"); return True
+    latest = _ANDROID_ROOT / "Sdk" / "cmdline-tools" / "latest"
+    latest.parent.mkdir(parents=True, exist_ok=True)
+    url = "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip"
+    tmp = Path(tempfile.gettempdir()) / "cmdline-tools.zip"
+    await ilog("│  ⬇ Android cmdline-tools…", "info")
+    ok = await download_file(url, tmp, "cmdline-tools") or await download_file_no_ssl(url, tmp, "cmdline-tools (no-ssl)")
+    if not ok:
+        await ilog("│  ✗ Не удалось скачать cmdline-tools", "error"); return False
+    try:
+        tmpx = Path(tempfile.mkdtemp())
+        with zipfile.ZipFile(tmp) as z:
+            z.extractall(tmpx)                    # → cmdline-tools/
+        if latest.exists():
+            shutil.rmtree(latest, ignore_errors=True)
+        shutil.move(str(tmpx / "cmdline-tools"), str(latest))
+    except Exception as e:
+        await ilog(f"│  ✗ Распаковка cmdline-tools: {e}", "error"); return False
+    if _wvd_sdkmgr().exists():
+        await ilog(f"│  ✓ cmdline-tools → {latest}", "success"); return True
+    await ilog("│  ✗ sdkmanager.bat не найден после распаковки", "error"); return False
+
+
+async def _wvd_run_sdk_provision() -> bool:
+    """Generate + run (windowless) a resilient .bat — accept licenses, install
+    platform-tools + emulator + system-image + AEHD, then create the AVD. A .bat
+    here is internal (Python runs it automatically); the user never touches it."""
+    java, sdkm = _jre_java(), _wvd_sdkmgr()
+    if not (java and sdkm.exists()):
+        await ilog("│  ✗ JRE/cmdline-tools не готовы", "error"); return False
+    java_home = java.parent.parent
+    avdm = sdkm.parent / "avdmanager.bat"
+    bat  = _ANDROID_ROOT / "_ripster_sdk_provision.bat"
+    log  = _ANDROID_ROOT / "sdk_install.log"
+    bat.write_text(
+        "@echo off\r\n"
+        f'set "JAVA_HOME={java_home}"\r\n'
+        'set "PATH=%JAVA_HOME%\\bin;%PATH%"\r\n'
+        f'set "SDKM={sdkm}"\r\n'
+        f'set "AVDM={avdm}"\r\n'
+        f'set "LOG={log}"\r\n'
+        'echo licenses> "%LOG%"\r\n'
+        '(for /l %%i in (1,1,60) do @echo y)| call "%SDKM%" --licenses >> "%LOG%" 2>&1\r\n'
+        ':retry\r\n'
+        'echo y| call "%SDKM%" "platform-tools" "emulator" '
+        f'"{_WVD_SYS_IMG}" "extras;google;Android_Emulator_Hypervisor_Driver" >> "%LOG%" 2>&1\r\n'
+        'if not "%errorlevel%"=="0" ( timeout /t 15 /nobreak >nul & goto retry )\r\n'
+        f'echo no | call "%AVDM%" create avd -n {_WVD_AVD} -k "{_WVD_SYS_IMG}" --force >> "%LOG%" 2>&1\r\n'
+        'echo DONE_MARKER_0>> "%LOG%"\r\n',
+        encoding="utf-8")
+    await ilog("│  ⚙ sdkmanager: лицензии + platform-tools + emulator + system-image + AEHD + AVD (5–15 мин)…", "info")
+    rc, _ = await irun(["cmd", "/c", str(bat)])
+    done = log.exists() and "DONE_MARKER_0" in log.read_text(encoding="utf-8", errors="replace")
+    if done:
+        await ilog("│  ✓ SDK-пакеты + AVD установлены", "success"); return True
+    await ilog(f"│  ✗ sdkmanager не завершился (rc={rc}) — лог {log}", "error"); return False
+
+
+async def _wvd_install_aehd() -> bool:
+    """Install the AEHD hypervisor driver — ONE UAC prompt, then never again."""
+    def _aehd_running() -> bool:
+        try:
+            out = subprocess.run(["sc.exe", "query", "aehd"], capture_output=True,
+                                 text=True, creationflags=_NO_WIN).stdout or ""
+            return "RUNNING" in out
+        except Exception:
+            return False
+    if _aehd_running():
+        await ilog("│  ✓ AEHD гипервизор уже работает", "success"); return True
+    bat = _ANDROID_ROOT / "Sdk" / "extras" / "google" / "Android_Emulator_Hypervisor_Driver" / "silent_install.bat"
+    if not bat.exists():
+        await ilog("│  ✗ Установщик AEHD не найден (шаг sdkmanager неполный)", "error"); return False
+    await ilog("│  🔐 Ставлю AEHD-гипервизор (ОДИН UAC-запрос — нажми «Да»)…", "info")
+    ps = f"Start-Process -Verb RunAs -Wait -FilePath cmd -ArgumentList '/c','\"{bat}\"'"
+    await irun(["powershell", "-NoProfile", "-Command", ps])
+    if _aehd_running():
+        await ilog("│  ✓ AEHD гипервизор работает", "success"); return True
+    await ilog("│  ⚠ AEHD не подтвердился (UAC отклонён?) — повтори установку", "warn"); return False
+
+
+async def setup_widevine_toolchain() -> bool:
+    """Autonomous L3 Widevine toolchain — JRE 17 + Android cmdline-tools + SDK
+    packages (platform-tools/emulator/system-image/AEHD) + AVD + AEHD driver, with
+    ZERO manual steps (one UAC for the kernel driver). Idempotent. After this the
+    WVD minter (Settings → SoundCloud) can boot the emulator and extract device.wvd."""
+    await ilog("┌─ Widevine L3 (SoundCloud DRM) — автоустановка тулчейна", "info")
+    if platform.system() != "Windows":
+        await ilog("└─ ✗ Только Windows", "error"); return False
+    try:
+        if not await _wvd_install_jre17():         return False
+        if not await _wvd_install_cmdline_tools(): return False
+        if not await _wvd_run_sdk_provision():     return False
+        await _wvd_install_aehd()                  # non-fatal — пайплайн доступен после UAC
+        await ilog("└─ ✓ WVD-тулчейн готов. Минт device.wvd — кнопкой в Настройках → SoundCloud.", "success")
+        return True
+    except Exception as e:
+        await ilog(f"└─ ✗ WVD setup: {e}", "error"); return False
+
+
 async def ensure_git() -> Optional[str]:
     """Best-effort install Git per-user via winget if missing (no admin). Git is
     required to clone the Apple downloader; a fresh PC usually has neither."""
@@ -920,6 +1068,7 @@ __all__ = [
     "download_file", "download_file_no_ssl",
     "install_go_windows", "install_gpac_windows", "install_mp4decrypt_windows",
     "install_ffmpeg_windows", "install_node_windows",
+    "setup_widevine_toolchain",
     "clone_downloader", "go_mod_download",
     "run_full_setup",
 ]

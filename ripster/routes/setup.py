@@ -152,6 +152,12 @@ async def setup_component(key: str):
             await _setup.install_mp4decrypt_windows()
             await _setup.go_mod_download()
             done = bool(_setup.tool_path("go"))
+        elif key == "widevine":
+            # 5–15 min (downloads JRE + Android SDK + system-image + AEHD). Run
+            # detached so the request returns now; progress streams to the Setup
+            # console via ilog. Zero manual steps (one UAC for the kernel driver).
+            asyncio.create_task(_setup.setup_widevine_toolchain())
+            done = True
         else:
             return {"ok": False, "error": f"неизвестный компонент: {key}"}
     except Exception as e:                                # noqa: BLE001
@@ -841,6 +847,12 @@ async def restart_app():
         # correct — it re-execs in the existing console.
         if os.environ.get("RIPSTER_LAUNCHER") == "1":
             _respawn_detached()    # don't rely on the launcher (it may have only attached)
+            os._exit(0)
+        elif os.name == "nt":
+            # os.execv on Windows re-execs in a NEW console-subsystem process WITHOUT
+            # the no-window flag → a cmd window pops. Use the windowless detached
+            # respawn instead (same successor mechanism as the launcher path).
+            _respawn_detached()
             os._exit(0)
         else:
             os.execv(sys.executable, [sys.executable] + sys.argv)
