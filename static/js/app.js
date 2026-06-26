@@ -4411,11 +4411,13 @@ async function applyRipsterUpdate(){
   try {
     const d = await api('POST','/api/update/apply');
     if(d && d.ok){
-      if(st){ st.innerHTML = '✅ Обновлено! Перезапускаю — страница обновится сама, как только поднимется новая версия.'; st.style.color = '#30d158'; }
+      // Auto-restart proved unreliable (launcher attach / webview → hung page), so
+      // we DON'T touch the server: the new code is already on disk. Tell the user to
+      // close & reopen Ripster themselves — that always works, no hung page.
+      if(st){ st.innerHTML = '✅ Обновление установлено!<br><b>Полностью закрой Ripster и открой заново</b> — новая версия подхватится сама.<br><span style="color:var(--muted);font-size:12px">(Перезапуск вручную — так надёжнее.)</span>'; st.style.color = '#30d158'; }
       _ripsterUpdate = null;
-      toast('Обновлено! Перезапускаю…','var(--green)', '', 9000);
-      _restartPending = true;       // WS-reconnect auto-reload as a backup
-      restartApp();                 // actually trigger the restart: server self-respawns (3.0.13) → ping-poll → reload
+      toast('Готово! Закрой Ripster и открой заново','var(--green)', '', 15000);
+      showRestartBanner('Обновление установлено — полностью закрой Ripster и открой заново, чтобы новая версия вступила в силу.');
     } else {
       const rb = d && d.rolled_back ? ' (откат выполнен — установка в порядке)' : '';
       if(st){ st.textContent = `✗ Сбой на этапе «${(d&&d.stage)||'?'}»: ${(d&&d.error)||'?'}${rb}`; st.style.color = '#c084a0'; }
