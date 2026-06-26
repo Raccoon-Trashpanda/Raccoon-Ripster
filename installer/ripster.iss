@@ -9,7 +9,7 @@
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\ripster.iss
 
 #define AppName "Ripster"
-#define AppVersion "3.0.17"
+#define AppVersion "3.0.18"
 #define AppPublisher "Raccoon-Trashpanda"
 #define AppURL "https://github.com/Raccoon-Trashpanda/Raccoon-Ripster"
 #define SrcDir ".."
@@ -58,7 +58,7 @@ Type: filesandordirs; Name: "{app}\__pycache__"
 ; interpreter needs python.exe / pythonw.exe / *.dll); we exclude only the
 ; installer's own output and any stray packaged exe instead.
 Source: "{#SrcDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion; \
-  Excludes: "\.git\*,\.git,\.venv\*,\.venv,run.bat,installer\output\*,dist\*,RipsterSetup*.exe,apple-music-downloader.exe,downloads\*,tokens\*,logs\*,backups\*,*.wvd,frida-server*,tools\widevine\*,_widevine_setup\_keydive_out\*,config.yaml"
+  Excludes: "\.git\*,\.git,\.venv\*,\.venv,run.bat,installer\output\*,dist\*,*-portable.zip,RipsterSetup*.exe,apple-music-downloader.exe,apple-music-downloader\*,downloads\*,tokens\*,logs\*,backups\*,*.wvd,frida-server*,tools\widevine\*,tools\lucida\node_modules\*,tools\lucida\node_modules,tools\node\*,tools\node,AppleMusicDecrypt\*,AppleMusicDecrypt,orpheus\*,orpheus,_widevine_setup\_keydive_out\*,config.yaml"
 
 ; Seed config.yaml from the example only if the user doesn't already have one.
 Source: "{#SrcDir}\config.example.yaml"; DestDir: "{app}"; DestName: "config.yaml"; \

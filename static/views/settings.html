@@ -262,26 +262,26 @@
         </div>
 
         <div class="block mt12">
-          <div class="block-title">🖼 Artwork</div>
+          <div class="block-title">🖼 Обложка</div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Embed artwork in audio file</div></div>
+            <div class="toggle-info"><div class="toggle-label">Встроить обложку в файл</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-embedcover" onchange="saveSetting('embed-cover',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Save cover.jpg to folder</div><div class="toggle-sub">Saves artwork image alongside music files</div></div>
+            <div class="toggle-info"><div class="toggle-label">Сохранять cover.jpg в папку</div><div class="toggle-sub">Картинка обложки рядом с музыкой</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-savecover" onchange="saveSetting('save-cover-to-folder',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <!-- zhaarey / AMD -->
           <div class="settings-row mt8" id="cover-std-opts">
             <div class="field-group flex1">
-              <label class="lbl">Cover size</label>
+              <label class="lbl">Размер обложки</label>
               <select id="s-coversize" onchange="saveSetting('cover-size',this.value)">
                 <option>100x100</option><option>600x600</option><option>1200x1200</option>
                 <option>3000x3000</option><option>5000x5000</option><option>original</option>
               </select>
             </div>
             <div class="field-group" style="width:120px">
-              <label class="lbl">Format</label>
+              <label class="lbl">Формат</label>
               <select id="s-coverfmt" onchange="saveSetting('cover-format',this.value)">
                 <option>jpg</option><option>png</option><option>original</option>
               </select>
@@ -296,7 +296,7 @@
                   oninput="saveSetting('gamdl-cover-size',parseInt(this.value))"/>
               </div>
               <div class="field-group" style="width:110px">
-                <label class="lbl">Format <span style="color:var(--blue);font-size:9px">gamdl</span></label>
+                <label class="lbl">Формат <span style="color:var(--blue);font-size:9px">gamdl</span></label>
                 <select id="s-gamdl-coverfmt" onchange="saveSetting('gamdl-cover-format',this.value)">
                   <option value="jpg">jpg</option><option value="png">png</option><option value="raw">raw</option>
                 </select>
@@ -306,25 +306,25 @@
         </div>
 
         <div class="block mt12">
-          <div class="block-title">🏷 Tags &amp; Lyrics</div>
+          <div class="block-title">🏷 Теги и текст</div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Embed LRC in audio file</div></div>
+            <div class="toggle-info"><div class="toggle-label">Встроить LRC в файл</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-embedlrc" onchange="saveSetting('embed-lrc',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Save .lrc file</div></div>
+            <div class="toggle-info"><div class="toggle-label">Сохранять .lrc файл</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-savelrc" onchange="saveSetting('save-lrc-file',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="settings-row mt8" id="lrc-std-opts">
             <div class="field-group flex1">
-              <label class="lbl">Lyric type</label>
+              <label class="lbl">Тип текста</label>
               <select id="s-lrctype" onchange="saveSetting('lrc-type',this.value)">
-                <option value="lyrics">lyrics (synced)</option>
-                <option value="syllable-lyrics">syllable-lyrics (word-by-word)</option>
+                <option value="lyrics">текст (синхрон.)</option>
+                <option value="syllable-lyrics">по словам (syllable)</option>
               </select>
             </div>
             <div class="field-group" style="width:120px">
-              <label class="lbl">Format</label>
+              <label class="lbl">Формат</label>
               <select id="s-lrcfmt" onchange="saveSetting('lrc-format',this.value)">
                 <option>lrc</option><option>ttml</option>
               </select>
@@ -337,27 +337,27 @@
             <div style="font-size:10px;color:var(--blue);font-weight:600;margin:6px 0 4px">gamdl</div>
             <div class="settings-row">
               <div class="field-group flex1">
-                <label class="lbl">Synced lyrics format</label>
+                <label class="lbl">Формат синхро-текста</label>
                 <select id="s-gamdl-lrc" onchange="saveSetting('gamdl-synced-lyrics-format',this.value)">
                   <option value="lrc">LRC</option><option value="srt">SRT</option><option value="ttml">TTML</option>
                 </select>
               </div>
             </div>
             <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label">No synced lyrics</div></div>
+              <div class="toggle-info"><div class="toggle-label">Без синхро-текста</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-nolrc" onchange="saveSetting('gamdl-no-synced-lyrics',this.checked)"><div class="toggle-slider"></div></label>
             </div>
             <div class="toggle-row">
-              <div class="toggle-info"><div class="toggle-label">Lyrics only mode</div><div class="toggle-sub">Download only lyrics, skip audio</div></div>
+              <div class="toggle-info"><div class="toggle-label">Только текст</div><div class="toggle-sub">Качать только текст, без аудио</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-lrconly" onchange="saveSetting('gamdl-lyrics-only',this.checked)"><div class="toggle-slider"></div></label>
             </div>
             <div class="field-group mt8">
-              <label class="lbl">Exclude tags (comma-sep)</label>
+              <label class="lbl">Исключить теги (через запятую)</label>
               <input id="s-gamdl-exclude" placeholder="comment,compilation" style="font-family:var(--mono);font-size:11px"
                 oninput="saveSetting('gamdl-exclude-tags',this.value)"/>
             </div>
             <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label">Fetch extra tags</div><div class="toggle-sub">Normalization &amp; smooth playback data</div></div>
+              <div class="toggle-info"><div class="toggle-label">Доп. теги</div><div class="toggle-sub">Данные нормализации и плавного воспроизведения</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-extratags" onchange="saveSetting('gamdl-fetch-extra-tags',this.checked)"><div class="toggle-slider"></div></label>
             </div>
           </div>

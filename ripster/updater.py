@@ -25,6 +25,10 @@ import subprocess
 import sys
 from pathlib import Path
 
+# The launcher runs the server WINDOWLESS; any console child spawned without this
+# flag pops a fresh cmd window (the "cmd flashes on update" bug). 0 on non-Windows.
+_CNW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 # A version is any dot-separated run of numbers (≥2 components preferred so a
 # stray digit in prose isn't mistaken for a version); a bare number is the
 # fallback. ANY component may be tens/hundreds — comparison is NUMERIC, so
@@ -105,7 +109,7 @@ def _git_remote_is_repo(base_dir: Path, repo: str) -> bool:
     zipball overlay path."""
     try:
         r = subprocess.run(["git", "-C", str(base_dir), "remote", "get-url", "origin"],
-                           capture_output=True, text=True, timeout=15)
+                           capture_output=True, text=True, timeout=15, creationflags=_CNW)
         url  = (r.stdout or "").strip().lower()
         slug = (repo or "").strip().lower()
         return bool(url) and bool(slug) and (slug in url or slug.split("/")[-1] in url)
@@ -329,7 +333,7 @@ def _verify_subprocess(base_dir: Path) -> tuple[bool, str]:
     )
     try:
         r = subprocess.run([sys.executable, "-c", code], cwd=bd,
-                           capture_output=True, text=True, timeout=120)
+                           capture_output=True, text=True, timeout=120, creationflags=_CNW)
         out = (r.stdout + r.stderr).strip()
         return r.returncode == 0, out[-600:] or "no output"
     except Exception as e:                            # noqa: BLE001
@@ -354,7 +358,7 @@ async def apply_update(config, base_dir: Path) -> dict:
     if (base_dir / ".git").exists() and _git_remote_is_repo(base_dir, _repo(config)):
         try:
             r = subprocess.run(["git", "-C", str(base_dir), "pull", "--ff-only"],
-                               capture_output=True, text=True, timeout=120)
+                               capture_output=True, text=True, timeout=120, creationflags=_CNW)
             if r.returncode != 0:
                 return {"ok": False, "stage": "git-pull", "error": (r.stderr or r.stdout)[:500]}
         except Exception as e:                        # noqa: BLE001
@@ -377,7 +381,7 @@ async def apply_update(config, base_dir: Path) -> dict:
         pip_ran = True
         try:
             subprocess.run([sys.executable, "-m", "pip", "install", "-r", str(req)],
-                           capture_output=True, text=True, timeout=600)
+                           capture_output=True, text=True, timeout=600, creationflags=_CNW)
         except Exception as e:                        # noqa: BLE001
             restored = _restore_snapshot(base_dir, snap)
             return {"ok": False, "stage": "pip", "error": str(e),

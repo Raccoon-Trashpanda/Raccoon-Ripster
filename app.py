@@ -285,7 +285,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "3.0.17"
+RELEASE_VERSION = "3.0.18"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -861,7 +861,8 @@ def _spawn_restart(delay: float = 0.4) -> None:
             [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:],
             cwd=str(BASE_DIR),
             env=restart_env,
-            creationflags=(subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP)
+            creationflags=(subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+                           | getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if IS_WINDOWS else 0,
         )
         os._exit(0)
