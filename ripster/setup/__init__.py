@@ -785,8 +785,19 @@ async def setup_widevine_toolchain() -> bool:
         if not await _wvd_install_jre17():         return False
         if not await _wvd_install_cmdline_tools(): return False
         if not await _wvd_run_sdk_provision():     return False
-        await _wvd_install_aehd()                  # non-fatal — пайплайн доступен после UAC
-        await ilog("└─ ✓ WVD-тулчейн готов. Минт device.wvd — кнопкой в Настройках → SoundCloud.", "success")
+        # AEHD only HW-accelerates the emulator; minting still works without it
+        # (just slower). So it's non-fatal — but report honestly, never claim a
+        # green toolchain when the hypervisor didn't actually come up.
+        aehd_ok = await _wvd_install_aehd()
+        if aehd_ok:
+            await ilog("└─ ✓ WVD-тулчейн готов (с AEHD-ускорением). "
+                       "Минт device.wvd — кнопкой в Настройках → SoundCloud.", "success")
+        else:
+            await ilog("└─ ⚠ Тулчейн установлен, но AEHD-гипервизор НЕ активен — эмулятор "
+                       "запустится, но медленно (или не стартует). Причины: UAC отклонён, "
+                       "нужна перезагрузка, либо включён Hyper-V/виртуализация выключена в BIOS. "
+                       "Можно пробовать минт device.wvd; если эмулятор висит — включи "
+                       "виртуализацию/перезагрузись и повтори установку AEHD.", "warn")
         return True
     except Exception as e:
         await ilog(f"└─ ✗ WVD setup: {e}", "error"); return False
