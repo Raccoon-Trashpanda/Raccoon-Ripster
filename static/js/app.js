@@ -65,10 +65,15 @@ function applyLang() {
   const lang = S.lang || 'ru';
   const flags = {ru:'🇷🇺',en:'🇬🇧',hi:'🇮🇳',ja:'🇯🇵',zh:'🇨🇳'};
   document.documentElement.lang = lang;
-  document.querySelectorAll('[data-i18n]').forEach(el => { el.textContent = t(el.dataset.i18n); });
-  document.querySelectorAll('[data-i18n-ph]').forEach(el => { el.placeholder = t(el.dataset.i18nPh); });
-  document.querySelectorAll('[data-i18n-title]').forEach(el => { el.title = t(el.dataset.i18nTitle); });
-  document.querySelectorAll('[data-i18n-html]').forEach(el => { el.innerHTML = t(el.dataset.i18nHtml); });
+  // Defensive: t() returns the raw KEY when a translation is missing. Assign only
+  // when a real translation exists (v !== key) — otherwise KEEP the element's
+  // existing HTML fallback text instead of showing an ugly raw key like
+  // "setup.deps_hdr". Fixes the whole missing-key class, not one-off keys.
+  const _set = (el, attr, prop) => { const k = el.dataset[attr], v = t(k); if (v !== k) el[prop] = v; };
+  document.querySelectorAll('[data-i18n]').forEach(el => _set(el, 'i18n', 'textContent'));
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => _set(el, 'i18nPh', 'placeholder'));
+  document.querySelectorAll('[data-i18n-title]').forEach(el => _set(el, 'i18nTitle', 'title'));
+  document.querySelectorAll('[data-i18n-html]').forEach(el => _set(el, 'i18nHtml', 'innerHTML'));
   const cur = document.getElementById('lang-current');
   if(cur) cur.textContent = flags[lang] || lang.toUpperCase();
 }

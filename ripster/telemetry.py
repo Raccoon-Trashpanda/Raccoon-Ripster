@@ -48,7 +48,9 @@ _REDACT = [
     (re.compile(r"(media-user-token|authorization-token|bearer|x-user-auth-token|"
                 r"auth[-_]?token|access[-_]?token|refresh[-_]?token|client[-_]?secret|"
                 r"arl|sp[-_]?dc|password|api[-_]?key)"
-                r"(\s*[=:]\s*|\"\s*:\s*\"|\s+)([^\s\"',}]{6,})", re.I),
+                # separator: =, :, OR quote-colon-quote in BOTH single and double
+                # quotes (streamrip DEBUG logs Python-dict repr → 'key': 'value').
+                r"(['\"]?\s*[=:]\s*['\"]?\s*|\s+)([^\s\"',}]{6,})", re.I),
      r"\1\2«…»"),
     (re.compile(r"Bearer\s+[A-Za-z0-9._\-]{12,}", re.I), "Bearer «…»"),
     (re.compile(r"eyJ[A-Za-z0-9._\-]{20,}"), "«jwt…»"),            # JWTs

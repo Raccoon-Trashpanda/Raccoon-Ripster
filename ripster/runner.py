@@ -57,6 +57,20 @@ _RE_PATIENT = _re.compile(
 )
 _MAX_PATIENT_RETRIES = 15   # ~28 min of patient retrying through an overload blip
 
+# Decrypt gRPC CORE down (decrypt_init AioRpcError / StatusCode.UNAVAILABLE /
+# "DECRYPT STREAM DOWN"). This is NOT the same as "wrapper busy" — the public
+# wrapper's decrypt core itself is overloaded/dead and does NOT recover by
+# hammering it for half an hour (observed: 15×120s = 35 min, all UNAVAILABLE).
+# Give it a FEW honest tries, then stop with clear guidance (raise a LOCAL
+# docker wrapper / try later / non-Hi-Res). Matched BEFORE _RE_PATIENT (the
+# decrypt message also contains "wm.wol.moe", which would otherwise grant 15).
+_RE_DECRYPT_DOWN = _re.compile(
+    r'DECRYPT\s+STREAM\s+DOWN|AMD_WRAPPER_DECRYPT_ERROR|ошибку\s+декрипт|'
+    r'decrypt_init|AioRpcError|decrypt.*UNAVAILABLE|внутренн.*ошибку\s+декрипт',
+    _re.I,
+)
+_MAX_DECRYPT_RETRIES = 5   # ~8 min, then stop — decrypt core won't self-heal now
+
 
 # ── Partial-download reason classifier (issue #5) ───────────────────────────────
 # When a release comes back short, name WHY in one canonical token so the
@@ -824,6 +838,20 @@ def _apply_cover_to_folder(task: dict, tid: str) -> None:
     try:
         d = _get_task_dir(task)
         if not d:
+            # Fallback for engines whose dir the generic resolver misses (e.g.
+            # orpheus_beatport sets no _save_dir/manifest entry): locate the release
+            # folder from the newest audio file under the task's base save path.
+            bsp = task.get("_base_save_path")
+            try:
+                if bsp and Path(bsp).is_dir():
+                    auds = [p for p in Path(bsp).rglob("*")
+                            if p.suffix.lower() in (".flac", ".m4a", ".mp3", ".alac", ".aac")]
+                    if auds:
+                        d = max(auds, key=lambda p: p.stat().st_mtime).parent
+            except Exception:
+                d = None
+        if not d:
+            print(f"[cover] no task dir for {tid} — skip", flush=True)
             return
         if any((d / n).exists() for n in ("cover.jpg", "cover.jpeg", "cover.png")):
             return   # engine already saved one — leave it
@@ -926,6 +954,49 @@ async def _amd_preflight(task: dict, quality: str) -> bool:
         await _log(f"✓ Wrapper-manager готов — регионы: {regions_str}", "success", tid)
 
     await _log(f"▶ AMD v2 [{codec.upper()}] — {task.get('url', '')}", "info", tid)
+    return True
+
+
+async def _soundcloud_preflight(task: dict) -> bool:
+    """Turnkey SoundCloud — auto-provision Node 20 + the built Lucida engine.
+
+    A fresh install ships runner.mjs but NOT the compiled Lucida (lucida-src/build)
+    and may have only an old system Node. Node 18's undici breaks every SC fetch
+    with 'terminated' (proven live on the tester box; Node 20 fixes it). Rather
+    than make the user hunt for a Setup button, provision both ONCE here so a
+    clean install rips SoundCloud out of the box. Returns False (task → ERROR)
+    only when provisioning genuinely fails."""
+    tid = task.get("id", "")
+    from ripster.engines import soundcloud as _sc_eng
+    from ripster import setup as _setup_mod
+
+    node_exe = _setup_mod.tool_path("node")
+    if node_exe is None or _setup_mod._node_version(node_exe) < _setup_mod._MIN_NODE_MAJOR:
+        await _log("📦 SoundCloud: ставлю Node.js 20 (старый/отсутствующий Node ломает "
+                   "Lucida с 'terminated')…", "info", tid)
+        try:
+            await _setup_mod.install_node_windows()
+        except Exception as e:                                       # noqa: BLE001
+            await _log(f"⚠ Авто-установка Node не удалась: {e}", "warn", tid)
+
+    if not _sc_eng.is_installed():
+        await _log("📦 SoundCloud: устанавливаю движок Lucida (один раз, ~1–2 мин)…",
+                   "info", tid)
+        try:
+            from ripster.routes.setup import _install_soundcloud_component
+            await _install_soundcloud_component()
+        except Exception as e:                                       # noqa: BLE001
+            await _log(f"⚠ Авто-установка Lucida не удалась: {e}", "warn", tid)
+
+    if not _sc_eng.is_installed():
+        await _log("✗ SoundCloud-движок (Lucida) не установлен. Открой Setup → SoundCloud "
+                   "и установи вручную (нужны интернет + git).", "error", tid)
+        _try_advance_task(task, TaskStatus.ERROR)
+        return False
+    if not _sc_eng.node_available():
+        await _log("✗ Node.js не найден для SoundCloud — установка не удалась.", "error", tid)
+        _try_advance_task(task, TaskStatus.ERROR)
+        return False
     return True
 
 
@@ -1048,6 +1119,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 if v is None: _config.pop(k, None)
                 else:         _config[k] = v
         if not ok:
+            _add_to_history(task)
+            return
+
+    if engine_name == "soundcloud":
+        if not await _soundcloud_preflight(task):
             _add_to_history(task)
             return
 
@@ -1566,7 +1642,14 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             retry_n = task.get("_retry_count", 0)
             # Transient wrapper overload → patient (many) retries; otherwise the
             # normal small cap. Either way capped at 120s spacing (no hammering).
-            max_r = _MAX_PATIENT_RETRIES if _RE_PATIENT.search(msg) else _MAX_AUTO_RETRIES
+            # Decrypt-core-down first (fewest retries — won't self-heal), then the
+            # patient wrapper-busy class, else the normal small cap.
+            if _RE_DECRYPT_DOWN.search(msg):
+                max_r = _MAX_DECRYPT_RETRIES
+            elif _RE_PATIENT.search(msg):
+                max_r = _MAX_PATIENT_RETRIES
+            else:
+                max_r = _MAX_AUTO_RETRIES
             can_retry = (
                 retry_n < max_r
                 and not _RE_NO_RETRY.search(msg)
@@ -1574,8 +1657,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             )
             if can_retry:
                 delay = _RETRY_BACKOFF[min(retry_n, len(_RETRY_BACKOFF) - 1)]
+                # Trim long errors at a WORD boundary (not mid-word like the old
+                # msg[:120] → "…Повтори позже, выб") so the retry line reads clean.
+                _emsg = msg if len(msg) <= 160 else (msg[:160].rsplit(" ", 1)[0] + "…")
                 await _broadcast(_i18n.log_event("console.error_retry", level="warn", task_id=tid,
-                                                 msg=msg[:120], n=retry_n + 1, max=max_r, delay=delay))
+                                                 msg=_emsg, n=retry_n + 1, max=max_r, delay=delay))
                 await asyncio.sleep(delay)
                 # Reset in-place: same tile, same ID, no new queue entry.
                 task["status"]       = "queued"

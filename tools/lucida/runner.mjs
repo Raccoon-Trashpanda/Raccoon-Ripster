@@ -65,6 +65,15 @@ function pad(n, total) {
   return `[${n}/${total}]`
 }
 
+// SoundCloud serves a tiny "-large" (100x100) artwork by default; the same CDN
+// path exposes a 500x500 ("-t500x500") and "-original". Upgrade the URL so the
+// embedded + folder cover is full-size instead of a thumbnail.
+function _upgradeScArt(url = '') {
+  if (!url || !url.includes('sndcdn.com')) return url
+  return url.replace(/-(large|t67x67|t120x120|t200x200|badge|small|tiny|mini|crop|t\d+x\d+)\.(jpg|png)/i,
+                     '-t500x500.$2')
+}
+
 // Extract {title, artist, album, coverUrl} from a Lucida metadata object.
 function _metaOf(md = {}) {
   const covers = md.coverArtwork || []
@@ -73,7 +82,7 @@ function _metaOf(md = {}) {
     title:    md.title || '',
     artist:   md.artists?.[0]?.name || '',
     album:    md.album?.name || md.album?.title || '',
-    coverUrl: cover?.url || '',
+    coverUrl: _upgradeScArt(cover?.url || ''),
   }
 }
 

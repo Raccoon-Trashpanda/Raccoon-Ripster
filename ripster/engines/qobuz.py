@@ -263,7 +263,11 @@ class QobuzEngine(StreamripMixin, EngineBase):
         # NOTE: do NOT pass --no-progress (streamrip 2.0.6 then prints nothing on a
         # non-TTY). `-v` makes it emit the real auth/region/API error to stderr (we
         # capture stderr→stdout) so a silent 0-tracks failure becomes diagnosable.
-        return [*find_rip(), "-v", "--config-path", str(cfg_path), "url", url]
+        # NO "-v": streamrip's DEBUG verbosity dumps "Request params" / "Login resp"
+        # lines that contain the Qobuz user_auth_token + account email in plaintext
+        # → they leaked into the console/console.log/telemetry. Default verbosity
+        # still prints download paths (quality detection) + ERROR lines we parse.
+        return [*find_rip(), "--config-path", str(cfg_path), "url", url]
 
     def classify_line(self, line: str) -> str:
         return _classify_line(line)

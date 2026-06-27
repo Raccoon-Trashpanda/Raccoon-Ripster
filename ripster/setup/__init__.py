@@ -562,17 +562,54 @@ async def install_ffmpeg_windows() -> None:
         await ilog(f"✗ FFmpeg extract failed: {e}", "error")
 
 
+# SoundCloud/Lucida runs on Node's global fetch (undici). Node 18's bundled
+# undici throws a bare "Error: terminated" on the very first SoundCloud resolve —
+# proven live on the tester box: identical runner.mjs fails on Node 18.12.1 and
+# succeeds on Node 20.18.1. So we require Node ≥ 20; an older SYSTEM node is not
+# good enough and we install a portable v20 beside it.
+_MIN_NODE_MAJOR = 20
+
+
+def _node_version(exe: str) -> int:
+    """Return the major version of a node executable (e.g. 20), or 0 if unknown."""
+    try:
+        out = subprocess.run([exe, "--version"], capture_output=True, text=True,
+                             timeout=10).stdout.strip()
+        m = re.match(r"v?(\d+)\.", out)
+        return int(m.group(1)) if m else 0
+    except Exception:
+        return 0
+
+
 async def install_node_windows() -> Optional[str]:
-    """Download a portable Node.js LTS into tools/node (no admin) and return the
-    path to node.exe. SoundCloud's Lucida engine needs node + npm; a fresh PC has
-    neither, so the SC install/build dies with 'node not found'. Extracts the zip,
-    flattens node-vXX-win-x64/ → tools/node, and puts it on PATH for this session."""
-    node_exe = tool_path("node")
-    if node_exe:
-        await ilog(f"✓ Node.js already present: {node_exe}", "success")
-        return node_exe
+    """Ensure Node.js ≥ 20 is available and return the path to node.exe.
+
+    A fresh PC has no Node at all; some testers have an OLD system Node (18.x)
+    whose bundled undici breaks SoundCloud/Lucida with 'terminated'. So:
+      1. a portable Node we installed earlier (tools/node, guaranteed ≥20) wins;
+      2. a system Node is accepted ONLY if it is ≥20;
+      3. otherwise download a portable v20 into tools/node and prepend it to PATH
+         (it then shadows the stale system Node for every child process)."""
     tools_dir = _base_dir / "tools"
     node_dir  = tools_dir / "node"
+    # 1) Portable Node we control — always new enough.
+    portable = node_dir / "node.exe"
+    if portable.exists() and _node_version(str(portable)) >= _MIN_NODE_MAJOR:
+        if str(node_dir).lower() not in os.environ.get("PATH", "").lower():
+            os.environ["PATH"] = str(node_dir) + os.pathsep + os.environ.get("PATH", "")
+        await ilog(f"✓ Node.js (portable) present: {portable}", "success")
+        return str(portable)
+    # 2) System Node — accept only if ≥20.
+    sys_node = shutil.which("node")
+    if sys_node:
+        ver = _node_version(sys_node)
+        if ver >= _MIN_NODE_MAJOR:
+            await ilog(f"✓ Node.js already present: {sys_node} (v{ver})", "success")
+            return sys_node
+        await ilog(f"⚠ Системный Node.js v{ver} слишком старый (нужен ≥{_MIN_NODE_MAJOR}) "
+                   f"— ставлю portable Node 20 рядом (иначе SoundCloud падает с "
+                   f"'terminated').", "warn")
+    # 3) Download a portable v20.
     tools_dir.mkdir(exist_ok=True)
     NODE_VER = "v20.18.1"
     arch = "x64" if platform.machine().endswith("64") else "x86"

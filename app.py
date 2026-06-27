@@ -285,7 +285,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "3.0.19"
+RELEASE_VERSION = "3.0.20"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -544,6 +544,16 @@ async def broadcast(msg: dict):
     if msg.get("type") == "log":
         if "text" not in msg and "msg" in msg:
             msg = {**msg, "text": msg["msg"]}
+        # SECRET-REDACT at the single chokepoint → covers the live WS console, the
+        # persistent console.log AND telemetry in one place. Engines (e.g. streamrip
+        # DEBUG) can echo a Qobuz user_auth_token / ARL / bearer into a log line;
+        # redact() strips them here so they never reach a screen, disk or owner.
+        try:
+            from ripster import telemetry as _tlm
+            msg = {k: (_tlm.redact(v) if k in ("text", "msg") and isinstance(v, str) else v)
+                   for k, v in msg.items()}
+        except Exception:
+            pass
         _console_file_write(msg)               # persist the full stream to disk
         try:                                   # forward warn/error to the owner (tester builds)
             from ripster import telemetry as _tlm
