@@ -47,28 +47,50 @@ function Show-Status {
     Write-Host ""
 }
 
+function Connect-Wifi {
+    # THE fix that unblocked everything (Jun 2026): on a cold boot the guest has
+    # NO saved Wi-Fi network, so wlan0 never associates with the emulator's
+    # simulated AP "AndroidWifi". Result: ConnectivityService reports
+    # "Active default network: none" -> Chrome has no internet -> KeyDive's DRM
+    # playback can't do a license exchange -> no .wvd. One command associates it.
+    # (eth0 NAT is alive at the qemu layer but the image ships no EthernetService,
+    #  so Wi-Fi via netsim is the only path the framework will adopt.)
+    Write-Host "Connecting guest Wi-Fi to AndroidWifi..." -ForegroundColor Cyan
+    & $ADB -s $SERIAL shell "cmd wifi connect-network AndroidWifi open" 2>$null | Out-Null
+    for($i=0;$i -lt 15;$i++){
+        $net = (& $ADB -s $SERIAL shell "dumpsys connectivity | grep 'Active default network'" 2>$null)
+        if($net -and ($net -notmatch "none")){ Write-Host "  Network up: $($net.Trim())" -ForegroundColor Green; return $true }
+        Start-Sleep 2
+    }
+    Write-Host "  WARN: emulator network still 'none' after Wi-Fi connect." -ForegroundColor Yellow
+    return $false
+}
+
 function Boot-Emulator {
-    if((Get-Process qemu-system-x86_64 -EA SilentlyContinue)){ Write-Host "Emulator already running." -ForegroundColor Yellow; return $true }
-    if(-not ((sc.exe query aehd 2>$null | Select-String "RUNNING"))){
-        Write-Host "!! AEHD hypervisor not running - x86_64 emulator can't boot." -ForegroundColor Red
-        Write-Host "   Install it (one-time, needs admin/UAC):" -ForegroundColor Red
-        Write-Host "   $SDK\extras\google\Android_Emulator_Hypervisor_Driver\silent_install.bat" -ForegroundColor Red
-        return $false
-    }
-    Write-Host "Launching emulator (headless)..." -ForegroundColor Cyan
-    Start-Process -FilePath $EMU -WindowStyle Hidden -ArgumentList `
-        "-avd",$AVD,"-no-window","-no-snapshot","-no-boot-anim","-gpu","swiftshader_indirect","-no-audio",`
-        "-dns-server","8.8.8.8,8.8.4.4","-netdelay","none","-netspeed","full"
-    & $ADB start-server | Out-Null
-    Write-Host "Waiting for boot..." -NoNewline
-    for($i=0;$i -lt 30;$i++){
-        Start-Sleep 5
-        if((& $ADB -s $SERIAL shell getprop sys.boot_completed 2>$null).Trim() -eq "1"){ Write-Host " booted." -ForegroundColor Green; break }
-        Write-Host "." -NoNewline
-    }
+    if(-not (Get-Process qemu-system-x86_64 -EA SilentlyContinue)){
+        if(-not ((sc.exe query aehd 2>$null | Select-String "RUNNING"))){
+            Write-Host "!! AEHD hypervisor not running - x86_64 emulator can't boot." -ForegroundColor Red
+            Write-Host "   Install it (one-time, needs admin/UAC):" -ForegroundColor Red
+            Write-Host "   $SDK\extras\google\Android_Emulator_Hypervisor_Driver\silent_install.bat" -ForegroundColor Red
+            return $false
+        }
+        # -no-window: NEVER pop the phone UI on a tester's desktop (mints headless).
+        Write-Host "Launching emulator (headless, no window)..." -ForegroundColor Cyan
+        Start-Process -FilePath $EMU -WindowStyle Hidden -ArgumentList `
+            "-avd",$AVD,"-no-window","-no-snapshot","-no-boot-anim","-gpu","swiftshader_indirect","-no-audio",`
+            "-dns-server","8.8.8.8,8.8.4.4","-netdelay","none","-netspeed","full"
+        & $ADB start-server | Out-Null
+        Write-Host "Waiting for boot..." -NoNewline
+        for($i=0;$i -lt 30;$i++){
+            Start-Sleep 5
+            if((& $ADB -s $SERIAL shell getprop sys.boot_completed 2>$null).Trim() -eq "1"){ Write-Host " booted." -ForegroundColor Green; break }
+            Write-Host "." -NoNewline
+        }
+    } else { Write-Host "Emulator already running." -ForegroundColor Yellow }
     & $ADB -s $SERIAL root | Out-Null
     Start-Sleep 2
-    Ensure-Frida
+    Connect-Wifi | Out-Null    # <-- network fix; must run BEFORE KeyDive (every boot)
+    Ensure-Frida               # <-- now runs even if the emulator was already up
     return $true
 }
 
@@ -171,6 +193,8 @@ function Stop-Emulator {
 
 # ---- AUTO mode: full pipeline headless, no prompts (driven by the Setup tab) ----
 if($Auto){
+    try { Start-Transcript -Path "$HERE\wvd_mint.log" -Append -EA SilentlyContinue | Out-Null } catch {}
+    Write-Host ("=== AUTO MINT run: {0} ===" -f (Get-Date)) -ForegroundColor DarkCyan
     Show-Status
     if(Test-Path $WVDDST){ Write-Host "AUTO_RESULT: OK (device.wvd already present) $WVDDST" -ForegroundColor Green; exit 0 }
     Write-Host "=== AUTO MINT: boot -> extract -> install -> verify -> stop ===" -ForegroundColor Cyan

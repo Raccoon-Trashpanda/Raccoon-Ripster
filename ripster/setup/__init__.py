@@ -836,13 +836,16 @@ async def _wvd_install_aehd() -> bool:
     if _aehd_running():
         await ilog("│  ✓ AEHD гипервизор работает", "success"); return True
 
-    # 2) Elevated via UAC (interactive desktop session only).
-    if helper and helper.exists():
-        await ilog("│  🔐 Запрашиваю права (ОДИН UAC — нажми «Да»)…", "info")
-        ps = f"Start-Process -Verb RunAs -Wait -FilePath '{helper}'"
-        await irun(["powershell", "-NoProfile", "-Command", ps])
-        if _aehd_running():
-            await ilog("│  ✓ AEHD гипервизор работает", "success"); return True
+    # 2) Elevated via UAC (interactive desktop session). HIDDEN window + no pause —
+    # the only thing the user sees is the one-time UAC consent (unavoidable for a
+    # kernel driver); no cmd window pops.
+    await ilog("│  🔐 Запрашиваю права на драйвер (ОДИН UAC — нажми «Да»)…", "info")
+    _drvcmd = f'pnputil /add-driver "{inf}" /install & sc start aehd'
+    ps = (f"Start-Process -Verb RunAs -WindowStyle Hidden -Wait -FilePath cmd "
+          f"-ArgumentList '/c','{_drvcmd}'")
+    await irun(["powershell", "-NoProfile", "-Command", ps])
+    if _aehd_running():
+        await ilog("│  ✓ AEHD гипервизор работает", "success"); return True
 
     # 3) Manual fallback — a background/Session-0 server can't raise UAC at all.
     if helper and helper.exists():
