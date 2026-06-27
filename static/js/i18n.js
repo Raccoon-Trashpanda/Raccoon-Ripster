@@ -1,6 +1,11 @@
 // Ripster i18n — translation dictionary (5 locales)
 var LANG = {
   ru: {
+    // Setup → Python-зависимости
+    'setup.deps_hdr':'📦 Python-зависимости',
+    'setup.deps_check':'🔄 Проверить обновления',
+    'setup.deps_update_all':'⬆️ Обновить всё (без закреплённых)',
+    'setup.deps_hint':'Нажми «Проверить обновления».',
     // Nav
     'nav.s_main':'Главное','nav.queue':'Очередь','nav.search':'Поиск',
     'nav.history':'История','nav.watchlist':'Watchlist','nav.releases':'Релизы',
@@ -453,6 +458,11 @@ var LANG = {
     'sc.eng_install_err':'Ошибка установки: ',
   },
   en: {
+    // Setup → Python dependencies
+    'setup.deps_hdr':'📦 Python dependencies',
+    'setup.deps_check':'🔄 Check for updates',
+    'setup.deps_update_all':'⬆️ Update all (except pinned)',
+    'setup.deps_hint':'Click "Check for updates".',
     // Nav
     'nav.s_main':'Main','nav.queue':'Queue','nav.search':'Search',
     'nav.history':'History','nav.watchlist':'Watchlist','nav.releases':'Releases',
