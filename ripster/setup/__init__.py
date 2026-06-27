@@ -770,7 +770,37 @@ async def _wvd_install_aehd() -> bool:
     await irun(["powershell", "-NoProfile", "-Command", ps])
     if _aehd_running():
         await ilog("│  ✓ AEHD гипервизор работает", "success"); return True
-    await ilog("│  ⚠ AEHD не подтвердился (UAC отклонён?) — повтори установку", "warn"); return False
+    # No UAC dialog appeared / driver still absent. The usual cause: the Ripster
+    # server is a BACKGROUND/windowless process (or, on a remote/headless launch,
+    # a non-interactive session) and a background process CANNOT raise the UAC
+    # consent UI on the user's desktop — Start-Process -Verb RunAs just returns
+    # without showing anything. Fix: drop a self-elevating .cmd the user double-
+    # clicks FROM EXPLORER, where UAC always works. Open its folder to make it
+    # obvious.
+    try:
+        helper = _base_dir / "Install-AEHD.cmd"
+        helper.write_text(
+            "@echo off\r\n"
+            "net session >nul 2>&1\r\n"
+            "if %errorlevel% NEQ 0 (\r\n"
+            "  echo Requesting administrator rights...\r\n"
+            "  powershell -NoProfile -Command \"Start-Process -Verb RunAs -FilePath '%~f0'\"\r\n"
+            "  exit /b\r\n"
+            ")\r\n"
+            f'call "{bat}"\r\n'
+            "echo.\r\n"
+            "echo AEHD install finished. You can close this window.\r\n"
+            "pause\r\n",
+            encoding="utf-8")
+        await ilog("│  ⚠ Окно UAC не появилось — фоновый процесс не может его показать.", "warn")
+        await ilog(f"│  👉 Запусти вручную (двойной клик → «Да»): {helper}", "warn")
+        try:
+            subprocess.Popen(["explorer", "/select,", str(helper)], creationflags=_NO_WIN)
+        except Exception:
+            pass
+    except Exception as e:                                            # noqa: BLE001
+        await ilog(f"│  ⚠ AEHD не подтвердился; не удалось создать Install-AEHD.cmd: {e}", "warn")
+    return False
 
 
 async def setup_widevine_toolchain() -> bool:
