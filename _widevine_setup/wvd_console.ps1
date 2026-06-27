@@ -57,7 +57,8 @@ function Boot-Emulator {
     }
     Write-Host "Launching emulator (headless)..." -ForegroundColor Cyan
     Start-Process -FilePath $EMU -WindowStyle Hidden -ArgumentList `
-        "-avd",$AVD,"-no-window","-no-snapshot","-no-boot-anim","-gpu","swiftshader_indirect","-no-audio"
+        "-avd",$AVD,"-no-window","-no-snapshot","-no-boot-anim","-gpu","swiftshader_indirect","-no-audio",`
+        "-dns-server","8.8.8.8,8.8.4.4","-netdelay","none","-netspeed","full"
     & $ADB start-server | Out-Null
     Write-Host "Waiting for boot..." -NoNewline
     for($i=0;$i -lt 30;$i++){
