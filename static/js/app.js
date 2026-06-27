@@ -1345,10 +1345,17 @@ function renderQueue() {
   existing.forEach((node,id)=>{ if(!ids.has(id)) node.remove(); });
 
   S.queue.forEach(task=>{
-    if(existing.has(task.id)){
-      updateQueueItem(task, existing.get(task.id));
-    } else {
-      el.appendChild(buildQueueItem(task));
+    // Per-task try/catch: a single malformed task (missing meta etc.) must NOT
+    // throw out of forEach and abort the loop — that left every task AFTER it
+    // unrendered ("some tasks show, some don't"). Skip the bad one, keep going.
+    try {
+      if(existing.has(task.id)){
+        updateQueueItem(task, existing.get(task.id));
+      } else {
+        el.appendChild(buildQueueItem(task));
+      }
+    } catch(e){
+      console.error('renderQueue: skipped bad task', task && task.id, e);
     }
   });
 
