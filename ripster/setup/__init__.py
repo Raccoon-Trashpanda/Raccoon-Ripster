@@ -752,7 +752,18 @@ async def _wvd_run_sdk_provision() -> bool:
 
 
 async def _wvd_install_aehd() -> bool:
-    """Install the AEHD hypervisor driver — ONE UAC prompt, then never again."""
+    """Install the AEHD hypervisor driver via pnputil (proven non-interactive).
+
+    The bundled silent_install.bat uses RUNDLL32 InstallHinfSection, which is async
+    (the following ``sc start`` races it → 1060) and can need an interactive driver
+    dialog. ``pnputil /add-driver <inf> /install`` creates + installs the service in
+    one synchronous, UI-less call — verified live on the tester box. Strategy:
+      1. direct pnputil — works when the server already holds an admin token
+         (headless/SSH/Session-0 with full token);
+      2. elevated via Start-Process -Verb RunAs — shows ONE UAC in an interactive
+         desktop session (a normal Ripster.exe launch);
+      3. self-elevating Install-AEHD.cmd the user double-clicks from Explorer
+         (covers background/Session-0 servers that can't raise UAC at all)."""
     def _aehd_running() -> bool:
         try:
             out = subprocess.run(["sc.exe", "query", "aehd"], capture_output=True,
@@ -762,23 +773,15 @@ async def _wvd_install_aehd() -> bool:
             return False
     if _aehd_running():
         await ilog("│  ✓ AEHD гипервизор уже работает", "success"); return True
-    bat = _ANDROID_ROOT / "Sdk" / "extras" / "google" / "Android_Emulator_Hypervisor_Driver" / "silent_install.bat"
-    if not bat.exists():
-        await ilog("│  ✗ Установщик AEHD не найден (шаг sdkmanager неполный)", "error"); return False
-    await ilog("│  🔐 Ставлю AEHD-гипервизор (ОДИН UAC-запрос — нажми «Да»)…", "info")
-    ps = f"Start-Process -Verb RunAs -Wait -FilePath cmd -ArgumentList '/c','\"{bat}\"'"
-    await irun(["powershell", "-NoProfile", "-Command", ps])
-    if _aehd_running():
-        await ilog("│  ✓ AEHD гипервизор работает", "success"); return True
-    # No UAC dialog appeared / driver still absent. The usual cause: the Ripster
-    # server is a BACKGROUND/windowless process (or, on a remote/headless launch,
-    # a non-interactive session) and a background process CANNOT raise the UAC
-    # consent UI on the user's desktop — Start-Process -Verb RunAs just returns
-    # without showing anything. Fix: drop a self-elevating .cmd the user double-
-    # clicks FROM EXPLORER, where UAC always works. Open its folder to make it
-    # obvious.
+    drv = _ANDROID_ROOT / "Sdk" / "extras" / "google" / "Android_Emulator_Hypervisor_Driver"
+    inf = drv / "aehd.inf"
+    if not inf.exists():
+        await ilog("│  ✗ Драйвер AEHD не найден (шаг sdkmanager неполный)", "error"); return False
+
+    # Always drop a self-elevating helper (pnputil-based) — used as the manual
+    # fallback AND as the elevated payload for attempt #2.
+    helper = _base_dir / "Install-AEHD.cmd"
     try:
-        helper = _base_dir / "Install-AEHD.cmd"
         helper.write_text(
             "@echo off\r\n"
             "net session >nul 2>&1\r\n"
@@ -787,19 +790,44 @@ async def _wvd_install_aehd() -> bool:
             "  powershell -NoProfile -Command \"Start-Process -Verb RunAs -FilePath '%~f0'\"\r\n"
             "  exit /b\r\n"
             ")\r\n"
-            f'call "{bat}"\r\n'
-            "echo.\r\n"
-            "echo AEHD install finished. You can close this window.\r\n"
+            f'pnputil /add-driver "{inf}" /install\r\n'
+            "sc start aehd\r\n"
+            'sc query aehd | find "RUNNING" >nul && (echo AEHD OK) || (echo AEHD FAILED)\r\n'
             "pause\r\n",
             encoding="utf-8")
-        await ilog("│  ⚠ Окно UAC не появилось — фоновый процесс не может его показать.", "warn")
+    except Exception:
+        helper = None
+
+    # 1) Direct (works if we already have an elevated token).
+    await ilog("│  🔐 Ставлю AEHD-гипервизор (pnputil)…", "info")
+    try:
+        subprocess.run(["pnputil", "/add-driver", str(inf), "/install"],
+                       capture_output=True, text=True, creationflags=_NO_WIN, timeout=120)
+        subprocess.run(["sc.exe", "start", "aehd"], capture_output=True,
+                       text=True, creationflags=_NO_WIN)
+    except Exception:
+        pass
+    if _aehd_running():
+        await ilog("│  ✓ AEHD гипервизор работает", "success"); return True
+
+    # 2) Elevated via UAC (interactive desktop session only).
+    if helper and helper.exists():
+        await ilog("│  🔐 Запрашиваю права (ОДИН UAC — нажми «Да»)…", "info")
+        ps = f"Start-Process -Verb RunAs -Wait -FilePath '{helper}'"
+        await irun(["powershell", "-NoProfile", "-Command", ps])
+        if _aehd_running():
+            await ilog("│  ✓ AEHD гипервизор работает", "success"); return True
+
+    # 3) Manual fallback — a background/Session-0 server can't raise UAC at all.
+    if helper and helper.exists():
+        await ilog("│  ⚠ Окно UAC не появилось (фоновый процесс не может его показать).", "warn")
         await ilog(f"│  👉 Запусти вручную (двойной клик → «Да»): {helper}", "warn")
         try:
             subprocess.Popen(["explorer", "/select,", str(helper)], creationflags=_NO_WIN)
         except Exception:
             pass
-    except Exception as e:                                            # noqa: BLE001
-        await ilog(f"│  ⚠ AEHD не подтвердился; не удалось создать Install-AEHD.cmd: {e}", "warn")
+    else:
+        await ilog("│  ⚠ AEHD не установился и не удалось создать Install-AEHD.cmd", "warn")
     return False
 
 
