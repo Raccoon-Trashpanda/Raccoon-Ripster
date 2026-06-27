@@ -740,15 +740,41 @@ async def _wvd_run_sdk_provision() -> bool:
         'echo y| call "%SDKM%" "platform-tools" "emulator" '
         f'"{_WVD_SYS_IMG}" "extras;google;Android_Emulator_Hypervisor_Driver" >> "%LOG%" 2>&1\r\n'
         'if not "%errorlevel%"=="0" ( timeout /t 15 /nobreak >nul & goto retry )\r\n'
-        f'echo no | call "%AVDM%" create avd -n {_WVD_AVD} -k "{_WVD_SYS_IMG}" --force >> "%LOG%" 2>&1\r\n'
+        # -d pixel: give the AVD a real device profile. A bare `create avd` defaults
+        # to hw.ramSize=96M, which starves Android so badly that connectivity/radio
+        # services never come up ("Active default network: none"). The pixel profile
+        # sets 2G. We ALSO patch config.ini below as belt-and-suspenders.
+        f'echo no | call "%AVDM%" create avd -n {_WVD_AVD} -d pixel -k "{_WVD_SYS_IMG}" --force >> "%LOG%" 2>&1\r\n'
         'echo DONE_MARKER_0>> "%LOG%"\r\n',
         encoding="utf-8")
     await ilog("│  ⚙ sdkmanager: лицензии + platform-tools + emulator + system-image + AEHD + AVD (5–15 мин)…", "info")
     rc, _ = await irun(["cmd", "/c", str(bat)])
     done = log.exists() and "DONE_MARKER_0" in log.read_text(encoding="utf-8", errors="replace")
     if done:
+        _patch_avd_ram()
         await ilog("│  ✓ SDK-пакеты + AVD установлены", "success"); return True
     await ilog(f"│  ✗ sdkmanager не завершился (rc={rc}) — лог {log}", "error"); return False
+
+
+def _patch_avd_ram() -> None:
+    """Ensure the AVD has enough RAM. A bare avdmanager AVD defaults to 96M, which
+    starves Android (no network/radio). Force hw.ramSize=2048 + a real device name."""
+    try:
+        from pathlib import Path as _P
+        cfg = _P(os.path.expanduser("~")) / ".android" / "avd" / f"{_WVD_AVD}.avd" / "config.ini"
+        if not cfg.is_file():
+            return
+        import re as _re
+        txt = cfg.read_text(encoding="utf-8", errors="replace")
+        if _re.search(r"(?m)^\s*hw\.ramSize\s*=", txt):
+            txt = _re.sub(r"(?m)^\s*hw\.ramSize\s*=.*$", "hw.ramSize = 2048", txt)
+        else:
+            txt += "\nhw.ramSize = 2048\n"
+        if not _re.search(r"(?m)^\s*hw\.device\.name\s*=", txt):
+            txt += "hw.device.name = pixel\n"
+        cfg.write_text(txt, encoding="utf-8")
+    except Exception:
+        pass
 
 
 async def _wvd_install_aehd() -> bool:
