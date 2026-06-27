@@ -17,7 +17,7 @@
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/css/main.css?v=27"/>
+<link rel="stylesheet" href="/static/css/main.css?v=28"/>
 </head>
 <body>
 <div id="guest-banner">
@@ -210,7 +210,7 @@
   <div id="detail-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9000" onclick="if(event.target===this)closeDetail()">
     <div id="detail-panel" style="position:absolute;top:0;right:0;bottom:0;width:min(780px,100vw);background:var(--bg);display:flex;flex-direction:column;box-shadow:-16px 0 60px rgba(0,0,0,.85)">
       <!-- Sticky header bar -->
-      <div style="position:sticky;top:0;background:rgba(14,14,18,.97);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;padding:10px 16px;flex-shrink:0;z-index:2">
+      <div style="position:sticky;top:0;background:var(--player-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;padding:10px 16px;flex-shrink:0;z-index:2">
         <button id="detail-back-btn" onclick="detailGoBack()" title="Назад" style="display:none;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.08);color:var(--muted);border:none;cursor:pointer;font-size:16px;flex-shrink:0;transition:background .15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background='rgba(255,255,255,.16)'" onmouseout="this.style.background='rgba(255,255,255,.08)'">←</button>
         <button onclick="closeDetail()" title="Закрыть" style="width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.08);color:var(--muted);border:none;cursor:pointer;font-size:15px;flex-shrink:0;transition:background .15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background='rgba(255,255,255,.16)'" onmouseout="this.style.background='rgba(255,255,255,.08)'">✕</button>
         <span id="detail-breadcrumb" style="font-size:12px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
@@ -223,7 +223,7 @@
   </div>
 
   <!-- ─── Preview player ─── -->
-  <div id="preview-player" style="position:fixed;bottom:0;left:220px;right:0;background:rgba(14,14,18,.97);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid var(--border);z-index:9500">
+  <div id="preview-player" style="position:fixed;bottom:0;left:220px;right:0;background:var(--player-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid var(--border);z-index:9500">
 
     <!-- ══ Expanded Now Playing panel ══ -->
     <div id="pp-expanded" style="display:none;padding:20px 24px 16px;border-bottom:1px solid rgba(255,255,255,.07)">
@@ -298,7 +298,7 @@
         <!-- Quality pill -->
         <div id="pp-quality" style="position:relative;flex-shrink:0">
           <button id="pp-quality-btn" onclick="toggleQualityMenu(event)" title="Качество стрима" style="height:26px;padding:0 10px;border-radius:13px;background:rgba(255,255,255,.06);color:var(--muted);border:1px solid var(--border);cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px;white-space:nowrap"><span id="pp-quality-label">MP3</span><span style="font-size:8px;opacity:.7">▾</span></button>
-          <div id="pp-quality-menu" style="display:none;position:absolute;bottom:34px;right:0;background:rgba(20,20,26,.98);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--border);border-radius:10px;padding:5px;min-width:170px;box-shadow:0 8px 28px rgba(0,0,0,.55);z-index:9600"></div>
+          <div id="pp-quality-menu" style="display:none;position:absolute;bottom:34px;right:0;background:var(--player-bg);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--border);border-radius:10px;padding:5px;min-width:170px;box-shadow:0 8px 28px rgba(0,0,0,.55);z-index:9600"></div>
         </div>
         <!-- Volume: icon + vertical hover popup (no inline line — distinct from seek) -->
         <div id="pp-vol-wrap" style="position:relative;flex-shrink:0">
@@ -394,7 +394,7 @@
   </div>
 
   <!-- Sleep timer popup -->
-  <div id="fp-sleep-pop" style="display:none;position:fixed;z-index:9750;background:rgba(20,20,28,.96);backdrop-filter:blur(20px);border:1px solid var(--border);border-radius:12px;padding:8px;box-shadow:0 12px 40px rgba(0,0,0,.5);min-width:180px"></div>
+  <div id="fp-sleep-pop" style="display:none;position:fixed;z-index:9750;background:var(--player-bg);backdrop-filter:blur(20px);border:1px solid var(--border);border-radius:12px;padding:8px;box-shadow:0 12px 40px rgba(0,0,0,.5);min-width:180px"></div>
 
   <!-- styles moved to /static/css/main.css -->
 </div>

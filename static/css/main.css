@@ -26,6 +26,7 @@
   --topbar-bg:#111318;
   --sidebar-bg:#111318;
   --console-bg:rgba(0,0,0,.35);
+  --player-bg:rgba(14,14,18,.97);
   --font:system-ui,-apple-system,'Segoe UI',sans-serif;
   --mono:'JetBrains Mono','Fira Code','Cascadia Code',monospace;
   --display:system-ui,-apple-system,'Segoe UI',sans-serif;
@@ -54,6 +55,7 @@ html.light{
   --topbar-bg:rgba(244,244,248,.95);
   --sidebar-bg:#ebebf0;
   --console-bg:rgba(0,0,0,.04);
+  --player-bg:rgba(244,244,248,.97);
   --shadow:0 10px 40px rgba(0,0,0,.12);
 }
 html{overflow:hidden;height:100%}
