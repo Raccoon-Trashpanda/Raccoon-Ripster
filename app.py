@@ -285,7 +285,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "3.0.20"
+RELEASE_VERSION = "3.0.21"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -980,6 +980,89 @@ async def websocket_endpoint(ws: WebSocket):
         ws_clients.discard(ws)
 
 
+def _takeover_stale_server(host: str, port: int) -> bool:
+    """Make sure THIS interpreter can bind `port`, taking it over from a STALE
+    Ripster if needed.
+
+    The frozen Ripster.exe launcher (a pre-built binary, NOT shipped by self-update)
+    just *attaches* to whatever already answers on the port — so after an overlay
+    update the user kept seeing the OLD version: the previous server lingered in the
+    background (a detached restart successor, or a browser-fallback close that never
+    terminated it) and the launcher reopened onto it. This server-side guard fixes
+    that for installs that already have the old exe:
+
+      • port free                       → bind (normal first start)
+      • held by a foreign app           → leave it (uvicorn fails loudly, as before)
+      • held by an OLDER Ripster        → kill it, wait for the port, then bind
+                                          (the just-overlaid newer code wins)
+      • held by a SAME/NEWER Ripster    → stand down (a sibling won the restart race)
+
+    Returns True if the caller should proceed to bind, False if it should exit."""
+    import socket, time, json, subprocess
+    from urllib.request import urlopen
+    if host not in ("127.0.0.1", "localhost"):
+        return True                       # container 0.0.0.0 etc. — don't interfere
+
+    def _can_bind() -> bool:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port)); return True
+        except OSError:
+            return False
+        finally:
+            s.close()
+
+    if _can_bind():
+        return True
+
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=2) as r:
+            j = json.loads(r.read() or b"{}")
+    except Exception:
+        return True                       # not answering / unknown — let uvicorn try
+    if j.get("app") != "ripster":
+        return True                       # foreign app on our port — don't touch it
+
+    other = str(j.get("version") or "")
+    try:
+        from ripster.updater import is_newer
+        newer_or_same = (other == RELEASE_VERSION) or is_newer(other, RELEASE_VERSION)
+    except Exception:
+        newer_or_same = (other == RELEASE_VERSION)
+    if newer_or_same:
+        print(f"  ↪ Ripster v{other} already live on {port} — stepping aside.", flush=True)
+        return False                      # a same/newer sibling owns it → exit cleanly
+
+    # An OLDER Ripster is squatting the port (stale after an update). Kill whatever
+    # holds it so this newer code can bind.
+    print(f"  ⟳ Replacing stale Ripster v{other} on {port} with v{RELEASE_VERSION}…", flush=True)
+    _CNW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["netstat", "-ano", "-p", "tcp"],
+                                 capture_output=True, text=True, creationflags=_CNW).stdout
+            pids = set()
+            for line in out.splitlines():
+                u = line.upper()
+                if f"127.0.0.1:{port} " in line and "LISTENING" in u:
+                    parts = line.split()
+                    if parts and parts[-1].isdigit():
+                        pids.add(parts[-1])
+            for pid in pids:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
+                               capture_output=True, creationflags=_CNW)
+        else:
+            subprocess.run(["bash", "-c", f"fuser -k {port}/tcp"], capture_output=True)
+    except Exception as e:                                            # noqa: BLE001
+        print(f"  ⚠ could not kill stale server: {e}", flush=True)
+    for _ in range(40):                   # up to ~10 s for the port to free
+        if _can_bind():
+            return True
+        time.sleep(0.25)
+    return True                           # bind anyway; uvicorn will report if still busy
+
+
 # ── Entry point ────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     # Host/port are env-overridable (RIPSTER_HOST / RIPSTER_PORT) so a container
@@ -1021,4 +1104,6 @@ if __name__ == "__main__":
     print("─" * 52)
     Path(config.get("save-path", "downloads")).mkdir(parents=True, exist_ok=True)
     save_config(config)
+    if not _takeover_stale_server(host, port):
+        sys.exit(0)                       # a same/newer Ripster already owns the port
     uvicorn.run(app, host=host, port=port, log_level="warning")

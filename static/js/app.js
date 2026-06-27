@@ -4419,13 +4419,17 @@ async function applyRipsterUpdate(){
   try {
     const d = await api('POST','/api/update/apply');
     if(d && d.ok){
-      // Auto-restart proved unreliable (launcher attach / webview → hung page), so
-      // we DON'T touch the server: the new code is already on disk. Tell the user to
-      // close & reopen Ripster themselves — that always works, no hung page.
-      if(st){ st.innerHTML = '✅ Обновление установлено!<br><b>Полностью закрой Ripster и открой заново</b> — новая версия подхватится сама.<br><span style="color:var(--muted);font-size:12px">(Перезапуск вручную — так надёжнее.)</span>'; st.style.color = '#30d158'; }
+      // New code is on disk. Auto-restart in place: /api/restart respawns the NEW
+      // on-disk code and that instance takes over the port (server-side
+      // _takeover_stale_server kills the stale one) — so the old "close & reopen
+      // shows the old version" bug is gone. Then we wait for the new server and
+      // hard-reload so the new UI loads too. No manual close needed.
+      const newVer = (d.latest || (_ripsterUpdate && _ripsterUpdate.latest) || '').replace(/^v/,'');
+      if(st){ st.innerHTML = '✅ Обновление установлено — перезапускаю и обновляю страницу…'; st.style.color = '#30d158'; }
       _ripsterUpdate = null;
-      toast('Готово! Закрой Ripster и открой заново','var(--green)', '', 15000);
-      showRestartBanner('Обновление установлено — полностью закрой Ripster и открой заново, чтобы новая версия вступила в силу.');
+      toast('Обновление применяется — страница перезагрузится сама','var(--green)', '', 8000);
+      await fetch('/api/restart', {method:'POST'}).catch(()=>{});
+      _waitForNewServerThenReload(newVer);
     } else {
       const rb = d && d.rolled_back ? ' (откат выполнен — установка в порядке)' : '';
       if(st){ st.textContent = `✗ Сбой на этапе «${(d&&d.stage)||'?'}»: ${(d&&d.error)||'?'}${rb}`; st.style.color = '#c084a0'; }
@@ -4437,6 +4441,24 @@ async function applyRipsterUpdate(){
     if(applyBtn){ applyBtn.disabled = false; applyBtn.textContent = '⬆️ Обновить сейчас'; }
     updateSetupBadge();
   }
+}
+
+// After an update we restart the server in place; poll until the NEW version is
+// answering (or the server bounced) and then hard-reload so the new UI loads too.
+async function _waitForNewServerThenReload(newVer){
+  let downSeen = false;
+  for(let i=0;i<90;i++){                       // up to ~90s
+    await new Promise(r=>setTimeout(r,1000));
+    try{
+      const r = await fetch('/api/ping', {cache:'no-store'});
+      if(r.ok){
+        let v = '';
+        try { v = String(((await r.json())||{}).version||''); } catch(e){}
+        if((newVer && v === newVer) || downSeen){ location.reload(); return; }
+      } else { downSeen = true; }
+    }catch(e){ downSeen = true; }              // server went down = restart in progress
+  }
+  location.reload();                           // fallback — reload regardless
 }
 
 // Show the existing "restart required" banner with a custom reason.
@@ -8301,12 +8323,47 @@ async function _maybeAskTelemetryName(){
     if (String(c['telemetry-forward']) === 'false') return;
     if ((c['telemetry-name']||'').trim()) return;
     if (localStorage.getItem('tlm_named') === '1') return;
-    let name = prompt('Как тебя подписать для разработчика? (имя/ник — поможет понять, чей это Ripster при диагностике)', '');
-    localStorage.setItem('tlm_named','1');
-    name = (name||'').trim();
-    if (!name) return;
-    await api('POST','/api/config', {'telemetry-name': name.slice(0,48)});
-    if (S.config) S.config['telemetry-name'] = name.slice(0,48);
-    toast('Спасибо! Имя сохранено','var(--green)');
+    // NOTE: do NOT use window.prompt() — WebView2 (the pywebview backend on
+    // Windows, which is what the Ripster.exe launcher uses) suppresses prompt()
+    // entirely, so the first-run ask silently never appeared. Use an in-page modal.
+    _showFirstRunNameModal();
   } catch(e){}
+}
+
+function _showFirstRunNameModal(){
+  if(document.getElementById('firstrun-name-modal')) return;
+  const modal = document.createElement('div');
+  modal.id = 'firstrun-name-modal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.75);backdrop-filter:blur(4px)';
+  modal.innerHTML = `<div style="background:var(--surface,#1c1c1e);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:24px;width:380px;max-width:90vw">
+    <div style="font-size:16px;font-weight:700;color:#f0f0f4;margin-bottom:6px">👋 Добро пожаловать в Ripster</div>
+    <div style="font-size:12px;color:var(--muted,#888);margin-bottom:16px">Как тебя подписать для разработчика? Имя/ник поможет понять, чей это Ripster, если пришлёшь диагностику. Можно пропустить — спросим только один раз.</div>
+    <input id="firstrun-name-input" type="text" maxlength="48" placeholder="Имя или ник"
+      style="width:100%;padding:10px 12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:9px;color:#f0f0f4;font-size:15px;box-sizing:border-box;outline:none"
+      onkeydown="if(event.key==='Enter') _saveFirstRunName()">
+    <div style="display:flex;gap:8px;margin-top:14px">
+      <button onclick="_saveFirstRunName()" style="flex:1;padding:10px;background:#0a84ff;border:none;border-radius:9px;cursor:pointer;color:#fff;font-weight:600;font-size:13px;font-family:var(--font)">Сохранить</button>
+      <button onclick="_skipFirstRunName()" style="padding:10px 16px;background:transparent;border:1px solid rgba(255,255,255,.1);border-radius:9px;cursor:pointer;font-size:13px;color:var(--muted,#888);font-family:var(--font)">Пропустить</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+  setTimeout(()=>{ const i=document.getElementById('firstrun-name-input'); if(i) i.focus(); },50);
+}
+
+function _skipFirstRunName(){
+  localStorage.setItem('tlm_named','1');
+  const m=document.getElementById('firstrun-name-modal'); if(m) m.remove();
+}
+
+async function _saveFirstRunName(){
+  const inp=document.getElementById('firstrun-name-input');
+  const name=((inp&&inp.value)||'').trim().slice(0,48);
+  localStorage.setItem('tlm_named','1');
+  const m=document.getElementById('firstrun-name-modal'); if(m) m.remove();
+  if(!name) return;
+  try{
+    await api('POST','/api/config', {'telemetry-name': name});
+    if(S.config) S.config['telemetry-name']=name;
+    toast('Спасибо! Имя сохранено','var(--green)');
+  }catch(e){}
 }
