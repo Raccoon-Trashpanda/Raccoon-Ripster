@@ -178,7 +178,12 @@ function _wsWatchdog() {
   }
 }
 setInterval(_wsWatchdog, 15000);
-document.addEventListener('visibilitychange', () => { if (!document.hidden) _wsWatchdog(); });
+// Self-heal the queue: a socket can stay "alive" (log/progress events keep
+// resetting _wsLastMsg so the watchdog never cycles it) yet silently miss a
+// queue_update — leaving S.queue frozen on a stale snapshot ("bot added a task
+// but Ripster never shows it"). Periodically re-pull the authoritative REST queue.
+setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) pullQueue(); }, 15000);
+document.addEventListener('visibilitychange', () => { if (!document.hidden) { _wsWatchdog(); pullQueue(); } });
 
 // Pull the authoritative queue over REST and re-render. A safety net so a
 // successful add reflects immediately even if the WS push is lagging/dead.
