@@ -67,12 +67,17 @@ async def _probe_amazon() -> dict:
     from fastapi.concurrency import run_in_threadpool
 
     def _do():
-        import os
-        exe = (_cfg.get("amazon-cli-path") or "").strip()
-        if not exe:
-            from ripster.engines.amazon import _amz_exe
-            exe = _amz_exe()
-        ok_exe = bool(exe) and os.path.isfile(exe)
+        import os, importlib.util
+        override = (_cfg.get("amazon-cli-path") or "").strip()
+        if override:
+            # An explicit override is a real exe path → check the file.
+            ok_exe, detail = os.path.isfile(override), os.path.basename(override)
+        else:
+            # Default: _amz_exe() runs `python -c "from amz.cli import main"`, i.e.
+            # an argv LIST, not a file path (the old os.path.isfile(list) blew up
+            # with "path should be str… not list"). The real requirement is that
+            # the `amz` (amazon-music) package is importable.
+            ok_exe, detail = (importlib.util.find_spec("amz") is not None), "amz module"
         if not ok_exe:
             return {"ok": False,
                     "error": "CLI `amz` не найден — pip install amazon-music "
@@ -81,7 +86,7 @@ async def _probe_amazon() -> dict:
             "login":    "token ✓",
             "lossless": True,         # Master/HD при наличии Unlimited
             "hq":       True,
-            "note":     f"Токен задан, CLI: {os.path.basename(exe)} ✓ "
+            "note":     f"Токен задан, CLI: {detail} ✓ "
                         f"(аккаунт проверяется при первой загрузке)",
         }}
 
