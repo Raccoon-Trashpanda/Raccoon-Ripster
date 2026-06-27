@@ -10,15 +10,20 @@ $ErrorActionPreference = "SilentlyContinue"
 $HERE   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ROOT   = Split-Path -Parent $HERE                       # C:\dev\apple_music
 $SDK    = "C:\Android\Sdk"
-$JRE    = "C:\Android\jre17\jdk-17.0.19+10-jre"
+# JRE: pick the jdk-* dir dynamically (don't hardcode 17.0.x - it changes).
+$JRE    = (Get-ChildItem "C:\Android\jre17\jdk-*" -Directory -EA SilentlyContinue | Select-Object -First 1).FullName
+if(-not $JRE){ $JRE = "C:\Android\jre17" }
 $ADB    = "$SDK\platform-tools\adb.exe"
 $EMU    = "$SDK\emulator\emulator.exe"
 $SERIAL = "emulator-5554"
 $AVD    = "wvd"
 $IMAGE  = "system-images;android-30;google_apis;x86_64"
 $FRIDA  = "$HERE\frida-server-x86_64"
-$KEYDIVE= "$ROOT\.venv\Scripts\keydive.exe"
-$VENVPY = "$ROOT\.venv\Scripts\python.exe"
+# Interpreter: dev .venv OR the bundled embeddable python\ that ships in the
+# installer. The old code only knew .venv -> on a real install keydive.exe was
+# never found and Extract silently produced no .wvd.
+if(Test-Path "$ROOT\.venv\Scripts\python.exe"){ $VENVPY = "$ROOT\.venv\Scripts\python.exe" } elseif(Test-Path "$ROOT\python\python.exe"){ $VENVPY = "$ROOT\python\python.exe" } else { $VENVPY = "python" }
+$KEYDIVE= Join-Path (Split-Path -Parent $VENVPY) "Scripts\keydive.exe"
 $WVDDST = "$ROOT\tools\widevine\device.wvd"
 $env:JAVA_HOME = $JRE
 $env:ANDROID_SDK_ROOT = $SDK
@@ -67,23 +72,46 @@ function Boot-Emulator {
 }
 
 function Ensure-Frida {
-    $running = & $ADB -s $SERIAL shell "ps -A 2>/dev/null | grep frida-server" 2>$null
-    if($running){ Write-Host "frida-server already running." -ForegroundColor Green; return }
-    $present = & $ADB -s $SERIAL shell "[ -f /data/local/tmp/frida-server ] && echo yes" 2>$null
-    if(-not ($present -match "yes")){
-        Write-Host "Streaming frida-server to device (adb sync is broken for big files, using base64)..." -ForegroundColor Cyan
-        $b64 = [Convert]::ToBase64String([IO.File]::ReadAllBytes($FRIDA))
-        $b64 | & $ADB -s $SERIAL shell "base64 -d > /data/local/tmp/frida-server; chmod 755 /data/local/tmp/frida-server"
+    # CRITICAL: the frida-server on the device MUST match KeyDive's frida CLIENT
+    # version, else KeyDive reports "Frida server is not running" even though it is.
+    # Derive the version from the installed frida and fetch the matching android
+    # x86_64 server (cached). The bundled frida-server-x86_64 is only a last resort.
+    $ver = (& $VENVPY -c "import frida; print(frida.__version__)" 2>$null)
+    if($ver){ $ver = $ver.Trim() }
+    $srv = $FRIDA
+    if($ver){
+        $cached = "$HERE\frida-server-$ver-x86_64"
+        if(-not (Test-Path $cached)){
+            $url = "https://github.com/frida/frida/releases/download/$ver/frida-server-$ver-android-x86_64.xz"
+            $xz  = "$cached.xz"
+            Write-Host "Downloading frida-server $ver (matches KeyDive)..." -ForegroundColor Cyan
+            try {
+                Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $xz -TimeoutSec 180
+                & $VENVPY -c "import lzma,sys; open(sys.argv[2],'wb').write(lzma.open(sys.argv[1]).read())" $xz $cached
+                Remove-Item $xz -Force -EA SilentlyContinue
+            } catch { Write-Host "frida-server $ver download failed ($_) - using bundled." -ForegroundColor Yellow }
+        }
+        if(Test-Path $cached){ $srv = $cached }
     }
+    # Kill any stale (possibly wrong-version) frida-server already on the device.
+    & $ADB -s $SERIAL shell "pkill -f frida-server" 2>$null | Out-Null
+    Write-Host "Pushing frida-server to device..." -ForegroundColor Cyan
+    & $ADB -s $SERIAL push "$srv" /data/local/tmp/frida-server 2>$null | Out-Null
+    & $ADB -s $SERIAL shell "chmod 755 /data/local/tmp/frida-server" 2>$null | Out-Null
     & $ADB -s $SERIAL shell "nohup /data/local/tmp/frida-server >/data/local/tmp/fs.log 2>&1 &" | Out-Null
-    Start-Sleep 2
-    Write-Host "frida-server started." -ForegroundColor Green
+    Start-Sleep 3
+    $running = & $ADB -s $SERIAL shell "ps -A 2>/dev/null | grep frida-server" 2>$null
+    if($running){ Write-Host "frida-server $ver started." -ForegroundColor Green }
+    else {
+        $log = & $ADB -s $SERIAL shell "cat /data/local/tmp/fs.log 2>/dev/null"
+        Write-Host "frida-server did NOT start. Log: $log" -ForegroundColor Red
+    }
 }
 
 function Skip-ChromeFRE {
     # KeyDive's -a web drives Chrome; a fresh profile stops on the welcome/First-Run
     # screen and KeyDive hangs (the classic "Chrome stuck on welcome" snag). With adb
-    # root we pre-seed the chrome-command-line flag file so Chrome skips the FRE — best
+    # root we pre-seed the chrome-command-line flag file so Chrome skips the FRE - best
     # effort, never fatal.
     & $ADB -s $SERIAL shell "echo 'chrome --no-first-run --disable-fre --no-default-browser-check' > /data/local/tmp/chrome-command-line" 2>$null | Out-Null
     & $ADB -s $SERIAL shell "chmod 644 /data/local/tmp/chrome-command-line" 2>$null | Out-Null
@@ -92,13 +120,28 @@ function Skip-ChromeFRE {
     & $ADB -s $SERIAL shell "settings put secure user_setup_complete 1" 2>$null | Out-Null
 }
 
+function Ensure-KeyDive {
+    # KeyDive is a pip package; a bundled install has python\ but not keydive yet.
+    # Install it into whichever interpreter we resolved so Extract never fails with
+    # a silent "no .wvd" just because the tool was missing.
+    & $VENVPY -c "import keydive" 2>$null
+    if($LASTEXITCODE -eq 0){ return $true }
+    Write-Host "Installing KeyDive (pip)..." -ForegroundColor Cyan
+    & $VENVPY -m pip install --upgrade --disable-pip-version-check keydive
+    & $VENVPY -c "import keydive" 2>$null
+    return ($LASTEXITCODE -eq 0)
+}
+
 function Extract-Wvd {
     if(-not (Boot-Emulator)){ return }
+    if(-not (Ensure-KeyDive)){ Write-Host "KeyDive install failed (pip) - check your internet." -ForegroundColor Red; return }
     Skip-ChromeFRE
     Write-Host "Running KeyDive (-a web -> Chrome plays DRM -> captures CDM)..." -ForegroundColor Cyan
     if(Test-Path "$HERE\_keydive_out"){ Remove-Item "$HERE\_keydive_out" -Recurse -Force }
     Push-Location $HERE
-    & $KEYDIVE -s $SERIAL --output "_keydive_out" -w -a web
+    # Invoke via -m (NOT the .exe shim - console-script .exe shims don't run under
+    # the embeddable python; -m keydive works on every layout).
+    & $VENVPY -m keydive -s $SERIAL --output "_keydive_out" -w -a web
     Pop-Location
     $wvd = Get-ChildItem "$HERE\_keydive_out" -Recurse -Filter *.wvd | Select-Object -First 1
     if($wvd){ Write-Host "Extracted: $($wvd.FullName)" -ForegroundColor Green; Install-Wvd }
@@ -133,7 +176,7 @@ if($Auto){
     if(-not (Boot-Emulator)){ Write-Host "AUTO_RESULT: FAIL boot (AEHD/emulator)" -ForegroundColor Red; exit 2 }
     Extract-Wvd                              # KeyDive -> auto Install-Wvd
     if(-not (Test-Path $WVDDST)){
-        Write-Host "AUTO_RESULT: FAIL extract (KeyDive produced no .wvd — Chrome FRE/DRM?)" -ForegroundColor Red
+        Write-Host "AUTO_RESULT: FAIL extract (KeyDive produced no .wvd - Chrome FRE/DRM?)" -ForegroundColor Red
         Stop-Emulator; exit 3
     }
     Verify-Wvd
