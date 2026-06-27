@@ -5,6 +5,7 @@
 #  Method that WORKS: Android Studio AVD (google_apis x86_64 ships real Widevine
 #  L3) + KeyDive. MEmu/LDPlayer ship ClearKey-only - dead end, removed.
 # ============================================================================
+param([switch]$Auto)   # -Auto: run the whole pipeline headless (no menu, no prompts)
 $ErrorActionPreference = "SilentlyContinue"
 $HERE   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ROOT   = Split-Path -Parent $HERE                       # C:\dev\apple_music
@@ -79,8 +80,21 @@ function Ensure-Frida {
     Write-Host "frida-server started." -ForegroundColor Green
 }
 
+function Skip-ChromeFRE {
+    # KeyDive's -a web drives Chrome; a fresh profile stops on the welcome/First-Run
+    # screen and KeyDive hangs (the classic "Chrome stuck on welcome" snag). With adb
+    # root we pre-seed the chrome-command-line flag file so Chrome skips the FRE — best
+    # effort, never fatal.
+    & $ADB -s $SERIAL shell "echo 'chrome --no-first-run --disable-fre --no-default-browser-check' > /data/local/tmp/chrome-command-line" 2>$null | Out-Null
+    & $ADB -s $SERIAL shell "chmod 644 /data/local/tmp/chrome-command-line" 2>$null | Out-Null
+    # Best-effort: mark Play-services/Chrome first-run done so no setup wizard steals focus.
+    & $ADB -s $SERIAL shell "settings put global device_provisioned 1" 2>$null | Out-Null
+    & $ADB -s $SERIAL shell "settings put secure user_setup_complete 1" 2>$null | Out-Null
+}
+
 function Extract-Wvd {
     if(-not (Boot-Emulator)){ return }
+    Skip-ChromeFRE
     Write-Host "Running KeyDive (-a web -> Chrome plays DRM -> captures CDM)..." -ForegroundColor Cyan
     if(Test-Path "$HERE\_keydive_out"){ Remove-Item "$HERE\_keydive_out" -Recurse -Force }
     Push-Location $HERE
@@ -109,6 +123,23 @@ function Stop-Emulator {
     & $ADB -s $SERIAL emu kill 2>$null | Out-Null
     Get-Process qemu-system-x86_64 -EA SilentlyContinue | Stop-Process -Force
     Write-Host "Emulator stopped." -ForegroundColor Green
+}
+
+# ---- AUTO mode: full pipeline headless, no prompts (driven by the Setup tab) ----
+if($Auto){
+    Show-Status
+    if(Test-Path $WVDDST){ Write-Host "AUTO_RESULT: OK (device.wvd already present) $WVDDST" -ForegroundColor Green; exit 0 }
+    Write-Host "=== AUTO MINT: boot -> extract -> install -> verify -> stop ===" -ForegroundColor Cyan
+    if(-not (Boot-Emulator)){ Write-Host "AUTO_RESULT: FAIL boot (AEHD/emulator)" -ForegroundColor Red; exit 2 }
+    Extract-Wvd                              # KeyDive -> auto Install-Wvd
+    if(-not (Test-Path $WVDDST)){
+        Write-Host "AUTO_RESULT: FAIL extract (KeyDive produced no .wvd — Chrome FRE/DRM?)" -ForegroundColor Red
+        Stop-Emulator; exit 3
+    }
+    Verify-Wvd
+    Stop-Emulator
+    Write-Host "AUTO_RESULT: OK $WVDDST" -ForegroundColor Green
+    exit 0
 }
 
 # ---- menu loop ----

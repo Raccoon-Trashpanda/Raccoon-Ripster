@@ -102,6 +102,37 @@ async def widevine_mint_wizard():
     return {"ok": True, "msg": "Мастер WVD открылся в отдельном окне — следуй инструкциям там."}
 
 
+@router.post("/api/widevine/mint-auto")
+async def widevine_mint_auto():
+    """Fully automated device.wvd mint — runs wvd_console.ps1 -Auto (boot emulator →
+    KeyDive extract → install → verify → stop) headless, streaming progress to the
+    Setup console. No interactive menu, no separate window."""
+    if sys.platform != "win32":
+        return {"ok": False, "error": "Авто-минт WVD доступен только на Windows."}
+    ps1 = _base_dir / "_widevine_setup" / "wvd_console.ps1"
+    if not ps1.exists():
+        return {"ok": False, "error": "_widevine_setup/wvd_console.ps1 не найден в установке."}
+
+    async def _do():
+        await _setup.ilog("── Widevine L3: авто-минт device.wvd "
+                          "(boot → extract → install → verify) ──", "info")
+        await _setup.ilog("Займёт несколько минут (эмулятор + KeyDive). Не закрывай окно.", "info")
+        rc, out = await _setup.irun(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(ps1), "-Auto"],
+            cwd=str(ps1.parent))
+        if "AUTO_RESULT: OK" in (out or ""):
+            await _setup.ilog("✓ device.wvd сминчен и установлен — SoundCloud DRM готов.", "success")
+            if _broadcast:
+                await _broadcast({"type": "widevine_minted"})
+        else:
+            await _setup.ilog(f"✗ Авто-минт не завершился (rc={rc}). Смотри лог выше; "
+                              "если KeyDive застрял на Chrome — открой «Мастер WVD» и доведи вручную.",
+                              "error")
+    asyncio.create_task(_do())
+    return {"ok": True, "msg": "Авто-минт запущен — следи за консолью Setup."}
+
+
 # ── Setup checklist: install ONE component synchronously ──────────────────────
 # The redesigned Setup tab is a checklist; each ticked row calls this and AWAITS
 # completion (progress streams to the Setup console via WS log/step events). Async

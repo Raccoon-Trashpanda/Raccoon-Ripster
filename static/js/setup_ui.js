@@ -34,8 +34,11 @@ const SETUP_COMPONENTS = [
   { key:'widevine', icon:'🔐', label:'Widevine L3 — тулчейн (авто)', tag:'опционально', color:'#c084e0',
     desc:'Автоустановка всего для L3 БЕЗ ручных .bat: JRE 17 + Android SDK + эмулятор + system-image + AEHD-гипервизор + AVD. Один запрос UAC на драйвер. ~неск. ГБ, 5–15 мин. Нужно только для DRM-треков SoundCloud (миксы, приваты). Прогресс — в консоли ниже.',
     endpoint:'/api/setup/component/widevine', status:'widevine' },
-  { key:'wvd', icon:'🔑', label:'Widevine L3 — минт ключа', tag:'после тулчейна', color:'#c084e0',
-    desc:'Минтит ТВОЙ L3 device.wvd (эмулятор + KeyDive) — запусти ПОСЛЕ установки тулчейна выше. Готовый .wvd сам грузится в Настройки → SoundCloud.',
+  { key:'wvd', icon:'🔑', label:'Widevine L3 — минт ключа (авто)', tag:'после тулчейна', color:'#c084e0',
+    desc:'АВТО-минт твоего L3 device.wvd БЕЗ ручного меню: поднимает эмулятор → KeyDive извлекает CDM → ставит .wvd в Настройки → SoundCloud → проверяет. Запусти ПОСЛЕ тулчейна выше. Прогресс — в консоли ниже (несколько минут).',
+    endpoint:'/api/widevine/mint-auto', wsdone:'widevine_minted', status:'wvd' },
+  { key:'wvd-manual', icon:'🔑', label:'Widevine L3 — минт вручную (мастер)', tag:'fallback', color:'#c084e0', advanced:true,
+    desc:'Если авто-минт застрял (например KeyDive завис на экране приветствия Chrome) — открывает интерактивный мастер в отдельном окне, где шаги выбираются вручную.',
     endpoint:'/api/widevine/mint-wizard', wizard:true, status:'wvd' },
   // ── Spotify / Beatport (OrpheusDL) ────────────────────────────────────────
   { key:'orpheus', icon:'🟢', label:'OrpheusDL (Spotify)', color:'#1db954',
