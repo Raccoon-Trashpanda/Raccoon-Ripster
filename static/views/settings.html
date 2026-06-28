@@ -76,6 +76,14 @@
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-notify-on-done"
               onchange="saveSetting('notify-on-done',this.checked)"><div class="toggle-slider"></div></label>
           </div>
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <div class="toggle-label" data-i18n="s.tray_label">🗕 Сворачивать в трей</div>
+              <div class="toggle-sub" data-i18n="s.tray_sub">Закрытие или сворачивание окна прячет Ripster в системный трей — загрузки продолжаются. Применяется после перезапуска.</div>
+            </div>
+            <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-minimize-to-tray"
+              onchange="saveSetting('minimize-to-tray',this.checked)"><div class="toggle-slider"></div></label>
+          </div>
           <div class="field-group mt8">
             <label class="lbl" data-i18n="s.parallel_label">Параллельные загрузки</label>
             <div style="display:flex;align-items:center;gap:10px">

@@ -13,6 +13,7 @@ engine: amd                # default Apple engine: amd | gamdl | zhaarey.
 quality: alac              # default quality: alac | aac | atmos
 save-path: downloads       # where finished files land (relative or absolute)
 queue-autostart: true      # start downloading as soon as a link is added
+minimize-to-tray: true     # closing/minimizing the window folds Ripster into the system tray (server keeps running)
 max-parallel: 2            # parallel downloads (>2 not recommended for Apple)
 auto-delete-minutes: 0     # delete finished releases after N min (0 = never)
 quality-subfolders: true   # sort output into per-quality folders

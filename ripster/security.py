@@ -48,6 +48,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "amazon-token", "amazon-quality", "amazon-save-path", "amazon-cli-path",
     "releases-services", "releases-days", "releases-types",
     "queue-autostart", "max-parallel",
+    "minimize-to-tray",
     "wrapper-apple-id", "wrapper-password", "wrapper-mode", "apple-wrapper",
     "decrypt-port", "m3u8-port",
     "url-quality", "album-folder", "single-disc",

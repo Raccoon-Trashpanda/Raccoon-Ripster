@@ -133,21 +133,176 @@ def start_server(port: int) -> "subprocess.Popen | None":
         return None
 
 
-def open_window(url: str, title: str = "Ripster") -> str:
-    """Native pywebview window; browser fallback. Returns 'webview' | 'browser'."""
+# ── Tray icon + minimize-to-tray ───────────────────────────────────────────────
+# The window's close (X) and minimize both fold the app into the system tray
+# instead of quitting — the server keeps running so downloads continue. The tray
+# icon's left-click restores the window; "Выход" really quits. Gated by the
+# config key `minimize-to-tray` (default ON). All of this is best-effort: any
+# failure degrades to plain close/quit and is logged, never crashes the launcher.
+
+LOCK_FILE = None  # set in main(); single-instance lock holding our PID
+SHOW_FLAG = None  # a second launch drops this so the running instance pops up
+
+
+def tray_enabled() -> bool:
+    """config.yaml `minimize-to-tray` (default True). Env override for testing."""
+    env = os.environ.get("RIPSTER_TRAY")
+    if env is not None:
+        return env.strip() not in ("0", "false", "False", "")
     try:
+        import yaml
+        c = yaml.safe_load((BASE / "config.yaml").read_text(encoding="utf-8")) or {}
+        return bool(c.get("minimize-to-tray", True))
+    except Exception:
+        return True
+
+
+def _tray_image():
+    """A PIL image for the tray icon — the shipped ripster.ico, or a drawn dot."""
+    try:
+        from PIL import Image
+        ico = BASE / "ripster.ico"
+        if ico.exists():
+            return Image.open(str(ico))
+    except Exception as e:
+        _log(f"[launcher] tray icon image fallback: {type(e).__name__}: {e}")
+    try:
+        from PIL import Image, ImageDraw
+        img = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.ellipse((8, 8, 56, 56), fill=(124, 92, 255, 255))
+        return img
+    except Exception:
+        return None
+
+
+def start_tray(window, do_quit) -> "object | None":
+    """Start a detached system-tray icon. Left-click / "Открыть" restores the
+    window; "Выход" calls do_quit(). Returns the pystray Icon or None."""
+    try:
+        import pystray
+    except Exception as e:
+        _log(f"[launcher] pystray unavailable ({type(e).__name__}: {e}) — no tray")
+        return None
+    img = _tray_image()
+    if img is None:
+        _log("[launcher] no tray image — no tray")
+        return None
+
+    def _restore(icon=None, item=None):
+        try:
+            window.show()
+            window.restore()
+        except Exception as e:
+            _log(f"[launcher] tray restore failed: {type(e).__name__}: {e}")
+
+    def _quit(icon=None, item=None):
+        try:
+            do_quit()
+        except Exception as e:
+            _log(f"[launcher] tray quit failed: {type(e).__name__}: {e}")
+
+    try:
+        menu = pystray.Menu(
+            pystray.MenuItem("Открыть Ripster", _restore, default=True),
+            pystray.MenuItem("Выход", _quit),
+        )
+        icon = pystray.Icon("ripster", img, "Ripster", menu)
+        icon.run_detached()   # spins its own thread; returns immediately
+        _log("[launcher] tray icon started")
+        return icon
+    except Exception as e:
+        import traceback
+        _log(f"[launcher] tray start failed: {type(e).__name__}: {e}")
+        _log(traceback.format_exc())
+        return None
+
+
+def _watch_show_flag(window, win_open) -> None:
+    """Poll for the SHOW_FLAG a second launch drops, and surface the window."""
+    while win_open.is_set():
+        try:
+            if SHOW_FLAG and SHOW_FLAG.exists():
+                SHOW_FLAG.unlink()
+                window.show()
+                window.restore()
+                _log("[launcher] second launch → surfaced window")
+        except Exception:
+            pass
+        time.sleep(0.7)
+
+
+def open_window(url: str, port: int, win_open, title: str = "Ripster"):
+    """Native pywebview window with tray + minimize-to-tray; browser fallback.
+    Returns ('webview', state) | ('browser', None). `state['quit']` is True only
+    when the user really chose Выход (so main() tears the server down)."""
+    try:
+        import threading
         import webview
         _log(f"[launcher] opening webview window -> {url}")
-        webview.create_window(title, url, width=1280, height=860)
-        webview.start()  # blocks until the window is closed
-        _log("[launcher] webview window closed normally")
-        return "webview"
+        window = webview.create_window(title, url, width=1280, height=860)
+        state = {"quit": False, "tray": None, "notified": False}
+        use_tray = tray_enabled()
+
+        def do_quit():
+            state["quit"] = True
+            try:
+                if state["tray"] is not None:
+                    state["tray"].stop()
+            except Exception:
+                pass
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+        def on_closing():
+            # Real quit (from tray) → allow the close. Otherwise fold to tray.
+            if state["quit"] or not use_tray or state["tray"] is None:
+                return True
+            try:
+                window.hide()
+                if not state["notified"]:
+                    state["notified"] = True
+                    try:
+                        state["tray"].notify(
+                            "Ripster свёрнут в трей — загрузки продолжаются. "
+                            "Клик по значку откроет окно, «Выход» закроет программу.",
+                            "Ripster")
+                    except Exception:
+                        pass
+            except Exception as e:
+                _log(f"[launcher] hide-to-tray failed: {type(e).__name__}: {e}")
+                return True   # if hiding fails, let it close normally
+            return False      # cancel the close → app stays alive in tray
+
+        def on_minimized():
+            if use_tray and state["tray"] is not None and not state["quit"]:
+                try:
+                    window.hide()
+                except Exception:
+                    pass
+
+        window.events.closing += on_closing
+        try:
+            window.events.minimized += on_minimized
+        except Exception:
+            pass
+
+        if use_tray:
+            state["tray"] = start_tray(window, do_quit)
+            threading.Thread(target=_watch_show_flag, args=(window, win_open),
+                             daemon=True).start()
+
+        webview.start()  # blocks until the window is destroyed (real quit)
+        _log("[launcher] webview window closed")
+        return "webview", state
     except Exception as e:
         import traceback
         _log(f"[launcher] webview FAILED ({type(e).__name__}: {e}) -> browser fallback")
         _log(traceback.format_exc())
         webbrowser.open(url)
-        return "browser"
+        return "browser", None
 
 
 def _supervise(box: list, port: int, win_open) -> None:
@@ -188,8 +343,54 @@ def _supervise(box: list, port: int, win_open) -> None:
         wait_for_ripster(port, timeout=30)
 
 
+def _pid_alive(pid: "int | None") -> bool:
+    if not pid:
+        return False
+    try:
+        import ctypes
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        h = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, int(pid))
+        if not h:
+            return False
+        ctypes.windll.kernel32.CloseHandle(h)
+        return True
+    except Exception:
+        return False
+
+
+def _single_instance_guard() -> bool:
+    """True = we are the sole instance and may proceed. False = another launcher
+    already owns the window; we signalled it to surface and should exit."""
+    global LOCK_FILE, SHOW_FLAG
+    logs = BASE / "logs"
+    LOCK_FILE = logs / "launcher.lock"
+    SHOW_FLAG = logs / "launcher.show"
+    try:
+        logs.mkdir(parents=True, exist_ok=True)
+        existing = None
+        if LOCK_FILE.exists():
+            try:
+                existing = int(LOCK_FILE.read_text(encoding="utf-8").strip())
+            except Exception:
+                existing = None
+        if existing and existing != os.getpid() and _pid_alive(existing):
+            _log(f"[launcher] already running (pid {existing}) → surfacing it, exiting")
+            try:
+                SHOW_FLAG.write_text("1", encoding="utf-8")
+            except Exception:
+                pass
+            return False
+        LOCK_FILE.write_text(str(os.getpid()), encoding="utf-8")
+    except Exception as e:
+        _log(f"[launcher] single-instance guard skipped: {type(e).__name__}: {e}")
+    return True
+
+
 def main() -> None:
     import threading
+    if not _single_instance_guard():
+        return
     desired = config_port()
     box = [None]   # box[0] = the server process WE own (None when attaching to an existing one)
     if ripster_alive(desired):
@@ -213,16 +414,22 @@ def main() -> None:
         threading.Thread(target=_supervise, args=(box, port, win_open), daemon=True).start()
 
     url = f"http://127.0.0.1:{port}"
-    mode = open_window(url)        # blocks until the window is closed
+    mode, _state = open_window(url, port, win_open)  # blocks until real quit
 
-    # Window closed → stop supervising FIRST (so it doesn't respawn), then stop the
-    # server we own. Browser fallback leaves it running (a tab was closed, not the app).
+    # Window destroyed (user chose Выход) → stop supervising FIRST (so it doesn't
+    # respawn), then stop the server we own. Browser fallback leaves it running
+    # (a tab was closed, not the app).
     win_open.clear()
     if mode == "webview" and box[0] is not None:
         try:
             box[0].terminate()
         except Exception:
             pass
+    try:
+        if LOCK_FILE is not None and LOCK_FILE.exists():
+            LOCK_FILE.unlink()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
