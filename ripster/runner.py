@@ -563,6 +563,17 @@ def _add_to_history(task: dict) -> None:
         + (f"  ERR: {entry['error'][:120]}" if entry.get("error") else ""),
         flush=True,
     )
+    # Native desktop toast on finish (Windows) — only when the owner enabled it in
+    # Settings. Lets the user know a download is done while Ripster is minimized/tray;
+    # Focus Assist auto-suppresses it over fullscreen games.
+    if status in ("done", "error") and _config.get("notify-on-done"):
+        try:
+            from ripster import notify as _notify
+            _notify.toast_download_done(
+                entry.get("title") or entry.get("url") or "Ripster",
+                status == "done", entry.get("got"))
+        except Exception:
+            pass
     # Persistent error log — so a failed download leaves a diagnosable trail
     # (full error + tail of the engine output) even after history rotates.
     if status == "error":

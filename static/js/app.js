@@ -3695,6 +3695,7 @@ function showStab(id, btn) {
   if(id==='global')  {
     loadAuthStatus();
     setChk('s-queue-autostart', c['queue-autostart']!==false);
+    setChk('s-notify-on-done', !!c['notify-on-done']);
     const mp = +(c['max-parallel'] || 1);
     const sl = document.getElementById('s-max-parallel');
     const vl = document.getElementById('s-max-parallel-val');

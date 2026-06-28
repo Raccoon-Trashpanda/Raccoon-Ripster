@@ -68,6 +68,14 @@
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-queue-autostart"
               onchange="saveSetting('queue-autostart',this.checked)"><div class="toggle-slider"></div></label>
           </div>
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <div class="toggle-label" data-i18n="s.notify_label">🔔 Уведомлять о завершении</div>
+              <div class="toggle-sub" data-i18n="s.notify_sub">Системное уведомление со звуком, когда загрузка готова — даже если окно свёрнуто (в играх не мешает)</div>
+            </div>
+            <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-notify-on-done"
+              onchange="saveSetting('notify-on-done',this.checked)"><div class="toggle-slider"></div></label>
+          </div>
           <div class="field-group mt8">
             <label class="lbl" data-i18n="s.parallel_label">Параллельные загрузки</label>
             <div style="display:flex;align-items:center;gap:10px">

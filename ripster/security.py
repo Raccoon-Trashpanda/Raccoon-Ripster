@@ -61,6 +61,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "remote-enabled", "public-url", "ngrok-",
     "service-colors",
     "player-",
+    "notify-",        # notify-on-done (native desktop toast on download finish)
     "ripster-repo",   # ripster-repo + ripster-repo-token (self-update)
     "telemetry-",     # diagnostics forwarding (telemetry-forward/url/level/token/...)
 )
