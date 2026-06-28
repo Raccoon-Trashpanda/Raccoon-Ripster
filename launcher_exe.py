@@ -142,6 +142,36 @@ def start_server(port: int) -> "subprocess.Popen | None":
 
 LOCK_FILE = None  # set in main(); single-instance lock holding our PID
 SHOW_FLAG = None  # a second launch drops this so the running instance pops up
+WIN_STATE = None  # set in main(); remembers the window's last position + size
+
+
+def _load_win_state() -> dict:
+    """Last-saved window geometry {x,y,width,height}, sanity-checked. Empty dict
+    → use defaults (pywebview centers a 1280×860 window)."""
+    import json
+    try:
+        if WIN_STATE and WIN_STATE.exists():
+            d = json.loads(WIN_STATE.read_text(encoding="utf-8"))
+            w, h = d.get("width"), d.get("height")
+            if isinstance(w, int) and isinstance(h, int) and 480 <= w <= 10000 and 360 <= h <= 10000:
+                out = {"width": w, "height": h}
+                x, y = d.get("x"), d.get("y")
+                # Guard against off-screen coords (unplugged monitor etc).
+                if isinstance(x, int) and isinstance(y, int) and -200 <= x <= 20000 and -200 <= y <= 20000:
+                    out["x"], out["y"] = x, y
+                return out
+    except Exception as e:
+        _log(f"[launcher] window-state load skipped: {type(e).__name__}: {e}")
+    return {}
+
+
+def _save_win_state(geo: dict) -> None:
+    import json
+    try:
+        if WIN_STATE:
+            WIN_STATE.write_text(json.dumps(geo), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def tray_enabled() -> bool:
@@ -240,12 +270,48 @@ def open_window(url: str, port: int, win_open, title: str = "Ripster"):
         import threading
         import webview
         _log(f"[launcher] opening webview window -> {url}")
-        window = webview.create_window(title, url, width=1280, height=860)
+        geo = _load_win_state()
+        window = webview.create_window(
+            title, url,
+            width=geo.get("width", 1280), height=geo.get("height", 860),
+            x=geo.get("x"), y=geo.get("y"))
         state = {"quit": False, "tray": None, "notified": False}
         use_tray = tray_enabled()
 
+        # Remember where/how big the user left the window and restore it next launch.
+        _geo = {"width": geo.get("width", 1280), "height": geo.get("height", 860)}
+        if "x" in geo: _geo["x"] = geo["x"]
+        if "y" in geo: _geo["y"] = geo["y"]
+        _geo_timer = [None]
+        def _schedule_geo_save():
+            try:
+                if _geo_timer[0]:
+                    _geo_timer[0].cancel()
+                tmr = threading.Timer(1.0, lambda: _save_win_state(dict(_geo)))
+                tmr.daemon = True
+                tmr.start()
+                _geo_timer[0] = tmr
+            except Exception:
+                pass
+        def on_resized(w, h):
+            try:
+                _geo["width"], _geo["height"] = int(w), int(h)
+                _schedule_geo_save()
+            except Exception:
+                pass
+        def on_moved(x, y):
+            try:
+                _geo["x"], _geo["y"] = int(x), int(y)
+                _schedule_geo_save()
+            except Exception:
+                pass
+
         def do_quit():
             state["quit"] = True
+            try:
+                _save_win_state(dict(_geo))   # persist final geometry on real quit
+            except Exception:
+                pass
             try:
                 if state["tray"] is not None:
                     state["tray"].stop()
@@ -286,6 +352,11 @@ def open_window(url: str, port: int, win_open, title: str = "Ripster"):
         window.events.closing += on_closing
         try:
             window.events.minimized += on_minimized
+        except Exception:
+            pass
+        try:
+            window.events.resized += on_resized
+            window.events.moved   += on_moved
         except Exception:
             pass
 
@@ -362,10 +433,11 @@ def _pid_alive(pid: "int | None") -> bool:
 def _single_instance_guard() -> bool:
     """True = we are the sole instance and may proceed. False = another launcher
     already owns the window; we signalled it to surface and should exit."""
-    global LOCK_FILE, SHOW_FLAG
+    global LOCK_FILE, SHOW_FLAG, WIN_STATE
     logs = BASE / "logs"
     LOCK_FILE = logs / "launcher.lock"
     SHOW_FLAG = logs / "launcher.show"
+    WIN_STATE = logs / "window_state.json"
     try:
         logs.mkdir(parents=True, exist_ok=True)
         existing = None
