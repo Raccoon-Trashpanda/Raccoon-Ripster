@@ -396,6 +396,8 @@ function _syncReleasePillsFromConfig() {
   const types = document.getElementById('rel-types');
   if(days  && c['releases-days'])  days.value  = c['releases-days'];
   if(types && c['releases-types']) types.value = c['releases-types'];
+  const bg = document.getElementById('rel-bg-scan');
+  if(bg) bg.checked = !!c['spotify-bg-scan'];
   _renderRelActiveSvcs();
 }
 

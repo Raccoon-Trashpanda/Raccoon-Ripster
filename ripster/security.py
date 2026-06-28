@@ -40,7 +40,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "spotify-client-id", "spotify-client-secret", "spotify-sp-dc",
     "spotify-release-days", "spotify-release-types", "spotify-auto-convert",
     "spotify-default-target", "spotify-engine",
-    "spotify-proxy", "spotify-crawl-interval",
+    "spotify-proxy", "spotify-crawl-interval", "spotify-bg-scan",
     "orpheus-",   # orpheus-quality, orpheus-save-path, orpheus-convert-mp3, …
     "beatport-username", "beatport-password", "beatport-quality", "beatport-save-path",
     "soundcloud-save-path", "soundcloud-oauth-token", "soundcloud-hq",

@@ -7,7 +7,7 @@
           <!-- Controls -->
           <div style="display:flex;gap:6px;margin-left:auto;align-items:center;flex-wrap:wrap">
             <input id="rel-search" type="search" placeholder="Поиск по артисту / названию…" oninput="_applyRelFilter()" style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);outline:none;width:170px;min-width:100px"/>
-            <select id="rel-days" onchange="_relSavePrefs();loadReleases(true)" style="padding:5px 8px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
+            <select id="rel-days" onchange="_relSavePrefs();loadReleases(false)" style="padding:5px 8px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
               <option value="7">7 дней</option>
               <option value="14">14 дней</option>
               <option value="30">30 дней</option>
@@ -27,9 +27,13 @@
               <option value="artist_desc">По артисту Z→A</option>
               <option value="title_asc">По названию A→Z</option>
             </select>
-            <button onclick="loadReleases(true)" id="rel-refresh-btn" data-i18n="rel.refresh" style="padding:5px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;color:var(--text);font-family:var(--font)">
-              ↺ Обновить
+            <button onclick="loadReleases(true)" id="rel-refresh-btn" data-i18n="rel.refresh" title="Сканировать релизы у Spotify сейчас" style="padding:5px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;color:var(--text);font-family:var(--font)">
+              ↺ Сканировать
             </button>
+            <label title="Фоновое сканирование: умное, с таймингом, не до бана. Без него релизы обновляются только по кнопке." style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);cursor:pointer;white-space:nowrap">
+              <input type="checkbox" id="rel-bg-scan" onchange="saveSetting('spotify-bg-scan',this.checked)" style="width:auto;margin:0;cursor:pointer"/>
+              <span data-i18n="rel.bgscan">⏱ Фон</span>
+            </label>
             <button onclick="showView('settings',document.querySelector('.nav-item[data-view=settings]'));setTimeout(()=>showStab('releases',document.querySelector('[data-stab=releases]')),50)" style="padding:5px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)" title="Настройки радара">⚙</button>
           </div>
         </div>
