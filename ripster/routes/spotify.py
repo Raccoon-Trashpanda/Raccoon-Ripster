@@ -577,6 +577,34 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             return
         hdr = {"Authorization": f"Bearer {t['access_token']}"}
 
+    # The developer Web API is HEAVILY rate-limited: crawling every followed
+    # artist's albums with it reliably earns multi-hour 429 bans (Retry-After up
+    # to ~5h). The web-player token (sp_dc) is NOT rate-limited and is the only
+    # token meant for the releases scan. So when sp_dc is unavailable (expired /
+    # not set) we DON'T hammer Spotify with the dev token — we serve the durable
+    # store and surface a clear "refresh sp_dc" message instead of getting banned.
+    if not web_token:
+        feed = _build_feed(days, types)
+        _sp_releases_cache[cache_key] = {**feed, "ts": datetime.now().timestamp(),
+                                         "partial": True}
+        _save_disk_cache()
+        _sp_scan_running = False
+        sp_dc_set = bool((_cfg.get("spotify-sp-dc") or "").strip())
+        msg = ("sp_dc cookie протух — свежие релизы не сканируются (Spotify dev-API "
+               "лимитирован и банит). Обнови sp_dc в Settings → Spotify."
+               if sp_dc_set else
+               "Для сканирования релизов нужен sp_dc cookie — добавь его в Settings → "
+               "Spotify (dev-API без него лимитирован и банит).")
+        _sp_last_error = msg
+        print(f"[spotify] no sp_dc web token — serving store ({len(feed['releases'])} "
+              f"releases), skipping dev-token album crawl to avoid 429 bans", flush=True)
+        if _broadcast:
+            await _broadcast({"type": "releases_scan_done", "error": msg,
+                              "artists_checked": feed["artists_checked"],
+                              "releases_count": len(feed["releases"]),
+                              "releases": feed["releases"], "partial": True})
+        return
+
     if _broadcast:
         await _broadcast({"type": "releases_scan_start", "phase": "artists"})
 

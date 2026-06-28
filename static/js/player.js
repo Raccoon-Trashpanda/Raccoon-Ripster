@@ -1052,6 +1052,27 @@ function _wireAllSeekBars() {
   ['pp-progress', 'pp-progress-big', 'fp-progress'].forEach(id =>
     _wireSeekBar(document.getElementById(id))
   );
+  _wireVolumeKeeper();
+}
+// Keep the hover-popup volume slider open for the whole drag. Without this, the
+// first pointermove of a vertical drag leaves the narrow popup, :hover drops,
+// the popup goes display:none and the native drag aborts — so only clicks worked.
+function _wireVolumeKeeper() {
+  const slider = document.getElementById('pp-vol');
+  const wrap   = document.getElementById('pp-vol-wrap');
+  if (!slider || !wrap || slider._volWired) return;
+  slider._volWired = true;
+  slider.style.touchAction = 'none';
+  const release = () => {
+    wrap.classList.remove('vol-active');
+    document.removeEventListener('pointerup', release);
+    document.removeEventListener('pointercancel', release);
+  };
+  slider.addEventListener('pointerdown', () => {
+    wrap.classList.add('vol-active');
+    document.addEventListener('pointerup', release);
+    document.addEventListener('pointercancel', release);
+  });
 }
 // Re-arm at every possible moment — DOMContentLoaded, full load, and again
 // just before the first audio session starts. Idempotent — `_dragWired` flag

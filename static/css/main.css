@@ -636,10 +636,15 @@ img[data-cover].loaded{
 /* Bridge the gap so moving the cursor icon→popup doesn't dismiss it. */
 #pp-vol-popup::before{ content:""; position:absolute; left:0; right:0; bottom:-10px; height:10px; }
 #pp-vol-wrap:hover #pp-vol-popup, #pp-vol-popup:hover{ display:block; }
-#pp-vol-wrap:hover #pp-mute{ color:var(--text); }
+/* Keep the popup open WHILE dragging the slider — a vertical drag jitters the
+   cursor off the narrow popup, which lost :hover → display:none → the drag died
+   (felt like "click works, drag doesn't"). JS adds .vol-active on pointerdown. */
+#pp-vol-wrap.vol-active #pp-vol-popup{ display:block; }
+#pp-vol-wrap:hover #pp-mute, #pp-vol-wrap.vol-active #pp-mute{ color:var(--text); }
 #pp-vol{
+  /* `appearance:slider-vertical` was deprecated/removed in modern Chromium
+     (WebView2) and broke vertical dragging — use writing-mode (Chrome 121+). */
   writing-mode:vertical-lr; direction:rtl;     /* vertical, up = louder */
-  -webkit-appearance:slider-vertical; appearance:slider-vertical;
   width:6px; height:104px; cursor:pointer; accent-color:var(--red);
 }
 #pp-vol::-webkit-slider-runnable-track{ width:6px; border-radius:3px; background:rgba(255,255,255,.16); }

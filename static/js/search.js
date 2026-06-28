@@ -593,6 +593,10 @@ function renderAlbumPage(){
       </div>`;
 
   document.getElementById('detail-content').innerHTML = header + tracksList;
+  // Re-mark the currently-playing track (pause glyph + row highlight) — the rows
+  // are freshly built, so without this a card reopened mid-playback shows no
+  // indication of what's playing. Safe no-op when nothing is playing.
+  try { if (typeof _syncAlbumPlayBtns === 'function') _syncAlbumPlayBtns(); } catch {}
 }
 
 // Update play buttons in the open album page to reflect current playback state.
