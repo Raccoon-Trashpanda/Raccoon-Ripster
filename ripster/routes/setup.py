@@ -691,6 +691,11 @@ async def _ensure_orpheus_venv() -> "str | None":
     venv = _base_dir / "tools" / "orpheusvenv"
     try:
         await _setup.irun([sys.executable, "-m", "venv", str(venv)])
+        if not _orpheus_venv_python():
+            # Bundled embeddable python lacks the stdlib `venv` module → virtualenv.
+            await _setup.irun([sys.executable, "-m", "pip", "install", "-q",
+                               "--break-system-packages", "virtualenv"])
+            await _setup.irun([sys.executable, "-m", "virtualenv", str(venv)])
     except Exception as e:
         await _setup.ilog(f"⚠ OrpheusDL venv не создан ({e}) — ставлю в общий python", "warn")
         return None

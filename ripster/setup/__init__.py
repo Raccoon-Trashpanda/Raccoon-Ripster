@@ -873,6 +873,12 @@ async def _ensure_wvd_venv() -> bool:
         if not vpy.is_file():
             await ilog("│  ⚙ создаю изолированный venv для pywidevine (SC DRM)…", "info")
             await irun([sys.executable, "-m", "venv", str(venv)])
+            if not vpy.is_file():
+                # The bundled embeddable python ships WITHOUT the stdlib `venv`
+                # module → fall back to virtualenv (pip-installable).
+                await irun([sys.executable, "-m", "pip", "install", "-q",
+                            "--break-system-packages", "virtualenv"])
+                await irun([sys.executable, "-m", "virtualenv", str(venv)])
         if not vpy.is_file():
             await ilog("│  ⚠ venv не создан — SC DRM будет на общем python (возможны конфликты)", "warn")
             return False
