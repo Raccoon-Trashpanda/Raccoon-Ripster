@@ -61,25 +61,62 @@ def install(app, ctx) -> None:
 # it. The resulting .wvd is uploaded + shown installed in the SoundCloud SETTINGS
 # tab (that part deliberately stays there); this is only the "mint a new one" help.
 
+def _wvd_venv_python() -> "str | None":
+    """The isolated pywidevine venv interpreter, if provisioned. pywidevine pins
+    deps (protobuf>=6.33) that OTHER engines (OrpheusDL→protobuf 3.15.8) clobber in
+    the shared bundled python, so we keep it in tools/wvdvenv and call it as a
+    subprocess. See the ripster-dependency-versions skill."""
+    for sub in (("Scripts", "python.exe"), ("bin", "python")):
+        cand = _base_dir / "tools" / "wvdvenv" / sub[0] / sub[1]
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
+def _validate_wvd(path: Path) -> tuple[bool, str]:
+    """Return (valid, error). Validate in the ISOLATED venv if present (robust
+    against a polluted shared env), else fall back to in-process import."""
+    vpy = _wvd_venv_python()
+    if vpy:
+        import subprocess
+        code = ("from pywidevine.device import Device;"
+                "Device.load(r'''" + str(path) + "''');print('WVD_OK')")
+        try:
+            r = subprocess.run([vpy, "-c", code], capture_output=True, text=True,
+                               timeout=25,
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if r.returncode == 0 and "WVD_OK" in (r.stdout or ""):
+                return True, ""
+            tail = [l for l in (r.stderr or "").splitlines() if l.strip()]
+            return False, (tail[-1] if tail else "load failed")
+        except Exception as e:
+            return False, f"{type(e).__name__}: {e}"
+    try:
+        from pywidevine.device import Device
+        Device.load(path)
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+
 @router.get("/api/widevine/status")
 async def widevine_status():
     # Honour a user-configured device path first, then the bundled default —
     # same resolution order as /api/soundcloud/wvd-status so the Setup badge and
-    # the SoundCloud settings status never disagree. Validate by actually loading
-    # the device so a corrupt/wrong-format .wvd reads as installed-but-invalid.
+    # the SoundCloud settings status never disagree. Validation runs in the
+    # isolated pywidevine venv so a polluted shared env can't make a good .wvd
+    # read as invalid (the device.wvd-shows-as-missing tester bug).
     p_cfg = (_cfg.get("sc-widevine-device") or "").strip()
     candidates = [Path(p_cfg)] if p_cfg else []
     candidates.append(_base_dir / "tools" / "widevine" / "device.wvd")
     for c in candidates:
         if c and c.is_file():
-            try:
-                from pywidevine.device import Device
-                Device.load(c)
-                return {"installed": True, "path": str(c),
-                        "size": c.stat().st_size, "valid": True}
-            except Exception as e:
-                return {"installed": True, "path": str(c),
-                        "size": c.stat().st_size, "valid": False, "error": str(e)}
+            valid, err = _validate_wvd(c)
+            out = {"installed": True, "path": str(c), "size": c.stat().st_size,
+                   "valid": valid}
+            if not valid:
+                out["error"] = err
+            return out
     return {"installed": False, "path": str(candidates[-1])}
 
 

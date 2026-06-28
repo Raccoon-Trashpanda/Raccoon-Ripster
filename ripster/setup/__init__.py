@@ -860,6 +860,37 @@ async def _wvd_install_aehd() -> bool:
     return False
 
 
+async def _ensure_wvd_venv() -> bool:
+    """Provision the ISOLATED pywidevine runtime venv (tools/wvdvenv) used by the
+    SoundCloud-DRM runner + the device.wvd validator. Kept OUT of the shared bundled
+    python on purpose: pywidevine needs protobuf>=6.33, but OrpheusDL pins it down to
+    3.15.8 in the shared env (which also breaks AMD). Isolating pywidevine is the only
+    robust fix. The runner only imports pywidevine + httpx + mutagen.
+    See the ripster-dependency-versions skill."""
+    venv = _base_dir / "tools" / "wvdvenv"
+    vpy  = venv / ("Scripts/python.exe" if _is_windows else "bin/python")
+    try:
+        if not vpy.is_file():
+            await ilog("│  ⚙ создаю изолированный venv для pywidevine (SC DRM)…", "info")
+            await irun([sys.executable, "-m", "venv", str(venv)])
+        if not vpy.is_file():
+            await ilog("│  ⚠ venv не создан — SC DRM будет на общем python (возможны конфликты)", "warn")
+            return False
+        await irun([str(vpy), "-m", "pip", "install", "-q", "--upgrade",
+                    "pip", "pywidevine", "httpx", "mutagen"])
+        vrc, vout = await irun([str(vpy), "-c",
+                                "from pywidevine.device import Device; print('wvd-venv OK')"])
+        if vrc == 0 and "wvd-venv OK" in (vout or ""):
+            await ilog("│  ✓ pywidevine venv готов (изолирован от protobuf/construct-конфликтов)",
+                       "success")
+            return True
+        await ilog(f"│  ⚠ pywidevine venv не проверился: {(vout or '')[:120]}", "warn")
+        return False
+    except Exception as e:
+        await ilog(f"│  ⚠ wvd venv: {type(e).__name__}: {e}", "warn")
+        return False
+
+
 async def setup_widevine_toolchain() -> bool:
     """Autonomous L3 Widevine toolchain — JRE 17 + Android cmdline-tools + SDK
     packages (platform-tools/emulator/system-image/AEHD) + AVD + AEHD driver, with
@@ -868,7 +899,10 @@ async def setup_widevine_toolchain() -> bool:
     await ilog("┌─ Widevine L3 (SoundCloud DRM) — автоустановка тулчейна", "info")
     if platform.system() != "Windows":
         await ilog("└─ ✗ Только Windows", "error"); return False
-    # The whole toolchain (JRE + Android SDK + emulator + AEHD) exists ONLY to mint
+    # The isolated pywidevine RUNTIME (tools/wvdvenv) is needed to USE device.wvd,
+    # independent of minting — ensure it first, even if the .wvd already exists.
+    await _ensure_wvd_venv()
+    # The minting TOOLCHAIN (JRE + Android SDK + emulator + AEHD) exists ONLY to mint
     # device.wvd. If it's already minted, skip everything — re-running sdkmanager
     # on an already-provisioned box silently re-verifies for ~15 min (looks frozen).
     try:
