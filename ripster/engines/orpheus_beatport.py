@@ -26,6 +26,18 @@ def _base_dir() -> Path:
 def _orpheus_dir() -> Path:
     return _base_dir() / "orpheus"
 
+
+def _orpheus_python() -> str:
+    """Interpreter for OrpheusDL — prefer the ISOLATED venv (tools/orpheusvenv) so
+    OrpheusDL's protobuf==3.15.8 never pollutes the shared bundled python (which
+    would break AMD + pywidevine). See the ripster-dependency-versions skill."""
+    base = _base_dir()
+    for sub in (("Scripts", "python.exe"), ("bin", "python")):
+        cand = base / "tools" / "orpheusvenv" / sub[0] / sub[1]
+        if cand.is_file():
+            return str(cand)
+    return sys.executable
+
 def _settings_path() -> Path:
     return _orpheus_dir() / "config" / "settings.json"
 
@@ -229,7 +241,7 @@ class OrpheusBeatportEngine(EngineBase):
             f"sys.argv = [{orpheus_py!r}] + sys.argv[1:]; "
             f"runpy.run_path({orpheus_py!r}, run_name='__main__')"
         )
-        cmd = [sys.executable, "-c", _boot]
+        cmd = [_orpheus_python(), "-c", _boot]
         if save_path:
             cmd += ["-o", save_path.rstrip("/\\")]
         cmd.append(url)

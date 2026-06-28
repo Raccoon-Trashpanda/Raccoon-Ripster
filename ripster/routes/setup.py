@@ -672,6 +672,31 @@ async def _install_soundcloud_component() -> bool:
     return False
 
 
+def _orpheus_venv_python() -> "str | None":
+    """The isolated OrpheusDL venv interpreter, if provisioned (tools/orpheusvenv)."""
+    for sub in (("Scripts", "python.exe"), ("bin", "python")):
+        cand = _base_dir / "tools" / "orpheusvenv" / sub[0] / sub[1]
+        if cand.is_file():
+            return str(cand)
+    return None
+
+
+async def _ensure_orpheus_venv() -> "str | None":
+    """Create (if needed) the isolated OrpheusDL venv and return its python path,
+    or None on failure (caller falls back to the shared interpreter). Keeps
+    OrpheusDL's protobuf==3.15.8 out of the shared bundled python."""
+    vpy = _orpheus_venv_python()
+    if vpy:
+        return vpy
+    venv = _base_dir / "tools" / "orpheusvenv"
+    try:
+        await _setup.irun([sys.executable, "-m", "venv", str(venv)])
+    except Exception as e:
+        await _setup.ilog(f"⚠ OrpheusDL venv не создан ({e}) — ставлю в общий python", "warn")
+        return None
+    return _orpheus_venv_python()
+
+
 async def _install_orpheus_component() -> bool:
     """OrpheusDL core + Spotify module + pip deps. Clones the OFFICIAL repos at
     install time — NO secrets/config shipped (the dev's orpheus/config holds personal
@@ -731,10 +756,17 @@ async def _install_orpheus_component() -> bool:
     except Exception as _e:
         await _setup.ilog(f"⚠ orpheus/core.py patch skipped: {_e}", "warn")
 
+    # Isolate OrpheusDL in its OWN venv: its requirements pin protobuf==3.15.8,
+    # which — installed into the shared bundled python — breaks AMD (Apple) and
+    # pywidevine (both need protobuf>=6.33). The engines run orpheus under this
+    # venv's python (_orpheus_python). See the ripster-dependency-versions skill.
+    pip_py = await _ensure_orpheus_venv() or sys.executable
+    if pip_py != sys.executable:
+        await _setup.ilog("⚙ OrpheusDL → изолированный venv (tools/orpheusvenv)", "info")
     req = orph_dir / "requirements.txt"
     if req.exists():
         await _setup.ilog("📦 pip install OrpheusDL requirements…", "info")
-        await _setup.irun([sys.executable, "-m", "pip", "install", "-r", str(req), "--quiet"],
+        await _setup.irun([pip_py, "-m", "pip", "install", "-r", str(req), "--quiet"],
                           cwd=str(orph_dir))
 
     from ripster.engines.orpheus_spotify import is_installed
@@ -780,8 +812,10 @@ async def _install_beatport_component() -> bool:
 
     req = mod_path / "requirements.txt"
     if req.exists():
-        await _setup.ilog("📦 pip install requirements.txt…", "info")
-        await _setup.irun([sys.executable, "-m", "pip", "install", "-r", str(req), "--quiet"],
+        # Into the SAME isolated OrpheusDL venv (Beatport runs on top of OrpheusDL).
+        pip_py = await _ensure_orpheus_venv() or sys.executable
+        await _setup.ilog("📦 pip install requirements.txt (OrpheusDL venv)…", "info")
+        await _setup.irun([pip_py, "-m", "pip", "install", "-r", str(req), "--quiet"],
                           cwd=str(mod_path))
 
     ok = is_installed()
