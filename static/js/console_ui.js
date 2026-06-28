@@ -232,9 +232,15 @@ function _maybeAutoscroll(out) {
 }
 
 // Repaint the Console from the buffer — honors the per-task filter.
-function _refreshConsole() {
+function _refreshConsole(_tries) {
   const out = document.getElementById('console-out');
-  if (!out) return;
+  if (!out) {
+    // The console view fragment may still be loading (showView injects it async) —
+    // retry briefly so the buffer paints once #console-out exists, instead of
+    // silently leaving the console blank. (This DOM path has broken repeatedly.)
+    if ((_tries || 0) < 12) setTimeout(() => _refreshConsole((_tries || 0) + 1), 120);
+    return;
+  }
   _rebuildConsoleTaskFilter();
   if (typeof _rebuildConsoleSvcFilter === 'function') _rebuildConsoleSvcFilter();
   out.innerHTML = '';
