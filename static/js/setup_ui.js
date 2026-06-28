@@ -25,10 +25,10 @@ const SETUP_COMPONENTS = [
     desc:'Извлечение/декрипт MP4-фрагментов. Нужен для Apple ALAC и музыкальных видео.',
     endpoint:'/api/setup/component/mp4decrypt', status:'mp4decrypt' },
   // ── SoundCloud ────────────────────────────────────────────────────────────
-  { key:'node', icon:'🟩', label:'Node.js', tag:'для SoundCloud', color:'#3c873a',
+  { key:'node', icon:'🟩', label:'Node.js', tag:'для SoundCloud', color:'#3c873a', def:true,
     desc:'Среда выполнения для Lucida. Ставится автоматически вместе с SoundCloud, но можно отдельно.',
     endpoint:'/api/setup/component/node', status:'node' },
-  { key:'soundcloud', icon:'🎧', label:'SoundCloud (Lucida)', color:'#ff5500',
+  { key:'soundcloud', icon:'🎧', label:'SoundCloud (Lucida)', color:'#ff5500', def:true,
     desc:'Node.js + Lucida (клон исходников + npm-сборка, ~1–2 мин). Нужен только для скачивания с SoundCloud.',
     endpoint:'/api/setup/component/soundcloud', status:'soundcloud' },
   { key:'widevine', icon:'🔐', label:'Widevine L3 — тулчейн (авто)', tag:'опционально', color:'#c084e0',
@@ -41,10 +41,10 @@ const SETUP_COMPONENTS = [
     desc:'Если авто-минт застрял (например KeyDive завис на экране приветствия Chrome) — открывает интерактивный мастер в отдельном окне, где шаги выбираются вручную.',
     endpoint:'/api/widevine/mint-wizard', wizard:true, status:'wvd' },
   // ── Spotify / Beatport (OrpheusDL) ────────────────────────────────────────
-  { key:'orpheus', icon:'🟢', label:'OrpheusDL (Spotify)', color:'#1db954',
+  { key:'orpheus', icon:'🟢', label:'OrpheusDL (Spotify)', color:'#1db954', def:true,
     desc:'База для Spotify и Beatport — клонирует OrpheusDL + модуль Spotify. БЕЗ секретов (вход настраивается потом в Настройки → Spotify). Нативный Spotify-декрипт требует ещё Spotify.dll (отдельно).',
     endpoint:'/api/setup/component/orpheus', status:'orpheus' },
-  { key:'beatport', icon:'🎚️', label:'Beatport', color:'#01f49c',
+  { key:'beatport', icon:'🎚️', label:'Beatport', color:'#01f49c', def:true,
     desc:'Модуль orpheusdl-beatport поверх OrpheusDL. Если OrpheusDL не стоит — поставится автоматически.',
     endpoint:'/api/setup/component/beatport', status:'beatport' },
   // ── Advanced ──────────────────────────────────────────────────────────────
