@@ -868,6 +868,17 @@ async def setup_widevine_toolchain() -> bool:
     await ilog("┌─ Widevine L3 (SoundCloud DRM) — автоустановка тулчейна", "info")
     if platform.system() != "Windows":
         await ilog("└─ ✗ Только Windows", "error"); return False
+    # The whole toolchain (JRE + Android SDK + emulator + AEHD) exists ONLY to mint
+    # device.wvd. If it's already minted, skip everything — re-running sdkmanager
+    # on an already-provisioned box silently re-verifies for ~15 min (looks frozen).
+    try:
+        _wvd_dst = _base_dir / "tools" / "widevine" / "device.wvd"
+        if _wvd_dst.is_file() and _wvd_dst.stat().st_size > 0:
+            await ilog("└─ ✓ device.wvd уже есть — тулчейн не нужен, минт уже выполнен. Пропускаю.",
+                       "success")
+            return True
+    except Exception:
+        pass
     try:
         if not await _wvd_install_jre17():         return False
         if not await _wvd_install_cmdline_tools(): return False
