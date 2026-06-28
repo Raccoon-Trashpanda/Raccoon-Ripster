@@ -161,8 +161,10 @@ async function checkRipsterUpdate(silent){
     }
     if(d.available){
       if(st){
-        const dl = d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener" style="color:#30d158;font-weight:700;text-decoration:underline">↓ Скачать и установить v${esc(d.latest)}</a>` : '';
-        st.innerHTML = `🆕 Доступна <b style="color:#30d158">v${esc(d.latest)}</b> (у тебя v${esc(d.current)}).`
+        const _lat = esc(String(d.latest||'').replace(/^v/i,''));   // tag is "v3.0.25" → strip leading v (no "vv")
+        const _cur = esc(String(d.current||'').replace(/^v/i,''));
+        const dl = d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener" style="color:#30d158;font-weight:700;text-decoration:underline">↓ Скачать и установить v${_lat}</a>` : '';
+        st.innerHTML = `🆕 Доступна <b style="color:#30d158">v${_lat}</b> (у тебя v${_cur}).`
           + `<br><span style="color:var(--muted);font-size:11px">Кнопка «Обновить сейчас» обновит только код/интерфейс. Чтобы получить новые функции уровня приложения (системный трей, память окна и т.п.) — нужно ${dl ? '' : 'скачать и установить установщик новой версии'}</span>`
           + (dl ? ` ${dl}` : '');
         st.style.color = 'var(--text)';
