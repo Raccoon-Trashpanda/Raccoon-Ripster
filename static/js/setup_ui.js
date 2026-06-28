@@ -160,7 +160,13 @@ async function checkRipsterUpdate(silent){
       return d;
     }
     if(d.available){
-      if(st){ st.innerHTML = `🆕 Доступна <b style="color:#30d158">v${esc(d.latest)}</b> (у тебя v${esc(d.current)}).`; st.style.color = 'var(--text)'; }
+      if(st){
+        const dl = d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener" style="color:#30d158;font-weight:700;text-decoration:underline">↓ Скачать и установить v${esc(d.latest)}</a>` : '';
+        st.innerHTML = `🆕 Доступна <b style="color:#30d158">v${esc(d.latest)}</b> (у тебя v${esc(d.current)}).`
+          + `<br><span style="color:var(--muted);font-size:11px">Кнопка «Обновить сейчас» обновит только код/интерфейс. Чтобы получить новые функции уровня приложения (системный трей, память окна и т.п.) — нужно ${dl ? '' : 'скачать и установить установщик новой версии'}</span>`
+          + (dl ? ` ${dl}` : '');
+        st.style.color = 'var(--text)';
+      }
       if(applyBtn) applyBtn.style.display = '';
       if(log && d.changelog){ log.style.display = 'block'; log.textContent = d.changelog; }
     } else {
