@@ -43,6 +43,18 @@ def _base_dir() -> Path:
 def _orpheus_dir() -> Path:
     return _base_dir() / "orpheus"
 
+def _orpheus_python() -> str:
+    """OrpheusDL runs in its OWN venv (tools/orpheusvenv) — its protobuf==3.15.8
+    pin would break AMD/pywidevine in the shared bundled python. The venv (made
+    via virtualenv) is also non-isolated, so `python orpheus.py` finds orpheus.core.
+    Falls back to the current interpreter. See ripster-dependency-versions skill."""
+    base = _base_dir()
+    for sub in (("Scripts", "python.exe"), ("bin", "python")):
+        cand = base / "tools" / "orpheusvenv" / sub[0] / sub[1]
+        if cand.is_file():
+            return str(cand)
+    return sys.executable
+
 def _settings_path() -> Path:
     return _orpheus_dir() / "config" / "settings.json"
 
@@ -298,7 +310,17 @@ class TidalEngine(EngineBase):
         atmos = (quality == "atmos") or (orpheus_quality == "hifi" and bool(config.get("tidal-atmos")))
         _update_orpheus_settings(orpheus_quality, save_path, config, atmos=atmos)
 
-        cmd = [sys.executable, str(_orpheus_dir() / "orpheus.py")]
+        # Run under the isolated OrpheusDL venv. Bootstrap via -c so orpheus.core
+        # imports even on an isolated interpreter (matches spotify/beatport engines).
+        orph_dir   = str(_orpheus_dir())
+        orpheus_py = str(_orpheus_dir() / "orpheus.py")
+        _boot = (
+            "import sys, runpy; "
+            f"sys.path.insert(0, {orph_dir!r}); "
+            f"sys.argv = [{orpheus_py!r}] + sys.argv[1:]; "
+            f"runpy.run_path({orpheus_py!r}, run_name='__main__')"
+        )
+        cmd = [_orpheus_python(), "-c", _boot]
         if save_path:
             cmd += ["-o", save_path.rstrip("/\\")]
         cmd.append(_to_orpheus_url(url))
