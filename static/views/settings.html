@@ -227,43 +227,43 @@
           <div class="block-title" data-i18n="s.paths">📁 Пути сохранения</div>
           <div class="settings-grid">
             <div class="field-group">
-              <label class="lbl">Папка загрузок</label>
-              <input id="s-savepath" placeholder="Музыка\Ripster (по умолчанию)" oninput="saveSetting('save-path',this.value)"/>
+              <label class="lbl" data-i18n="set.001">Папка загрузок</label>
+              <input id="s-savepath" data-i18n-ph="set.002" placeholder="Музыка\Ripster (по умолчанию)" oninput="saveSetting('save-path',this.value)"/>
               <div style="font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5">Пусто = <code>Музыка\Ripster</code>. Можно указать свою папку (напр. <code>D:\Музыка</code>) — туда пойдут ВСЕ загрузки, включая Apple.</div>
             </div>
             <div class="field-group">
-              <label class="lbl">Путь к загрузчику / main.go</label>
+              <label class="lbl" data-i18n="set.003">Путь к загрузчику / main.go</label>
               <input id="s-dlpath" placeholder="./apple-music-downloader" oninput="saveSetting('main-go-path',this.value)"/>
             </div>
           </div>
           <div class="toggle-row mt8">
-            <div class="toggle-info"><div class="toggle-label">Папки по качеству</div><div class="toggle-sub">alac/, flac/, 320/ … — любой сервис кладёт файлы в папку по формату, не по имени сервиса</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="set.004">Папки по качеству</div><div class="toggle-sub" data-i18n="set.005">alac/, flac/, 320/ … — любой сервис кладёт файлы в папку по формату, не по имени сервиса</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-quality-subfolders" onchange="saveSetting('quality-subfolders',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="field-group mt8">
-            <label class="lbl">Формат вывода (конвертация для ВСЕХ сервисов)</label>
+            <label class="lbl" data-i18n="set.006">Формат вывода (конвертация для ВСЕХ сервисов)</label>
             <select id="s-transcode-format" onchange="saveSetting('transcode-format',this.value)">
-              <option value="">Нативное качество — без конвертации</option>
+              <option value="" data-i18n="set.007">Нативное качество — без конвертации</option>
               <option value="alac">ALAC — Apple Lossless (.m4a)</option>
               <option value="flac">FLAC — Lossless (.flac)</option>
               <option value="mp3">MP3 320 kbps — Lossy (.mp3)</option>
             </select>
-            <div class="toggle-sub" style="margin-top:6px">После скачивания каждый файл перекодируется в выбранный формат (ffmpeg, метаданные+обложка переносятся). «Нативное» = отдаётся как есть. Из lossy в lossless качество не вырастет — это для единого формата.</div>
+            <div class="toggle-sub" style="margin-top:6px" data-i18n="set.008">После скачивания каждый файл перекодируется в выбранный формат (ffmpeg, метаданные+обложка переносятся). «Нативное» = отдаётся как есть. Из lossy в lossless качество не вырастет — это для единого формата.</div>
           </div>
           <div class="toggle-row mt8">
-            <div class="toggle-info"><div class="toggle-label">Сохранять оригинал</div><div class="toggle-sub">Оставлять исходный файл рядом с результатом конвертации (по умолчанию оригинал удаляется). Игнорируется при «Нативное качество».</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="set.009">Сохранять оригинал</div><div class="toggle-sub" data-i18n="set.010">Оставлять исходный файл рядом с результатом конвертации (по умолчанию оригинал удаляется). Игнорируется при «Нативное качество».</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-transcode-keep" onchange="saveSetting('transcode-keep-original',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row mt8">
-            <div class="toggle-info"><div class="toggle-label">Запуск через go run (разработка)</div><div class="toggle-sub">Запускает исходный код командой go run main.go</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="set.011">Запуск через go run (разработка)</div><div class="toggle-sub" data-i18n="set.012">Запускает исходный код командой go run main.go</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gorun" onchange="saveSetting('use-go-run',this.checked)"><div class="toggle-slider"></div></label>
           </div>
         </div>
 
         <div class="block mt12">
-          <div class="block-title">🏷 Переименование по тегам</div>
+          <div class="block-title" data-i18n="set.013">🏷 Переименование по тегам</div>
           <div class="field-group">
-            <label class="lbl">Шаблон имени файла (пусто = не переименовывать)</label>
+            <label class="lbl" data-i18n="set.014">Шаблон имени файла (пусто = не переименовывать)</label>
             <input id="s-rename-tmpl" placeholder="{tracknumber:02d}. {artist} - {title}"
               style="font-family:var(--mono);font-size:11px"
               oninput="saveSetting('file-rename-template',this.value)"/>
@@ -278,26 +278,26 @@
         </div>
 
         <div class="block mt12">
-          <div class="block-title">🖼 Обложка</div>
+          <div class="block-title" data-i18n="set.015">🖼 Обложка</div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Встроить обложку в файл</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="set.016">Встроить обложку в файл</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-embedcover" onchange="saveSetting('embed-cover',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Сохранять cover.jpg в папку</div><div class="toggle-sub">Картинка обложки рядом с музыкой</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="set.017">Сохранять cover.jpg в папку</div><div class="toggle-sub" data-i18n="set.018">Картинка обложки рядом с музыкой</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-savecover" onchange="saveSetting('save-cover-to-folder',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <!-- zhaarey / AMD -->
           <div class="settings-row mt8" id="cover-std-opts">
             <div class="field-group flex1">
-              <label class="lbl">Размер обложки</label>
+              <label class="lbl" data-i18n="set.019">Размер обложки</label>
               <select id="s-coversize" onchange="saveSetting('cover-size',this.value)">
                 <option>100x100</option><option>600x600</option><option>1200x1200</option>
                 <option>3000x3000</option><option>5000x5000</option><option>original</option>
               </select>
             </div>
             <div class="field-group" style="width:120px">
-              <label class="lbl">Формат</label>
+              <label class="lbl" data-i18n="set.020">Формат</label>
               <select id="s-coverfmt" onchange="saveSetting('cover-format',this.value)">
                 <option>jpg</option><option>png</option><option>original</option>
               </select>
@@ -322,25 +322,25 @@
         </div>
 
         <div class="block mt12">
-          <div class="block-title">🏷 Теги и текст</div>
+          <div class="block-title" data-i18n="set.021">🏷 Теги и текст</div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Встроить LRC в файл</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="set.022">Встроить LRC в файл</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-embedlrc" onchange="saveSetting('embed-lrc',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Сохранять .lrc файл</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="set.023">Сохранять .lrc файл</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-savelrc" onchange="saveSetting('save-lrc-file',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="settings-row mt8" id="lrc-std-opts">
             <div class="field-group flex1">
-              <label class="lbl">Тип текста</label>
+              <label class="lbl" data-i18n="set.024">Тип текста</label>
               <select id="s-lrctype" onchange="saveSetting('lrc-type',this.value)">
-                <option value="lyrics">текст (синхрон.)</option>
-                <option value="syllable-lyrics">по словам (syllable)</option>
+                <option value="lyrics" data-i18n="set.025">текст (синхрон.)</option>
+                <option value="syllable-lyrics" data-i18n="set.026">по словам (syllable)</option>
               </select>
             </div>
             <div class="field-group" style="width:120px">
-              <label class="lbl">Формат</label>
+              <label class="lbl" data-i18n="set.020">Формат</label>
               <select id="s-lrcfmt" onchange="saveSetting('lrc-format',this.value)">
                 <option>lrc</option><option>ttml</option>
               </select>
@@ -353,27 +353,27 @@
             <div style="font-size:10px;color:var(--blue);font-weight:600;margin:6px 0 4px">gamdl</div>
             <div class="settings-row">
               <div class="field-group flex1">
-                <label class="lbl">Формат синхро-текста</label>
+                <label class="lbl" data-i18n="set.027">Формат синхро-текста</label>
                 <select id="s-gamdl-lrc" onchange="saveSetting('gamdl-synced-lyrics-format',this.value)">
                   <option value="lrc">LRC</option><option value="srt">SRT</option><option value="ttml">TTML</option>
                 </select>
               </div>
             </div>
             <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label">Без синхро-текста</div></div>
+              <div class="toggle-info"><div class="toggle-label" data-i18n="set.028">Без синхро-текста</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-nolrc" onchange="saveSetting('gamdl-no-synced-lyrics',this.checked)"><div class="toggle-slider"></div></label>
             </div>
             <div class="toggle-row">
-              <div class="toggle-info"><div class="toggle-label">Только текст</div><div class="toggle-sub">Качать только текст, без аудио</div></div>
+              <div class="toggle-info"><div class="toggle-label" data-i18n="set.029">Только текст</div><div class="toggle-sub" data-i18n="set.030">Качать только текст, без аудио</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-lrconly" onchange="saveSetting('gamdl-lyrics-only',this.checked)"><div class="toggle-slider"></div></label>
             </div>
             <div class="field-group mt8">
-              <label class="lbl">Исключить теги (через запятую)</label>
+              <label class="lbl" data-i18n="set.031">Исключить теги (через запятую)</label>
               <input id="s-gamdl-exclude" placeholder="comment,compilation" style="font-family:var(--mono);font-size:11px"
                 oninput="saveSetting('gamdl-exclude-tags',this.value)"/>
             </div>
             <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label">Доп. теги</div><div class="toggle-sub">Данные нормализации и плавного воспроизведения</div></div>
+              <div class="toggle-info"><div class="toggle-label" data-i18n="set.032">Доп. теги</div><div class="toggle-sub" data-i18n="set.033">Данные нормализации и плавного воспроизведения</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-extratags" onchange="saveSetting('gamdl-fetch-extra-tags',this.checked)"><div class="toggle-slider"></div></label>
             </div>
           </div>
@@ -384,14 +384,14 @@
             <div style="font-size:10px;color:var(--green);font-weight:600;margin:6px 0 4px">AMD</div>
             <div class="settings-row">
               <div class="field-group flex1">
-                <label class="lbl">Формат лирики</label>
+                <label class="lbl" data-i18n="set.034">Формат лирики</label>
                 <select id="s-amd-lrc" onchange="saveSetting('amd-lyrics-format',this.value)">
                   <option value="lrc">LRC</option><option value="ttml">TTML</option>
                 </select>
               </div>
             </div>
             <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label">Сохранять лирику</div></div>
+              <div class="toggle-info"><div class="toggle-label" data-i18n="set.035">Сохранять лирику</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-amd-savelrc"
                 onchange="saveSetting('amd-save-lyrics',this.checked)"><div class="toggle-slider"></div></label>
             </div>
@@ -400,7 +400,7 @@
 
         <!-- ═══ Service colors ═══ -->
         <div class="block mt12">
-          <div class="block-title">🎨 Цвета сервисов</div>
+          <div class="block-title" data-i18n="set.036">🎨 Цвета сервисов</div>
           <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">
             По умолчанию — бренд-цвета. Можно переопределить под себя.
           </div>
@@ -686,7 +686,7 @@
               style="width:100%;font-family:monospace;font-size:11px;background:rgba(0,0,0,.25);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px;resize:vertical"></textarea>
             <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
-                onclick="document.getElementById('apple-cookies-file').click()" title="Выбрать файл cookies.txt из проводника">📂 Выбрать файл cookies.txt</button>
+                onclick="document.getElementById('apple-cookies-file').click()" data-i18n-title="set.037" title="Выбрать файл cookies.txt из проводника">📂 Выбрать файл cookies.txt</button>
               <input type="file" id="apple-cookies-file" accept=".txt,text/plain" style="display:none" onchange="importAppleCookiesFile(this)"/>
               <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
                 onclick="(async()=>{const el=document.getElementById('apple-cookies'),st=document.getElementById('apple-cookies-status');st.textContent='…';try{const r=await api('POST','/api/apple/cookies',{text:el.value});st.textContent=r&&r.ok?(r.exists?('✅ Сохранено: '+r.lines+' cookies'+(r.looks_apple?'':' ⚠ нет apple.com')):'🗑 очищено'):('✗ '+((r&&r.error)||'ошибка'));st.style.color=r&&r.ok?'var(--green,#30d158)':'#fc3c44';}catch(e){st.textContent='✗ '+e;st.style.color='#fc3c44';}})()">💾 Сохранить cookies</button>
@@ -1075,7 +1075,7 @@
             <div class="settings-grid">
               <div class="field-group">
                 <label class="lbl">user-id</label>
-                <input id="s-qobuz-userid" placeholder="Цифры из cookie user-id"
+                <input id="s-qobuz-userid" data-i18n-ph="set.038" placeholder="Цифры из cookie user-id"
                   style="font-family:var(--mono);font-size:11px"
                   oninput="saveSetting('qobuz-user-id',this.value)"/>
               </div>
@@ -1284,7 +1284,7 @@
               </div>
               <div class="field-group">
                 <label class="lbl">user_id</label>
-                <input id="s-tidal-userid" placeholder="цифры"
+                <input id="s-tidal-userid" data-i18n-ph="set.039" placeholder="цифры"
                   style="font-family:var(--mono);font-size:11px"
                   oninput="saveSetting('tidal-user-id',this.value)"/>
               </div>
@@ -1296,7 +1296,7 @@
               </div>
               <div class="field-group" style="grid-column:1/-1">
                 <label class="lbl" data-i18n="s.tidal_expiry">token_expiry (Unix timestamp, опционально)</label>
-                <input id="s-tidal-expiry" placeholder="9999999999 (= никогда)"
+                <input id="s-tidal-expiry" data-i18n-ph="set.040" placeholder="9999999999 (= никогда)"
                   style="font-family:var(--mono);font-size:11px"
                   oninput="saveSetting('tidal-token-expiry',this.value)"/>
               </div>
@@ -1765,8 +1765,8 @@
                 style="font-family:var(--mono);font-size:11px"/>
             </div>
             <div class="field-group" style="margin-bottom:8px">
-              <label class="lbl">Пароль</label>
-              <input id="s-bp-pass" type="password" placeholder="Пароль Beatport"
+              <label class="lbl" data-i18n="set.041">Пароль</label>
+              <input id="s-bp-pass" type="password" data-i18n-ph="set.042" placeholder="Пароль Beatport"
                 oninput="saveSetting('beatport-password',this.value)"
                 style="font-family:var(--mono);font-size:11px"/>
             </div>
@@ -1785,7 +1785,7 @@
 
           <!-- Quality + save path -->
           <div class="field-group mt8">
-            <label class="lbl">Качество по умолчанию</label>
+            <label class="lbl" data-i18n="set.043">Качество по умолчанию</label>
             <select id="s-bp-quality" onchange="saveSetting('beatport-quality',this.value)"
               style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:7px 10px;font-size:12px;font-family:var(--font);cursor:pointer">
               <option value="hifi">FLAC 16-bit (Professional)</option>
@@ -1800,7 +1800,7 @@
         <!-- ══════════ YANDEX TAB ══════════ -->
         <div class="stab-panel" id="stab-yandex">
         <div class="block mt12">
-          <div class="block-title" style="color:#ffcc00">🟡 Яндекс.Музыка</div>
+          <div class="block-title" style="color:#ffcc00" data-i18n="set.044">🟡 Яндекс.Музыка</div>
 
           <div style="background:rgba(255,204,0,.06);border:1px solid rgba(255,204,0,.18);border-radius:9px;padding:10px 12px;margin-bottom:10px">
             <div style="font-size:11px;font-weight:700;color:#ffcc00;margin-bottom:8px" data-i18n="ya.oauth">🔑 OAuth токен</div>
@@ -1827,7 +1827,7 @@
             </div>
             <div class="field-group" style="margin-top:10px">
               <label class="lbl" data-i18n="ya.paste_label">Вставь URL после входа (или сам токен)</label>
-              <input id="s-yandex-paste" placeholder="music.yandex.ru/#access_token=…  или  AQAA…"
+              <input id="s-yandex-paste" data-i18n-ph="set.045" placeholder="music.yandex.ru/#access_token=…  или  AQAA…"
                 style="font-family:var(--mono);font-size:11px"
                 oninput="yandexSaveToken(this.value)"/>
             </div>
@@ -1857,7 +1857,7 @@
         <!-- ══════════ RELEASES TAB ══════════ -->
         <div class="stab-panel" id="stab-releases">
         <div class="block mt12">
-          <div class="block-title">📡 Радар релизов</div>
+          <div class="block-title" data-i18n="set.046">📡 Радар релизов</div>
           <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Выбери сервисы для сканирования новых релизов. Сервис скрыт если нет токена.</div>
 
           <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
@@ -1889,21 +1889,21 @@
               <label class="lbl" data-i18n="s.rel_period">Период по умолчанию</label>
               <select id="rel-cfg-days" onchange="saveSetting('releases-days',this.value)"
                 style="padding:6px 8px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);width:100%;outline:none">
-                <option value="7">7 дней</option>
-                <option value="14">14 дней</option>
-                <option value="30">30 дней</option>
-                <option value="90">3 месяца</option>
-                <option value="180">6 месяцев</option>
+                <option value="7" data-i18n="set.047">7 дней</option>
+                <option value="14" data-i18n="set.048">14 дней</option>
+                <option value="30" data-i18n="set.049">30 дней</option>
+                <option value="90" data-i18n="set.050">3 месяца</option>
+                <option value="180" data-i18n="set.051">6 месяцев</option>
               </select>
             </div>
             <div class="field-group" style="flex:1;min-width:160px">
-              <label class="lbl">Типы релизов</label>
+              <label class="lbl" data-i18n="set.052">Типы релизов</label>
               <select id="rel-cfg-types" onchange="saveSetting('releases-types',this.value)"
                 style="padding:6px 8px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);width:100%;outline:none">
-                <option value="album,single">Альбомы + синглы</option>
-                <option value="album">Только альбомы</option>
-                <option value="single">Только синглы</option>
-                <option value="album,single,appears_on,compilation">Всё</option>
+                <option value="album,single" data-i18n="set.053">Альбомы + синглы</option>
+                <option value="album" data-i18n="set.054">Только альбомы</option>
+                <option value="single" data-i18n="set.055">Только синглы</option>
+                <option value="album,single,appears_on,compilation" data-i18n="set.056">Всё</option>
               </select>
             </div>
           </div>
