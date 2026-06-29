@@ -3,6 +3,7 @@ var LANG = {
   ru: {
     // Setup → Python-зависимости
     'setup.deps_hdr':'📦 Python-зависимости',
+    'setup.deps_note':'Обновление pip-пакетов приложения. <b>📌 закреплённые</b> ломают сборку — «Обновить всё» их не трогает. После обновления нужен рестарт.',
     'setup.deps_check':'🔄 Проверить обновления',
     'setup.deps_update_all':'⬆️ Обновить всё (без закреплённых)',
     'setup.deps_hint':'Нажми «Проверить обновления».',
@@ -460,6 +461,7 @@ var LANG = {
   en: {
     // Setup → Python dependencies
     'setup.deps_hdr':'📦 Python dependencies',
+    'setup.deps_note':'Updates the bundled pip packages. <b>📌 pinned</b> ones break the build — "Update all" skips them. A restart is needed afterwards.',
     'setup.deps_check':'🔄 Check for updates',
     'setup.deps_update_all':'⬆️ Update all (except pinned)',
     'setup.deps_hint':'Click "Check for updates".',
