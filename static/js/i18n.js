@@ -27,6 +27,10 @@ var LANG = {
     // Settings — general
     's.queue_section':'⏵ Очередь','s.autostart_label':'Автостарт при добавлении',
     's.autostart_sub':'Сразу начинает загрузку при добавлении ссылки',
+    's.notify_label':'🔔 Уведомлять о завершении',
+    's.notify_sub':'Системное уведомление со звуком, когда загрузка готова — даже если окно свёрнуто (в играх не мешает).',
+    's.tray_label':'🗕 Сворачивать в трей',
+    's.tray_sub':'Закрытие или сворачивание окна прячет Ripster в системный трей — загрузки продолжаются. Применяется после перезапуска.',
     's.parallel_label':'Параллельные загрузки','s.threads':'потоков',
     's.parallel_sub':'1 = последовательно · 2–4 = несколько альбомов одновременно. Не рекомендуется >2 для Apple Music/AMD.',
     's.autodel_label':'🧹 Авто-очистка диска','s.autodel_sub':'Удалять скачанные релизы с диска ПК через N минут после завершения (0 = выкл, 1–60). Уже отданное в кэш-канал Telegram остаётся.',
@@ -485,6 +489,10 @@ var LANG = {
     // Settings — general
     's.queue_section':'⏵ Queue','s.autostart_label':'Auto-start on add',
     's.autostart_sub':'Downloads start as soon as a link is added',
+    's.notify_label':'🔔 Notify on completion',
+    's.notify_sub':'System notification with sound when a download finishes — even if the window is minimized (does not interrupt fullscreen games).',
+    's.tray_label':'🗕 Minimize to tray',
+    's.tray_sub':'Closing or minimizing the window hides Ripster in the system tray — downloads keep running. Applies after a restart.',
     's.parallel_label':'Parallel downloads','s.threads':'threads',
     's.parallel_sub':'1 = sequential · 2–4 = multiple albums at once. Not recommended >2 for Apple Music/AMD.',
     's.autodel_label':'🧹 Disk auto-clean','s.autodel_sub':'Delete finished releases from the PC disk N minutes after they complete (0 = off, 1–60). Anything already mirrored to the Telegram cache channel stays.',
