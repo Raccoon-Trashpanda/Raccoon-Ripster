@@ -173,10 +173,10 @@ function showUrlServiceModal(url, quality, detectedSvc) {
     <div style="font-size:11px;color:var(--muted,#888);margin-bottom:4px">Определён сервис</div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
       <div style="width:10px;height:10px;border-radius:50%;background:${svcInfo.color}"></div>
-      <div style="font-size:16px;font-weight:700;color:#f0f0f4">${svcInfo.label}</div>
+      <div style="font-size:16px;font-weight:700;color:var(--text)">${svcInfo.label}</div>
     </div>
     <div style="font-size:11px;color:var(--muted,#888);font-family:monospace;background:rgba(0,0,0,.3);border-radius:7px;padding:7px 10px;margin-bottom:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${shortUrl}</div>
-    <div style="font-size:12px;font-weight:600;color:#f0f0f4;margin-bottom:10px">${isSpotify?'Конвертировать и скачать через:':'Скачать через:'}</div>
+    <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px">${isSpotify?'Конвертировать и скачать через:':'Скачать через:'}</div>
     <div style="display:flex;gap:8px;margin-bottom:16px">${targetBtns}</div>
     <div style="display:flex;justify-content:flex-end">
       <button onclick="document.getElementById('url-svc-modal').remove()"

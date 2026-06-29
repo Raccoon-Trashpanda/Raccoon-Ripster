@@ -218,10 +218,10 @@ function showWrapper2FAModal() {
   modal.id = 'wrapper-2fa-modal';
   modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.75);backdrop-filter:blur(4px)';
   modal.innerHTML = `<div style="background:var(--surface,#1c1c1e);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:24px;width:340px;max-width:90vw">
-    <div style="font-size:15px;font-weight:700;color:#f0f0f4;margin-bottom:6px">🔐 Apple ID — двухфакторный код</div>
+    <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:6px">🔐 Apple ID — двухфакторный код</div>
     <div style="font-size:12px;color:var(--muted,#888);margin-bottom:16px">Введи 6-значный код из SMS или приложения «Пароли». У тебя есть ~60 секунд.</div>
     <input id="wrapper-2fa-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000"
-      style="width:100%;padding:10px 12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:9px;color:#f0f0f4;font-size:22px;font-family:var(--mono,monospace);text-align:center;letter-spacing:6px;box-sizing:border-box;outline:none"
+      style="width:100%;padding:10px 12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:9px;color:var(--text);font-size:22px;font-family:var(--mono,monospace);text-align:center;letter-spacing:6px;box-sizing:border-box;outline:none"
       onkeydown="if(event.key==='Enter') submitWrapper2FA()">
     <div style="display:flex;gap:8px;margin-top:14px">
       <button onclick="submitWrapper2FA()" style="flex:1;padding:10px;background:#0a84ff;border:none;border-radius:9px;cursor:pointer;color:#fff;font-weight:600;font-size:13px;font-family:var(--font)">Подтвердить</button>

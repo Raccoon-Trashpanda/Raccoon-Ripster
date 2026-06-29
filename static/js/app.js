@@ -784,12 +784,12 @@ function _multiUrlPrompt(urls, quality) {
   modal.id = 'multi-url-modal';
   modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.7);backdrop-filter:blur(4px)';
   modal.innerHTML = `<div style="background:var(--surface,#1c1c1e);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:24px;width:440px;max-width:90vw">
-    <div style="font-size:16px;font-weight:700;color:#f0f0f4;margin-bottom:6px">Вставлено несколько ссылок</div>
-    <div style="font-size:12px;color:var(--muted);margin-bottom:12px">Найдено <b style="color:#f0f0f4">${n}</b> ссылок одним запросом${summary?` · ${summary}`:''}. Что делать?</div>
+    <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px">Вставлено несколько ссылок</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:12px">Найдено <b style="color:var(--text)">${n}</b> ссылок одним запросом${summary?` · ${summary}`:''}. Что делать?</div>
     <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:8px 10px;margin-bottom:16px;max-height:170px;overflow:auto">${list}</div>
     <div style="display:flex;flex-direction:column;gap:8px">
       <button onclick="_multiUrlChoose('all')" style="padding:11px;background:var(--green,#34c759);color:#000;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇ Качать все (${n})</button>
-      <button onclick="_multiUrlChoose('first')" style="padding:10px;background:rgba(255,255,255,.06);color:#f0f0f4;border:1px solid rgba(255,255,255,.12);border-radius:10px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font)">1️⃣ Только первую</button>
+      <button onclick="_multiUrlChoose('first')" style="padding:10px;background:rgba(255,255,255,.06);color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:10px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font)">1️⃣ Только первую</button>
       <button onclick="_multiUrlChoose('cancel')" style="padding:8px;background:transparent;color:var(--muted);border:1px solid rgba(255,255,255,.1);border-radius:10px;font-size:12px;cursor:pointer;font-family:var(--font)">Отмена</button>
     </div>
   </div>`;
