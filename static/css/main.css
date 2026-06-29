@@ -30,8 +30,19 @@
   --font:system-ui,-apple-system,'Segoe UI',sans-serif;
   --mono:'JetBrains Mono','Fira Code','Cascadia Code',monospace;
   --display:system-ui,-apple-system,'Segoe UI',sans-serif;
-  --radius:14px;
-  --shadow:0 20px 60px rgba(0,0,0,.6);
+  --radius:16px;
+  --radius-sm:10px;
+  --shadow:0 10px 34px rgba(0,0,0,.34), 0 2px 8px rgba(0,0,0,.22);
+  --shadow-sm:0 2px 12px rgba(0,0,0,.18);
+  --tr:.16s cubic-bezier(.4,0,.2,1);
+}
+/* Softness pass: gentle, consistent transitions on interactive elements so
+   hovers/focus/theme-switch feel smooth instead of snapping. Scoped to controls
+   (not *) to avoid scroll/layout jank. */
+button, .btn-ghost, .btn-sm, .btn-red, .btn-orange, input, select, textarea,
+.qi, .pill, .nav-item, .toggle-slider, a {
+  transition: background-color var(--tr), border-color var(--tr),
+              color var(--tr), box-shadow var(--tr), transform .12s ease;
 }
 /* ── Light theme ── */
 html.light{
