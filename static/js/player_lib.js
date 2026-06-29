@@ -574,15 +574,15 @@ function _showFirstRunNameModal(){
   const modal = document.createElement('div');
   modal.id = 'firstrun-name-modal';
   modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.75);backdrop-filter:blur(4px)';
-  modal.innerHTML = `<div style="background:var(--surface,#1c1c1e);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:24px;width:380px;max-width:90vw">
-    <div style="font-size:16px;font-weight:700;color:#f0f0f4;margin-bottom:6px">👋 Добро пожаловать в Ripster</div>
+  modal.innerHTML = `<div style="background:var(--surface,#1c1c1e);border:1px solid var(--border);border-radius:16px;padding:24px;width:380px;max-width:90vw">
+    <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px">👋 Добро пожаловать в Ripster</div>
     <div style="font-size:12px;color:var(--muted,#888);margin-bottom:16px">Как тебя подписать для разработчика? Имя/ник поможет понять, чей это Ripster, если пришлёшь диагностику. Можно пропустить — спросим только один раз.</div>
     <input id="firstrun-name-input" type="text" maxlength="48" placeholder="Имя или ник"
-      style="width:100%;padding:10px 12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:9px;color:#f0f0f4;font-size:15px;box-sizing:border-box;outline:none"
+      style="width:100%;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:9px;color:var(--text);font-size:15px;box-sizing:border-box;outline:none"
       onkeydown="if(event.key==='Enter') _saveFirstRunName()">
     <div style="display:flex;gap:8px;margin-top:14px">
       <button onclick="_saveFirstRunName()" style="flex:1;padding:10px;background:#0a84ff;border:none;border-radius:9px;cursor:pointer;color:#fff;font-weight:600;font-size:13px;font-family:var(--font)">Сохранить</button>
-      <button onclick="_skipFirstRunName()" style="padding:10px 16px;background:transparent;border:1px solid rgba(255,255,255,.1);border-radius:9px;cursor:pointer;font-size:13px;color:var(--muted,#888);font-family:var(--font)">Пропустить</button>
+      <button onclick="_skipFirstRunName()" style="padding:10px 16px;background:transparent;border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;color:var(--muted,#888);font-family:var(--font)">Пропустить</button>
     </div>
   </div>`;
   document.body.appendChild(modal);
