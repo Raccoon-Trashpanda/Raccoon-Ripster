@@ -634,38 +634,22 @@ img[data-cover].loaded{
 #pp-quality-menu .pp-q-opt.active::after{ content:"✓"; font-size:11px; }
 #pp-quality-menu .pp-q-sub{ font-size:10px; color:var(--muted2); font-family:var(--mono); }
 
-/* ══ Volume — vertical slider popup on hover (distinct from the seek line) ══ */
-#pp-vol-popup{
-  display:none;
-  position:absolute; bottom:38px; left:50%; transform:translateX(-50%);
-  background:rgba(20,20,26,.98);
-  backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px);
-  border:1px solid var(--border); border-radius:13px;
-  padding:13px 9px 11px; box-shadow:0 8px 28px rgba(0,0,0,.55);
-  z-index:9600;
-}
-/* Bridge the gap so moving the cursor icon→popup doesn't dismiss it. */
-#pp-vol-popup::before{ content:""; position:absolute; left:0; right:0; bottom:-10px; height:10px; }
-#pp-vol-wrap:hover #pp-vol-popup, #pp-vol-popup:hover{ display:block; }
-/* Keep the popup open WHILE dragging the slider — a vertical drag jitters the
-   cursor off the narrow popup, which lost :hover → display:none → the drag died
-   (felt like "click works, drag doesn't"). JS adds .vol-active on pointerdown. */
-#pp-vol-wrap.vol-active #pp-vol-popup{ display:block; }
-#pp-vol-wrap:hover #pp-mute, #pp-vol-wrap.vol-active #pp-mute{ color:var(--text); }
+/* ══ Volume — flat inline horizontal slider (consistent with the rest of the bar,
+   centred by the zone's align-items:center; native drag, theme-aware thumb) ══ */
+#pp-vol-wrap:hover #pp-mute{ color:var(--text); }
 #pp-vol{
-  /* `appearance:slider-vertical` was deprecated/removed in modern Chromium
-     (WebView2) and broke vertical dragging — use writing-mode (Chrome 121+). */
-  writing-mode:vertical-lr; direction:rtl;     /* vertical, up = louder */
-  width:6px; height:104px; cursor:pointer; accent-color:var(--red);
+  -webkit-appearance:none; appearance:none;
+  width:84px; height:4px; border-radius:3px; cursor:pointer; outline:none;
+  background:var(--border2); accent-color:var(--red); vertical-align:middle;
 }
-#pp-vol::-webkit-slider-runnable-track{ width:6px; border-radius:3px; background:rgba(255,255,255,.16); }
+#pp-vol::-webkit-slider-runnable-track{ height:4px; border-radius:3px; background:transparent; }
 #pp-vol::-webkit-slider-thumb{
-  -webkit-appearance:none; width:14px; height:14px; border-radius:50%;
-  background:var(--red); border:2px solid #fff; margin-left:-4px;
-  box-shadow:0 1px 4px rgba(0,0,0,.4);
+  -webkit-appearance:none; width:13px; height:13px; border-radius:50%;
+  background:var(--red); border:2px solid var(--surface); margin-top:-4.5px;
+  box-shadow:0 1px 4px rgba(0,0,0,.35); cursor:pointer;
 }
-#pp-vol::-moz-range-track{ width:6px; border-radius:3px; background:rgba(255,255,255,.16); }
-#pp-vol::-moz-range-thumb{ width:14px; height:14px; border-radius:50%; background:var(--red); border:2px solid #fff; }
+#pp-vol::-moz-range-track{ height:4px; border-radius:3px; background:var(--border2); }
+#pp-vol::-moz-range-thumb{ width:13px; height:13px; border-radius:50%; background:var(--red); border:2px solid var(--surface); }
 
 /* Chapter rows in the expanded panel — soft hover affordance. */
 #pp-chapters > *{ transition:background-color .12s ease; border-radius:7px; }
@@ -1202,19 +1186,19 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
       margin: 0; padding: 0; background: transparent; border: none; outline: none;
     }
     #pp-vol::-webkit-slider-runnable-track, #pp-vol-big::-webkit-slider-runnable-track {
-      height: 3px; border-radius: 2px; background: rgba(255,255,255,.18);
+      height: 3px; border-radius: 2px; background: var(--border2);
     }
     #pp-vol::-moz-range-track, #pp-vol-big::-moz-range-track {
-      height: 3px; border-radius: 2px; background: rgba(255,255,255,.18);
+      height: 3px; border-radius: 2px; background: var(--border2);
     }
     #pp-vol::-webkit-slider-thumb, #pp-vol-big::-webkit-slider-thumb {
       -webkit-appearance: none; appearance: none;
-      width: 11px; height: 11px; border-radius: 50%; background: #fff;
-      margin-top: -4px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.4);
+      width: 12px; height: 12px; border-radius: 50%; background: var(--red);
+      margin-top: -4.5px; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.35);
     }
     #pp-vol::-moz-range-thumb, #pp-vol-big::-moz-range-thumb {
-      width: 11px; height: 11px; border-radius: 50%; background: #fff;
-      border: none; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.4);
+      width: 12px; height: 12px; border-radius: 50%; background: var(--red);
+      border: none; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.35);
     }
     /* Detail panel slide-in from right */
     #detail-panel { transform: translateX(100%); transition: transform .28s cubic-bezier(.25,.46,.45,.94); }
