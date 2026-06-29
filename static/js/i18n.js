@@ -148,6 +148,7 @@ var LANG = {
     'search.add_batch':'+ Добавить все в очередь',
     'search.hint':'Введи запрос — Apple Music, Deezer или Qobuz',
     'search.sort':'Сортировка:','search.sort_rel':'По релевантности','search.sort_new':'Новые ↓','search.sort_old':'Старые ↑','search.sort_tr_desc':'Треков ↓','search.sort_tr_asc':'Треков ↑',
+    'con.copy':'📋 Копировать','con.download_log':'⬇ Скачать лог','con.download_log_title':'Скачать все логи одним zip — пришли нам этот файл для диагностики','bbc.loading':'Загружаю…','q.with_appleid':'С Apple ID:','q.need_docker':'· Нужен Docker Desktop',
     // History
     'h.title':'История загрузок','h.subtitle':'записей · сохраняется в history.json',
     'h.all_svcs':'Все сервисы','h.all_results':'Все результаты',
@@ -611,6 +612,7 @@ var LANG = {
     'search.add_batch':'+ Add all to queue',
     'search.hint':'Type a query — Apple Music, Deezer, or Qobuz',
     'search.sort':'Sort:','search.sort_rel':'Relevance','search.sort_new':'Newest ↓','search.sort_old':'Oldest ↑','search.sort_tr_desc':'Tracks ↓','search.sort_tr_asc':'Tracks ↑',
+    'con.copy':'📋 Copy','con.download_log':'⬇ Download log','con.download_log_title':'Download all logs as one zip — send us this file for diagnostics','bbc.loading':'Loading…','q.with_appleid':'With Apple ID:','q.need_docker':'· Needs Docker Desktop',
     // History
     'h.title':'Download history','h.subtitle':'records · saved in history.json',
     'h.all_svcs':'All services','h.all_results':'All results',
