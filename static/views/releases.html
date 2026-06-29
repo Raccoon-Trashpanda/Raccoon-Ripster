@@ -6,35 +6,35 @@
           <div id="rel-active-svcs" style="display:flex;gap:5px;flex-wrap:wrap"></div>
           <!-- Controls -->
           <div style="display:flex;gap:6px;margin-left:auto;align-items:center;flex-wrap:wrap">
-            <input id="rel-search" type="search" placeholder="Поиск по артисту / названию…" oninput="_applyRelFilter()" style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);outline:none;width:170px;min-width:100px"/>
+            <input id="rel-search" type="search" data-i18n-ph="rel.search_ph" placeholder="Поиск по артисту / названию…" oninput="_applyRelFilter()" style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);outline:none;width:170px;min-width:100px"/>
             <select id="rel-days" onchange="_relSavePrefs();loadReleases(false)" style="padding:5px 8px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
-              <option value="7">7 дней</option>
-              <option value="14">14 дней</option>
-              <option value="30">30 дней</option>
-              <option value="90" selected>3 месяца</option>
-              <option value="180">6 месяцев</option>
-              <option value="365">1 год</option>
-              <option value="730">2 года</option>
-              <option value="1825">5 лет</option>
-              <option value="9999">Всё время</option>
+              <option value="7" data-i18n="rel.d7">7 дней</option>
+              <option value="14" data-i18n="rel.d14">14 дней</option>
+              <option value="30" data-i18n="rel.d30">30 дней</option>
+              <option value="90" selected data-i18n="rel.d90">3 месяца</option>
+              <option value="180" data-i18n="rel.d180">6 месяцев</option>
+              <option value="365" data-i18n="rel.d365">1 год</option>
+              <option value="730" data-i18n="rel.d730">2 года</option>
+              <option value="1825" data-i18n="rel.d1825">5 лет</option>
+              <option value="9999" data-i18n="rel.dall">Всё время</option>
             </select>
             <select id="rel-sort" onchange="_relSavePrefs();_applyRelFilter()" style="padding:5px 8px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
-              <option value="date_desc">По дате ↓ (новые)</option>
-              <option value="date_asc">По дате ↑ (старые)</option>
-              <option value="tracks_desc">По трекам ↓ (больше)</option>
-              <option value="tracks_asc">По трекам ↑ (меньше)</option>
-              <option value="artist_asc">По артисту A→Z</option>
-              <option value="artist_desc">По артисту Z→A</option>
-              <option value="title_asc">По названию A→Z</option>
+              <option value="date_desc" data-i18n="rel.sort_date_desc">По дате ↓ (новые)</option>
+              <option value="date_asc" data-i18n="rel.sort_date_asc">По дате ↑ (старые)</option>
+              <option value="tracks_desc" data-i18n="rel.sort_tr_desc">По трекам ↓ (больше)</option>
+              <option value="tracks_asc" data-i18n="rel.sort_tr_asc">По трекам ↑ (меньше)</option>
+              <option value="artist_asc" data-i18n="rel.sort_artist_asc">По артисту A→Z</option>
+              <option value="artist_desc" data-i18n="rel.sort_artist_desc">По артисту Z→A</option>
+              <option value="title_asc" data-i18n="rel.sort_title_asc">По названию A→Z</option>
             </select>
-            <button onclick="loadReleases(true)" id="rel-refresh-btn" data-i18n="rel.refresh" title="Сканировать релизы у Spotify сейчас" style="padding:5px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;color:var(--text);font-family:var(--font)">
+            <button onclick="loadReleases(true)" id="rel-refresh-btn" data-i18n="rel.refresh" data-i18n-title="rel.refresh_title" title="Сканировать релизы у Spotify сейчас" style="padding:5px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;color:var(--text);font-family:var(--font)">
               ↺ Сканировать
             </button>
-            <label title="Фоновое сканирование: умное, с таймингом, не до бана. Без него релизы обновляются только по кнопке." style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);cursor:pointer;white-space:nowrap">
+            <label data-i18n-title="rel.bgscan_title" title="Фоновое сканирование: умное, с таймингом, не до бана. Без него релизы обновляются только по кнопке." style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);cursor:pointer;white-space:nowrap">
               <input type="checkbox" id="rel-bg-scan" onchange="saveSetting('spotify-bg-scan',this.checked)" style="width:auto;margin:0;cursor:pointer"/>
               <span data-i18n="rel.bgscan">⏱ Фон</span>
             </label>
-            <button onclick="showView('settings',document.querySelector('.nav-item[data-view=settings]'));setTimeout(()=>showStab('releases',document.querySelector('[data-stab=releases]')),50)" style="padding:5px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)" title="Настройки радара">⚙</button>
+            <button onclick="showView('settings',document.querySelector('.nav-item[data-view=settings]'));setTimeout(()=>showStab('releases',document.querySelector('[data-stab=releases]')),50)" style="padding:5px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)" data-i18n-title="rel.settings_title" title="Настройки радара">⚙</button>
           </div>
         </div>
 
@@ -42,14 +42,14 @@
         <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
           <div id="rel-view-chips" style="display:flex;gap:5px"></div>
           <div id="rel-type-chips" style="display:flex;gap:5px;flex-wrap:wrap;padding-left:8px;border-left:1px solid var(--border)"></div>
-          <button id="rel-mark-seen" onclick="markAllRelSeen()" style="margin-left:auto;padding:4px 10px;background:transparent;border:1px solid var(--border);border-radius:14px;font-size:11px;color:var(--muted);cursor:pointer;font-family:var(--font)" title="Отметить все релизы как просмотренные">✓ Прочитано</button>
-          <button id="rel-reset-seen" onclick="resetRelSeen()" style="padding:4px 10px;background:transparent;border:1px solid var(--border);border-radius:14px;font-size:11px;color:var(--muted);cursor:pointer;font-family:var(--font)" title="Снять все отметки «просмотрено» — все релизы снова станут новыми">↩ Сброс</button>
+          <button id="rel-mark-seen" onclick="markAllRelSeen()" style="margin-left:auto;padding:4px 10px;background:transparent;border:1px solid var(--border);border-radius:14px;font-size:11px;color:var(--muted);cursor:pointer;font-family:var(--font)" data-i18n="rel.mark_seen" data-i18n-title="rel.mark_seen_title" title="Отметить все релизы как просмотренные">✓ Прочитано</button>
+          <button id="rel-reset-seen" onclick="resetRelSeen()" style="padding:4px 10px;background:transparent;border:1px solid var(--border);border-radius:14px;font-size:11px;color:var(--muted);cursor:pointer;font-family:var(--font)" data-i18n="rel.reset_seen" data-i18n-title="rel.reset_seen_title" title="Снять все отметки «просмотрено» — все релизы снова станут новыми">↩ Сброс</button>
         </div>
 
         <!-- Per-service live scan progress (WS-driven) -->
         <div id="rel-status-bar" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px">
           <div style="display:flex;align-items:center;gap:10px">
-            <div id="rel-status-text" style="font-size:12px;color:var(--text);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">⟳ Загрузка…</div>
+            <div id="rel-status-text" data-i18n="rel.status_loading" style="font-size:12px;color:var(--text);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">⟳ Загрузка…</div>
             <div id="rel-status-count" style="font-size:11px;color:var(--muted);font-family:var(--mono)"></div>
           </div>
           <div style="height:3px;background:rgba(255,255,255,.05);border-radius:2px;margin-top:8px;overflow:hidden">
@@ -61,7 +61,7 @@
         <div id="releases-grid"></div>
         <div id="rel-load-more" style="display:none;text-align:center;padding:16px 0">
           <button onclick="_relShowMore()" style="padding:8px 24px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer;font-family:var(--mono)">
-            Показать ещё · <span id="rel-load-more-count"></span>
+            <span data-i18n="rel.show_more">Показать ещё ·</span> <span id="rel-load-more-count"></span>
           </button>
         </div>
         <div id="rel-empty" style="text-align:center;padding:40px;font-size:13px;color:var(--muted);display:none" data-i18n="rel.empty">Нет новых релизов за выбранный период</div>
