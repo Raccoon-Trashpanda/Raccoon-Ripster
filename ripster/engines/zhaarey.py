@@ -29,6 +29,16 @@ _RE_RETRY   = re.compile(r"Error detected, press Enter to try again", re.I)
 # Local docker wrapper couldn't mint a content key (expired/unsubscribed Apple
 # session): the wrapper logs "Invalid CKC" and the Go side dies decrypting.
 _RE_DECRYPT_FAIL = re.compile(r"Failed to run v[23]|decryptFragment|Invalid CKC", re.I)
+# zhaarey can exit 0 after logging "Unavailable, trying to dl aac-lc" → "Failed to
+# dl aac-lc: Unavailable" for every track (nothing saved) WITHOUT a "Completed: N/M"
+# summary line. A genuine success always logs Completed, so this only matters in the
+# rc==0 / no-Completed branch of is_finished (don't false-positive a real download).
+_RE_UNAVAIL = re.compile(r"Failed to dl[^\n]*Unavailable|\bUnavailable\b", re.I)
+# Public wrapper (wm.wol.moe) couldn't decrypt: the Go tool logs
+# "Skipping ...: Decryption is not available for media ID: N" for every track and
+# then exits 0 with "Finished with 0 error(s)" → looks like success but 0 files
+# were saved (the "Готово, а файлов нет" report). Treat as a clear failure.
+_RE_DECRYPT_NA = re.compile(r"Decryption is not available", re.I)
 
 # yt-dlp segment noise — hide from console, extract % for progress bar if present
 _RE_NOISY   = re.compile(
@@ -65,20 +75,31 @@ class ZhaereyEngine(EngineBase):
         # can extract the exact output directory without guessing.
         return base + ([flag] if flag else []) + ["--json", url]
 
+    @staticmethod
+    def _json_tracks(line: str) -> Optional[list]:
+        """Extract the --json track array from a log line, tolerant of a prefix
+        (timestamp / log marker / "Saved:" label) before the array. The old code
+        required the line to *start* with '[' — any prefix made it return None, so
+        the runner got no output dir and the release was orphaned at the bare root
+        (= silent non-delivery). Scans for the outermost [...] and json-decodes it."""
+        line = line.strip()
+        i, j = line.find("["), line.rfind("]")
+        if i == -1 or j <= i:
+            return None
+        try:
+            v = _json.loads(line[i:j + 1])
+            return v if isinstance(v, list) and v else None
+        except Exception:
+            return None
+
     def extract_save_dir(self, log_text: str) -> Optional[str]:
         """Parse the JSON summary line emitted by --json to get the output dir."""
         for line in reversed(log_text.splitlines()):
-            line = line.strip()
-            if not line.startswith("["):
-                continue
-            try:
-                tracks = _json.loads(line)
-                if isinstance(tracks, list) and tracks:
-                    p = tracks[0].get("path", "")
-                    if p:
-                        return str(_Path(p).parent)
-            except Exception:
-                pass
+            tracks = self._json_tracks(line)
+            if tracks:
+                p = tracks[0].get("path", "") if isinstance(tracks[0], dict) else ""
+                if p:
+                    return str(_Path(p).parent)
         return None
 
     def extract_save_files(self, log_text: str) -> Optional[list[str]]:
@@ -88,17 +109,11 @@ class ZhaereyEngine(EngineBase):
         a blind glob would pull in the OTHER task's files (issue #19). Returns None
         when no JSON summary is present (caller falls back to the directory glob)."""
         for line in reversed(log_text.splitlines()):
-            line = line.strip()
-            if not line.startswith("["):
-                continue
-            try:
-                tracks = _json.loads(line)
-                if isinstance(tracks, list) and tracks:
-                    names = [_Path(t.get("path", "")).name
-                             for t in tracks if t.get("path")]
-                    return names or None
-            except Exception:
-                pass
+            tracks = self._json_tracks(line)
+            if tracks:
+                names = [_Path(t.get("path", "")).name
+                         for t in tracks if isinstance(t, dict) and t.get("path")]
+                return names or None
         return None
 
     def iter_events(self, line: str, *, progress: tuple[int, int]):
@@ -327,10 +342,24 @@ class ZhaereyEngine(EngineBase):
                 "протухла или без активной подписки Apple Music. Куки тут ни при "
                 "чём (они для AAC/видео/метаданных). Перелогинь wrapper в "
                 "Setup → Apple → Wrapper или переключись на AMD (публичный wrapper)."))
+        if _RE_DECRYPT_NA.search(log_text):
+            return EngineResult(False, error=(
+                "Apple: декрипт недоступен для этих треков — wrapper не смог их "
+                "расшифровать (локальная Apple-сессия wrapper'а протухла/без подписки, "
+                "либо публичный wm.wol.moe перегружен). Файлы НЕ сохранены. "
+                "Перелогинь wrapper (Setup → Apple → Wrapper) или повтори позже."))
         if _RE_CODEC.search(log_text):
             return EngineResult(False, error="no codec found — wrapper not responding")
         if _RE_TOKEN.search(log_text):
             return EngineResult(False, error="failed to get token — wrapper not authenticated")
         if rc == 0:
+            # Exit 0 but no "Completed: N/M" summary above. If the log shows the
+            # track(s) were Unavailable / failed to download, zhaarey just gave up
+            # quietly — that's NOT success (it used to be reported as done with 0
+            # files → silent non-delivery).
+            if _RE_UNAVAIL.search(log_text):
+                return EngineResult(False, error=(
+                    "Apple: трек недоступен в этом регионе/качестве (Unavailable) — "
+                    "смени storefront (регион) или качай через AMD (публичный wrapper)."))
             return EngineResult(success=True)
         return EngineResult(False, error="unknown finish state")
