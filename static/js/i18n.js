@@ -147,6 +147,7 @@ var LANG = {
     'search.batch_ph':'Вставь несколько ссылок, по одной на строку…',
     'search.add_batch':'+ Добавить все в очередь',
     'search.hint':'Введи запрос — Apple Music, Deezer или Qobuz',
+    'search.sort':'Сортировка:','search.sort_rel':'По релевантности','search.sort_new':'Новые ↓','search.sort_old':'Старые ↑','search.sort_tr_desc':'Треков ↓','search.sort_tr_asc':'Треков ↑',
     // History
     'h.title':'История загрузок','h.subtitle':'записей · сохраняется в history.json',
     'h.all_svcs':'Все сервисы','h.all_results':'Все результаты',
@@ -609,6 +610,7 @@ var LANG = {
     'search.batch_ph':'Paste multiple links, one per line…',
     'search.add_batch':'+ Add all to queue',
     'search.hint':'Type a query — Apple Music, Deezer, or Qobuz',
+    'search.sort':'Sort:','search.sort_rel':'Relevance','search.sort_new':'Newest ↓','search.sort_old':'Oldest ↑','search.sort_tr_desc':'Tracks ↓','search.sort_tr_asc':'Tracks ↑',
     // History
     'h.title':'Download history','h.subtitle':'records · saved in history.json',
     'h.all_svcs':'All services','h.all_results':'All results',
