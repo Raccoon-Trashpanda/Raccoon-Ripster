@@ -1,0 +1,83 @@
+/* fx_ui.js — Yandex-style polish:
+   1) a thin network-activity loading bar across the very top (NProgress-style),
+      driven by a fetch() wrapper so it reflects real library/network loading;
+   2) a cursor-following soft glow + glossy sheen on buttons (the highlight
+      tracks the mouse position inside each button).
+   Self-contained, additive, no dependency on app.js internals. */
+(function () {
+  'use strict';
+
+  // ── 1. Top network loading bar ──────────────────────────────────────────
+  let inflight = 0, val = 0, timer = null, bar = null;
+  function el() { if (!bar) bar = document.getElementById('net-progress'); return bar; }
+  function paint() { const b = el(); if (b) { b.style.transform = 'scaleX(' + val + ')'; b.style.opacity = '1'; } }
+  function trickle() {
+    clearTimeout(timer);
+    if (inflight <= 0) return;
+    val = Math.min(val + (1 - val) * 0.12, 0.9);
+    paint();
+    timer = setTimeout(trickle, 300);
+  }
+  function begin() {
+    inflight++;
+    if (inflight === 1) { val = 0.08; paint(); trickle(); }
+  }
+  function end() {
+    inflight = Math.max(0, inflight - 1);
+    if (inflight !== 0) return;
+    clearTimeout(timer);
+    val = 1; paint();
+    const b = el();
+    setTimeout(() => {
+      if (!b) return;
+      b.style.opacity = '0';
+      setTimeout(() => {
+        b.style.transition = 'none';
+        b.style.transform = 'scaleX(0)';
+        requestAnimationFrame(() => { b.style.transition = ''; });
+      }, 280);
+    }, 200);
+  }
+  const _fetch = window.fetch;
+  if (typeof _fetch === 'function') {
+    window.fetch = function () {
+      begin();
+      let p;
+      try { p = _fetch.apply(this, arguments); } catch (e) { end(); throw e; }
+      return p.then(r => { end(); return r; }, e => { end(); throw e; });
+    };
+  }
+
+  // ── 2. Cursor-following glow on buttons ─────────────────────────────────
+  const SEL = '.btn-red,.btn-ghost,.btn-orange,.pp-transport,.pp-extra,' +
+              '#pp-play,#pp-play-big,.nav-item,.lang-flag-btn';
+  function tag(root) {
+    try { (root || document).querySelectorAll(SEL).forEach(b => b.classList.add('fx-glow')); } catch (_) {}
+  }
+  document.addEventListener('mousemove', (e) => {
+    const t = e.target;
+    const b = t && t.closest ? t.closest('.fx-glow') : null;
+    if (!b) return;
+    const r = b.getBoundingClientRect();
+    if (!r.width) return;
+    b.style.setProperty('--mx', ((e.clientX - r.left) / r.width * 100) + '%');
+    b.style.setProperty('--my', ((e.clientY - r.top) / r.height * 100) + '%');
+  }, { passive: true });
+
+  function init() {
+    tag();
+    // Views/cards load dynamically — tag new buttons as they appear.
+    try {
+      const mo = new MutationObserver((muts) => {
+        for (const m of muts) for (const n of m.addedNodes) {
+          if (n.nodeType !== 1) continue;
+          if (n.matches && n.matches(SEL)) n.classList.add('fx-glow');
+          tag(n);
+        }
+      });
+      mo.observe(document.body, { childList: true, subtree: true });
+    } catch (_) {}
+  }
+  if (document.readyState !== 'loading') init();
+  else document.addEventListener('DOMContentLoaded', init);
+})();

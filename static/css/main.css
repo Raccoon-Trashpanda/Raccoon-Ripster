@@ -626,6 +626,24 @@ img[data-cover].loaded{
 .pp-time-sep{ color:var(--muted2); font-size:11px; }
 .pp-time-dur{ font-size:11px; color:var(--muted2); font-variant-numeric:tabular-nums; }
 
+/* ══ Top network-loading bar (NProgress-style, driven by a fetch() wrapper) ══ */
+#net-progress{
+  position:fixed; top:0; left:0; right:0; height:3px; z-index:99999;
+  transform:scaleX(0); transform-origin:0 50%; opacity:0;
+  background:linear-gradient(90deg, var(--red), #d8a4bf);
+  box-shadow:0 0 10px var(--red), 0 0 4px var(--red);
+  transition:transform .2s ease, opacity .3s ease; pointer-events:none;
+}
+/* ══ Cursor-following soft glow on buttons (tracks the mouse via --mx/--my) ══ */
+.fx-glow{ position:relative; }
+.fx-glow::after{
+  content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
+  background:radial-gradient(130px circle at var(--mx,50%) var(--my,50%),
+            rgba(255,255,255,.16), transparent 55%);
+  opacity:0; transition:opacity .18s ease;
+}
+.fx-glow:hover::after{ opacity:1; }
+
 /* ══ Quality pill ═════════════════════════════════════════════════════════ */
 #pp-quality-btn{ transition:background-color .15s ease, color .15s ease, border-color .15s ease; }
 #pp-quality-btn:hover{ color:var(--text); background:rgba(255,255,255,.10); border-color:var(--border2); }
