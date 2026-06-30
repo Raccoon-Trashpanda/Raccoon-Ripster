@@ -507,13 +507,13 @@ img[data-cover].loaded{
      border just right of the nav sidebar. Grows upward from the bottom for
      the track-list; capped height so it never reaches the top. */
   body.pp-side #preview-player{
-    bottom:0; left:220px; right:auto !important; top:auto !important;
+    bottom:0; right:0; left:auto !important; top:auto !important;
     width:344px; max-height:calc(100vh - 72px);
     border-radius:14px 14px 0 0;
     display:flex !important; flex-direction:column;
     border-top:1px solid var(--border);
-    border-right:1px solid var(--border);
-    box-shadow:0 -6px 34px rgba(0,0,0,.55), 8px -4px 34px rgba(0,0,0,.4);
+    border-left:1px solid var(--border);
+    box-shadow:0 -6px 34px rgba(0,0,0,.55), -8px -4px 34px rgba(0,0,0,.4);
   }
   /* expanded block holds the track-list and scrolls within the capped box */
   body.pp-side #pp-expanded{
@@ -545,7 +545,7 @@ img[data-cover].loaded{
   body.pp-side #pp-quality,
   body.pp-side #pp-vol-wrap{ display:none !important; }
   /* shift content right so it clears the 344px panel and stays scrollable */
-  body.pp-side .main{ padding-left:344px; transition:padding-left .18s ease; }
+  body.pp-side .main{ padding-right:344px; transition:padding-right .18s ease; }
 
   /* Collapsed dock open: reserve space so the last cards clear the 58px dock */
   .main[data-preview-open="1"] #sc-grid,
@@ -602,23 +602,37 @@ img[data-cover].loaded{
 
 /* ══ Three-zone mini bar — transport + extra buttons ══════════════════════ */
 .pp-transport{
-  width:30px; height:30px; border-radius:50%;
+  width:34px; height:34px; border-radius:50%;
   background:transparent; color:var(--muted); border:none; cursor:pointer;
-  font-size:15px; flex-shrink:0; padding:0;
+  font-size:17px; flex-shrink:0; padding:0;
   transition:transform .12s ease, color .15s ease, background-color .15s ease;
 }
 .pp-transport:hover{ color:var(--text); background:rgba(255,255,255,.07); }
 .pp-transport:active{ transform:scale(.9); }
 .pp-extra{
-  width:28px; height:28px; border-radius:50%;
+  width:31px; height:31px; border-radius:50%;
   background:transparent; color:var(--muted); border:1px solid var(--border);
-  cursor:pointer; font-size:12px; flex-shrink:0; padding:0;
+  cursor:pointer; font-size:13px; flex-shrink:0; padding:0;
   display:flex; align-items:center; justify-content:center;
   transition:transform .12s ease, color .15s ease,
              background-color .15s ease, border-color .15s ease;
 }
 .pp-extra:hover{ color:var(--text); background:rgba(255,255,255,.07); border-color:var(--border2); }
 .pp-extra:active{ transform:scale(.9); }
+
+/* ══ AIMP-style rectangular time readout (current = ms, then duration) ═════ */
+.pp-time-box{
+  display:inline-flex; align-items:baseline; gap:5px;
+  padding:4px 10px; border-radius:8px; flex-shrink:0; white-space:nowrap;
+  background:var(--surface2); border:1px solid var(--border);
+  font-family:var(--mono); line-height:1;
+}
+.pp-time-cur{
+  font-size:13px; font-weight:700; color:var(--text);
+  font-variant-numeric:tabular-nums; min-width:78px; text-align:right;
+}
+.pp-time-sep{ color:var(--muted2); font-size:11px; }
+.pp-time-dur{ font-size:11px; color:var(--muted2); font-variant-numeric:tabular-nums; }
 
 /* ══ Quality pill ═════════════════════════════════════════════════════════ */
 #pp-quality-btn{ transition:background-color .15s ease, color .15s ease, border-color .15s ease; }

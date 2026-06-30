@@ -987,6 +987,32 @@ setInterval(() => {
   _floatSyncFn?.();
 }, 250);
 
+// ── AIMP-style millisecond readout for the mini-bar current time ──────────────
+// Additive: a rAF loop owns #pp-cur and renders M:SS.mmm smoothly. The 250ms
+// ticks above still set pp-cur-big / fp-cur (M:SS) — this just overwrites the
+// mini box ~16ms later, so there's no fight and no risk to the tick logic.
+function fmtDurMs(sec){
+  if(!isFinite(sec)||sec<0) sec=0;
+  const m=Math.floor(sec/60), s=Math.floor(sec%60), ms=Math.floor((sec-Math.floor(sec))*1000);
+  return m+':'+String(s).padStart(2,'0')+'.'+String(ms).padStart(3,'0');
+}
+function _ppNowTime(){
+  try{ if(_waEnabled() && _WA && _WA.curSource) return {cur:_waCurrentTime(), loaded:true}; }catch(_){}
+  try{ const v=Preview&&Preview._fpsEl; if(v && v.src) return {cur:v.currentTime||0, loaded:true}; }catch(_){}
+  const a=document.getElementById('pp-audio'); if(a && a.src) return {cur:a.currentTime||0, loaded:true};
+  return {cur:0, loaded:false};
+}
+function _ppMsLoop(){
+  requestAnimationFrame(_ppMsLoop);
+  const box=document.getElementById('pp-cur'); if(!box) return;
+  const pv=document.getElementById('preview-player');
+  if(!pv || !pv.classList.contains('visible')) return;
+  if(_seekDragging) return;
+  const n=_ppNowTime(); if(!n.loaded) return;
+  box.textContent=fmtDurMs(n.cur);
+}
+requestAnimationFrame(_ppMsLoop);
+
 // Apply player-toggle changes live (called by Settings → Плеер).
 function _playerCfgChanged() {
   // Spin toggle is purely CSS — body class flips it.
