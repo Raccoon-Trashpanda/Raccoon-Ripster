@@ -1005,12 +1005,13 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
                                 shows the full-width cache, so no partial second band */
       background: transparent !important; box-shadow: none !important;
     }
-    #pp-fill {                /* played — brighter overlay up to the playhead, full height */
+    #pp-fill {                /* invisible width-carrier: only its right edge (the stick)
+                                 shows — no 'played' fill, so there's just ONE bar = position */
       height: 100% !important; top: 0 !important; transform: none !important;
       border-radius: 0 !important; box-shadow: none !important;
-      background: rgba(255,255,255,.30) !important;
+      background: transparent !important;
     }
-    #pp-fill::after {         /* PLAYHEAD — a soft vertical stick (палочка), always on */
+    #pp-fill::after {         /* PLAYHEAD — the single vertical position bar (палочка) */
       content:""; position:absolute; right:0; top:0; bottom:0; width:3px;
       transform: translateX(50%); border-radius:3px; pointer-events:none; z-index:3;
       background: var(--pp-svc, var(--red));
