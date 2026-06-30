@@ -1017,8 +1017,12 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
       background: var(--pp-svc, var(--red));
       box-shadow: 0 0 8px var(--pp-svc, rgba(226,75,74,.85));
     }
-    /* controls float above the progress surface; #pp-bar itself stays transparent */
-    #pp-bar { position: relative; z-index: 1; }
+    /* Controls float above the progress surface. #pp-bar passes clicks THROUGH its
+       empty areas to the seek layer below (so the whole dock scrubs, Yandex-style);
+       only the interactive controls capture their own clicks. */
+    #pp-bar { position: relative; z-index: 1; pointer-events: none; }
+    #pp-bar button, #pp-bar input, #pp-bar select, #pp-bar a,
+    #pp-bar #pp-art, #pp-bar #pp-mini-meta, #pp-bar #pp-quality { pointer-events: auto; }
 
     /* ══ DRAWER seek bar (#pp-progress-big) — a normal slim bar + a playhead stick. ══ */
     #pp-progress-big {
