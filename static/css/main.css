@@ -983,21 +983,30 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
        thumb; thin, soft-shadowed CACHE line. main.css is ?v-busted, so these
        !important rules override any stale inline styles from a cached index.html. ══ */
     #pp-progress, #pp-progress-big {
-      height: 8px !important; overflow: visible !important; border-radius: 4px !important;
+      height: 12px !important; overflow: hidden !important; border-radius: 6px !important;
       background: rgba(255,255,255,.13) !important;
+      transition: height .12s ease, background-color .15s ease !important;
     }
-    /* PLAYED — thick, service colour (background set by JS), soft glow. */
-    #pp-fill, #pp-fill-big, .fp-fill {
+    /* Hover → grow + brighten so it's obvious the strip is the scrubber (Yandex-style). */
+    #pp-progress:hover, #pp-progress-big:hover {
+      height: 16px !important; background: rgba(255,255,255,.20) !important;
+    }
+    /* PLAYED — flat bar filling the whole track height (NO thumb circle), service colour. */
+    #pp-fill, #pp-fill-big {
+      height: 100% !important; top: 0 !important; transform: none !important;
+      border-radius: 6px !important;
+      box-shadow: 0 0 8px var(--pp-svc, rgba(255,255,255,.35)) !important;
+    }
+    /* Fullscreen keeps the centred thin line + glowing thumb (unchanged). */
+    .fp-fill {
       height: 8px !important; top: 50% !important; transform: translateY(-50%) !important;
       border-radius: 4px !important;
       box-shadow: 0 0 8px var(--pp-svc, rgba(255,255,255,.45)),
                   0 0 2px var(--pp-svc, rgba(255,255,255,.65));
     }
-    /* THUMB — pseudo-element on the fill's right edge → tracks the playhead with
-       zero extra JS (fill width already = played %). White dot, service-colour ring. */
-    #pp-fill::after, #pp-fill-big::after, .fp-fill::after {
+    .fp-fill::after {
       content: ""; position: absolute; right: 0; top: 50%;
-      width: 10px; height: 10px; border-radius: 50%;
+      width: 12px; height: 12px; border-radius: 50%;
       transform: translate(50%, -50%);
       background: #fff;
       box-shadow: 0 0 0 2px var(--pp-svc, rgba(255,255,255,.30)),
