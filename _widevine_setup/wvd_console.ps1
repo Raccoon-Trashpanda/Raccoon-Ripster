@@ -18,6 +18,8 @@ $EMU    = "$SDK\emulator\emulator.exe"
 $SERIAL = "emulator-5554"
 $AVD    = "wvd"
 $IMAGE  = "system-images;android-30;google_apis;x86_64"
+$SDKM   = "$SDK\cmdline-tools\latest\bin\sdkmanager.bat"
+$AVDM   = "$SDK\cmdline-tools\latest\bin\avdmanager.bat"
 $FRIDA  = "$HERE\frida-server-x86_64"
 # Interpreter: dev .venv OR the bundled embeddable python\ that ships in the
 # installer. The old code only knew .venv -> on a real install keydive.exe was
@@ -155,6 +157,47 @@ function Ensure-KeyDive {
     return ($LASTEXITCODE -eq 0)
 }
 
+function Ensure-Sdk {
+    # platform-tools + emulator + system-image + the AEHD driver package. sdkmanager
+    # resumes partial downloads; runs elevated when Ripster itself is admin.
+    if((Test-Path $ADB) -and (Test-Path "$SDK\system-images\android-30\google_apis\x86_64\system.img")){ return $true }
+    if(-not (Test-Path $SDKM)){ Write-Host "!! cmdline-tools missing - run the in-app Setup (JRE + SDK tools) first." -ForegroundColor Red; return $false }
+    Write-Host "Installing SDK components (platform-tools, emulator, system-image, AEHD)..." -ForegroundColor Cyan
+    cmd /c "echo y| `"$SDKM`" `"platform-tools`" `"emulator`" `"$IMAGE`" `"extras;google;Android_Emulator_Hypervisor_Driver`""
+    return ((Test-Path $ADB) -and (Test-Path "$SDK\system-images\android-30\google_apis\x86_64\system.img"))
+}
+
+function Ensure-Aehd {
+    # Hypervisor driver — the one admin-gated step. With Ripster running elevated
+    # (PrivilegesRequired=admin / uac_admin) this installs without a separate UAC.
+    if((sc.exe query aehd 2>$null | Select-String "RUNNING")){ return $true }
+    $inst = "$SDK\extras\google\Android_Emulator_Hypervisor_Driver\silent_install.bat"
+    if(-not (Test-Path $inst)){ Write-Host "AEHD installer missing - run Ensure-Sdk first." -ForegroundColor Red; return $false }
+    Write-Host "Installing AEHD hypervisor driver..." -ForegroundColor Cyan
+    Push-Location (Split-Path $inst); cmd /c "`"$inst`""; Pop-Location
+    return ((sc.exe query aehd 2>$null | Select-String "RUNNING") -ne $null)
+}
+
+function Ensure-Avd {
+    if(Test-Path "$env:USERPROFILE\.android\avd\$AVD.avd"){ return $true }
+    if(-not (Test-Path $AVDM)){ Write-Host "avdmanager missing - run the in-app Setup first." -ForegroundColor Red; return $false }
+    Write-Host "Creating AVD '$AVD'..." -ForegroundColor Cyan
+    cmd /c "echo no| `"$AVDM`" create avd -n $AVD -k `"$IMAGE`" --force"
+    return (Test-Path "$env:USERPROFILE\.android\avd\$AVD.avd")
+}
+
+function One-Click {
+    # The whole pipeline in one go: provision everything that can be auto-installed,
+    # then boot -> extract -> verify. Assumes admin (Ripster runs elevated).
+    if(Test-Path $WVDDST){ Write-Host "device.wvd already present: $WVDDST" -ForegroundColor Green; return }
+    if(-not (Ensure-Sdk)){  Write-Host "ONE_CLICK: FAIL sdk"  -ForegroundColor Red; return }
+    if(-not (Ensure-Aehd)){ Write-Host "ONE_CLICK: FAIL aehd (needs admin)" -ForegroundColor Red; return }
+    if(-not (Ensure-Avd)){  Write-Host "ONE_CLICK: FAIL avd"  -ForegroundColor Red; return }
+    Extract-Wvd                                  # boot -> KeyDive -> auto Install-Wvd
+    if(Test-Path $WVDDST){ Verify-Wvd; Write-Host "ONE_CLICK: OK $WVDDST" -ForegroundColor Green }
+    else { Write-Host "ONE_CLICK: FAIL extract (KeyDive produced no .wvd)" -ForegroundColor Red }
+}
+
 function Extract-Wvd {
     if(-not (Boot-Emulator)){ return }
     if(-not (Ensure-KeyDive)){ Write-Host "KeyDive install failed (pip) - check your internet." -ForegroundColor Red; return }
@@ -197,7 +240,10 @@ if($Auto){
     Write-Host ("=== AUTO MINT run: {0} ===" -f (Get-Date)) -ForegroundColor DarkCyan
     Show-Status
     if(Test-Path $WVDDST){ Write-Host "AUTO_RESULT: OK (device.wvd already present) $WVDDST" -ForegroundColor Green; exit 0 }
-    Write-Host "=== AUTO MINT: boot -> extract -> install -> verify -> stop ===" -ForegroundColor Cyan
+    Write-Host "=== AUTO MINT: provision -> boot -> extract -> install -> verify -> stop ===" -ForegroundColor Cyan
+    if(-not (Ensure-Sdk)){  Write-Host "AUTO_RESULT: FAIL sdk"  -ForegroundColor Red; exit 2 }
+    if(-not (Ensure-Aehd)){ Write-Host "AUTO_RESULT: FAIL aehd (needs admin)" -ForegroundColor Red; exit 2 }
+    if(-not (Ensure-Avd)){  Write-Host "AUTO_RESULT: FAIL avd"  -ForegroundColor Red; exit 2 }
     if(-not (Boot-Emulator)){ Write-Host "AUTO_RESULT: FAIL boot (AEHD/emulator)" -ForegroundColor Red; exit 2 }
     Extract-Wvd                              # KeyDive -> auto Install-Wvd
     if(-not (Test-Path $WVDDST)){
@@ -213,6 +259,7 @@ if($Auto){
 # ---- menu loop ----
 while($true){
     Show-Status
+    Write-Host "  [9] ONE-CLICK: install everything + extract device.wvd" -ForegroundColor Green
     Write-Host "  [1] Boot emulator + frida-server"
     Write-Host "  [2] Extract device.wvd (KeyDive)  -> auto-installs"
     Write-Host "  [3] Install last extracted .wvd into Ripster"
@@ -221,6 +268,7 @@ while($true){
     Write-Host "  [0] Exit"
     $c = Read-Host "`nChoose"
     switch($c){
+        "9"{ One-Click }
         "1"{ Boot-Emulator }
         "2"{ Extract-Wvd }
         "3"{ Install-Wvd }
