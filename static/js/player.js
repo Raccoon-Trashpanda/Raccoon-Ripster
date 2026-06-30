@@ -2072,12 +2072,17 @@ function togglePlayerExpanded() {
   const btn = document.getElementById('pp-expand-btn');
   const main = document.querySelector('.main');
   if (!bar || !exp) return;
+  // The dock has backdrop-filter, which (in Chromium) traps position:fixed
+  // descendants. Re-parent the drawer to <body> so it docks to the viewport.
+  if (exp.parentElement !== document.body) document.body.appendChild(exp);
   const opening = exp.style.display === 'none';
   exp.style.display = opening ? '' : 'none';
   if (btn) btn.classList.toggle('expanded', opening);
   // Desktop: expanded view becomes an AIMP-style vertical panel docked on the
   // left border between the nav sidebar and the content (CSS body.pp-side).
   document.body.classList.toggle('pp-side', opening);
+  const bd = document.getElementById('pp-backdrop');
+  if (bd) bd.style.display = opening ? 'block' : 'none';
   if (main) {
     if (opening) {
       main.removeAttribute('data-preview-open');
@@ -2733,6 +2738,7 @@ function closePreview() {
   if (exp)   exp.style.display = 'none';
   if (btn)   btn.classList.remove('expanded');
   document.body.classList.remove('pp-side');
+  { const bd = document.getElementById('pp-backdrop'); if (bd) bd.style.display = 'none'; }
   if (main)  { main.removeAttribute('data-preview-open'); main.removeAttribute('data-preview-expanded'); }
   // Also close fullscreen player if open
   if (typeof fpClose === 'function' && _FP && _FP.open) fpClose();

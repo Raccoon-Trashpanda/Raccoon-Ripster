@@ -506,46 +506,38 @@ img[data-cover].loaded{
   /* Compact AIMP-style window anchored to the bottom-LEFT corner, on the
      border just right of the nav sidebar. Grows upward from the bottom for
      the track-list; capped height so it never reaches the top. */
-  body.pp-side #preview-player{
-    bottom:0; right:0; left:auto !important; top:auto !important;
-    width:344px; max-height:calc(100vh - 72px);
-    border-radius:14px 14px 0 0;
-    display:flex !important; flex-direction:column;
-    border-top:1px solid var(--border);
-    border-left:1px solid var(--border);
-    box-shadow:0 -6px 34px rgba(0,0,0,.55), -8px -4px 34px rgba(0,0,0,.4);
-  }
-  /* expanded block holds the track-list and scrolls within the capped box */
+  /* Expanded "now playing" → a right-side DRAWER CARD, styled like the mix
+     detail panel (#detail-panel): big cover on top, controls, then the
+     track-list, sliding over the content with a backdrop (#pp-backdrop). The
+     bottom dock stays a normal collapsed bar underneath. body.pp-side in JS. */
   body.pp-side #pp-expanded{
-    display:flex !important; flex-direction:column; gap:12px;
-    flex:1 1 auto; min-height:0;
-    padding:16px 16px 10px !important; border-bottom:none !important;
+    display:flex !important; flex-direction:column; gap:14px;
+    position:fixed; top:0; right:0; bottom:0;
+    width:min(440px,100vw);
+    background:var(--bg);
+    border-left:1px solid var(--border);
+    box-shadow:-16px 0 60px rgba(0,0,0,.85);
+    z-index:9550; overflow-y:auto;
+    padding:26px 22px 96px !important; border-bottom:none !important;
+    animation:ppDrawerIn .22s ease;
   }
-  /* the cover+meta+controls row → stacked vertically, centered cover */
+  /* cover+meta+controls → stacked vertically, big centered cover (card look) */
   body.pp-side #pp-expanded > div:first-child{
     flex-direction:column !important; align-items:stretch !important;
-    gap:10px !important; max-width:none !important; margin:0 !important;
+    gap:14px !important; max-width:none !important; margin:0 !important;
     flex:0 0 auto;
   }
   body.pp-side #pp-art-big{
-    width:140px !important; height:140px !important; align-self:center;
-    font-size:44px !important;
+    width:200px !important; height:200px !important; align-self:center;
+    font-size:56px !important; border-radius:16px !important;
   }
-  /* track-list fills the remaining height and scrolls */
+  /* track-list fills the remaining height and scrolls inside the drawer */
   body.pp-side #pp-chapters-wrap{
     max-width:none !important; margin:0 !important;
     flex:1 1 auto; min-height:0; display:flex; flex-direction:column;
   }
   body.pp-side #pp-chapters{ max-height:none !important; flex:1 1 auto; }
-  /* compact the bottom mini-bar — transport/meta/seek already live in the panel.
-     Hide the left + center zones and the quality/volume controls; keep only the
-     window-action extras (expand / float / local / close) in the right zone. */
-  body.pp-side .pp-zone-left,
-  body.pp-side .pp-zone-center,
-  body.pp-side #pp-quality,
-  body.pp-side #pp-vol-wrap{ display:none !important; }
-  /* shift content right so it clears the 344px panel and stays scrollable */
-  body.pp-side .main{ padding-right:344px; transition:padding-right .18s ease; }
+  @keyframes ppDrawerIn{ from{ transform:translateX(40px); opacity:.4 } to{ transform:translateX(0); opacity:1 } }
 
   /* Collapsed dock open: reserve space so the last cards clear the 58px dock */
   .main[data-preview-open="1"] #sc-grid,
