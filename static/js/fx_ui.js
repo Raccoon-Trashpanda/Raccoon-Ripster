@@ -8,7 +8,7 @@
   'use strict';
 
   // ── 1. Top network loading bar ──────────────────────────────────────────
-  let inflight = 0, val = 0, timer = null, bar = null;
+  let inflight = 0, val = 0, timer = null, startT = null, shown = false, bar = null;
   function el() { if (!bar) bar = document.getElementById('net-progress'); return bar; }
   function paint() { const b = el(); if (b) { b.style.transform = 'scaleX(' + val + ')'; b.style.opacity = '1'; } }
   function trickle() {
@@ -18,25 +18,33 @@
     paint();
     timer = setTimeout(trickle, 300);
   }
+  function show() {            // only fires if loading is STILL going after the delay
+    if (shown || inflight <= 0) return;
+    shown = true; val = 0.08; paint(); trickle();
+  }
   function begin() {
     inflight++;
-    if (inflight === 1) { val = 0.08; paint(); trickle(); }
+    // Debounce: don't flash the bar for quick background polls — only show it
+    // when a request is genuinely slow (still in flight after 280ms).
+    if (inflight === 1) { clearTimeout(startT); startT = setTimeout(show, 280); }
   }
   function end() {
     inflight = Math.max(0, inflight - 1);
     if (inflight !== 0) return;
-    clearTimeout(timer);
+    clearTimeout(startT); clearTimeout(timer);
+    if (!shown) return;       // fast poll finished before the bar ever appeared
     val = 1; paint();
     const b = el();
     setTimeout(() => {
-      if (!b) return;
+      if (!b) { shown = false; return; }
       b.style.opacity = '0';
       setTimeout(() => {
         b.style.transition = 'none';
         b.style.transform = 'scaleX(0)';
         requestAnimationFrame(() => { b.style.transition = ''; });
+        shown = false;
       }, 280);
-    }, 200);
+    }, 150);
   }
   const _fetch = window.fetch;
   if (typeof _fetch === 'function') {

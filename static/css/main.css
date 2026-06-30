@@ -993,20 +993,28 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
        thumb; thin, soft-shadowed CACHE line. main.css is ?v-busted, so these
        !important rules override any stale inline styles from a cached index.html. ══ */
     #pp-progress, #pp-progress-big {
-      height: 12px !important; overflow: hidden !important; border-radius: 6px !important;
-      background: rgba(255,255,255,.13) !important;
-      transition: height .12s ease, background-color .15s ease !important;
+      height: 10px !important; overflow: visible !important; border-radius: 999px !important;
+      background: rgba(255,255,255,.12) !important;
+      transition: height .12s ease !important;
     }
-    /* Hover → grow + brighten so it's obvious the strip is the scrubber (Yandex-style). */
-    #pp-progress:hover, #pp-progress-big:hover {
-      height: 16px !important; background: rgba(255,255,255,.20) !important;
-    }
-    /* PLAYED — flat bar filling the whole track height (NO thumb circle), service colour. */
+    #pp-progress:hover, #pp-progress-big:hover { height: 13px !important; }
+    /* PLAYED — flat service-colour tint up to the playhead (NO glow blob, clean). */
     #pp-fill, #pp-fill-big {
       height: 100% !important; top: 0 !important; transform: none !important;
-      border-radius: 6px !important;
-      box-shadow: 0 0 8px var(--pp-svc, rgba(255,255,255,.35)) !important;
+      border-radius: 999px !important; box-shadow: none !important;
+      background: var(--pp-svc, var(--red)) !important;
     }
+    /* PLAYHEAD — a soft, blurred dot at the current position (appears on hover;
+       not a hard ring). "Плавно мягкая точка". */
+    #pp-fill::after, #pp-fill-big::after {
+      content:""; position:absolute; right:0; top:50%;
+      width:11px; height:11px; border-radius:50%;
+      transform: translate(50%,-50%);
+      background:#fff; box-shadow:0 0 7px 1px rgba(255,255,255,.55);
+      opacity:0; transition:opacity .15s ease; pointer-events:none; z-index:6;
+    }
+    #pp-progress:hover #pp-fill::after,
+    #pp-progress-big:hover #pp-fill-big::after { opacity:1; }
     /* Fullscreen keeps the centred thin line + glowing thumb (unchanged). */
     .fp-fill {
       height: 8px !important; top: 50% !important; transform: translateY(-50%) !important;
@@ -1028,8 +1036,8 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
        portion loaded ahead of the playhead (Yandex-style single bar). */
     #pp-buffered, #pp-buffered-big {
       height: 100% !important; top: 0 !important; transform: none !important;
-      border-radius: 6px !important;
-      background: rgba(255,255,255,.20) !important;
+      border-radius: 999px !important;
+      background: rgba(255,255,255,.16) !important;
       box-shadow: none !important;
     }
     /* Fullscreen keeps the thin centred cache line. */
