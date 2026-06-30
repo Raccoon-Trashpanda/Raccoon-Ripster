@@ -578,17 +578,8 @@ img[data-cover].loaded{
   border-radius:50%;
 }
 
-/* Progress bars: gentle glow + slightly taller hit area on hover for easier seek. */
-#pp-progress, #pp-progress-big{
-  transition:height .12s ease, box-shadow .15s ease;
-}
-#pp-progress:hover, #pp-progress-big:hover{
-  box-shadow:0 0 0 4px rgba(192,132,160,.10);
-}
-#pp-fill, #pp-fill-big{
-  background:linear-gradient(90deg, var(--red), #d8a4bf) !important;
-  box-shadow:0 0 8px rgba(192,132,160,.5);
-}
+/* (Old seek-bar rules removed — the full-dock cache + position-stick design lives
+   in the !important block further down and is the single source of truth.) */
 
 /* Expanded-panel volume slider stays horizontal (mini-bar volume is vertical, below). */
 #pp-vol-big{ accent-color:var(--red); height:4px; }
