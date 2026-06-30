@@ -1005,8 +1005,17 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
                   0 1px 5px rgba(0,0,0,.5);
       pointer-events: none; z-index: 5;
     }
-    /* CACHE — thinner than the played line, rounded, soft drop shadow. */
-    #pp-buffered, #pp-buffered-big, #fp-buffered {
+    /* CACHE — folded into the same track as a subtle full-height band behind the
+       fill (NOT a separate second line). Lighter than the unplayed track = the
+       portion loaded ahead of the playhead (Yandex-style single bar). */
+    #pp-buffered, #pp-buffered-big {
+      height: 100% !important; top: 0 !important; transform: none !important;
+      border-radius: 6px !important;
+      background: rgba(255,255,255,.20) !important;
+      box-shadow: none !important;
+    }
+    /* Fullscreen keeps the thin centred cache line. */
+    #fp-buffered {
       height: 3px !important; top: 50% !important; transform: translateY(-50%) !important;
       border-radius: 2px !important;
       background: rgba(255,255,255,.26) !important;
