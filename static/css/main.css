@@ -996,20 +996,19 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
     /* ══ MINI dock seek = the WHOLE player surface (Yandex-style). Cache + played
        fill the entire dock height (top edge → bottom of the window), full width,
        BEHIND the controls; a thin vertical STICK marks the playhead. ══ */
-    #pp-progress {
+    #pp-progress {            /* the light CACHE bar = the whole dock, full width */
       position: absolute !important; inset: 0 !important; height: auto !important;
-      background: transparent !important; border-radius: 0 !important;
+      background: rgba(255,255,255,.055) !important; border-radius: 0 !important;
       overflow: hidden !important; z-index: 0 !important;
     }
-    #pp-buffered {            /* cache — light, full dock height, width = loaded % */
-      height: 100% !important; top: 0 !important; transform: none !important;
-      border-radius: 0 !important; box-shadow: none !important;
-      background: rgba(255,255,255,.05) !important;
+    #pp-buffered {            /* network-buffered band hidden — the base above already
+                                shows the full-width cache, so no partial second band */
+      background: transparent !important; box-shadow: none !important;
     }
-    #pp-fill {                /* played — a touch brighter than cache, full height */
+    #pp-fill {                /* played — brighter overlay up to the playhead, full height */
       height: 100% !important; top: 0 !important; transform: none !important;
       border-radius: 0 !important; box-shadow: none !important;
-      background: rgba(255,255,255,.10) !important;
+      background: rgba(255,255,255,.14) !important;
     }
     #pp-fill::after {         /* PLAYHEAD — a soft vertical stick (палочка), always on */
       content:""; position:absolute; right:0; top:0; bottom:0; width:2px;
