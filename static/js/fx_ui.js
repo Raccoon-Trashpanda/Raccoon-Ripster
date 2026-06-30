@@ -46,9 +46,15 @@
       }, 280);
     }, 150);
   }
+  // Background status/queue polls run every few seconds — they must NOT flash
+  // the bar. Only genuine content/navigation loads drive it.
+  const SKIP = /(\/api\/queue|status|releases|telemetry|wrapper-status|wrapper\/logs|\/ping)/i;
   const _fetch = window.fetch;
   if (typeof _fetch === 'function') {
-    window.fetch = function () {
+    window.fetch = function (input) {
+      let url = '';
+      try { url = typeof input === 'string' ? input : (input && input.url) || ''; } catch (_) {}
+      if (SKIP.test(url)) return _fetch.apply(this, arguments);   // background poll — no bar
       begin();
       let p;
       try { p = _fetch.apply(this, arguments); } catch (e) { end(); throw e; }

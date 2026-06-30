@@ -997,9 +997,13 @@ function fmtDurMs(sec){
   return m+':'+String(s).padStart(2,'0')+'.'+String(ms).padStart(3,'0');
 }
 function _ppNowTime(){
-  try{ if(_waEnabled() && _WA && _WA.curSource) return {cur:_waCurrentTime(), loaded:true}; }catch(_){}
-  try{ const v=Preview&&Preview._fpsEl; if(v && v.src) return {cur:v.currentTime||0, loaded:true}; }catch(_){}
-  const a=document.getElementById('pp-audio'); if(a && a.src) return {cur:a.currentTime||0, loaded:true};
+  // Only an ACTIVELY PLAYING source owns #pp-cur. Critically, BBC plays through a
+  // separate <audio id="bbc-audio"> (its own ontimeupdate drives the time); if we
+  // read a paused pp-audio with a stale src here we'd overwrite — and freeze — the
+  // BBC clock. The !paused guards prevent that.
+  try{ if(_waEnabled() && _WA && _WA.curSource && !_waIsPaused()) return {cur:_waCurrentTime(), loaded:true}; }catch(_){}
+  try{ const v=Preview&&Preview._fpsEl; if(v && v.src && !v.paused) return {cur:v.currentTime||0, loaded:true}; }catch(_){}
+  const a=document.getElementById('pp-audio'); if(a && a.src && !a.paused) return {cur:a.currentTime||0, loaded:true};
   return {cur:0, loaded:false};
 }
 function _ppMsLoop(){
