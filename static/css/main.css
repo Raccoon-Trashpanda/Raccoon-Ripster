@@ -998,7 +998,7 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
        BEHIND the controls; a thin vertical STICK marks the playhead. ══ */
     #pp-progress {            /* the light CACHE bar = the whole dock, full width */
       position: absolute !important; inset: 0 !important; height: auto !important;
-      background: rgba(255,255,255,.085) !important; border-radius: 0 !important;
+      background: rgba(255,255,255,.13) !important; border-radius: 0 !important;
       overflow: hidden !important; z-index: 0 !important;
     }
     #pp-buffered {            /* network-buffered band hidden — the base above already
@@ -1008,13 +1008,13 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
     #pp-fill {                /* played — brighter overlay up to the playhead, full height */
       height: 100% !important; top: 0 !important; transform: none !important;
       border-radius: 0 !important; box-shadow: none !important;
-      background: rgba(255,255,255,.20) !important;
+      background: rgba(255,255,255,.30) !important;
     }
     #pp-fill::after {         /* PLAYHEAD — a soft vertical stick (палочка), always on */
-      content:""; position:absolute; right:0; top:0; bottom:0; width:2px;
-      transform: translateX(50%); border-radius:2px; pointer-events:none; z-index:3;
+      content:""; position:absolute; right:0; top:0; bottom:0; width:3px;
+      transform: translateX(50%); border-radius:3px; pointer-events:none; z-index:3;
       background: var(--pp-svc, var(--red));
-      box-shadow: 0 0 8px var(--pp-svc, rgba(226,75,74,.85));
+      box-shadow: 0 0 10px 1px var(--pp-svc, rgba(226,75,74,.9));
     }
     /* Controls float above the progress surface. #pp-bar passes clicks THROUGH its
        empty areas to the seek layer below (so the whole dock scrubs, Yandex-style);
