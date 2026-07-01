@@ -301,8 +301,13 @@ async function bbcPlay(pid, vpid, title, artist, art) {
   //    NOT through pp-audio — pausing pp-audio alone leaves it running under the
   //    BBC stream, causing double audio + its UI tick overwriting the player with
   //    the streaming-service track). Hard-stop the source so it can't auto-advance.
+  // ALWAYS hard-stop pp-audio — not only when it's already playing. A service
+  // preview (esp. Tidal's segment-concat stream) can still be BUFFERING when the
+  // user hits a BBC mix: pp-audio is paused now but has a pending play() that
+  // fires when the stream fills → Tidal then plays OVER the BBC mix. Clearing the
+  // src cancels that pending load. (See the "Tidal plays together with BBC" report.)
   const ppAudio = document.getElementById('pp-audio');
-  if (ppAudio && !ppAudio.paused) { ppAudio.pause(); ppAudio.removeAttribute('src'); ppAudio.load(); }
+  if (ppAudio) { try { ppAudio.pause(); } catch {} ppAudio.removeAttribute('src'); try { ppAudio.load(); } catch {} }
   try {
     if (typeof _WA !== 'undefined' && _WA.curSource) {
       try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch {}
@@ -410,7 +415,7 @@ function _bbcStartStream(url) {
       audio.removeEventListener('loadedmetadata', _r);
       if (audio.duration && _bbcResumeAt < audio.duration - 20) {
         try { audio.currentTime = _bbcResumeAt; } catch(_) {}
-        toast(`▶ Продолжаю с ${_bbcFmtDur(_bbcResumeAt)}`, 'var(--muted)', '', 2600);
+        toast(`▶ Продолжаю с ${_bbcFmtDur(_bbcResumeAt)}`, 'var(--muted)', 2600);
       }
     });
   }

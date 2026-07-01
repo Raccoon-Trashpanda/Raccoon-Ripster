@@ -745,7 +745,7 @@ async function setStreamQuality(q) {
       audio.addEventListener('loadedmetadata', seekOnce);
       await _playPreviewAt(Preview.idx);
     }
-    if (typeof toast === 'function') toast(`Качество: ${_qualityShortLabel(item.service, q)}`, 'var(--green)', '', 2500);
+    if (typeof toast === 'function') toast(`Качество: ${_qualityShortLabel(item.service, q)}`, 'var(--green)', 2500);
   } catch (e) {
     console.warn('[quality] switch failed:', e?.message);
     if (typeof toast === 'function') toast('Не удалось переключить качество', 'var(--red)');
@@ -1013,7 +1013,11 @@ function _ppMsLoop(){
   if(!pv || !pv.classList.contains('visible')) return;
   if(_seekDragging) return;
   const n=_ppNowTime(); if(!n.loaded) return;
-  box.textContent=fmtDurMs(n.cur);
+  // Split the milliseconds into a smaller, dimmer span so the M:SS part stays
+  // large + readable while the rapidly-changing .mmm doesn't turn the whole
+  // readout into an unreadable blur.
+  const s=fmtDurMs(n.cur); const i=s.lastIndexOf('.');
+  box.innerHTML = i>0 ? s.slice(0,i)+'<span class="pp-ms">'+s.slice(i)+'</span>' : s;
 }
 requestAnimationFrame(_ppMsLoop);
 
@@ -1430,7 +1434,7 @@ function _setupAudioEvents() {
         '/api/stream/qobuz/':  'Qobuz stream error — проверь токен (Settings → Qobuz)',
       };
       const hint = Object.entries(svcHints).find(([k]) => (item.url || '').includes(k));
-      toast(hint ? hint[1] : 'Ошибка воспроизведения аудио', 'var(--red)', '', 5000);
+      toast(hint ? hint[1] : 'Ошибка воспроизведения аудио', 'var(--red)', 5000);
       const btn = document.getElementById('pp-play'); if(btn) btn.textContent = '▶';
       const btnB = document.getElementById('pp-play-big'); if(btnB) btnB.textContent = '▶';
     }, 900);
@@ -1441,6 +1445,13 @@ async function _playPreviewAt(idx) {
   const item  = Preview.queue[idx];
   console.log('[_playAt]', idx, {hasItem: !!item, hasUrl: !!item?.url, svc: item?.service, id: item?.id});
   if (!item) return;
+  // Play-generation guard: resolving a stream URL is async (await fetch). If the
+  // user CLOSES the player (or switches tracks) DURING that await, the old code
+  // still ran audio.play() when the fetch resolved → "closed the player but the
+  // Tidal track keeps playing". Bump the generation on every start; closePreview
+  // bumps it too. After each await we bail if a newer play/close superseded us.
+  Preview._playGen = (Preview._playGen || 0) + 1;
+  const _gen = Preview._playGen;
   // Refresh the in-bar quality pill for this track's service (options + label).
   try { _updateQualityPill(item); } catch (_) {}
   // Suppress stale `ended`/`error` events that some browsers fire when HLS.js
@@ -1627,6 +1638,11 @@ async function _playPreviewAt(idx) {
     }
   }
 
+  // The player was closed or another track started while we were resolving the
+  // stream URL — do NOT start this (superseded) playback. Prevents the "closed
+  // the player but a Tidal track still plays" race.
+  if (_gen !== Preview._playGen) return;
+
   if (item.format === 'drm-hls-cbc' || item.format === 'drm-hls-ctr') {
     _scDrmHls(audio, item, playBtn, playBtnB);
   } else {
@@ -1641,7 +1657,7 @@ async function _playPreviewAt(idx) {
         audio.removeEventListener('loadedmetadata', _seek);
         if (audio.duration && audio.duration > 600 && _resumeAt < audio.duration - 20) {
           try { audio.currentTime = _resumeAt; } catch(_) {}
-          toast(`▶ Продолжаю с ${fmtDur(_resumeAt)}`, 'var(--muted)', '', 2600);
+          toast(`▶ Продолжаю с ${fmtDur(_resumeAt)}`, 'var(--muted)', 2600);
         }
       });
     }
@@ -2729,6 +2745,9 @@ window.addEventListener('load', () => {
 });
 
 function closePreview() {
+  // Invalidate any in-flight _playPreviewAt (a stream URL still resolving) so it
+  // can't start playback after we've closed — the "closed but still playing" bug.
+  Preview._playGen = (Preview._playGen || 0) + 1;
   if (Preview.mode === 'bbc') { bbcStop(); return; }
   const audio = document.getElementById('pp-audio');
   const bar   = document.getElementById('preview-player');

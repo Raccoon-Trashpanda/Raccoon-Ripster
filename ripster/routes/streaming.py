@@ -254,14 +254,11 @@ async def stream_qobuz(track_id: str, request: Request, format_id: int = 27,
 
 # ── Tidal ─────────────────────────────────────────────────────────────────────
 
-@router.get("/api/stream/tidal/{track_id}")
-async def stream_tidal(track_id: str, request: Request, quality: str = "LOSSLESS",
-                       name: str = "", artist: str = ""):
-    """Return a Tidal stream URL for the given track_id."""
-    # Use the AUTO-REFRESHING token (minted from the OrpheusDL TV refresh_token,
-    # cached ~4h) exactly like search/releases do. The pasted `tidal-token` dies in
-    # ~16h and can't be refreshed, which made previews constantly fail with
-    # "токен истёк" and feel like the token "doesn't save". Fall back to the pasted one.
+async def _tidal_stream_token(track_id: str) -> tuple[str, str]:
+    """(access_token, countryCode) — prefer the AUTO-REFRESHING OrpheusDL TV token
+    (minted from a long-lived refresh_token, cached ~4h), fall back to the pasted
+    `tidal-token`. The pasted token dies in ~16h; the refresh path never needs a
+    manual re-login."""
     try:
         from ripster.engines.tidal import _tidal_token_country
         token, country = await _tidal_token_country(_cfg)
@@ -270,51 +267,175 @@ async def stream_tidal(track_id: str, request: Request, quality: str = "LOSSLESS
     if not token:
         token   = (_cfg.get("tidal-token") or "").strip()
         country = (_cfg.get("tidal-country") or "US").strip().upper()
-    country = (country or "US").upper()
+    return token, (country or "US").upper()
 
+
+# Tidal's audioquality codes for playbackinfopostpaywall (map our ids → theirs).
+_TIDAL_PBQ = {"low": "LOW", "high": "HIGH", "mp3": "HIGH", "aac": "HIGH",
+              "lossless": "LOSSLESS", "flac": "LOSSLESS",
+              "hires": "HI_RES_LOSSLESS", "hi_res": "HI_RES_LOSSLESS",
+              "master": "HI_RES_LOSSLESS", "hifi": "HI_RES_LOSSLESS"}
+
+
+async def _tidal_playbackinfo(track_id: str, quality: str, token: str, country: str):
+    """GET the current playbackinfopostpaywall (the v1 streamUrl endpoint was
+    RETIRED by Tidal — it now 401s 'Asset is not ready' for EVERY token, which
+    read as 'token expired' even though the token was fresh). Returns the httpx
+    response."""
+    aq = _TIDAL_PBQ.get((quality or "").lower(), "LOSSLESS")
+    async with httpx.AsyncClient(timeout=12) as c:
+        return await c.get(
+            f"https://api.tidal.com/v1/tracks/{track_id}/playbackinfopostpaywall",
+            params={"audioquality": aq, "playbackmode": "STREAM",
+                    "assetpresentation": "FULL", "countryCode": country},
+            headers={"Authorization": f"Bearer {token}"},
+        )
+
+
+def _tidal_parse_dash(xml: str) -> tuple[str, list[str]] | None:
+    """Parse a Tidal DASH manifest → (init_url, [segment_urls]). Tidal ships a
+    single Representation with a SegmentTemplate (init + $Number$ media) and a
+    SegmentTimeline of <S d=.. r=..> runs; total segments = Σ(r+1)."""
+    init  = re.search(r'initialization="([^"]+)"', xml)
+    media = re.search(r'media="([^"]+)"', xml)
+    if not (init and media):
+        return None
+    m = re.search(r'startNumber="(\d+)"', xml)
+    start_n = int(m.group(1)) if m else 1
+    total = 0
+    for stag in re.finditer(r'<S\b([^>]*?)/?>', xml):
+        attrs = stag.group(1)
+        if 'd="' not in attrs:
+            continue
+        rep = re.search(r'r="(\d+)"', attrs)
+        total += (int(rep.group(1)) + 1) if rep else 1
+    if total <= 0:
+        return None
+    tmpl = media.group(1)
+    segs = [tmpl.replace("$Number$", str(start_n + i)) for i in range(total)]
+    return init.group(1), segs
+
+
+@router.get("/api/stream/tidal/{track_id}")
+async def stream_tidal(track_id: str, request: Request, quality: str = "LOSSLESS",
+                       name: str = "", artist: str = ""):
+    """Resolve a Tidal track to a playable Ripster URL.
+
+    Tidal retired the old ``/v1/tracks/{id}/streamUrl`` endpoint (it 401s for any
+    token now). We use ``playbackinfopostpaywall`` instead — it returns a base64
+    DASH manifest (segmented fMP4/FLAC) or, for some tiers, a BTS manifest with a
+    direct URL. DASH is streamed through our segment-concat proxy so the browser
+    <audio> plays it as one progressive fMP4."""
+    import base64 as _b64
+    import json as _json
+    import urllib.parse as _up
+
+    token, country = await _tidal_stream_token(track_id)
     if not token:
         raise HTTPException(400, "Tidal token не настроен (Settings → Tidal)")
-
-    hdr = {"Authorization": f"Bearer {token}"}
     try:
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(
-                f"https://api.tidal.com/v1/tracks/{track_id}/streamUrl",
-                params={"soundQuality": quality, "countryCode": country},
-                headers=hdr,
-            )
-            if r.status_code == 401:
-                print(f"[tidal] stream 401 for track={track_id} — token expired", flush=True)
-                raise HTTPException(401,
-                    "Tidal: токен истёк. Обнови access_token в Settings → Tidal.")
-            if r.status_code == 404:
-                print(f"[tidal] stream 404 for track={track_id} (region/unavailable)", flush=True)
-                raise HTTPException(404,
-                    "Tidal: трек не найден или недоступен в твоём регионе.")
-            data = r.json()
-    except HTTPException:
-        raise
+        r = await _tidal_playbackinfo(track_id, quality, token, country)
     except Exception as e:
-        print(f"[tidal] stream API error for track={track_id}: {e}", flush=True)
+        print(f"[tidal] playbackinfo error for track={track_id}: {e}", flush=True)
         raise HTTPException(502, f"Tidal API error: {e}")
+    if r.status_code == 401:
+        print(f"[tidal] playbackinfo 401 for track={track_id} (token rejected)", flush=True)
+        raise HTTPException(401, "Tidal: сессия отклонена (401). Переустанови вход Tidal в Настройки → Tidal.")
+    if r.status_code in (404, 400):
+        print(f"[tidal] playbackinfo {r.status_code} for track={track_id}: {r.text[:120]}", flush=True)
+        raise HTTPException(404, "Tidal: трек недоступен в твоём регионе или снят.")
+    if r.status_code != 200:
+        print(f"[tidal] playbackinfo {r.status_code} for track={track_id}: {r.text[:120]}", flush=True)
+        raise HTTPException(502, f"Tidal API {r.status_code}")
 
-    url = data.get("url")
-    if not url:
-        errmsg = data.get("userMessage") or data.get("title") or "No URL"
-        print(f"[tidal] stream rejected for track={track_id}: {errmsg}", flush=True)
-        raise HTTPException(400, f"Tidal stream error: {errmsg}")
+    data = r.json()
+    mime_type = (data.get("manifestMimeType") or "").lower()
+    manifest  = data.get("manifest") or ""
+    try:
+        decoded = _b64.b64decode(manifest).decode("utf-8", errors="replace")
+    except Exception:
+        decoded = ""
 
-    codec = (data.get("codec") or "").upper()
-    fmt   = "flac" if "FLAC" in codec else ("aac" if "AAC" in codec or "M4A" in codec else "mp4")
-    mime  = f"audio/{fmt}"
-    _record_listen("tidal", request, track_id, name, artist, url)
+    # BTS manifest → direct CDN URL(s): stream through the generic /api/proxy.
+    if "bts" in mime_type:
+        try:
+            urls = _json.loads(decoded).get("urls") or []
+        except Exception:
+            urls = []
+        if urls:
+            url = urls[0]
+            _record_listen("tidal", request, track_id, name, artist, url)
+            enc = _b64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
+            return {"url": f"/api/proxy?u={enc}&svc=tidal&mime=audio/mp4"
+                           f"&name={_up.quote(name)}&artist={_up.quote(artist)}",
+                    "format": "mp4", "mime": "audio/mp4", "quality": quality}
+
+    # DASH manifest → segment-concat proxy (the common FLAC/lossless case).
+    if _tidal_parse_dash(decoded):
+        _record_listen("tidal", request, track_id, name, artist, "")
+        return {"url": f"/api/stream/tidal-dash/{track_id}"
+                       f"?quality={_up.quote(quality)}&name={_up.quote(name)}&artist={_up.quote(artist)}",
+                "format": "flac", "mime": "audio/mp4", "quality": quality}
+
+    print(f"[tidal] unsupported manifest ({mime_type}) for track={track_id}", flush=True)
+    raise HTTPException(502, "Tidal: неизвестный формат манифеста.")
+
+
+@router.get("/api/stream/tidal-dash/{track_id}")
+async def stream_tidal_dash(track_id: str, request: Request, quality: str = "LOSSLESS",
+                            name: str = "", artist: str = ""):
+    """Stream a Tidal DASH track as ONE progressive fMP4: fetch the init segment
+    then each media fragment in order and concatenate. Chromium/WebView2 play the
+    concatenated fMP4 (FLAC-in-MP4) via a plain <audio> element."""
+    token, country = await _tidal_stream_token(track_id)
+    if not token:
+        raise HTTPException(400, "Tidal token не настроен (Settings → Tidal)")
+    r = await _tidal_playbackinfo(track_id, quality, token, country)
+    if r.status_code != 200:
+        raise HTTPException(r.status_code if r.status_code in (401, 404) else 502,
+                            "Tidal: не удалось получить манифест.")
     import base64 as _b64
-    import urllib.parse as _up
-    enc = _b64.urlsafe_b64encode(url.encode()).decode().rstrip("=")
-    proxy_url = (f"/api/proxy?u={enc}&svc=tidal&mime={_up.quote(mime)}"
-                 f"&name={_up.quote(name)}&artist={_up.quote(artist)}")
-    return {"url": proxy_url, "format": fmt, "mime": mime,
-            "codec": codec, "quality": quality, "_cdn": url}
+    try:
+        decoded = _b64.b64decode(r.json().get("manifest") or "").decode("utf-8", errors="replace")
+    except Exception:
+        decoded = ""
+    parsed = _tidal_parse_dash(decoded)
+    if not parsed:
+        raise HTTPException(502, "Tidal: манифест не разобран.")
+    init_url, seg_urls = parsed
+
+    urls = [init_url] + seg_urls
+
+    async def _gen():
+        # Pipelined fetch: keep WINDOW segment requests in flight and yield them
+        # IN ORDER. Sequential one-at-a-time made the browser wait ~1–2 s to buffer
+        # enough to start ("Tidal opens slowly"); a small look-ahead window fills
+        # the buffer several× faster while preserving fMP4 fragment order.
+        import asyncio as _aio
+        WINDOW = 5
+        async with httpx.AsyncClient(timeout=None, headers={"User-Agent": _UA}) as c:
+            async def _fetch(i):
+                return await c.get(urls[i])
+            inflight: dict = {}
+            nxt = 0
+            for i in range(min(WINDOW, len(urls))):
+                inflight[i] = _aio.create_task(_fetch(i)); nxt = i + 1
+            for i in range(len(urls)):
+                try:
+                    resp = await inflight.pop(i)
+                except Exception as e:
+                    print(f"[tidal] dash segment error track={track_id}: {e}", flush=True)
+                    return
+                if resp.status_code != 200:
+                    print(f"[tidal] dash segment {resp.status_code} track={track_id}", flush=True)
+                    return
+                if nxt < len(urls):
+                    inflight[nxt] = _aio.create_task(_fetch(nxt)); nxt += 1
+                yield resp.content
+
+    return StreamingResponse(_gen(), media_type="audio/mp4",
+                             headers={"Cache-Control": "no-store",
+                                      "Accept-Ranges": "none"})
 
 
 # ── Deezer ────────────────────────────────────────────────────────────────────
