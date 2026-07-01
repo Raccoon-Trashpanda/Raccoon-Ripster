@@ -27,6 +27,24 @@ function _scDrmPreferGet() { return window._scDrmPrefer || 'ctr'; }
 
 // ── Widevine L3 device upload + status + peer wrapper ─────────────────────
 
+// Status chips carry their own tinted background + border (not a bare text
+// colour on a hardcoded rgba(0,0,0,.25) box) so they stay readable on BOTH
+// themes — a fixed dark box washed out the mint-green "OK" text on light
+// theme (green-on-muted-tan ≈ unreadable). Same pattern as the AMD-wrapper
+// status widget in cookies_ui.js.
+const _SC_CHIP = {
+  muted: { c: 'var(--muted)', bg: 'rgba(128,128,128,.10)', bd: 'var(--border)' },
+  ok:    { c: '#1f9d78',      bg: 'rgba(62,207,170,.14)',  bd: 'rgba(62,207,170,.35)' },
+  warn:  { c: '#b9760a',      bg: 'rgba(239,159,39,.14)',  bd: 'rgba(239,159,39,.35)' },
+  err:   { c: '#a8506d',      bg: 'rgba(192,132,160,.16)', bd: 'rgba(192,132,160,.35)' },
+};
+function _scChip(el, kind) {
+  const s = _SC_CHIP[kind] || _SC_CHIP.muted;
+  el.style.color = s.c;
+  el.style.background = s.bg;
+  el.style.border = '1px solid ' + s.bd;
+}
+
 async function _scCheckWvdWrapper() {
   const inp = document.getElementById('s-sc-wvd-wrapper');
   const out = document.getElementById('sc-wvd-wrapper-status');
@@ -44,14 +62,14 @@ async function _scCheckWvdWrapper() {
     const d = await r.json();
     if (d.ready) {
       out.textContent = ti('sc.wvdw_ready', { url });
-      out.style.color = '#3ecfaa';
+      out.style.color = '#1f9d78';
     } else {
       out.textContent = ti('sc.wvdw_fail', { err: d.error || t('sc.wvdw_noresp') });
-      out.style.color = '#c084a0';
+      out.style.color = '#a8506d';
     }
   } catch (e) {
     out.textContent = '✗ ' + e.message;
-    out.style.color = '#c084a0';
+    out.style.color = '#a8506d';
   }
 }
 
@@ -59,25 +77,25 @@ async function _scCheckWvd() {
   const out = document.getElementById('sc-wvd-status');
   if (!out) return;
   out.textContent = t('sc.wvd_checking');
-  out.style.color = 'var(--muted)';
+  _scChip(out, 'muted');
   try {
     const r = await fetch('/api/soundcloud/wvd-status');
     const d = await r.json();
     if (!d.installed) {
       out.textContent = t('sc.wvd_missing');
-      out.style.color = '#c084a0';
+      _scChip(out, 'err');
       return;
     }
     if (d.valid) {
       out.textContent = ti('sc.wvd_ok', { size: d.size });
-      out.style.color = '#3ecfaa';
+      _scChip(out, 'ok');
     } else {
       out.textContent = ti('sc.wvd_invalid', { err: d.error || '?' });
-      out.style.color = '#EF9F27';
+      _scChip(out, 'warn');
     }
   } catch (e) {
     out.textContent = t('sc.wvd_err') + e.message;
-    out.style.color = '#c084a0';
+    _scChip(out, 'err');
   }
 }
 
@@ -86,10 +104,10 @@ async function _scUploadWvd(input) {
   const file = input?.files?.[0];
   if (!file) return;
   if (file.size > 100000 || file.size < 100) {
-    if (out) { out.textContent = ti('sc.wvd_badsize', { size: file.size }); out.style.color = '#c084a0'; }
+    if (out) { out.textContent = ti('sc.wvd_badsize', { size: file.size }); _scChip(out, 'err'); }
     return;
   }
-  if (out) { out.textContent = t('sc.wvd_uploading'); out.style.color = 'var(--muted)'; }
+  if (out) { out.textContent = t('sc.wvd_uploading'); _scChip(out, 'muted'); }
   try {
     const buf = await file.arrayBuffer();
     const bytes = new Uint8Array(buf);
@@ -101,14 +119,14 @@ async function _scUploadWvd(input) {
     });
     const d = await r.json();
     if (d.ok) {
-      if (out) { out.textContent = ti('sc.wvd_installed', { size: d.size, path: d.path }); out.style.color = '#3ecfaa'; }
+      if (out) { out.textContent = ti('sc.wvd_installed', { size: d.size, path: d.path }); _scChip(out, 'ok'); }
       toast(t('sc.wvd_toast'), 'var(--green)');
       input.value = '';
     } else {
-      if (out) { out.textContent = '✗ ' + (d.detail || t('sc.wvd_err_generic')); out.style.color = '#c084a0'; }
+      if (out) { out.textContent = '✗ ' + (d.detail || t('sc.wvd_err_generic')); _scChip(out, 'err'); }
     }
   } catch (e) {
-    if (out) { out.textContent = '✗ ' + e.message; out.style.color = '#c084a0'; }
+    if (out) { out.textContent = '✗ ' + e.message; _scChip(out, 'err'); }
   }
 }
 

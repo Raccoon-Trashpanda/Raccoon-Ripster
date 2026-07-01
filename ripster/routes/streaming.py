@@ -258,8 +258,19 @@ async def stream_qobuz(track_id: str, request: Request, format_id: int = 27,
 async def stream_tidal(track_id: str, request: Request, quality: str = "LOSSLESS",
                        name: str = "", artist: str = ""):
     """Return a Tidal stream URL for the given track_id."""
-    token   = (_cfg.get("tidal-token") or "").strip()
-    country = (_cfg.get("tidal-country") or "US").strip().upper()
+    # Use the AUTO-REFRESHING token (minted from the OrpheusDL TV refresh_token,
+    # cached ~4h) exactly like search/releases do. The pasted `tidal-token` dies in
+    # ~16h and can't be refreshed, which made previews constantly fail with
+    # "токен истёк" and feel like the token "doesn't save". Fall back to the pasted one.
+    try:
+        from ripster.engines.tidal import _tidal_token_country
+        token, country = await _tidal_token_country(_cfg)
+    except Exception:
+        token, country = "", ""
+    if not token:
+        token   = (_cfg.get("tidal-token") or "").strip()
+        country = (_cfg.get("tidal-country") or "US").strip().upper()
+    country = (country or "US").upper()
 
     if not token:
         raise HTTPException(400, "Tidal token не настроен (Settings → Tidal)")

@@ -219,7 +219,12 @@ _OVERLAY_PATHS = ("ripster", "static", "app.py", "amd_runner.py",
                   # SoundCloud/Lucida CLI wrapper — small CODE, not a heavy dep (the
                   # heavy parts, lucida-src/build + node_modules, are built locally and
                   # NOT overlaid). Ship the runner so updates keep SoundCloud working.
-                  "tools/lucida/runner.mjs", "tools/lucida/package.json")
+                  "tools/lucida/runner.mjs", "tools/lucida/package.json",
+                  # Widevine L3 minter scripts (wvd.bat / wvd_console.ps1) — small CODE,
+                  # not the heavy toolchain (JRE/SDK/emulator stay untouched). Without
+                  # this, testers on an old install never receive minter pipeline fixes
+                  # (e.g. the -Auto one-click path) through self-update.
+                  "_widevine_setup")
 # Snapshot covers everything the overlay may write so rollback is exact.
 _SNAPSHOT_PATHS = _OVERLAY_PATHS
 

@@ -9,8 +9,11 @@
   --bg3:#1c1e2a;
   --surface:#1c1e2a;
   --surface2:#252836;
+  --surface3:#2a2a3a;   /* deepest raised surface (dropdown hover) — theme-aware */
   --border:#3a3a58;
   --border2:#4a4a68;
+  --accent:var(--red);  /* semantic accent (toasts, bot/admin links) → brand red per theme */
+  --fg:var(--text);     /* alias for text colour used by a few legacy rules */
   --text:#e8e8f8;
   --muted:#9090a8;
   --muted2:#6a6a8a;
@@ -27,6 +30,9 @@
   --sidebar-bg:#111318;
   --console-bg:rgba(0,0,0,.35);
   --player-bg:rgba(14,14,18,.97);
+  --panel:#1c1e2a;                    /* raised card/panel bg (telemetry, modals) — theme-aware */
+  --pp-cache:rgba(255,255,255,.14);   /* seek-bar cache shading — light tint shows on dark dock */
+  --pp-track:rgba(255,255,255,.06);   /* seek-bar empty-rail base */
   --font:system-ui,-apple-system,'Segoe UI',sans-serif;
   --mono:'JetBrains Mono','Fira Code','Cascadia Code',monospace;
   --display:system-ui,-apple-system,'Segoe UI',sans-serif;
@@ -52,6 +58,7 @@ html.light{
   --bg3:#e0e0e8;
   --surface:#ffffff;
   --surface2:#f0f0f5;
+  --surface3:#e8e8ee;   /* deepest raised surface (dropdown hover) — light (was falling back to dark #2a2a3a) */
   --border:rgba(0,0,0,.1);
   --border2:rgba(0,0,0,.16);
   --text:#18181f;
@@ -69,6 +76,10 @@ html.light{
   --console-bg:rgba(0,0,0,.04);
   --player-bg:rgba(244,244,248,.97);
   --shadow:0 10px 40px rgba(0,0,0,.12);
+  --panel:#ffffff;              /* raised card/panel bg (telemetry, modals) — light */
+  --pp-cache:rgba(0,0,0,.08);   /* seek-bar cache shading — dark tint shows on light dock */
+  --pp-track:rgba(0,0,0,.02);   /* seek-bar empty-rail base — barely-there so the dock
+                                   itself doesn't read as "darkened" (only the cache band shows) */
 }
 html{overflow:hidden;height:100%}
 html,body{background:var(--bg);color:var(--text);font-family:var(--font);overflow:hidden;height:100%}
@@ -589,20 +600,37 @@ img[data-cover].loaded{
   width:34px; height:34px; border-radius:50%;
   background:transparent; color:var(--muted); border:none; cursor:pointer;
   font-size:17px; flex-shrink:0; padding:0;
-  transition:transform .12s ease, color .15s ease, background-color .15s ease;
+  transition:transform .12s cubic-bezier(.3,1.5,.6,1), color .15s ease, background-color .15s ease;
 }
-.pp-transport:hover{ color:var(--text); background:rgba(255,255,255,.07); }
-.pp-transport:active{ transform:scale(.9); }
+.pp-transport:hover{ color:var(--text); background:rgba(255,255,255,.07); transform:scale(1.08); }
+.pp-transport:active{ transform:scale(.86); }
 .pp-extra{
   width:31px; height:31px; border-radius:50%;
   background:transparent; color:var(--muted); border:1px solid var(--border);
   cursor:pointer; font-size:13px; flex-shrink:0; padding:0;
   display:flex; align-items:center; justify-content:center;
-  transition:transform .12s ease, color .15s ease,
+  transition:transform .12s cubic-bezier(.3,1.5,.6,1), color .15s ease,
              background-color .15s ease, border-color .15s ease;
 }
-.pp-extra:hover{ color:var(--text); background:rgba(255,255,255,.07); border-color:var(--border2); }
-.pp-extra:active{ transform:scale(.9); }
+.pp-extra:hover{ color:var(--text); background:rgba(255,255,255,.07); border-color:var(--border2); transform:scale(1.08); }
+.pp-extra:active{ transform:scale(.86); }
+
+/* ══ Yandex-style glossy shimmer sweep — a soft diagonal highlight slides
+   across the button on hover, clipped to its (circular) shape. Purely
+   decorative, pointer-events:none so it never steals clicks. ══ */
+.pp-transport, .pp-extra, #pp-play, #pp-play-big{ position:relative; overflow:hidden; }
+.pp-transport::before, .pp-extra::before, #pp-play::before, #pp-play-big::before{
+  content:""; position:absolute; inset:-60%;
+  background:linear-gradient(115deg, transparent 42%, rgba(255,255,255,.5) 50%, transparent 58%);
+  background-repeat:no-repeat; background-size:220% 220%;
+  background-position:130% 130%; transition:background-position .55s ease;
+  pointer-events:none;
+}
+.pp-transport:hover::before, .pp-extra:hover::before,
+#pp-play:hover::before, #pp-play-big:hover::before{ background-position:-30% -30%; }
+#pp-play:hover, #pp-play-big:hover{ transform:scale(1.06); }
+#pp-play:active, #pp-play-big:active{ transform:scale(.92); }
+#pp-play, #pp-play-big{ transition:transform .12s cubic-bezier(.3,1.5,.6,1); }
 
 /* ══ AIMP-style rectangular time readout (current = ms, then duration) ═════ */
 .pp-time-box{
@@ -990,15 +1018,17 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
     #pp-progress {            /* seek surface = the whole dock; faint full-width/height
                                  shadow base so the cache strip is always visible end-to-end */
       position: absolute !important; inset: 0 !important; height: auto !important;
-      background: rgba(255,255,255,.06) !important; border-radius: 0 !important;
+      background: var(--pp-track) !important; border-radius: 0 !important;
       overflow: hidden !important; z-index: 0 !important;
     }
     #pp-buffered {            /* CACHE = a soft shadow band, FULL HEIGHT of the dock,
                                  width = cached/buffered amount (JS-driven). Doesn't touch
-                                 the controls — just shades the loaded portion behind them. */
+                                 the controls — just shades the loaded portion behind them.
+                                 Theme-aware (--pp-cache): a white tint is invisible on the
+                                 light-theme dock — was the "cache doesn't show" report. */
       height: 100% !important; top: 0 !important; transform: none !important;
       border-radius: 0 !important; box-shadow: none !important;
-      background: rgba(255,255,255,.11) !important;
+      background: var(--pp-cache) !important;
     }
     #pp-fill {                /* invisible width-carrier: only its right edge (the stick)
                                  shows — no 'played' fill, so there's just ONE bar = position */
@@ -1018,17 +1048,39 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
     #pp-bar { position: relative; z-index: 1; pointer-events: none; }
     #pp-bar button, #pp-bar input, #pp-bar select, #pp-bar a,
     #pp-bar #pp-art, #pp-bar #pp-mini-meta, #pp-bar #pp-quality { pointer-events: auto; }
+    /* True geometric centering for transport+time. The left zone (art+title,
+       often short) and right zone (quality pill + volume + 4 icon buttons, all
+       flex-shrink:0 — reliably wide) never have equal content width, so
+       balancing them via flex:1 1 0 on both sides always skewed the transport
+       controls left of the dock's real centre ("centering hromaet" report).
+       Taking the centre zone out of flex flow and pinning it to #pp-bar's true
+       midpoint fixes it regardless of what's in the side zones. */
+    .pp-zone-center {
+      position: absolute !important; left: 50% !important; top: 50% !important;
+      transform: translate(-50%, -50%) !important; flex: none !important;
+      display: flex !important; flex-direction: column !important;
+      align-items: center !important; gap: 3px !important;
+    }
+    .pp-transport-row { display: flex; align-items: center; gap: 14px; }
+    /* Compact readout for the stacked-above-buttons layout — the full-size
+       .pp-time-box chip (used standalone elsewhere) is too tall here. */
+    .pp-time-box-mini {
+      padding: 1px 8px !important; font-size: 10px !important;
+    }
+    .pp-time-box-mini .pp-time-cur { font-size: 10.5px !important; min-width: 56px !important; }
+    .pp-time-box-mini .pp-time-sep,
+    .pp-time-box-mini .pp-time-dur { font-size: 9.5px !important; }
 
     /* ══ DRAWER seek bar (#pp-progress-big) — a normal slim bar + a playhead stick. ══ */
     #pp-progress-big {
       height: 8px !important; overflow: visible !important; border-radius: 999px !important;
-      background: rgba(255,255,255,.12) !important; transition: height .12s ease !important;
+      background: var(--pp-track) !important; transition: height .12s ease !important;
     }
     #pp-progress-big:hover { height: 11px !important; }
     #pp-buffered-big {
       height: 100% !important; top: 0 !important; transform: none !important;
       border-radius: 999px !important; box-shadow: none !important;
-      background: rgba(255,255,255,.16) !important;
+      background: var(--pp-cache) !important;
     }
     #pp-fill-big {            /* no played fill — only its right edge (the stick) shows */
       height: 100% !important; top: 0 !important; transform: none !important;
@@ -1193,28 +1245,10 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
     }
     #pp-prev:disabled, #pp-next:disabled { opacity: .25; cursor: default; }
     #pp-expand-btn.expanded { transform: rotate(180deg); }
-    /* Bigger pointer hit-area on the seek bars (was 5px → impossible to grab on touch).
-       Visual stripe stays thin via a ::before pseudo; the wrapper extends invisibly. */
-    #pp-progress, #pp-progress-big {
-      height: 16px !important;
-      background: transparent !important;
-      position: relative;
-    }
-    #pp-progress::before, #pp-progress-big::before {
-      content: ""; position: absolute; left:0; right:0; top:50%;
-      transform: translateY(-50%); height:4px;
-      background: rgba(255,255,255,.12); border-radius: 2px;
-      pointer-events: none;
-    }
-    #pp-fill, #pp-fill-big {
-      position: absolute !important; left:0; top:50%;
-      transform: translateY(-50%);
-      height: 4px !important; border-radius: 2px;
-      pointer-events: none;
-    }
-    #pp-progress:hover::before, #pp-progress-big:hover::before {
-      background: rgba(255,255,255,.2);
-    }
+    /* (Old "bigger touch hit-area" #pp-progress/#pp-fill overrides removed — they
+       re-collapsed the full-dock cache + playhead-stick design above (~line 990)
+       back into a thin 16px strip pinned to the top. That design is the single
+       source of truth for #pp-progress/#pp-fill and #pp-progress-big/#pp-fill-big. */
     /* Unified soft-3D for dock buttons (inline-styled, would otherwise stay flat) */
     #pp-prev, #pp-next, #pp-mute, #pp-expand-btn, #pp-float-btn,
     #pp-mute-big {

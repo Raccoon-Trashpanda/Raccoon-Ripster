@@ -141,9 +141,15 @@ async def widevine_mint_wizard():
 
 @router.post("/api/widevine/mint-auto")
 async def widevine_mint_auto():
-    """Fully automated device.wvd mint — runs wvd_console.ps1 -Auto (boot emulator →
-    KeyDive extract → install → verify → stop) headless, streaming progress to the
-    Setup console. No interactive menu, no separate window."""
+    """Fully automated device.wvd mint — installs the JRE17 + cmdline-tools + SDK
+    packages + AEHD toolchain first (idempotent, skips anything already present),
+    THEN runs wvd_console.ps1 -Auto (boot emulator → KeyDive extract → install →
+    verify → stop) headless, streaming progress to the Setup console. No
+    interactive menu, no separate window — this is the single one-click button.
+    Previously this skipped straight to the ps1, which assumes cmdline-tools/
+    sdkmanager already exist — on a clean box nothing had ever installed them
+    (setup_widevine_toolchain lived behind an unreferenced endpoint), so
+    Ensure-Sdk failed immediately and every step after it stayed uninstalled."""
     if sys.platform != "win32":
         return {"ok": False, "error": "Авто-минт WVD доступен только на Windows."}
     ps1 = _base_dir / "_widevine_setup" / "wvd_console.ps1"
@@ -152,8 +158,12 @@ async def widevine_mint_auto():
 
     async def _do():
         await _setup.ilog("── Widevine L3: авто-минт device.wvd "
-                          "(boot → extract → install → verify) ──", "info")
+                          "(тулчейн → boot → extract → install → verify) ──", "info")
         await _setup.ilog("Займёт несколько минут (эмулятор + KeyDive). Не закрывай окно.", "info")
+        if not await _setup.setup_widevine_toolchain():
+            await _setup.ilog("✗ Тулчейн (JRE/SDK/AEHD) не установился — авто-минт остановлен, "
+                              "смотри лог выше.", "error")
+            return
         rc, out = await _setup.irun(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-File", str(ps1), "-Auto"],
