@@ -1,61 +1,8 @@
 // ======================================================================
-// CODER / CONVERTER / TAGGER (file converter + tag editor UI)
+// Coder + Tagger + shared folder tree
 // Extracted from app.js (mechanical split — same global functions, no behaviour
 // change). Loaded AFTER app.js in index.html, so it sees S/api/toast/etc.
 // ======================================================================
-
-async function coderMix(taskId) {
-  let p;
-  try { p = await api('POST','/api/coder/preview',{task_id:taskId}); }
-  catch(e){ toast('Ripster Coder: '+e.message,'var(--red)'); return; }
-  if(!p || !p.ok){ toast('Ripster Coder: '+((p&&p.detail)||'не удалось'),'var(--red)'); return; }
-
-  const warn = p.lossless ? '' :
-    `<div style="margin:8px 0;padding:8px 10px;background:rgba(255,85,0,.12);border:1px solid rgba(255,85,0,.35);border-radius:8px;font-size:11px;color:#ff7a3d;line-height:1.4">
-      ⚠ Источник <b>${p.codec||p.source_ext||'?'}</b> — lossy. У lossy-треков есть padding, на стыках возможны микро-щелчки. Для идеально бесшовного микса качай альбом в <b>ALAC/FLAC</b>.</div>`;
-
-  const ov = document.createElement('div');
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center';
-  ov.innerHTML = `
-    <div style="background:var(--panel,#1a1a1f);border:1px solid #ffffff18;border-radius:14px;padding:18px 20px;width:min(440px,92vw);box-shadow:0 20px 60px #000a">
-      <div style="font-size:15px;font-weight:700;color:#c9a0ff;margin-bottom:2px">🎚 Ripster Coder</div>
-      <div style="font-size:11px;color:#888;margin-bottom:12px">Склейка ${p.count} треков → один файл + CUE → <code>${p.out_dir}</code></div>
-      <label style="font-size:11px;color:#aaa">Имя на выходе (файл и .cue)</label>
-      <input id="coder-name" value="${(p.name||'').replace(/"/g,'&quot;')}" style="width:100%;margin:4px 0 10px;padding:8px 10px;border-radius:8px;border:1px solid #ffffff22;background:#0e0e12;color:#eee;font-size:13px">
-      ${warn}
-      <label style="font-size:11px;color:#aaa">Формат склеенного микса</label>
-      <select id="coder-fmt" style="width:100%;margin:4px 0 14px;padding:8px 10px;border-radius:8px;border:1px solid #ffffff22;background:#0e0e12;color:#eee;font-size:13px">
-        <option value="source"${p.lossless?' selected':''}>Как источник — lossless (рекомендуется для микса)</option>
-        <option value="flac">FLAC — lossless</option>
-        <option value="alac">ALAC — Apple Lossless (.m4a)</option>
-        <option value="mp3"${!p.lossless?' selected':''}>MP3 320</option>
-      </select>
-      <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button id="coder-cancel" style="padding:8px 14px;border-radius:8px;border:1px solid #ffffff22;background:transparent;color:#aaa;cursor:pointer">Отмена</button>
-        <button id="coder-go" style="padding:8px 16px;border-radius:8px;border:none;background:#7c5cff;color:#fff;font-weight:600;cursor:pointer">Склеить</button>
-      </div>
-    </div>`;
-  document.body.appendChild(ov);
-  const close = () => ov.remove();
-  ov.addEventListener('click', e => { if(e.target===ov) close(); });
-  ov.querySelector('#coder-cancel').onclick = close;
-  ov.querySelector('#coder-go').onclick = async () => {
-    const name = ov.querySelector('#coder-name').value.trim();
-    const fmt  = ov.querySelector('#coder-fmt').value;
-    const go = ov.querySelector('#coder-go');
-    go.disabled = true; go.textContent = 'Склеиваю…';
-    try {
-      const r = await api('POST','/api/coder/mix',{task_id:taskId,name,fmt});
-      if(r && r.ok){
-        toast('🎚 Готово: '+r.name, 'var(--green)', (r.warning||('CUE + файл → '+r.out_dir)));
-        close();
-      } else { throw new Error((r&&r.detail)||'ошибка'); }
-    } catch(e){
-      go.disabled = false; go.textContent = 'Склеить';
-      toast('Ripster Coder: '+e.message,'var(--red)');
-    }
-  };
-}
 
 // ── Shared folder TREE (checkbox branches) for Coder & Tagger ────
 async function mountFolderTree(container, onSelect) {
@@ -286,7 +233,8 @@ async function cxRun(){
   if(!dir){ toast('Выбери папку — «📂 Обзор» или путь','var(--red)'); return; }
   const act = cxAction(), fmt = cxFmt();
   const btn = document.getElementById('coder-run'), out = document.getElementById('coder-result');
-  btn.disabled = true; const _t = btn.textContent; btn.textContent='Работаю…'; out.textContent='';
+  btn.disabled = true; const _t = btn.textContent; btn.textContent = (window.t?t('cd.working'):'Работаю…'); out.textContent='';
+  const _stopBtn = document.getElementById('coder-stop'); if(_stopBtn) _stopBtn.disabled = false;
   try{
     let r;
     if(act==='encode'){
@@ -316,9 +264,30 @@ async function cxRun(){
       r = await api('POST','/api/coder/retag',{dir});
       out.innerHTML = `<span style="color:var(--green)">✓ перетеговано ${r.retagged}</span> · <span style="color:var(--muted)">проверено ${r.checked}, пропущено ${r.skipped}</span>`;
     }
-    toast('🎛 Готово','var(--green)');
+    if(r && r.cancelled){
+      const msg = window.t ? t('cd.stopped') : 'Остановлено';
+      out.innerHTML = `<span style="color:var(--orange)">⏹ ${esc(msg)}</span>` +
+        (r.converted ? ` · ${r.converted} готово до отмены` : '');
+      toast('⏹ '+msg,'var(--orange)');
+    } else {
+      toast('🎛 Готово','var(--green)');
+    }
   }catch(e){ out.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`; toast('Coder: '+e.message,'var(--red)'); }
-  finally{ btn.disabled=false; btn.textContent=_t; }
+  finally{ btn.disabled=false; btn.textContent=_t;
+    const box=document.getElementById('coder-progress'); if(box) box.style.display='none'; }
+}
+
+// STOP: cooperative cancel — the worker stops between files (current file finishes
+// cleanly) or the mix builder kills ffmpeg and drops the partial. cxRun's awaited
+// response comes back {cancelled:true} and paints the "stopped" state.
+async function cxStop(){
+  const sb = document.getElementById('coder-stop');
+  if(sb){ sb.disabled = true; sb.textContent = window.t ? t('cd.working') : '…'; }
+  try{ await api('POST','/api/coder/cancel',{}); }
+  catch(e){ /* no-op: nothing running is fine */ }
+  const lbl = document.getElementById('coder-plabel');
+  if(lbl) lbl.textContent = window.t ? t('cd.stopped') : 'Остановлено';
+  setTimeout(()=>{ if(sb){ sb.disabled=false; sb.textContent = window.t?t('cd.stop'):'⏹ Стоп'; } }, 1500);
 }
 function coderFmtChange() {
   const fmt = document.getElementById('coder-fmt').value;
@@ -482,7 +451,11 @@ function coderProgress(m) {
   const bar = document.getElementById('coder-pbar');
   if(bar) bar.style.width = (m.pct||0) + '%';
   const lbl = document.getElementById('coder-plabel');
-  if(lbl) lbl.textContent = `${m.op==='mix'?'Склейка':'Конвертация'}: ${m.label||''} — трек ${m.current}/${m.total} · ${m.pct||0}%`;
+  const opName = window.t
+    ? t(m.op==='mix'?'cd.op_mix':m.op==='split'?'cd.op_split':'cd.op_convert')
+    : (m.op==='mix'?'Склейка':m.op==='split'?'Сплит':'Конвертация');
+  const trk = window.t ? t('cd.op_track') : 'трек';
+  if(lbl) lbl.textContent = `${opName}: ${m.label||''} — ${trk} ${m.current}/${m.total} · ${m.pct||0}%`;
   if((m.pct||0) >= 100) setTimeout(()=>{ box.style.display='none'; }, 1800);
 }
 async function coderDownloadConvert() {
@@ -494,7 +467,7 @@ async function coderDownloadConvert() {
   document.getElementById('url-input').value = url;
   await addUrl();
   document.getElementById('coder-url').value = '';
-  toast('Скачиваю в исходном качестве. После загрузки выбери папку тут и сконвертируй.','var(--green)','',7000);
+  toast('Скачиваю в исходном качестве. После загрузки выбери папку тут и сконвертируй.','var(--green)',7000);
   showView('queue', document.querySelector('[data-view=queue]'));
 }
 
@@ -669,3 +642,151 @@ async function taggerRename(dry) {
     }
   } catch(e){ toast('Переименование: '+e.message,'var(--red)'); }
 }
+
+function toggleTaskLog(id, btn) {
+  const panel = document.getElementById(`qi-log-${id}`);
+  if(!panel) return;
+  const open = panel.style.display === 'block';
+  panel.style.display = open ? 'none' : 'block';
+  if(!open) panel.scrollTop = panel.scrollHeight;
+  if(btn) btn.textContent = btn.textContent.replace(/^[▶▼]/, open ? '▶' : '▼');
+}
+
+function _typeLabel(m) {
+  if(!m) return '';
+  if(m.albumType) return m.albumType;
+  return {
+    albums:'Альбом', album:'Альбом',
+    single:'Сингл', ep:'EP', compilation:'Сборник',
+    songs:'Трек', song:'Трек', track:'Трек',
+    playlists:'Плейлист', playlist:'Плейлист',
+    artist:'Артист', 'music-videos':'Видео',
+  }[m.type] || '';
+}
+
+function _titleFromUrl(url) {
+  try {
+    const u = new URL(url);
+    const parts = u.pathname.split('/').filter(Boolean).map(p => {
+      try { return decodeURIComponent(p); } catch(_) { return p; }
+    });
+    const idx = parts.findIndex(p => ['album','track','song','playlist','artist'].includes(p));
+    if(idx >= 0) return `${parts[idx]} · ${parts[idx+1]||''}`;
+    return url;
+  } catch(_) { return url; }
+}
+
+
+function updateQueueItem(task, el) {
+  el = el || document.querySelector(`.qi[data-id="${task.id}"]`);
+  if(!el) return;
+  const _partial = String(!!(task.partial || task._partial));
+  // A status (or partial) change alters the action set + layout → full rebuild,
+  // preserving an open log panel. Resume-in-place keeps the SAME card (same id).
+  if(el.dataset.st !== task.status || el.dataset.partial !== _partial) {
+    const logOpen = el.querySelector('.qi-log-panel')?.style.display === 'block';
+    const fresh = buildQueueItem(task);
+    if(logOpen){
+      const p = fresh.querySelector('.qi-log-panel'); if(p) p.style.display='block';
+      const tg = fresh.querySelector('.qi-log-toggle'); if(tg) tg.textContent = tg.textContent.replace(/^▶/,'▼');
+    }
+    el.replaceWith(fresh);
+    return;
+  }
+  // Same status → cheap in-place update (no flicker, no rebuild).
+  const q   = _qualityFor(task);
+  const pct = Math.max(0, Math.min(100, task.progress||0));
+  el.style.setProperty('--qi-p', pct + '%');
+  const bar = el.querySelector('.qi-prog-bar');
+  if(bar){ bar.style.width = pct + '%'; bar.style.background = q.color; }
+  const m  = task.meta || {};
+  const _isSingle = m.type === 'song' || m.type === 'track';
+  const tc = _isSingle ? 1 : (m.trackCount || m.totalTracks || 0);
+  const cntEl = el.querySelector('.qi-count');
+  if(cntEl) cntEl.textContent = tc > 1 ? `${_tracksDone(task).done}/${tc}`
+                              : (pct>0 && pct<100 ? `${Math.round(pct)}%` : '');
+  const stEl = el.querySelector('.qi-st');
+  if(stEl) stEl.outerHTML = _qiStatusChip(task);
+  const badgeEl = el.querySelector('.qi-badge');
+  if(badgeEl){ badgeEl.textContent = q.label; badgeEl.style.background = q.color+'22'; badgeEl.style.color = q.color; }
+  // Metadata enrichment — title / artist / cover appear once they arrive.
+  if(m.title || m.artist){
+    const titleEl = el.querySelector('.qi-title');
+    if(titleEl) titleEl.textContent = m.title || _titleFromUrl(task.url);
+    const tcInfo  = tc > 1 ? `${tc} треков` : (tc === 1 ? '1 трек' : '');
+    const durInfo = (m.duration && ['soundcloud','bbc'].includes(m.service)) ? _scDur(m.duration) : '';
+    const line = [m.artist || '—', m.year, m.label, _typeLabel(m), tcInfo, durInfo].filter(Boolean).join(' · ');
+    let artistEl = el.querySelector('.qi-artist');
+    if(artistEl) artistEl.textContent = '— ' + line;
+    else if(titleEl && line){ const s=document.createElement('span'); s.className='qi-artist'; s.textContent='— '+line; titleEl.after(s); }
+    const artEl = el.querySelector('.qi-art');
+    if(artEl && m.artworkUrl && !artEl.querySelector('img'))
+      artEl.innerHTML = `<img src="${esc(m.artworkUrl)}" data-cover data-lightbox onload="this.classList.add('loaded')" style="cursor:zoom-in" loading="lazy"/>`;
+  }
+  // Download counters on existing action buttons (done state).
+  if(task.status === 'done'){
+    const _setCnt = (sel, n) => {
+      const btn = el.querySelector(sel); if(!btn) return;
+      let cnt = btn.querySelector('.dl-cnt');
+      if(n > 0){ if(!cnt){ cnt=document.createElement('span'); cnt.className='dl-cnt'; btn.appendChild(cnt);} cnt.textContent=n; }
+      else if(cnt) cnt.remove();
+    };
+    _setCnt('.dl-btn', task._dl_file||0);
+    _setCnt('.dl-zip-btn', task._dl_zip||0);
+    _setCnt('.dl-cloud-btn', task._dl_gofile||0);
+  }
+}
+
+function statusLabel(task) {
+  if(task.status==='running'){
+    const _isSingle = task.meta?.type === 'song' || task.meta?.type === 'track';
+    const tc = _isSingle ? 1 : (task.meta?.trackCount || task.meta?.totalTracks || 0);
+    const spin = '<span class="qi-spinner"></span>';
+    if(tc > 1){
+      const done = Math.min(tc, Math.floor((task.progress||0)/100*tc));
+      return `${spin}${done}/${tc}`;
+    }
+    return `${spin}${task.progress||0}%`;
+  }
+  if(task.status==='done')    return t('status.done');
+  if(task.status==='error')   return t('status.error');
+  if(task.status==='paused')  return t('status.paused');
+  return t('status.queued');
+}
+
+async function removeTask(id) {
+  // Optimistic: drop the card from the UI immediately so ✕ feels instant, then
+  // tell the server. The periodic pullQueue / WS reconciles if the delete failed.
+  S.queue = S.queue.filter(t => t.id !== id);
+  renderQueue(); updateTransport();
+  try { await api('DELETE', `/api/queue/${id}`); } catch(e) { pullQueue(); }
+}
+
+async function retryTask(id) {
+  const r = await api('POST', `/api/queue/retry/${id}`);
+  if(r.ok) toast(r.reused ? '↺ Повтор запущен' : '↺ Добавлено в очередь');
+  else if(r.duplicate) toast('Уже в очереди', 'var(--muted)');
+  else toast(r.msg || 'Ошибка повтора', 'var(--red)');
+}
+
+async function clearDone() {
+  // Finished = done / error / cancelled.
+  const done = S.queue.filter(t => t.status==='done' || t.status==='error' || t.status==='cancelled');
+  if(!done.length){ toast('Нет готовых задач для очистки','var(--muted)'); return; }
+  const removed = [];
+  for(const t of done){
+    try { await api('DELETE',`/api/queue/${t.id}`); removed.push(t.id); }
+    catch(e){ /* keep it; reported below */ }
+  }
+  // Self-refresh: don't depend on the WS queue_update arriving — right after a
+  // server restart / reconnect it can be missed, which made the button look dead.
+  if(removed.length){
+    const gone = new Set(removed);
+    S.queue = S.queue.filter(t => !gone.has(t.id));
+    renderQueue(); updateTransport();
+  }
+  const failed = done.length - removed.length;
+  if(failed) toast(`Не удалось убрать ${failed} — сервер ответил ошибкой`,'var(--orange)');
+  else toast(`Убрано: ${removed.length}`,'var(--green)');
+}
+

@@ -159,7 +159,83 @@ async def api_search(q: str, service: str = "apple", type: str = "album", limit:
     else:
         return {"results": [], "error": f"Unknown service: {service}"}
 
+_AMP_TYPE = {"album": "albums", "track": "songs", "song": "songs",
+             "artist": "artists", "video": "music-videos", "playlist": "playlists"}
+
+
+def _amp_art(attrs: dict, size: int = 200) -> str:
+    art = (attrs.get("artwork") or {}).get("url") or ""
+    if not art:
+        return ""
+    return (art.replace("{w}", str(size)).replace("{h}", str(size))
+               .replace("{f}", "jpg").replace("{c}", "bb"))
+
+
+async def _search_apple_ampapi(q: str, ent: str, limit: int, country: str) -> dict:
+    """Live Apple Music catalog search via amp-api. Unlike the iTunes Search
+    index, this reflects the catalog immediately, so a brand-new album (whose
+    lead singles are the only thing the iTunes index has indexed so far) shows
+    up. Needs the developer bearer (+ media-user-token); on any failure the
+    caller falls back to the auth-free iTunes path. Returns {"results": [...]}
+    (empty on any problem — never raises)."""
+    bearer = (_config.get("authorization-token") or "").strip()
+    if not bearer or bearer == "your-authorization-token":
+        return {"results": []}
+    mut  = (_config.get("media-user-token") or "").strip()
+    lang = _config.get("language", "en-US")
+    cc   = lang.split("-")[-1].upper() if "-" in lang else "US"
+    sf   = (country or cc or "US").lower()
+    type_key = _AMP_TYPE.get(ent, "albums")
+    is_track = ent in ("track", "song", "video")
+    headers = {"Authorization": f"Bearer {bearer}", "Origin": "https://music.apple.com"}
+    if mut:
+        headers["media-user-token"] = mut
+    try:
+        r = await _HTTP.aclient().get(
+            f"https://amp-api.music.apple.com/v1/catalog/{sf}/search",
+            params={"term": q, "types": type_key, "limit": min(max(limit, 1), 25)},
+            headers=headers,
+        )
+        if r.status_code != 200:
+            return {"results": []}
+        data = ((r.json().get("results") or {}).get(type_key) or {}).get("data") or []
+    except Exception:
+        return {"results": []}
+    out = []
+    for it in data:
+        a = it.get("attributes") or {}
+        full_date = (a.get("releaseDate") or "")[:10]
+        previews  = a.get("previews") or []
+        out.append({
+            "id":      str(it.get("id", "")),
+            "title":   a.get("name", ""),
+            "artist":  a.get("artistName", ""),
+            "album":   a.get("albumName", "") if is_track else "",
+            "type":    ent,
+            "url":     a.get("url", ""),
+            "cover":   _amp_art(a, 200),
+            "year":    full_date[:4],
+            "date":    full_date,
+            "label":   a.get("recordLabel", "") or a.get("copyright", ""),
+            "tracks":  a.get("trackCount"),
+            "preview": (previews[0].get("url", "") if previews else ""),
+            "service": "apple",
+        })
+    return {"results": out}
+
+
 async def _search_apple(q: str, ent: str, limit: int, country: str) -> dict:
+    """Apple search: live catalog (amp-api) first, iTunes Search index as
+    fallback. amp-api surfaces fresh releases the iTunes index hasn't picked up
+    yet (the "new album missing, only its singles show" symptom); iTunes is the
+    auth-free safety net when the bearer is absent/expired."""
+    amp = await _search_apple_ampapi(q, ent, limit, country)
+    if amp.get("results"):
+        return {"results": amp["results"][: max(limit * 2, 24)]}
+    return await _search_apple_itunes(q, ent, limit, country)
+
+
+async def _search_apple_itunes(q: str, ent: str, limit: int, country: str) -> dict:
     """iTunes Search API — completely public, no auth.
 
     Searches the account region AND New Zealand (where releases often go live

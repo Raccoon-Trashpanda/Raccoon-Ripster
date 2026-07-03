@@ -397,6 +397,30 @@ class TidalEngine(EngineBase):
             error="Tidal: трек не докачался (DASH/сеть прервалась) — повтори; при медленном VPN смени нод",
         )
 
+    @staticmethod
+    def _avail_from_item(item: dict) -> list[str]:
+        """Real per-release quality badges from Tidal's own fields — quality genuinely
+        VARIES per album (many are lossy-only, some Hi-Res, some Atmos), so we read the
+        item's audioQuality / audioModes / mediaMetadata.tags rather than assume a max."""
+        tags = set((item.get("mediaMetadata") or {}).get("tags") or [])
+        modes = set(item.get("audioModes") or [])
+        q = (item.get("audioQuality") or "").upper()
+        out: list[str] = []
+        if "DOLBY_ATMOS" in modes or "DOLBY_ATMOS" in tags:
+            out.append("ATMOS")
+        if "HIRES_LOSSLESS" in tags or q in ("HI_RES", "HI_RES_LOSSLESS"):
+            out.append("HI-RES")
+        if "LOSSLESS" in tags or q == "LOSSLESS" or "HI-RES" in out:
+            out.append("FLAC")
+        if q in ("HIGH", "LOW") and not out:
+            out.append("AAC")
+        # De-dupe keep order; fall back to Tidal's lossless baseline if fields absent.
+        seen, uniq = set(), []
+        for t in out:
+            if t not in seen:
+                seen.add(t); uniq.append(t)
+        return uniq or ["FLAC"]
+
     async def search(self, query: str, search_type: str, limit: int, config: dict) -> list[dict]:
         import httpx as _httpx
         token, country = await _tidal_token_country(config)
@@ -428,6 +452,7 @@ class TidalEngine(EngineBase):
                         "cover":   _tidal_cover(item.get("cover", "")),
                         "year":    (item.get("releaseDate") or "")[:4],
                         "tracks":  item.get("numberOfTracks"),
+                        "available": self._avail_from_item(item),
                         "service": "tidal",
                     })
                 elif t_type == "tracks":
@@ -439,6 +464,7 @@ class TidalEngine(EngineBase):
                         "type":    search_type,
                         "url":     f"https://listen.tidal.com/track/{tr_id}",
                         "cover":   _tidal_cover((item.get("album") or {}).get("cover", "")),
+                        "available": self._avail_from_item(item),
                         "service": "tidal",
                     })
                 elif t_type == "artists":

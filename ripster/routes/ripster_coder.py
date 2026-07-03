@@ -20,7 +20,8 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
 from ripster.mixcue import (build_mix, build_mixes, clean_mix_name, clean_mix_title,
-                            convert_tracks, split_cue, _CONVERT)
+                            convert_tracks, split_cue, _CONVERT,
+                            request_cancel, reset_cancel)
 
 router = APIRouter()
 _cfg: dict = {}
@@ -301,10 +302,18 @@ async def coder_convert(body: dict, request: Request):
     if _broadcast:
         await _broadcast({"type": "log", "level": "info",
                           "msg": f"🎛 Ripster Coder: конвертирую {len(files)} → {fmt.upper()} {bitrate}…"})
+    reset_cancel()
     _pg = _progress_bridge(asyncio.get_running_loop(), task_id, "convert")
     result = await run_in_threadpool(
         convert_tracks, [str(f) for f in files], out_dir, fmt, bitrate,
         _ffmpeg(), bool(keepcov), rename_tmpl, _pg, srate, bdepth, norm)
+    if result.get("cancelled"):
+        if _broadcast:
+            await _broadcast({"type": "log", "level": "warn",
+                              "msg": f"⏹ Ripster Coder: конвертация остановлена "
+                                     f"({result.get('converted',0)} файл(ов) готово до отмены)"})
+            await _broadcast({"type": "coder_cancelled", "op": "convert", "task_id": task_id})
+        return {"ok": True, "cancelled": True, **result}
     if not result.get("ok"):
         if _broadcast:
             await _broadcast({"type": "log", "level": "error",
@@ -340,8 +349,16 @@ async def coder_split(body: dict, request: Request):
     if _broadcast:
         await _broadcast({"type": "log", "level": "info",
                           "msg": f"✂ Ripster Coder: режу «{cue_path.name}» по CUE…"})
+    reset_cancel()
     _pg = _progress_bridge(asyncio.get_running_loop(), "", "split")
     res = await run_in_threadpool(split_cue, str(cue_path), out_dir, fmt, bitrate, _ffmpeg(), _pg)
+    if res.get("cancelled"):
+        if _broadcast:
+            await _broadcast({"type": "log", "level": "warn",
+                              "msg": f"⏹ Ripster Coder: сплит остановлен "
+                                     f"({res.get('converted',0)} треков готово до отмены)"})
+            await _broadcast({"type": "coder_cancelled", "op": "split", "task_id": ""})
+        return {"ok": True, "cancelled": True, **res}
     if not res.get("ok"):
         if _broadcast:
             await _broadcast({"type": "log", "level": "error",
@@ -353,6 +370,18 @@ async def coder_split(body: dict, request: Request):
                                  + (f" ({res['failed']} ошибок)" if res.get('failed') else "")})
         await _broadcast({"type": "coder_done", "out_dir": out_dir, "converted": res["converted"]})
     return {"ok": True, **res}
+
+
+@router.post("/api/coder/cancel")
+async def coder_cancel(body: dict = None, request: Request = None):
+    """Stop the running Coder job. Cooperative: the worker stops between files
+    (current file finishes cleanly), or the mix builder kills its ffmpeg and drops
+    the partial output. Safe to call when nothing is running — it's a no-op."""
+    request_cancel()
+    if _broadcast:
+        await _broadcast({"type": "log", "level": "warn",
+                          "msg": "⏹ Ripster Coder: получен сигнал остановки…"})
+    return {"ok": True}
 
 
 @router.post("/api/coder/retag")
@@ -399,11 +428,18 @@ async def coder_mix(body: dict, request: Request):
     # Multi-disc aware: one continuous file + CUE PER disc (' (CD N)' suffix) —
     # never merges discs together. Filename = clean "artist - essence",
     # TAG title/album = just the essence (no '<artist> - ' duplication).
+    reset_cancel()
     _pg = _progress_bridge(asyncio.get_running_loop(), task_id, "mix")
     res = await run_in_threadpool(
         build_mixes, [str(f) for f in files], str(out_dir), name, fmt, _ffmpeg(),
         clean_mix_title(album, artist), artist, _pg)
 
+    if res.get("cancelled"):
+        if _broadcast:
+            await _broadcast({"type": "log", "level": "warn", "task_id": task_id,
+                              "msg": "⏹ Ripster Coder: склейка остановлена (частичный файл удалён)"})
+            await _broadcast({"type": "coder_cancelled", "op": "mix", "task_id": task_id})
+        return {"ok": True, "cancelled": True, "out_dir": str(out_dir)}
     if not res.get("ok"):
         err = next((m.get("error") for m in res.get("mixes", []) if m.get("error")),
                    res.get("error") or "Ошибка склейки")

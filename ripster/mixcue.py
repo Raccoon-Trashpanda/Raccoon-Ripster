@@ -14,7 +14,28 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import threading
 from pathlib import Path
+
+# ── Cooperative cancellation ────────────────────────────────────────────────────
+# One global flag (the Coder runs one job at a time — a single local tool). The
+# long-running loops below check it BETWEEN files, so the file currently being
+# encoded finishes cleanly (no half-written output) before the job stops. The mix
+# builder (one long ffmpeg) also checks mid-stream and cleans its partial file.
+_CANCEL = threading.Event()
+
+
+def request_cancel() -> None:
+    _CANCEL.set()
+
+
+def reset_cancel() -> None:
+    _CANCEL.clear()
+
+
+def is_cancelled() -> bool:
+    return _CANCEL.is_set()
+
 
 # Trailing mix/credit tags to drop from a clean name:
 # "(DJ Mix)", "[Continuous Mix]", "(Mixed)", "(DJ Set)", "(Mixed by X)",
@@ -239,6 +260,8 @@ def convert_tracks(files: list[str], out_dir: str, fmt: str = "mp3",
     paths = [Path(f) for f in files if Path(f).is_file()]
     done, fail, names = 0, 0, []
     for p in paths:
+        if _CANCEL.is_set():           # stop between files — current one already done
+            break
         stem = p.stem
         if rename_template:
             stem = _fmt_name(rename_template, _probe(ffprobe, p)) or stem
@@ -267,7 +290,8 @@ def convert_tracks(files: list[str], out_dir: str, fmt: str = "mp3",
             try: progress(n, len(paths), p.name, int(n / len(paths) * 100))
             except Exception: pass
     return {"ok": done > 0, "converted": done, "failed": fail,
-            "out_dir": str(out_dir_p), "files": names}
+            "out_dir": str(out_dir_p), "files": names,
+            "cancelled": _CANCEL.is_set()}
 
 
 def build_mix(tracks: list[str], out_dir: str, out_name: str,
@@ -360,6 +384,17 @@ def build_mix(tracks: list[str], out_dir: str, out_name: str,
     _last = -1
     try:
         for raw in proc.stdout:
+            if _CANCEL.is_set():
+                # Kill the encoder and drop the partial output — a half-rendered
+                # mix must never be mistaken for a finished one.
+                proc.kill()
+                errf.close()
+                try: out_file.unlink()
+                except Exception: pass
+                if cover:
+                    try: cover.unlink()
+                    except Exception: pass
+                return {"ok": False, "cancelled": True, "error": "отменено"}
             line = raw.decode("utf-8", "ignore").strip()
             if line.startswith("out_time_us=") and total_dur > 0 and progress:
                 try:
@@ -452,6 +487,8 @@ def build_mixes(tracks: list[str], out_dir: str, out_name: str,
     multi = len(discs) > 1
     mixes = []
     for di, d in enumerate(discs):
+        if _CANCEL.is_set():
+            break
         grp = sorted([(t, p) for dd, t, p in info if dd == d], key=lambda x: (x[0], str(x[1])))
         files = [str(p) for _, p in grp]
         nm = f"{out_name} (CD {d})" if multi else out_name
@@ -465,7 +502,8 @@ def build_mixes(tracks: list[str], out_dir: str, out_name: str,
         r["disc"] = d
         mixes.append(r)
     return {"ok": any(m.get("ok") for m in mixes), "multi": multi,
-            "discs": len(discs), "mixes": mixes}
+            "discs": len(discs), "mixes": mixes,
+            "cancelled": _CANCEL.is_set()}
 
 
 # ── CUE splitter (inverse of the merger) ────────────────────────────────────────
@@ -572,6 +610,8 @@ def split_cue(cue_path: str, out_dir: str, fmt: str = "source",
     done = fail = 0
     names: list = []
     for i, t in enumerate(tracks):
+        if _CANCEL.is_set():
+            break
         start = t["start"]
         dur = (tracks[i + 1]["start"] - start) if i + 1 < len(tracks) else None
         num = t["num"] or (i + 1)
@@ -604,4 +644,5 @@ def split_cue(cue_path: str, out_dir: str, fmt: str = "source",
             except Exception:
                 pass
     return {"ok": done > 0, "converted": done, "failed": fail,
-            "out_dir": str(out), "files": names, "album": info["album"]}
+            "out_dir": str(out), "files": names, "album": info["album"],
+            "cancelled": _CANCEL.is_set()}

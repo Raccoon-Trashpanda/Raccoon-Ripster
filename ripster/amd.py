@@ -466,6 +466,36 @@ def _wrapper_mode() -> str:
     return _cfg.get("wrapper-mode", "docker-remote")
 
 
+def _wrapper_account_port() -> str:
+    """Host port to publish the wrapper's account-info API (container 30020) on.
+    Derived from `gamdl-wrapper-account-url` so both point at the same place;
+    defaults to 30020."""
+    url = (_cfg.get("gamdl-wrapper-account-url") or "").strip()
+    if url:
+        tail = url.rstrip("/").rsplit(":", 1)[-1]
+        if tail.isdigit():
+            return tail
+    return "30020"
+
+
+async def _harvest_wrapper_token() -> None:
+    """After the wrapper is confirmed serving, pull a fresh media-user-token from
+    its account API into config (music videos need a token from the SUBSCRIBED
+    account). Best-effort, never fatal. Kept out of apple_auth's import graph via
+    a lazy import — both modules share the same live `config` dict object."""
+    try:
+        from ripster.routes import apple_auth as _aa
+        loop = asyncio.get_event_loop()
+        mut = await loop.run_in_executor(None, _aa.sync_mut_from_wrapper)
+        if mut and _broadcast:
+            await _broadcast({"type": "wrapper_log",
+                              "text": f"🎬 media-user-token обновлён из аккаунта "
+                                      f"({len(mut)} симв.) — видео и aac-lc готовы."})
+            await _broadcast({"type": "apple_authed", "mut_length": len(mut)})
+    except Exception:
+        pass
+
+
 def _dist_dir(mode: str) -> Path:
     folder = "non-docker" if mode == "non-docker" else "docker"
     return _base_dir / "dist" / folder
@@ -643,6 +673,7 @@ async def _start_wrapper_docker(force_login: bool = False) -> dict:
     m3u_port = _cfg.get("m3u8-port",    "127.0.0.1:20020")
     dec_p    = dec_port.split(":")[-1]
     m3u_p    = m3u_port.split(":")[-1]
+    acct_p   = _wrapper_account_port()
     rootfs   = str(_rootfs_data(mode))
     Path(rootfs).mkdir(parents=True, exist_ok=True)
 
@@ -675,6 +706,9 @@ async def _start_wrapper_docker(force_login: bool = False) -> dict:
         "-v", f"{rootfs}:/app/rootfs/data",
         "-p", f"{dec_p}:10020",
         "-p", f"{m3u_p}:20020",
+        # Publish the account-info API too so the app can harvest a fresh
+        # media-user-token from the subscribed account (music videos need it).
+        "-p", f"{acct_p}:30020",
         "-e", f"args={wrapper_args}",
         image,
     ]
@@ -708,6 +742,7 @@ async def _start_wrapper_docker(force_login: bool = False) -> dict:
                 if _wrapper_log_task and not _wrapper_log_task.done():
                     _wrapper_log_task.cancel()
                 _wrapper_log_task = asyncio.create_task(_monitor_wrapper_logs())
+                await _harvest_wrapper_token()
                 return {"ok": True, "msg": f"Wrapper started (container {container_id})"}
             if _broadcast:
                 await _broadcast({"type": "wrapper_log",
@@ -785,6 +820,7 @@ async def _docker_login(docker_path: str, image: str, dec_p: str, m3u_p: str,
         "-v", f"{rootfs}:/app/rootfs/data",
         "-p", f"{dec_p}:10020",
         "-p", f"{m3u_p}:20020",
+        "-p", f"{_wrapper_account_port()}:30020",
         "-e", f"args={args_str}",
         image,
     ]
@@ -816,6 +852,7 @@ async def _docker_login(docker_path: str, image: str, dec_p: str, m3u_p: str,
         if await check_wrapper_running():
             if _broadcast:
                 await _broadcast({"type": "wrapper_started"})
+            await _harvest_wrapper_token()
             return {"ok": True, "msg": "Враппер залогинен и запущен"}
     return {"ok": True, "msg": "Логин идёт — введи 2FA-код в открывшемся поле"}
 

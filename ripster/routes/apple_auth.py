@@ -14,6 +14,8 @@ Install: apple_auth.install(app, cfg, save_config_fn, broadcast_fn)
 """
 from __future__ import annotations
 
+import json
+import urllib.request
 from pathlib import Path
 
 from fastapi import APIRouter, Request
@@ -32,6 +34,26 @@ def install(app, ctx) -> None:
     _save_config = ctx.save_config
     _broadcast   = ctx.broadcast
     app.include_router(router)
+    # One-shot sync at startup. Two sources, wrapper wins:
+    #  1) cookies.txt — if a logged-in music.apple.com export carries a fresher MUT.
+    #  2) the LOCAL wrapper's account API (port 30020) — the subscribed account it's
+    #     logged into mints a fresh media-user-token that music videos need, with
+    #     ZERO web-login / 2FA-lockout risk. This is authoritative when up, so it
+    #     runs LAST and overrides a stale cookie/config token.
+    try:
+        synced = sync_mut_from_cookies()
+        if synced:
+            print(f"[apple] media-user-token synced from cookies ({len(synced)} chars)",
+                  flush=True)
+    except Exception:
+        pass
+    try:
+        wsynced = sync_mut_from_wrapper()
+        if wsynced:
+            print(f"[apple] media-user-token synced from local wrapper "
+                  f"({len(wsynced)} chars)", flush=True)
+    except Exception:
+        pass
 
 
 # ── bookmarklet code (injected into the page as a draggable link) ─────────────
@@ -224,6 +246,90 @@ def _cookies_path() -> Path:
     return Path(p)
 
 
+def _extract_mut_from_cookies(text: str) -> str:
+    """Pull the `media-user-token` value out of a Netscape cookies.txt. It's a
+    normal music.apple.com cookie, so a logged-in cookie export ALREADY contains
+    the token music-videos need — no separate bookmarklet / programmatic login
+    (which would risk 2FA lockout). Netscape line = 7 tab-fields; [5]=name [6]=value."""
+    for line in (text or "").splitlines():
+        line = line.rstrip("\n")
+        if not line or line.lstrip().startswith("#"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 7 and parts[5].strip() == "media-user-token":
+            return parts[6].strip()
+    return ""
+
+
+def sync_mut_from_cookies(text: str = None) -> str:
+    """Sync media-user-token from cookies.txt into config (persisted). Called after
+    a cookie paste and once at startup, so refreshing the gamdl cookies also
+    refreshes the MV token — the stale-token → "invalid --key" MV failure fixes
+    itself. Returns the token if synced, else "". Never CLEARS an existing token
+    when cookies lack one (a partial export shouldn't wipe a good token)."""
+    try:
+        if text is None:
+            p = _cookies_path()
+            text = p.read_text(encoding="utf-8", errors="ignore") if p.exists() else ""
+        mut = _extract_mut_from_cookies(text)
+        if mut and mut != (_cfg.get("media-user-token") or "").strip():
+            _cfg["media-user-token"] = mut
+            if _save_config:
+                _save_config(_cfg)
+            return mut
+    except Exception:
+        pass
+    return ""
+
+
+def _wrapper_account_url() -> str:
+    """The local wrapper's account-info endpoint (port 30020). gamdl already
+    points at it via `gamdl-wrapper-account-url`; default to the standard port."""
+    u = (_cfg.get("gamdl-wrapper-account-url") or "").strip()
+    return u or "http://127.0.0.1:30020"
+
+
+def sync_mut_from_wrapper(timeout: float = 5.0) -> str:
+    """Harvest the media-user-token from the LOCAL wrapper's account API (30020).
+
+    The wrapper, once logged into a SUBSCRIBED Apple account, serves a JSON
+    ``{"storefront_id", "dev_token", "music_token"}`` where ``music_token`` is a
+    fresh media-user-token minted from that account — exactly what music-video
+    (and aac-lc) downloads need. Pulling it from the already-authenticated
+    wrapper means NO programmatic web login / 2FA, so no account-lock risk.
+
+    Syncs ``music_token`` into ``config["media-user-token"]`` (persisted) when it
+    differs. Returns the token if synced, else "". Best-effort: a wrapper that is
+    down / not publishing 30020 just yields "" and never clears a good token."""
+    try:
+        url = _wrapper_account_url()
+        req = urllib.request.Request(url, headers={"User-Agent": "Ripster"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8", "ignore"))
+    except Exception:
+        return ""
+    mut = (data.get("music_token") or "").strip()
+    # A real media-user-token is long; guard against an empty/garbage response so
+    # we never overwrite a working token with junk.
+    if mut and len(mut) > 50 and mut != (_cfg.get("media-user-token") or "").strip():
+        _cfg["media-user-token"] = mut
+        if _save_config:
+            _save_config(_cfg)
+        return mut
+    return ""
+
+
+@router.post("/api/apple/sync-from-wrapper")
+async def apple_sync_from_wrapper():
+    """On-demand: pull a fresh media-user-token from the running local wrapper."""
+    import asyncio
+    mut = await asyncio.get_event_loop().run_in_executor(None, sync_mut_from_wrapper)
+    if mut and _broadcast:
+        asyncio.create_task(_broadcast({"type": "apple_authed", "mut_length": len(mut)}))
+    return {"ok": bool(mut), "mut_synced": bool(mut),
+            "mut_length": len(mut) if mut else 0}
+
+
 @router.get("/api/apple/cookies-status")
 async def apple_cookies_status():
     p = _cookies_path()
@@ -262,8 +368,16 @@ async def apple_save_cookies(request: Request):
         return {"ok": False, "error": str(e)}
     lines = [l for l in text.splitlines() if l.strip() and not l.lstrip().startswith("#")]
     looks_apple = "apple.com" in text.lower()
+    # Auto-sync the MV token from the freshly-saved cookies — the same paste that
+    # feeds gamdl now also refreshes media-user-token, so music videos stop failing
+    # with a stale token ("invalid --key"). No separate bookmarklet step needed.
+    mut = sync_mut_from_cookies(text)
+    if mut and _broadcast:
+        import asyncio
+        asyncio.create_task(_broadcast({"type": "apple_authed", "mut_length": len(mut)}))
     return {"ok": True, "exists": True, "lines": len(lines),
-            "looks_apple": looks_apple, "path": str(p)}
+            "looks_apple": looks_apple, "path": str(p),
+            "mut_synced": bool(mut), "mut_length": len(mut) if mut else 0}
 
 
 @router.get("/api/apple/auth-status")

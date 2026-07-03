@@ -180,7 +180,10 @@ async def _resolve_input_url(url: str, oauth: str) -> tuple[str, list[dict]]:
     # mobile/www host (m.soundcloud.com, mobile.soundcloud.com) returns 404.
     url = re.sub(r"^(https?://)(m|mobile|www)\.soundcloud\.com",
                  r"\1soundcloud.com", url.strip(), flags=re.I)
-    timeout = httpx.Timeout(connect=4, read=8, write=8, pool=8)
+    # Roomier timeouts: SoundCloud's CDN (sndcdn.com) and api-v2 host intermittently
+    # take >4s to connect, especially when the IP is being throttled — a tight 4s
+    # connect fired ConnectTimeout mid-scrape and surfaced as an empty error.
+    timeout = httpx.Timeout(connect=12, read=20, write=12, pool=12)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
         cid = await _scrape_client_id(c)
         # on.soundcloud.com / app.goo.gl share links are HTTP redirects to the
@@ -292,7 +295,7 @@ async def _widevine_key_remote(wrapper_url: str, oauth: str, pssh_b64: str,
     (kid_hex, key_hex) back over a single HTTP call.
     """
     url = wrapper_url.rstrip("/") + "/api/wv-wrapper/key"
-    timeout = httpx.Timeout(connect=5, read=20, write=20, pool=20)
+    timeout = httpx.Timeout(connect=12, read=20, write=20, pool=20)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
         r = await c.post(url, json={
             "pssh_b64": pssh_b64,
@@ -323,7 +326,7 @@ async def _widevine_key(oauth: str, pssh_b64: str, license_token: str,
             "Referer":      "https://soundcloud.com/",
             **_sc_headers(oauth),
         }
-        timeout = httpx.Timeout(connect=5, read=15, write=15, pool=15)
+        timeout = httpx.Timeout(connect=12, read=15, write=15, pool=15)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
             r = await c.post(_SC_LICENSE,
                              params={"license_token": license_token},
@@ -438,7 +441,7 @@ async def _download_concat(init_url: str, segments: list[str], out: Path,
     Each window waits for its slowest segment before the next starts — combined
     with _seg_get's per-segment wall-clock cap, a single stuck CDN segment can't
     hang the whole set."""
-    timeout = httpx.Timeout(connect=4, read=20, write=20, pool=20)
+    timeout = httpx.Timeout(connect=12, read=20, write=20, pool=20)
     limits  = httpx.Limits(max_connections=_SEG_CONCURRENCY * 2,
                            max_keepalive_connections=_SEG_CONCURRENCY)
     n = len(segments)
@@ -458,7 +461,7 @@ async def _download_plain(stream_url: str, out: Path, on_progress) -> None:
     """Download a NON-DRM SoundCloud stream → out (no CDM, no decrypt).
     Handles HLS (m3u8 → concat EXT-X-MAP init + segments) and progressive
     (the URL is the audio file itself). This is the browser-extension path."""
-    timeout = httpx.Timeout(connect=4, read=20, write=20, pool=20)
+    timeout = httpx.Timeout(connect=12, read=20, write=20, pool=20)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
         r = await c.get(stream_url)
         r.raise_for_status()
@@ -557,7 +560,7 @@ async def _fetch_cover(url: str) -> Optional[bytes]:
     big = re.sub(r"-(large|t\d+x\d+|small|tiny|mini|crop)\.",
                  "-t500x500.", url)
     try:
-        timeout = httpx.Timeout(connect=4, read=8, write=8, pool=8)
+        timeout = httpx.Timeout(connect=12, read=8, write=8, pool=8)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
             for u in (big, url):
                 r = await c.get(u)
@@ -579,7 +582,7 @@ async def _process_one(idx: int, total: int, t: dict, *, dest_dir: Path,
     artist = t.get("artist", "")
     _print(f"{label} Downloading: {title}")
     try:
-        timeout = httpx.Timeout(connect=4, read=10, write=10, pool=10)
+        timeout = httpx.Timeout(connect=12, read=10, write=10, pool=10)
         async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as c:
             stream = await _resolve_track_stream(c, t["id"], cid, oauth)
             if not stream:
@@ -708,7 +711,11 @@ async def _main_async(args) -> int:
     try:
         label, tracks = await _resolve_input_url(args.url, args.oauth_token)
     except Exception as e:
-        _print(f"Error: SC resolve failed: {e}")
+        # httpx timeout exceptions stringify to '' — surface the TYPE so an empty
+        # message ("SC resolve failed: ") isn't mistaken for an auth/token problem.
+        # A bare ConnectTimeout/ReadTimeout here = SoundCloud is slow/throttling
+        # the IP, not a bad OAuth token.
+        _print(f"Error: SC resolve failed: {e or type(e).__name__}")
         return 1
 
     if not tracks:
@@ -716,7 +723,7 @@ async def _main_async(args) -> int:
         return 1
 
     # Reuse a single client_id for every track in this batch
-    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=4, read=8, write=8, pool=8),
+    async with httpx.AsyncClient(timeout=httpx.Timeout(connect=12, read=20, write=12, pool=12),
                                   follow_redirects=True) as c:
         cid = await _scrape_client_id(c)
 

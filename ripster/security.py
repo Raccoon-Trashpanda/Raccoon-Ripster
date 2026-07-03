@@ -34,6 +34,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "qobuz-email", "qobuz-password",
     "qobuz-user-id", "qobuz-auth-token",
     "qobuz-quality", "qobuz-save-path",
+    "qobuz-max-connections", "qobuz-requests-per-minute",
     "deezer-arl", "deezer-quality", "deezer-save-path",
     "tidal-token", "tidal-refresh",
     "tidal-user-id", "tidal-country", "tidal-token-expiry",

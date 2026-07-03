@@ -1188,10 +1188,15 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         if engine_name == "amd":
             line_timeout = 600.0    # long silent mp4decrypt/tagging windows
         elif engine_name == "qobuz":
-            # streamrip prints per-track progress, so 5 min of silence = genuinely
-            # stuck (e.g. artwork download hanging on a CDN blip with no connect
-            # timeout). Fail fast → auto-retry, which succeeds once the blip clears.
-            line_timeout = 300.0
+            # streamrip renders a rich/tqdm progress bar via CR (no newline) for
+            # the whole duration of a track transfer, same as OrpheusDL below.
+            # readline() blocks on a newline, so the runner sees ZERO output while a
+            # big file downloads. A long Hi-Res album (e.g. Yes -- "Tales From
+            # Topographic Oceans", 4 tracks ~20 min each, 24/192 ~700 MB, all
+            # downloading concurrently) stays silent past 300 s -> the watchdog
+            # killed a LIVE download. Give it Tidal/SC-style 20-min headroom; each
+            # finished track prints a newline that resets the watchdog.
+            line_timeout = 1200.0
         elif engine_name == "soundcloud":
             line_timeout = 1200.0   # 20 min — heartbeats every 30 s anyway
         elif engine_name in ("tidal", "orpheus_spotify", "orpheus_beatport"):
