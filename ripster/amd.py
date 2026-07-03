@@ -32,6 +32,11 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+# Hide the transient console window Windows opens for every child process. Without
+# this, the wrapper-status poll (docker info, every ~10s) flashes a cmd window
+# constantly on the owner's desktop.
+_CNW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 _cfg:          dict  = {}
 _broadcast            = None
 _save_config          = None
@@ -497,7 +502,7 @@ def check_docker_installed() -> tuple[bool, str]:
         try:
             r = subprocess.run(
                 [docker, "info", "--format", "{{.ServerVersion}}"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, creationflags=_CNW,
             )
             if r.returncode == 0:
                 return True, docker
@@ -509,7 +514,7 @@ def check_docker_installed() -> tuple[bool, str]:
             try:
                 r = subprocess.run(
                     [p, "info", "--format", "{{.ServerVersion}}"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, text=True, timeout=5, creationflags=_CNW,
                 )
                 if r.returncode == 0:
                     return True, p
@@ -592,7 +597,7 @@ async def _monitor_wrapper_logs() -> None:
                     ok2, dp2 = check_docker_installed()
                     if ok2:
                         subprocess.run([dp2, "rm", "-f", WRAPPER_CONTAINER_NAME],
-                                       capture_output=True, timeout=10)
+                                       capture_output=True, timeout=10, creationflags=_CNW)
                     return
             await proc.wait()
             await asyncio.sleep(3)
@@ -628,7 +633,10 @@ async def _start_wrapper_docker(force_login: bool = False) -> dict:
     if not ok:
         return {"ok": False, "msg": docker_path}
 
-    if await check_wrapper_running():
+    # A forced re-login must tear the running wrapper down and log in fresh —
+    # otherwise a stale/expired Apple session keeps serving and every decrypt
+    # fails with "Invalid CKC". Only short-circuit on a plain (non-forced) start.
+    if not force_login and await check_wrapper_running():
         return {"ok": True, "msg": "Wrapper already running"}
 
     dec_port = _cfg.get("decrypt-port", "127.0.0.1:10020")
@@ -640,7 +648,7 @@ async def _start_wrapper_docker(force_login: bool = False) -> dict:
 
     image = WRAPPER_LOCAL_IMAGE if mode == "docker-local" else "ghcr.io/itouakirai/wrapper:x86"
     subprocess.run([docker_path, "rm", "-f", WRAPPER_CONTAINER_NAME],
-                   capture_output=True, timeout=10)
+                   capture_output=True, timeout=10, creationflags=_CNW)
 
     apple_id  = _cfg.get("wrapper-apple-id", "")
     apple_pwd = _cfg.get("wrapper-password", "")
@@ -742,7 +750,7 @@ async def _read_login_stream(proc: "asyncio.subprocess.Process") -> None:
                 ok2, dp2 = check_docker_installed()
                 if ok2:
                     subprocess.run([dp2, "rm", "-f", WRAPPER_CONTAINER_NAME],
-                                   capture_output=True, timeout=10)
+                                   capture_output=True, timeout=10, creationflags=_CNW)
                 return
     except asyncio.CancelledError:
         pass
@@ -859,7 +867,10 @@ async def _start_wrapper_direct(force_login: bool = False) -> dict:
     if not bin_path.exists():
         return {"ok": False, "msg": f"Бинарник не найден: {bin_path}"}
 
-    if await check_wrapper_running():
+    # A forced re-login must tear the running wrapper down and log in fresh —
+    # otherwise a stale/expired Apple session keeps serving and every decrypt
+    # fails with "Invalid CKC". Only short-circuit on a plain (non-forced) start.
+    if not force_login and await check_wrapper_running():
         return {"ok": True, "msg": "Wrapper already running"}
 
     dec_port = _cfg.get("decrypt-port", "127.0.0.1:10020")

@@ -424,16 +424,27 @@ class QobuzEngine(StreamripMixin, EngineBase):
                 )
                 data = r.json()
             results = []
+            is_track = search_type == "track"
             for item in (data.get(ep_key) or {}).get("items") or []:
-                full_date = item.get("release_date_original") or ""
-                img = item.get("image") or {}
+                _alb = item.get("album") if isinstance(item.get("album"), dict) else {}
+                # A TRACK has no top-level `artist`/`image`/date — they live in
+                # `performer` and the track's `album`. Fall back so track search
+                # doesn't come back with an empty artist / no cover (the old bug).
+                full_date = (item.get("release_date_original")
+                             or _alb.get("release_date_original") or "")
+                img = item.get("image") or _alb.get("image") or {}
+                artist = ((item.get("artist") or {}).get("name")
+                          or (item.get("performer") or {}).get("name")
+                          or (_alb.get("artist") or {}).get("name") or "")
+                url = item.get("url") or (
+                    f"https://www.qobuz.com/track/{item.get('id', '')}" if is_track
+                    else f"https://www.qobuz.com/album/{item.get('id', '')}")
                 results.append({
                     "id":      str(item.get("id", "")),
                     "title":   item.get("title") or item.get("name", ""),
-                    "artist":  (item.get("artist") or {}).get("name", ""),
+                    "artist":  artist,
                     "type":    search_type,
-                    "url":     (item.get("url") or
-                                f"https://www.qobuz.com/album/{item.get('id', '')}"),
+                    "url":     url,
                     "cover":   (img.get("small") or img.get("large", "")) if isinstance(img, dict) else "",
                     "year":    full_date[:4],
                     "date":    full_date,

@@ -1235,8 +1235,23 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                         _slot, _dec_p, _m3u_p = _acq
                         _pool_slot = _slot
                         _base_dir = str(Path(__file__).resolve().parent.parent)
+                        # apple-parallel-tracks: hand this album the WHOLE pool so
+                        # the Go tool fans its tracks across every container (each
+                        # concurrent track gets its own CKC session). zh_cap is
+                        # forced to 1 below, so no other album competes for slots.
+                        _dports = ""
+                        if _config.get("apple-parallel-tracks"):
+                            try:
+                                _plist = await asyncio.to_thread(
+                                    _wp.ensure_all_decrypt_ports, _config)
+                                _dports = ",".join(_plist)
+                                if _dports:
+                                    task["log"].append(
+                                        f"🦝 parallel tracks across pool: {_dports}")
+                            except Exception:
+                                _dports = ""
                         _task_cwd = await asyncio.to_thread(
-                            _wp.slot_cwd, _slot, _dec_p, _m3u_p, _base_dir)
+                            _wp.slot_cwd, _slot, _dec_p, _m3u_p, _base_dir, _dports)
                         task["log"].append(f"🦝 wrapper-pool: slot {_slot} (decrypt {_dec_p}, m3u8 {_m3u_p})")
                         try:
                             await _broadcast({"type": "pool_update", "pool": _wp.live_status()})
@@ -1415,6 +1430,21 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 save_dir = _relocate_to_service_folder(save_dir, task.get("service") or "",
                                                        quality, _config)
                 task["_save_dir"] = save_dir
+                # Qobuz: streamrip tags only the primary `performer` → a collab lands
+                # with one artist (or all crammed into one string). Re-derive the FULL
+                # artist list from the Qobuz API and write proper multi-value ARTIST.
+                if task.get("service") == "qobuz":
+                    try:
+                        import re as _re_q
+                        _am = _re_q.search(r'/album/(?:[^/]+/)?([A-Za-z0-9]+)', url or "")
+                        if _am:
+                            from ripster.engines.qobuz_retag import retag_qobuz_album
+                            _rn = await retag_qobuz_album(_am.group(1), _cfg_view, str(save_dir))
+                            if _rn:
+                                task.setdefault("log", []).append(
+                                    f"[qobuz] артисты в тегах исправлены: {_rn} файл(ов)")
+                    except Exception as _re_e:
+                        task.setdefault("log", []).append(f"[qobuz] retag пропущен: {_re_e}")
                 # Write marker file so download.py can find this dir by task ID
                 try:
                     from ripster.task_marker import write_marker as _write_marker
@@ -2006,11 +2036,23 @@ async def process_queue() -> None:
             # each task acquires its own container. Pool off ⇒ 1 ⇒ original serial.
             zh_cap = 1
             if any((t.get("engine") or "").lower() == "zhaarey" for t in _queue):
-                try:
-                    from ripster.wrapper_pool import pool_size as _pool_size
-                    zh_cap = max(1, _pool_size(_config))
-                except Exception:
+                # apple-parallel-tracks dedicates the WHOLE pool to ONE album (the
+                # Go tool fans tracks across every container), so albums must run
+                # one-at-a-time — otherwise two albums fight over the same slots.
+                if _config.get("apple-parallel-tracks"):
                     zh_cap = 1
+                else:
+                    try:
+                        from ripster.wrapper_pool import pool_size as _pool_size
+                        # Honour max-parallel as a REAL ceiling for the local wrapper:
+                        # the pool may expose N container slots, but if the user lowered
+                        # parallelism (e.g. to ease the wrapper's CKC load), running more
+                        # than that overloads the local Apple session → "Invalid CKC".
+                        # zh_cap = min(pool slots, max-parallel).
+                        _mp = max(1, int(_config.get("max-parallel", 1)))
+                        zh_cap = max(1, min(_pool_size(_config), _mp))
+                    except Exception:
+                        zh_cap = 1
             by_id = {t["id"]: t for t in _queue}
             busy_keys = set()
             amd_active = 0

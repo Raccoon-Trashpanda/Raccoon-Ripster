@@ -103,9 +103,24 @@ def _load_artist_state() -> None:
         try:
             d = json.loads(_sp_state_file.read_text(encoding="utf-8"))
             _sp_artist_state = d.get("artists", {}) or {}
-            _sp_banned_until = float(d.get("banned_until", 0.0) or 0.0)
+            # Clamp any PERSISTED ban to the cap. A stale/huge banned_until (a
+            # pre-cap 6h ban, or a Spotify Retry-After of hours that an older path
+            # stored) must NEVER freeze the radar for more than _SP_BAN_CAP across
+            # a restart — the skill's rule is "no multi-hour self-ban", ever.
+            _sp_banned_until = min(float(d.get("banned_until", 0.0) or 0.0),
+                                   datetime.now().timestamp() + _SP_BAN_CAP)
             fc = d.get("followed")
             if isinstance(fc, dict):
+                # De-dupe the followed list on load — a pagination hiccup could
+                # accumulate duplicate artist entries (seen: 7250 rows / 5756 uniq),
+                # which bloats every crawl. Keep first occurrence per id.
+                _seen_ld, _arts_ld = set(), []
+                for _a in (fc.get("artists") or []):
+                    _id = _a.get("id")
+                    if _id and _id not in _seen_ld:
+                        _seen_ld.add(_id)
+                        _arts_ld.append(_a)
+                fc["artists"] = _arts_ld
                 _sp_followed_cache = fc
             ban_left = int(_sp_banned_until - datetime.now().timestamp())
             print(f"[spotify] artist-state: {len(_sp_artist_state)} artists, "
@@ -129,6 +144,47 @@ def _load_artist_state() -> None:
             print(f"[spotify] artist-state load error: {e}", flush=True)
     if not _sp_artist_state:
         _seed_state_from_old_cache()
+    else:
+        _repair_empty_store()
+
+
+def _repair_empty_store() -> None:
+    """Repair a store that has artists but ZERO releases (a scan populated the
+    followed-artist list then got interrupted/wiped before releases were filled).
+    Without this the feed is permanently blank even though the legacy flat cache
+    still holds real releases — and the empty-store seed never runs because the
+    store is technically non-empty. Refill releases from ALL legacy cache entries
+    (union, dedup by id), ts=0 so the next scan refreshes them."""
+    global _sp_artist_state
+    if not _sp_artist_state or not _sp_releases_cache:
+        return
+    if any(st.get("releases") for st in _sp_artist_state.values()):
+        return   # store already has releases — nothing to repair
+    merged: dict = {}   # artist_id -> {release_id -> rel}
+    names:  dict = {}
+    for entry in _sp_releases_cache.values():
+        for rel in entry.get("releases", []):
+            aid, rid = rel.get("artist_id"), rel.get("id")
+            if not aid or not rid:
+                continue
+            rel.setdefault("group", rel.get("type", "album"))
+            merged.setdefault(aid, {})[rid] = rel
+            if rel.get("artist"):
+                names.setdefault(aid, rel["artist"])
+    if not merged:
+        return
+    filled = 0
+    for aid, rels in merged.items():
+        st = _sp_artist_state.get(aid) or {"name": names.get(aid, ""), "ts": 0}
+        st["releases"] = list(rels.values())
+        st["ts"] = 0
+        if not st.get("name"):
+            st["name"] = names.get(aid, "")
+        _sp_artist_state[aid] = st
+        filled += len(rels)
+    print(f"[spotify] repaired empty store: filled {filled} releases into "
+          f"{len(merged)} artists from legacy cache", flush=True)
+    _save_artist_state()
 
 
 def _seed_state_from_old_cache() -> None:
@@ -375,6 +431,25 @@ async def _sp_dc_get_token() -> str | None:
     return None
 
 
+def _sp_minted_bearer() -> str | None:
+    """The web-player Bearer that `spotify_token_keeper` AUTO-mints from the durable
+    librespot blob into orpheus/config/spotify-token.txt (refreshed ~every 40 min,
+    life ~60). Same non-rate-limited web-player token sp_dc yields, but kept fresh
+    automatically — so the radar needs no manual sp_dc cookie refresh. Returns None
+    if the file is missing or older than its useful life."""
+    if not _sp_state_file:
+        return None
+    try:
+        import time as _t
+        p = _sp_state_file.parent / "orpheus" / "config" / "spotify-token.txt"
+        if not p.exists() or (_t.time() - p.stat().st_mtime) > 3300:   # >55 min → expired
+            return None
+        tok = p.read_text(encoding="utf-8").strip()
+        return tok or None
+    except Exception:
+        return None
+
+
 # ── OAuth routes ──────────────────────────────────────────────────────────
 
 @router.get("/spotify/login")
@@ -552,17 +627,25 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
     _sp_403_error = ""
 
     web_token = await _sp_dc_get_token()
+    _tok_src = "sp_dc"
+    if not web_token:
+        # Auto-inserted: the keeper's fresh web-player Bearer. This is what lets
+        # the radar keep scanning without a manual sp_dc cookie refresh.
+        web_token = _sp_minted_bearer()
+        _tok_src = "keeper-bearer"
     if web_token:
         hdr = {"Authorization": f"Bearer {web_token}"}
-        print("[spotify] scan using web player token (sp_dc)", flush=True)
+        print(f"[spotify] scan using web-player token ({_tok_src})", flush=True)
     else:
         t = _load_sp()
         sp_dc_set = bool((_cfg.get("spotify-sp-dc") or "").strip())
+        minted_exists = bool(_sp_state_file and
+                             (_sp_state_file.parent / "orpheus" / "config" / "spotify-token.txt").exists())
         if not t.get("access_token"):
             _sp_scan_running = False
-            print("[spotify] scan aborted: no sp_dc token and no OAuth token", flush=True)
+            print("[spotify] scan aborted: no web-player token and no OAuth token", flush=True)
             err = ("sp_dc cookie протух — обнови в Settings → Spotify (bookmarklet)"
-                   if sp_dc_set
+                   if sp_dc_set or minted_exists
                    else "Spotify не авторизован — подключи OAuth или sp_dc в Settings → Spotify")
             _sp_last_error = err
             if _broadcast:
@@ -657,8 +740,7 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
                     # OAuth/web token expired mid-crawl. Stop this pass (a forced
                     # refresh re-mints the token at the top); short cooldown only,
                     # so the user's next manual Scan isn't blocked for long.
-                    _sp_banned_until = max(_sp_banned_until,
-                                           datetime.now().timestamp() + _SP_BAN_CAP)
+                    _sp_banned_until = datetime.now().timestamp() + _SP_BAN_CAP
                     _save_artist_state()
                     print(f"[spotify] /me/following 401 (token expired) after {len(artists)} "
                           f"artists — stop pass, short cooldown", flush=True)
@@ -676,9 +758,14 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
         if artists:
             # Refresh the durable followed-artist list (only on a good response, so
             # a transient 429/error never wipes it). The feed is built from this.
+            _seen_fa, _fa = set(), []
+            for a in artists:
+                _aid = a.get("id")
+                if _aid and _aid not in _seen_fa:
+                    _seen_fa.add(_aid)
+                    _fa.append({"id": _aid, "name": a.get("name", "")})
             _sp_followed_cache = {
-                "artists": [{"id": a.get("id"), "name": a.get("name", "")}
-                            for a in artists if a.get("id")],
+                "artists": _fa,
                 "market":  market or _sp_followed_cache.get("market", ""),
                 "ts":      datetime.now().timestamp(),
             }
@@ -785,8 +872,12 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
                 rels    = []
                 hit_429 = False
                 for group in crawl_groups:
+                    # limit=50 is Spotify's max for this endpoint (spotify-release-list
+                    # uses it too). We fetch one page per group (no pagination), so the
+                    # larger page = fewer requests → fewer 429s AND wider recent-release
+                    # coverage in a single call. Was 20.
                     pg = (f"https://api.spotify.com/v1/artists/{aid}/albums"
-                          f"?include_groups={group}&limit=20{mkt}")
+                          f"?include_groups={group}&limit=50{mkt}")
                     data, status, ra = await _paced_get(pg)
                     if status == 429:
                         _sp_banned_until = _time.time() + min(ra, _SP_BAN_CAP)

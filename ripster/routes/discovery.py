@@ -379,10 +379,14 @@ async def _search_qobuz(q: str, ent: str, limit: int) -> dict:
                 alb_img = (item.get("album") or {}).get("image") if isinstance(item.get("album"), dict) else None
                 img_obj = alb_img if isinstance(alb_img, dict) else {}
             cover_url = img_obj.get("large", "") or img_obj.get("small", "")
+            _alb = item.get("album") if isinstance(item.get("album"), dict) else {}
             results.append({
                 "id":     str(item.get("id","")),
                 "title":  item.get("title") or item.get("name",""),
-                "artist": (item.get("artist") or {}).get("name",""),
+                # tracks carry the artist in `performer`, not `artist`
+                "artist": ((item.get("artist") or {}).get("name")
+                           or (item.get("performer") or {}).get("name")
+                           or (_alb.get("artist") or {}).get("name") or ""),
                 "type":   ent,
                 "url":    item.get("url","") or f"https://www.qobuz.com/album/{item.get('id','')}",
                 "cover":  cover_url,

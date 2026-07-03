@@ -260,6 +260,9 @@ DEFAULT_CONFIG: dict = {
     "amd-save-lyrics":   True,
     "amd-lyrics-format": "lrc",
     "amd-codec-alt":     True,
+    # zhaarey (local wrapper) — parallel track downloads within one album
+    "apple-parallel-tracks": False,
+    "apple-parallel-count":  4,
     # ── Qobuz ───────────────────────────────────────────────────────────────
     "qobuz-user-id":    "",
     "qobuz-auth-token": "",

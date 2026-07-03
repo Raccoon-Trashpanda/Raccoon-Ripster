@@ -26,6 +26,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "amd-dir", "amd-instance-url", "amd-instance-secure",
     "amd-parallel", "amd-save-lyrics", "amd-lyrics-format",
     "amd-codec-alt",
+    "apple-parallel",   # apple-parallel-tracks / apple-parallel-count (zhaarey)
     "atmos-max", "max-memory",
     "bearer", "media-user",
     "storefront",

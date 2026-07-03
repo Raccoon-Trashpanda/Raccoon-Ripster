@@ -1024,6 +1024,7 @@ function applyConfig() {
     if(_adv) _adv.textContent = (_ad === 0 ? 'Выкл' : _ad + ' мин'); }
   { const _ap = +(c['amd-parallel'] || 2);
     setVal('s-amd-parallel', _ap); }
+  setChk('s-apple-parallel', c['apple-parallel-tracks']);
   setChk('s-quality-subfolders', c['quality-subfolders']);
   setVal('s-transcode-format', c['transcode-format'] || (c['transcode-flac'] ? 'flac' : c['transcode-mp3'] ? 'mp3' : ''));
   setChk('s-transcode-keep', c['transcode-keep-original']);

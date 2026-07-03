@@ -284,12 +284,32 @@ _DEC_KEYS = ("decrypt-m3u8-port", "decrypt-port")
 _M3U_KEYS = ("get-m3u8-port", "m3u8-port")
 
 
-def slot_cwd(slot: int, decrypt_port: int, m3u8_port: int, base_dir) -> str:
+def ensure_all_decrypt_ports(config: dict) -> list[str]:
+    """Start every pool container and return their decrypt endpoints, so a single
+    album can fan its tracks across the WHOLE pool (apple-parallel-tracks) — each
+    concurrent track decrypts through its own container, avoiding one wrapper's
+    CKC serialisation. Returns [] when the pool is disabled."""
+    p = get_pool(config)
+    if p is None:
+        return []
+    try:
+        n = p.ensure(p.size)
+    except Exception:
+        n = 0
+    n = max(1, n)
+    return [f"127.0.0.1:{DECRYPT_BASE + i}" for i in range(n)]
+
+
+def slot_cwd(slot: int, decrypt_port: int, m3u8_port: int, base_dir,
+             decrypt_ports_csv: str = "") -> str:
     """Write `<base>/.pool_cwd/slot{N}/config.yaml` — a byte-for-byte copy of the
     root config.yaml with ONLY the wrapper-port lines repointed at this slot's
     container. The zhaarey binary reads config.yaml from its cwd (every other
     path in the file is absolute), so running it here sends its decrypt/m3u8
-    traffic to the slot's wrapper instead of the global one."""
+    traffic to the slot's wrapper instead of the global one.
+
+    ``decrypt_ports_csv`` (optional) lists ALL pool decrypt endpoints; when set,
+    the Go tool spreads parallel tracks across them (apple-parallel-tracks)."""
     base = _Path(base_dir)
     text = (base / "config.yaml").read_text(encoding="utf-8")
     dec_v, m3u_v = f"127.0.0.1:{decrypt_port}", f"127.0.0.1:{m3u8_port}"
@@ -302,6 +322,8 @@ def slot_cwd(slot: int, decrypt_port: int, m3u8_port: int, base_dir) -> str:
         text = _set(text, k, dec_v)
     for k in _M3U_KEYS:
         text = _set(text, k, m3u_v)
+    if decrypt_ports_csv:
+        text = _set(text, "decrypt-ports", f'"{decrypt_ports_csv}"')
 
     d = base / ".pool_cwd" / f"slot{slot}"
     d.mkdir(parents=True, exist_ok=True)
