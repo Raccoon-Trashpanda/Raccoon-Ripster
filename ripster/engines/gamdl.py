@@ -7,6 +7,11 @@ from pathlib import Path
 from .base import EngineBase, EngineResult
 from .registry import register
 
+# Windows: never pop a console window for the short `gamdl --help` probe. Without
+# this the flag-detection probe flashes a black gamdl/python console on the
+# owner's desktop (the "3-4 black windows" testers report). 0 on non-Windows.
+_CNW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+
 _QUALITIES = [
     {"id":"alac",        "codec":"alac",        "label":"ALAC",      "sub":"Apple Lossless",         "badge":"LOSSLESS","color":"#c084a0","bitrate":"≤1411 kbps",    "ext":"m4a","req":"cookies"},
     {"id":"atmos",       "codec":"ec3",         "label":"Atmos EC-3","sub":"Dolby Atmos EC-3",       "badge":"SPATIAL", "color":"#9090c8","bitrate":"2448–2768 kbps","ext":"m4a","req":"cookies"},
@@ -49,7 +54,8 @@ def _get_flags() -> set[str]:
     if _FLAG_CACHE is not None:
         return _FLAG_CACHE
     try:
-        r = subprocess.run([*_venv_gamdl(), "--help"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run([*_venv_gamdl(), "--help"], capture_output=True, text=True,
+                           timeout=10, creationflags=_CNW)
         _FLAG_CACHE = set(re.findall(r"--([a-z][a-z0-9-]+)", r.stdout + r.stderr))
     except Exception:
         _FLAG_CACHE = set()

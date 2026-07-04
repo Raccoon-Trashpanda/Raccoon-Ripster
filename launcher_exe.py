@@ -175,7 +175,11 @@ def _save_win_state(geo: dict) -> None:
 
 
 def tray_enabled() -> bool:
-    """config.yaml `minimize-to-tray` (default True). Env override for testing."""
+    """Whether the tray icon exists at all. When True, closing the window (X)
+    folds the app into the tray so downloads keep running; when False, closing
+    really quits. config.yaml `minimize-to-tray` (default True). Env override for
+    testing. NOTE: this no longer controls what a plain MINIMIZE does — see
+    minimize_to_tray() for that (default: stay on the taskbar)."""
     env = os.environ.get("RIPSTER_TRAY")
     if env is not None:
         return env.strip() not in ("0", "false", "False", "")
@@ -185,6 +189,24 @@ def tray_enabled() -> bool:
         return bool(c.get("minimize-to-tray", True))
     except Exception:
         return True
+
+
+def minimize_to_tray() -> bool:
+    """Where a plain MINIMIZE (the _ button) sends the window.
+
+    Default is the taskbar — a normal minimize that stays visible on the
+    taskbar, which is what users expect (testers reported the app "disappearing"
+    from the taskbar on minimize). Set config.yaml `minimize-to: tray` to fold
+    minimizes into the system tray instead. Env override RIPSTER_MINIMIZE_TRAY."""
+    env = os.environ.get("RIPSTER_MINIMIZE_TRAY")
+    if env is not None:
+        return env.strip() not in ("0", "false", "False", "")
+    try:
+        import yaml
+        c = yaml.safe_load((BASE / "config.yaml").read_text(encoding="utf-8")) or {}
+        return str(c.get("minimize-to", "taskbar")).strip().lower() == "tray"
+    except Exception:
+        return False
 
 
 def _tray_image():
@@ -342,8 +364,12 @@ def open_window(url: str, port: int, win_open, title: str = "Ripster"):
                 return True   # if hiding fails, let it close normally
             return False      # cancel the close → app stays alive in tray
 
+        min_to_tray = minimize_to_tray()
         def on_minimized():
-            if use_tray and state["tray"] is not None and not state["quit"]:
+            # Default: a plain minimize just goes to the taskbar (do nothing —
+            # let the OS minimize normally). Only fold into the tray when the
+            # user explicitly chose `minimize-to: tray`.
+            if min_to_tray and use_tray and state["tray"] is not None and not state["quit"]:
                 try:
                     window.hide()
                 except Exception:

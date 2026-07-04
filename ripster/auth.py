@@ -331,12 +331,18 @@ def install(app, config: dict, save_config: Callable[[dict], None]) -> None:
                 return await call_next(request)
 
         path = request.url.path
+        # NOTE: the Apple auth routes (/apple/, /api/apple/) are intentionally NOT
+        # public. They mutate owner state (set-token overwrites media-user-token,
+        # POST /api/apple/cookies writes cookies.txt to disk), so exposing them
+        # unauthenticated let anyone reaching the remote tunnel poison the token or
+        # write the cookie file. The app UI calls them with the session cookie, and
+        # the "🍎 Get Apple Token" bookmarklet opens set-token as a top-level GET
+        # navigation, which carries the SameSite=Lax session cookie for a
+        # logged-in owner — so gating them owner-only keeps that flow working.
         if (path in _PUBLIC_PATHS
                 or path.startswith("/static/")
-                or path.startswith("/spotify/")
-                or path.startswith("/apple/")
-                or path.startswith("/api/apple/")
-                or path.startswith("/guest/")):      # guest landing pages
+                or path.startswith("/spotify/")   # OAuth redirect target (external)
+                or path.startswith("/guest/")):   # guest landing pages
             return await call_next(request)
 
         if verify_session_cookie(request.cookies.get("ripster-session", "")):

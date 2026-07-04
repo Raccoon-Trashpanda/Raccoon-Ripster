@@ -37,6 +37,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+# Windows: suppress the console window every child process would otherwise flash
+# on the owner's desktop. Tool-detection probes (docker/gamdl/node/--version)
+# run when the Setup tab loads, so without this the user sees "3-4 black windows"
+# pop up. 0 on non-Windows. Defined up top so every helper can reference it.
+_NO_WIN = 0x08000000 if os.name == "nt" else 0
+
 _cfg:         dict     = {}
 _broadcast              = None
 _save_config            = None
@@ -91,7 +97,7 @@ def check_docker_installed() -> tuple[bool, str]:
         try:
             r = subprocess.run(
                 [docker, "info", "--format", "{{.ServerVersion}}"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=5, creationflags=_NO_WIN,
             )
             if r.returncode == 0:
                 return True, docker
@@ -103,7 +109,7 @@ def check_docker_installed() -> tuple[bool, str]:
             try:
                 r = subprocess.run(
                     [p, "info", "--format", "{{.ServerVersion}}"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, text=True, timeout=5, creationflags=_NO_WIN,
                 )
                 if r.returncode == 0:
                     return True, p
@@ -153,7 +159,7 @@ def _detect_gamdl_flags() -> set[str]:
         gamdl_exe = shutil.which("gamdl") or "gamdl"
         r = subprocess.run(
             [gamdl_exe, "--help"],
-            capture_output=True, text=True, timeout=10,
+            capture_output=True, text=True, timeout=10, creationflags=_NO_WIN,
         )
         flags = set(re.findall(r"--([a-z][a-z0-9-]+)", r.stdout + r.stderr))
         _gamdl_flags = flags
@@ -198,7 +204,7 @@ async def check_tools() -> dict:
             try:
                 r = subprocess.run(
                     [path, "version" if name == "go" else "--version"],
-                    capture_output=True, text=True, timeout=5,
+                    capture_output=True, text=True, timeout=5, creationflags=_NO_WIN,
                 )
                 ver = (r.stdout or r.stderr or "").strip().splitlines()[0][:60]
                 result[name]["version"] = ver
@@ -574,7 +580,7 @@ def _node_version(exe: str) -> int:
     """Return the major version of a node executable (e.g. 20), or 0 if unknown."""
     try:
         out = subprocess.run([exe, "--version"], capture_output=True, text=True,
-                             timeout=10).stdout.strip()
+                             timeout=10, creationflags=_NO_WIN).stdout.strip()
         m = re.match(r"v?(\d+)\.", out)
         return int(m.group(1)) if m else 0
     except Exception:
@@ -652,7 +658,6 @@ async def install_node_windows() -> Optional[str]:
 _ANDROID_ROOT = Path(r"C:\Android")
 _WVD_AVD      = "wvd"
 _WVD_SYS_IMG  = "system-images;android-30;google_apis;x86_64"
-_NO_WIN       = 0x08000000  # CREATE_NO_WINDOW
 
 
 def _jre_java() -> Optional[Path]:

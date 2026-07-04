@@ -51,6 +51,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "releases-services", "releases-days", "releases-types",
     "queue-autostart", "max-parallel",
     "minimize-to-tray",
+    "minimize-to",      # where a plain minimize goes: taskbar (default) / tray
     "wrapper-apple-id", "wrapper-password", "wrapper-mode", "apple-wrapper",
     "decrypt-port", "m3u8-port",
     "url-quality", "album-folder", "single-disc",
