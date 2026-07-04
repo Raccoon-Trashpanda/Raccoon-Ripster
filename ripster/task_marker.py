@@ -45,28 +45,12 @@ def _short_id(task_id: str) -> str:
 
 
 def write_marker(directory: Path, task_id: str, task: dict) -> bool:
-    """Write _ripster.txt into *directory*.  Returns True on success."""
-    meta    = task.get("meta") or {}
-    title   = meta.get("title")       or meta.get("album")  or ""
-    artist  = meta.get("artist")      or meta.get("albumArtist") or ""
-    album   = meta.get("album")       or title or ""
-    service = (task.get("service")    or "").capitalize()
-    quality = task.get("quality")     or ""
-
-    lines: list[str] = []
-    if artist: lines.append(f"  Исполнитель / Artist:    {artist}")
-    if album and album != title:
-        lines.append(f"  Альбом / Album:      {album}")
-    elif title:
-        lines.append(f"  Название / Title:      {title}")
-    if service: lines.append(f"  Сервис / Service:    {service}")
-    if quality: lines.append(f"  Качество / Quality:    {quality.upper()}")
-    lines.append(f"  ID загрузки / Download #: {_short_id(task_id)}")
-
-    release_block = "\n".join(lines) + "\n\n"
-    content = _TEMPLATE.format(task_id=task_id, release_block=release_block)
+    """Public build: write ONLY the machine-readable id line — the human-facing
+    banner / thank-you / release description was removed by request (it cluttered
+    download folders and confused users). The `task-id:` line is still needed so
+    find_dir_by_task_id() can locate the output directory for delivery."""
     try:
-        (directory / MARKER_FILENAME).write_text(content, encoding="utf-8")
+        (directory / MARKER_FILENAME).write_text(f"{_TAG} {task_id}\n", encoding="utf-8")
         return True
     except OSError:
         return False

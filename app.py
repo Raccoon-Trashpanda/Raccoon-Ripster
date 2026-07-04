@@ -806,7 +806,6 @@ _ctx.process_queue = process_queue
 from ripster.routes import history    as _history
 from ripster.routes import spotify    as _spotify
 from ripster.routes import discovery  as _discovery
-from ripster.routes import releases   as _releases
 from ripster.routes import setup      as _setup_routes
 from ripster.routes import streaming  as _streaming
 from ripster.routes import auth       as _auth_routes
@@ -828,7 +827,9 @@ _tl1001.install(config)          # 1001Tracklists source (login optional, disk-c
 _history.install(app, _ctx)
 _discovery.install(app, _ctx)
 _spotify.install(app, _ctx)
-_releases.install(app, _ctx)
+# Release radar disabled in the public build — its Spotify new-releases crawler
+# runs on a shared dev token that gets rate-limited/banned, so it doesn't work
+# for public users. (Nav item + route removed; feature stays in the private build.)
 _setup_routes.install(app, _ctx)
 _streaming.install(app, _ctx)
 _auth_routes.install(app, _ctx)
