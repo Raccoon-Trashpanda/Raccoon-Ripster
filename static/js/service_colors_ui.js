@@ -58,7 +58,7 @@ function _showSpotifyChoiceToast(url, quality) {
   el.innerHTML = `
     <div class="notif-dot" style="background:#1db954;color:#1db954"></div>
     <div class="notif-body">
-      <div class="notif-msg">Spotify — конвертировать через:</div>
+      <div class="notif-msg">${t('q.sp_conv_via')}</div>
       <div class="sp-picker-btns" style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
         <button data-target="apple"
           style="padding:5px 11px;background:rgba(192,132,160,.15);border:1px solid rgba(192,132,160,.25);border-radius:8px;font-size:11px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--font)">Apple Music</button>
@@ -69,7 +69,7 @@ function _showSpotifyChoiceToast(url, quality) {
       </div>
       <label class="sp-remember" style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px;color:var(--muted);cursor:pointer;user-select:none">
         <input type="checkbox" class="sp-remember-chk" style="accent-color:#1db954"/>
-        Запомнить выбор (не спрашивать снова)
+        ${t('q.remember_choice')}
       </label>
     </div>
     <div class="notif-close" onclick="_closeNotif('${id}')">✕</div>`;
@@ -101,12 +101,12 @@ async function _chooseSpTarget(notifId, target, remember) {
     try {
       await api('POST','/api/config',{ 'spotify-default-target': target });
       if(S.config) S.config['spotify-default-target'] = target;
-      toast(`Spotify → ${_svcLabel(target)} (запомнено)`, _svcColor(target));
+      toast('Spotify → '+_svcLabel(target)+' '+t('q.remembered'), _svcColor(target));
     } catch(e) {
       console.warn('save remember:', e);
     }
   } else {
-    toast('Конвертирую Spotify…', '#1db954');
+    toast(t('t.conv_sp'), '#1db954');
   }
 
   const r = await api('POST','/api/convert/spotify', { url: ctx.url, target });
@@ -116,7 +116,7 @@ async function _chooseSpTarget(notifId, target, remember) {
     detectUrlService('');
     toast('+ '+r.target.title, _svcColor(target), _svcLabel(target));
   } else {
-    toast('Не найдено на '+_svcLabel(target), 'var(--orange)', r.error||'');
+    toast(t('t.not_found_on')+_svcLabel(target), 'var(--orange)', r.error||'');
   }
 }
 
@@ -147,7 +147,7 @@ function showUrlServiceModal(url, quality, detectedSvc) {
     beatport: {label:'Beatport',    color:'#01f49c', engines:['OrpheusDL']},
   };
 
-  const svcInfo = SVC_INFO[detectedSvc] || {label:detectedSvc,color:'var(--muted)',engines:['Авто']};
+  const svcInfo = SVC_INFO[detectedSvc] || {label:detectedSvc,color:'var(--muted)',engines:[t('q.auto_word')]};
   const shortUrl = url.length > 60 ? url.slice(0,57)+'…' : url;
 
   const modal = document.createElement('div');
@@ -159,29 +159,29 @@ function showUrlServiceModal(url, quality, detectedSvc) {
     ? ['apple','qobuz','deezer']
     : [detectedSvc];
 
-  const targetBtns = targetOptions.map(t => {
-    const ti = SVC_INFO[t]||{label:t,color:'var(--muted)'};
-    return `<button onclick="chooseUrlSvc(${JSON.stringify(url)},${JSON.stringify(quality)},${JSON.stringify(detectedSvc)},${JSON.stringify(t)})"
+  const targetBtns = targetOptions.map(sk => {
+    const si = SVC_INFO[sk]||{label:sk,color:'var(--muted)'};
+    return `<button onclick="chooseUrlSvc(${JSON.stringify(url)},${JSON.stringify(quality)},${JSON.stringify(detectedSvc)},${JSON.stringify(sk)})"
       style="flex:1;padding:10px 14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:9px;cursor:pointer;font-family:var(--font);transition:.15s;text-align:center"
-      onmouseover="this.style.borderColor='${ti.color}'" onmouseout="this.style.borderColor='rgba(255,255,255,.12)'">
-      <div style="font-size:13px;font-weight:700;color:${ti.color}">${ti.label}</div>
-      ${isSpotify?'<div style="font-size:10px;color:var(--muted);margin-top:3px">конвертировать</div>':''}
+      onmouseover="this.style.borderColor='${si.color}'" onmouseout="this.style.borderColor='rgba(255,255,255,.12)'">
+      <div style="font-size:13px;font-weight:700;color:${si.color}">${si.label}</div>
+      ${isSpotify?'<div style="font-size:10px;color:var(--muted);margin-top:3px">'+t('q.convert_word')+'</div>':''}
     </button>`;
   }).join('');
 
   modal.innerHTML = `<div style="background:var(--surface,#1c1c1e);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:24px;width:420px;max-width:90vw">
-    <div style="font-size:11px;color:var(--muted,#888);margin-bottom:4px">Определён сервис</div>
+    <div style="font-size:11px;color:var(--muted,#888);margin-bottom:4px">${t('q.svc_detected')}</div>
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
       <div style="width:10px;height:10px;border-radius:50%;background:${svcInfo.color}"></div>
       <div style="font-size:16px;font-weight:700;color:var(--text)">${svcInfo.label}</div>
     </div>
     <div style="font-size:11px;color:var(--muted,#888);font-family:monospace;background:rgba(0,0,0,.3);border-radius:7px;padding:7px 10px;margin-bottom:16px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${shortUrl}</div>
-    <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px">${isSpotify?'Конвертировать и скачать через:':'Скачать через:'}</div>
+    <div style="font-size:12px;font-weight:600;color:var(--text);margin-bottom:10px">${isSpotify?t('q.conv_via'):t('q.dl_via')}</div>
     <div style="display:flex;gap:8px;margin-bottom:16px">${targetBtns}</div>
     <div style="display:flex;justify-content:flex-end">
       <button onclick="document.getElementById('url-svc-modal').remove()"
         style="padding:6px 14px;background:transparent;border:1px solid rgba(255,255,255,.1);border-radius:8px;cursor:pointer;font-size:12px;color:var(--muted,#888);font-family:var(--font)">
-        Отмена
+        ${t('s.cancel')}
       </button>
     </div>
   </div>`;
@@ -196,14 +196,14 @@ async function chooseUrlSvc(url, quality, srcSvc, targetSvc) {
 
   if(srcSvc === 'spotify') {
     // Convert Spotify → target service then add with target-service quality
-    toast('Конвертирую Spotify…', '#1db954');
+    toast(t('t.conv_sp'), '#1db954');
     const r = await api('POST','/api/convert/spotify',{url,target:targetSvc});
     if(r.ok && r.target?.url) {
       await api('POST','/api/queue/add',{url:r.target.url, quality: resolveQuality(targetSvc), title:r.target.title});
       document.getElementById('url-input').value='';
-      toast('+ '+r.target.title+' → очередь','#1db954');
+      toast('+ '+r.target.title+' → '+t('q.queue_word'),'#1db954');
     } else {
-      toast('Не найдено: '+(r.error||url),'var(--orange)');
+      toast(t('t.not_found_c')+(r.error||url),'var(--orange)');
     }
     return;
   }
@@ -216,17 +216,17 @@ async function _doAddUrl(url, quality, svc) {
   if(r.ok) {
     document.getElementById('url-input').value='';
     detectUrlService(''); // clear indicator
-    toast(r.count > 1 ? `Добавлено ${r.count} треков в очередь` : 'Добавлено в очередь');
+    toast(r.count > 1 ? ti('t.added_n',{n:r.count}) : t('t.added_q'));
     pullQueue();   // reflect immediately even if the WS push is lagging/dead
     // ISRC cross-service check (non-blocking; skip for tidal — no metadata ISRC)
     if(svc !== 'tidal') _checkIsrc(url, svc);
   } else if(r.spotify) {
     // Backend rejected Spotify URL — spotify-engine not set to a direct engine
-    toast('Включи OrpheusDL в Settings → Spotify', 'var(--orange)');
+    toast(t('svc.enable_orph'), 'var(--orange)');
   } else if(r.duplicate) {
-    toast('Уже в очереди', 'var(--muted)');
+    toast(t('cd.in_queue'), 'var(--muted)');
   } else {
-    toast(r.msg || r.detail || 'Ошибка URL', 'var(--red)');
+    toast(r.msg || r.detail || t('t.url_error'), 'var(--red)');
   }
 }
 
@@ -258,7 +258,7 @@ async function _checkIsrc(url, skipSvc = '') {
     const stack = document.getElementById('notif-stack');
     if (!stack) return;
 
-    const title  = r.title  ? `«${esc(r.title)}»`  : 'Трек';
+    const title  = r.title  ? `«${esc(r.title)}»`  : t('card.track');
     const artist = r.artist ? ` — ${esc(r.artist)}` : '';
 
     const n = document.createElement('div');
@@ -272,7 +272,7 @@ async function _checkIsrc(url, skipSvc = '') {
       `<div class="isrc-row" data-svc="${s}" style="display:flex;align-items:center;gap:8px;padding:5px 6px;margin:0 -6px;cursor:pointer;border-radius:6px">
         <span style="color:${_svcColor(s)};font-weight:700;min-width:50px">${esc({qobuz:'Qobuz',tidal:'Tidal',deezer:'Deezer'}[s]||s)}</span>
         <span style="color:var(--muted);flex:1;font-size:10.5px">${esc(_isrcQualLabel(s, r.matches[s]))}</span>
-        <span style="opacity:.7;font-size:13px" title="Добавить в очередь">⬇</span>
+        <span style="opacity:.7;font-size:13px" title="${t('q.add_queue')}">⬇</span>
       </div>`
     ).join('');
 
@@ -295,8 +295,8 @@ async function _checkIsrc(url, skipSvc = '') {
         const trackUrl = m.track_url || m.url;
         if (!trackUrl) return;
         const res = await api('POST', '/api/queue/add', { url: trackUrl });
-        if (res.ok) { toast('Добавлено в очередь'); n.remove(); }
-        else toast(res.msg || res.detail || 'Ошибка', 'var(--red)');
+        if (res.ok) { toast(t('t.added_q')); n.remove(); }
+        else toast(res.msg || res.detail || t('t.error'), 'var(--red)');
       });
     });
 
@@ -461,12 +461,12 @@ function _visibleLog(task) {
 }
 
 function _qiStatusChip(task) {
-  if(task.partial || task._partial) return `<span class="qi-st st-partial">⚠ частично</span>`;
-  if(task.status==='running') return `<span class="qi-st st-run"><span class="qi-spinner"></span>${task._retry_count?('догрузка '+task._retry_count):(task._auto_retry?'догрузка':'качаю')}</span>`;
-  if(task.status==='done')   return `<span class="qi-st st-done">✓ готово</span>`;
-  if(task.status==='error')  return `<span class="qi-st st-err">✗ ошибка</span>`;
-  if(task.status==='paused') return `<span class="qi-st">⏸ пауза</span>`;
-  return `<span class="qi-st st-q">в очереди</span>`;
+  if(task.partial || task._partial) return `<span class="qi-st st-partial">⚠ ${t('q.st_partial')}</span>`;
+  if(task.status==='running') return `<span class="qi-st st-run"><span class="qi-spinner"></span>${task._retry_count?(t('q.st_refetch')+' '+task._retry_count):(task._auto_retry?t('q.st_refetch'):t('q.st_dl'))}</span>`;
+  if(task.status==='done')   return `<span class="qi-st st-done">✓ ${t('q.st_done')}</span>`;
+  if(task.status==='error')  return `<span class="qi-st st-err">✗ ${t('q.st_err')}</span>`;
+  if(task.status==='paused') return `<span class="qi-st">⏸ ${t('q.st_paused')}</span>`;
+  return `<span class="qi-st st-q">${t('q.st_queued')}</span>`;
 }
 
 function buildQueueItem(task) {
@@ -486,13 +486,13 @@ function buildQueueItem(task) {
   el.style.setProperty('--qi-p', (task.progress||0) + '%');
   const _isSingleTrack = m?.type === 'song' || m?.type === 'track';
   const trackCount = _isSingleTrack ? 1 : (m?.trackCount || m?.totalTracks || 0);
-  const trackInfo  = trackCount > 1 ? `${trackCount} треков` : (trackCount === 1 ? '1 трек' : '');
+  const trackInfo  = trackCount > 1 ? ti('q.n_tracks',{n:trackCount}) : (trackCount === 1 ? t('q.one_track') : '');
   const hasMeta    = m && (m.title || m.artist);
   const typeLabel  = _typeLabel(m);
   const durInfo    = (m && m.duration && ['soundcloud','bbc'].includes(m.service)) ? _scDur(m.duration) : '';
   const artistLine = hasMeta
     ? [m.artist || '—', m.year, m.label, typeLabel, trackInfo, durInfo].filter(Boolean).join(' · ')
-    : (m?.meta_error ? `⚠ ${m.meta_error}` : (m?.enriched ? '' : 'Получаю метаданные…'));
+    : (m?.meta_error ? `⚠ ${m.meta_error}` : (m?.enriched ? '' : t('q.meta_loading')));
   const logLines   = (task.log || []).slice(-20);
   const logHtml    = logLines.map(l => {
     const lvl = /ERROR|✗/.test(l) ? 'error' : /WARN|⚠/.test(l) ? 'warn' : /✓|Done|Saved/.test(l) ? 'success' : /INFO|STEP/.test(l) ? 'info' : 'stdout';
@@ -509,9 +509,9 @@ function buildQueueItem(task) {
   const _showBar  = task.status==='running' || task.status==='queued';
   const _st       = _qiStatusChip(task);
   const _acts =
-    (task.service==='spotify' ? `<button class="dl-action-btn" onclick="isrcUpgrade('${task.id}')" title="🎯 Найти лучше (ISRC)" style="color:#c084f5;border-color:#c084f544">🎯</button>` : '') +
-    (task.status==='done' ? `<button class="dl-action-btn dl-cloud-btn" onclick="uploadToCloud('${task.id}',this)" title="Gofile link" style="color:#f0a050;border-color:#f0a05044">🔗${(task._dl_gofile||0)>0?`<span class="dl-cnt">${task._dl_gofile}</span>`:''}</button>` : '') +
-    ((task.status==='error'||task.status==='cancelled'||_partial) ? `<button class="dl-action-btn" onclick="retryTask('${task.id}')" title="↺ Догрузить недостающие треки (пропускает уже скачанные)" style="color:#ffd60a;border-color:#ffd60a44">↺</button>` : '');
+    (task.service==='spotify' ? `<button class="dl-action-btn" onclick="isrcUpgrade('${task.id}')" title="🎯 ${t('q.isrc_upgrade')}" style="color:#c084f5;border-color:#c084f544">🎯</button>` : '') +
+    (task.status==='done' ? `<button class="dl-action-btn dl-cloud-btn" onclick="uploadToCloud('${task.id}',this)" title="${t('q.gofile')}" style="color:#f0a050;border-color:#f0a05044">🔗${(task._dl_gofile||0)>0?`<span class="dl-cnt">${task._dl_gofile}</span>`:''}</button>` : '') +
+    ((task.status==='error'||task.status==='cancelled'||_partial) ? `<button class="dl-action-btn" onclick="retryTask('${task.id}')" title="↺ ${t('q.retry_missing')}" style="color:#ffd60a;border-color:#ffd60a44">↺</button>` : '');
 
   el.innerHTML = `
     <div class="qi-art">${m?.artworkUrl?`<img src="${esc(m.artworkUrl)}" data-cover data-lightbox onload="this.classList.add('loaded')" style="cursor:zoom-in" loading="lazy"/>`:'🎵'}</div>
@@ -525,163 +525,66 @@ function buildQueueItem(task) {
         ${_showBar?`<div class="qi-prog-wrap"><div class="qi-prog-bar" style="width:${_pct}%;background:${q.color}"></div></div>`:''}
         ${_countTxt?`<span class="qi-count">${_countTxt}</span>`:''}
         ${_st}
-        ${logLines.length?`<button class="qi-log-toggle" onclick="toggleTaskLog('${task.id}',this)" title="показать лог">▶${logLines.length}</button>`:''}
+        ${logLines.length?`<button class="qi-log-toggle" onclick="toggleTaskLog('${task.id}',this)" title="${t('q.show_log')}">▶${logLines.length}</button>`:''}
         <div class="qi-actions">${_acts}</div>
       </div>
       ${logLines.length?`<div class="qi-log-panel" id="qi-log-${task.id}">${logHtml}</div>`:''}
     </div>
-    <button class="qi-close owner-only" onclick="removeTask('${task.id}')" title="Удалить">✕</button>
+    <button class="qi-close owner-only" onclick="removeTask('${task.id}')" title="${t('q.remove')}">✕</button>
   `;
   return el;
 }
 
-// CODER / CONVERTER / TAGGER (file converter + tag editor UI) → moved to its own module file (see index.html).
+async function coderMix(taskId) {
+  let p;
+  try { p = await api('POST','/api/coder/preview',{task_id:taskId}); }
+  catch(e){ toast('Ripster Coder: '+e.message,'var(--red)'); return; }
+  if(!p || !p.ok){ toast('Ripster Coder: '+((p&&p.detail)||t('cd.failed')),'var(--red)'); return; }
 
-function toggleTaskLog(id, btn) {
-  const panel = document.getElementById(`qi-log-${id}`);
-  if(!panel) return;
-  const open = panel.style.display === 'block';
-  panel.style.display = open ? 'none' : 'block';
-  if(!open) panel.scrollTop = panel.scrollHeight;
-  if(btn) btn.textContent = btn.textContent.replace(/^[▶▼]/, open ? '▶' : '▼');
-}
+  const warn = p.lossless ? '' :
+    `<div style="margin:8px 0;padding:8px 10px;background:rgba(255,85,0,.12);border:1px solid rgba(255,85,0,.35);border-radius:8px;font-size:11px;color:#ff7a3d;line-height:1.4">
+      ${ti('cd.lossy_warn',{codec:(p.codec||p.source_ext||'?')})}</div>`;
 
-function _typeLabel(m) {
-  if(!m) return '';
-  if(m.albumType) return m.albumType;
-  return {
-    albums:'Альбом', album:'Альбом',
-    single:'Сингл', ep:'EP', compilation:'Сборник',
-    songs:'Трек', song:'Трек', track:'Трек',
-    playlists:'Плейлист', playlist:'Плейлист',
-    artist:'Артист', 'music-videos':'Видео',
-  }[m.type] || '';
-}
-
-function _titleFromUrl(url) {
-  try {
-    const u = new URL(url);
-    const parts = u.pathname.split('/').filter(Boolean).map(p => {
-      try { return decodeURIComponent(p); } catch(_) { return p; }
-    });
-    const idx = parts.findIndex(p => ['album','track','song','playlist','artist'].includes(p));
-    if(idx >= 0) return `${parts[idx]} · ${parts[idx+1]||''}`;
-    return url;
-  } catch(_) { return url; }
-}
-
-
-function updateQueueItem(task, el) {
-  el = el || document.querySelector(`.qi[data-id="${task.id}"]`);
-  if(!el) return;
-  const _partial = String(!!(task.partial || task._partial));
-  // A status (or partial) change alters the action set + layout → full rebuild,
-  // preserving an open log panel. Resume-in-place keeps the SAME card (same id).
-  if(el.dataset.st !== task.status || el.dataset.partial !== _partial) {
-    const logOpen = el.querySelector('.qi-log-panel')?.style.display === 'block';
-    const fresh = buildQueueItem(task);
-    if(logOpen){
-      const p = fresh.querySelector('.qi-log-panel'); if(p) p.style.display='block';
-      const tg = fresh.querySelector('.qi-log-toggle'); if(tg) tg.textContent = tg.textContent.replace(/^▶/,'▼');
+  const ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center';
+  ov.innerHTML = `
+    <div style="background:var(--panel,#1a1a1f);border:1px solid #ffffff18;border-radius:14px;padding:18px 20px;width:min(440px,92vw);box-shadow:0 20px 60px #000a">
+      <div style="font-size:15px;font-weight:700;color:#c9a0ff;margin-bottom:2px">🎚 Ripster Coder</div>
+      <div style="font-size:11px;color:#888;margin-bottom:12px">${ti('cd.mix_desc',{n:p.count})} → <code>${p.out_dir}</code></div>
+      <label style="font-size:11px;color:#aaa">${t('cd.out_name')}</label>
+      <input id="coder-name" value="${(p.name||'').replace(/"/g,'&quot;')}" style="width:100%;margin:4px 0 10px;padding:8px 10px;border-radius:8px;border:1px solid #ffffff22;background:#0e0e12;color:#eee;font-size:13px">
+      ${warn}
+      <label style="font-size:11px;color:#aaa">${t('cd.mix_fmt')}</label>
+      <select id="coder-fmt" style="width:100%;margin:4px 0 14px;padding:8px 10px;border-radius:8px;border:1px solid #ffffff22;background:#0e0e12;color:#eee;font-size:13px">
+        <option value="source"${p.lossless?' selected':''}>${t('cd.fmt_source')}</option>
+        <option value="flac">FLAC — lossless</option>
+        <option value="alac">ALAC — Apple Lossless (.m4a)</option>
+        <option value="mp3"${!p.lossless?' selected':''}>MP3 320</option>
+      </select>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button id="coder-cancel" style="padding:8px 14px;border-radius:8px;border:1px solid #ffffff22;background:transparent;color:#aaa;cursor:pointer">${t('s.cancel')}</button>
+        <button id="coder-go" style="padding:8px 16px;border-radius:8px;border:none;background:#7c5cff;color:#fff;font-weight:600;cursor:pointer">${t('cd.mix_btn')}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.addEventListener('click', e => { if(e.target===ov) close(); });
+  ov.querySelector('#coder-cancel').onclick = close;
+  ov.querySelector('#coder-go').onclick = async () => {
+    const name = ov.querySelector('#coder-name').value.trim();
+    const fmt  = ov.querySelector('#coder-fmt').value;
+    const go = ov.querySelector('#coder-go');
+    go.disabled = true; go.textContent = t('cd.mixing');
+    try {
+      const r = await api('POST','/api/coder/mix',{task_id:taskId,name,fmt});
+      if(r && r.ok){
+        toast(t('svc.coder_done')+r.name, 'var(--green)', (r.warning||(t('cd.cue_out')+r.out_dir)));
+        close();
+      } else { throw new Error((r&&r.detail)||t('t.error')); }
+    } catch(e){
+      go.disabled = false; go.textContent = t('cd.mix_btn');
+      toast('Ripster Coder: '+e.message,'var(--red)');
     }
-    el.replaceWith(fresh);
-    return;
-  }
-  // Same status → cheap in-place update (no flicker, no rebuild).
-  const q   = _qualityFor(task);
-  const pct = Math.max(0, Math.min(100, task.progress||0));
-  el.style.setProperty('--qi-p', pct + '%');
-  const bar = el.querySelector('.qi-prog-bar');
-  if(bar){ bar.style.width = pct + '%'; bar.style.background = q.color; }
-  const m  = task.meta || {};
-  const _isSingle = m.type === 'song' || m.type === 'track';
-  const tc = _isSingle ? 1 : (m.trackCount || m.totalTracks || 0);
-  const cntEl = el.querySelector('.qi-count');
-  if(cntEl) cntEl.textContent = tc > 1 ? `${_tracksDone(task).done}/${tc}`
-                              : (pct>0 && pct<100 ? `${Math.round(pct)}%` : '');
-  const stEl = el.querySelector('.qi-st');
-  if(stEl) stEl.outerHTML = _qiStatusChip(task);
-  const badgeEl = el.querySelector('.qi-badge');
-  if(badgeEl){ badgeEl.textContent = q.label; badgeEl.style.background = q.color+'22'; badgeEl.style.color = q.color; }
-  // Metadata enrichment — title / artist / cover appear once they arrive.
-  if(m.title || m.artist){
-    const titleEl = el.querySelector('.qi-title');
-    if(titleEl) titleEl.textContent = m.title || _titleFromUrl(task.url);
-    const tcInfo  = tc > 1 ? `${tc} треков` : (tc === 1 ? '1 трек' : '');
-    const durInfo = (m.duration && ['soundcloud','bbc'].includes(m.service)) ? _scDur(m.duration) : '';
-    const line = [m.artist || '—', m.year, m.label, _typeLabel(m), tcInfo, durInfo].filter(Boolean).join(' · ');
-    let artistEl = el.querySelector('.qi-artist');
-    if(artistEl) artistEl.textContent = '— ' + line;
-    else if(titleEl && line){ const s=document.createElement('span'); s.className='qi-artist'; s.textContent='— '+line; titleEl.after(s); }
-    const artEl = el.querySelector('.qi-art');
-    if(artEl && m.artworkUrl && !artEl.querySelector('img'))
-      artEl.innerHTML = `<img src="${esc(m.artworkUrl)}" data-cover data-lightbox onload="this.classList.add('loaded')" style="cursor:zoom-in" loading="lazy"/>`;
-  }
-  // Download counters on existing action buttons (done state).
-  if(task.status === 'done'){
-    const _setCnt = (sel, n) => {
-      const btn = el.querySelector(sel); if(!btn) return;
-      let cnt = btn.querySelector('.dl-cnt');
-      if(n > 0){ if(!cnt){ cnt=document.createElement('span'); cnt.className='dl-cnt'; btn.appendChild(cnt);} cnt.textContent=n; }
-      else if(cnt) cnt.remove();
-    };
-    _setCnt('.dl-btn', task._dl_file||0);
-    _setCnt('.dl-zip-btn', task._dl_zip||0);
-    _setCnt('.dl-cloud-btn', task._dl_gofile||0);
-  }
-}
-
-function statusLabel(task) {
-  if(task.status==='running'){
-    const _isSingle = task.meta?.type === 'song' || task.meta?.type === 'track';
-    const tc = _isSingle ? 1 : (task.meta?.trackCount || task.meta?.totalTracks || 0);
-    const spin = '<span class="qi-spinner"></span>';
-    if(tc > 1){
-      const done = Math.min(tc, Math.floor((task.progress||0)/100*tc));
-      return `${spin}${done}/${tc}`;
-    }
-    return `${spin}${task.progress||0}%`;
-  }
-  if(task.status==='done')    return t('status.done');
-  if(task.status==='error')   return t('status.error');
-  if(task.status==='paused')  return t('status.paused');
-  return t('status.queued');
-}
-
-async function removeTask(id) {
-  // Optimistic: drop the card from the UI FIRST so ✕ feels instant (don't wait for
-  // the DELETE round-trip or a WS queue_update). Reconcile via pullQueue on failure.
-  S.queue = S.queue.filter(t => t.id !== id);
-  renderQueue(); updateTransport();
-  try { await api('DELETE',`/api/queue/${id}`); }
-  catch(e){ toast('Не удалось удалить задачу','var(--red)'); pullQueue(); }
-}
-
-async function retryTask(id) {
-  const r = await api('POST', `/api/queue/retry/${id}`);
-  if(r.ok) toast(r.reused ? '↺ Повтор запущен' : '↺ Добавлено в очередь');
-  else if(r.duplicate) toast('Уже в очереди', 'var(--muted)');
-  else toast(r.msg || 'Ошибка повтора', 'var(--red)');
-}
-
-async function clearDone() {
-  // Finished = done / error / cancelled.
-  const done = S.queue.filter(t => t.status==='done' || t.status==='error' || t.status==='cancelled');
-  if(!done.length){ toast('Нет готовых задач для очистки','var(--muted)'); return; }
-  const removed = [];
-  for(const t of done){
-    try { await api('DELETE',`/api/queue/${t.id}`); removed.push(t.id); }
-    catch(e){ /* keep it; reported below */ }
-  }
-  // Self-refresh: don't depend on the WS queue_update arriving — right after a
-  // server restart / reconnect it can be missed, which made the button look dead.
-  if(removed.length){
-    const gone = new Set(removed);
-    S.queue = S.queue.filter(t => !gone.has(t.id));
-    renderQueue(); updateTransport();
-  }
-  const failed = done.length - removed.length;
-  if(failed) toast(`Не удалось убрать ${failed} — сервер ответил ошибкой`,'var(--orange)');
-  else toast(`Убрано: ${removed.length}`,'var(--green)');
+  };
 }
 

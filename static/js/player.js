@@ -140,7 +140,7 @@ function _scDrmSkip(reason) {
     _playPreviewAt(cur + 1);
   } else {
     const n = _FP._drmHits; _FP._drmHits = 0;
-    toast(`SC: ${n} тр. пропущено — ${reason}. Попробуй «⬇ Скачать».`, 'var(--orange)', '', 7000);
+    toast(ti('p.sc_skipped',{n:n,reason:reason}), 'var(--orange)', '', 7000);
   }
 }
 
@@ -198,7 +198,7 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
 
     if (!hasWebKitKeys && !hasStdFps) {
       Preview._fpsEl = null;
-      _scDrmSkip('FairPlay DRM — трек только для Safari');
+      _scDrmSkip(t('p.drm_fps_safari'));
       return;
     }
     _fpsLog(`[FPS] v8 video elm, wk=${hasWebKitKeys} std=${hasStdFps}`);
@@ -211,7 +211,7 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
       _fpsLog(`[FPS] cert ${serverCert.length}B`);
     } catch (e) {
       _fpsLog('[FPS] cert fail: ' + e.message);
-      Preview._fpsEl = null; _scDrmSkip('FairPlay: сертификат недоступен'); return;
+      Preview._fpsEl = null; _scDrmSkip(t('p.drm_fps_cert')); return;
     }
 
     const fpsLicUrl = `https://license.media-streaming.soundcloud.cloud/playback/fairplay?license_token=${encodeURIComponent(licToken)}`;
@@ -378,7 +378,7 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
                             robustness: 'SW_SECURE_CRYPTO' }],
     }]);
   } catch (_) {
-    _scDrmSkip('DRM (Widevine CDM недоступен — попробуй Chrome)');
+    _scDrmSkip(t('p.drm_no_wv'));
     return;
   }
 
@@ -391,7 +391,7 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
     }).catch(() => {});
   }
   if (!window.Hls || !Hls.isSupported()) {
-    _scDrmSkip('DRM (браузер не поддерживает MSE/HLS.js)');
+    _scDrmSkip(t('p.drm_no_mse'));
     return;
   }
 
@@ -411,7 +411,7 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
     hls = new Hls(hlsCfg);
   } catch (e) {
     console.error('[SC DRM] HLS init failed:', e);
-    _scDrmSkip('DRM (HLS.js ошибка инициализации)');
+    _scDrmSkip(t('p.drm_hls_init'));
     return;
   }
   Preview._hls = hls;
@@ -428,9 +428,9 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
       _scStreamCache.delete(String(item.id));
     }
     const reason = isKeyErr
-      ? (details.includes('license') ? 'лиц. сервер SC — токен истёк' : 'DRM ключ недоступен')
+      ? (details.includes('license') ? t('p.drm_lic_expired') : t('p.drm_key_unavail'))
       : data.type === 'networkError'
-        ? `SC сеть: ${data.details||'?'} (CORS?)`
+        ? ti('p.sc_net',{d:(data.details||'?')})
         : `DRM: ${data.details||data.type||'?'}`;
     _scDrmSkip(reason);
   });
@@ -451,7 +451,7 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
   } catch (e) {
     console.error('[SC DRM] loadSource/attachMedia failed:', e);
     hls.destroy(); Preview._hls = null;
-    _scDrmSkip('DRM (HLS.js ошибка загрузки)');
+    _scDrmSkip(t('p.drm_hls_load'));
   }
 }
 
@@ -698,8 +698,8 @@ function _updateQualityPill(item) {
   btn.style.opacity = fixed ? '.55' : '1';
   btn.style.pointerEvents = fixed ? 'none' : 'auto';
   btn.title = fixed
-    ? (svc === 'soundcloud' ? 'SoundCloud: качество источника фиксировано' : 'Качество фиксировано для этого источника')
-    : 'Качество стрима';
+    ? (svc === 'soundcloud' ? t('p.q_fixed_sc') : t('p.q_fixed'))
+    : t('p.stream_q');
 }
 function _closeQualityMenu() {
   const m = document.getElementById('pp-quality-menu');
@@ -745,10 +745,10 @@ async function setStreamQuality(q) {
       audio.addEventListener('loadedmetadata', seekOnce);
       await _playPreviewAt(Preview.idx);
     }
-    if (typeof toast === 'function') toast(`Качество: ${_qualityShortLabel(item.service, q)}`, 'var(--green)', 2500);
+    if (typeof toast === 'function') toast(t('p.quality_c')+_qualityShortLabel(item.service, q), 'var(--green)', 2500);
   } catch (e) {
     console.warn('[quality] switch failed:', e?.message);
-    if (typeof toast === 'function') toast('Не удалось переключить качество', 'var(--red)');
+    if (typeof toast === 'function') toast(t('p.q_fail'), 'var(--red)');
   }
 }
 // Close the quality menu on any outside click.
@@ -818,14 +818,14 @@ async function _waPlay(idx, startAtSec = 0) {
         const n = _WA._drmHits;
         _WA._drmHits = 0;
         if (item.service === 'soundcloud') {
-          toast(`SC: ${n} тр. пропущено — платный контент (нет Go+). Попробуй «⬇ Скачать».`, 'var(--orange)', '', 6000);
+          toast(ti('p.sc_paid_skipped',{n:n}), 'var(--orange)', '', 6000);
         } else {
-          toast(`Треков с DRM пропущено: ${n}. «⬇ Скачать» обходит это.`, 'var(--orange)', '', 6000);
+          toast(ti('p.drm_skipped',{n:n}), 'var(--orange)', '', 6000);
         }
         return false;
       }
       // Other failures — generic toast
-      toast(`Стрим ${item.service}: ${r.status || 'нет URL'}`, 'var(--red)');
+      toast(ti('p.stream_svc',{svc:item.service,st:(r.status || t('p.no_url'))}), 'var(--red)');
       if (idx + 1 < Preview.queue.length) return _waPlay(idx + 1, 0);
       return false;
     }
@@ -1401,9 +1401,9 @@ function _setupAudioEvents() {
     // Sleep timer "end of track" mode — pause and stop
     if (_FP && _FP.sleepEndOfTrack) {
       _FP.sleepEndOfTrack = false;
-      const lbl = document.getElementById('fp-sleep-val'); if (lbl) lbl.textContent = 'Сон';
+      const lbl = document.getElementById('fp-sleep-val'); if (lbl) lbl.textContent = t('p.sleep_word');
       const btn = document.getElementById('fp-sleep-btn'); if (btn) btn.classList.remove('active');
-      toast('💤 Таймер сна — пауза в конце трека', 'var(--muted)');
+      toast(t('p.sleep'), 'var(--muted)');
       return;   // don't auto-advance
     }
     if (Preview.idx >= 0 && Preview.idx < Preview.queue.length - 1) previewNext();
@@ -1429,12 +1429,12 @@ function _setupAudioEvents() {
       const item = Preview.queue[Preview.idx];
       if (!item) return;
       const svcHints = {
-        '/api/stream/deezer/': 'Deezer: трек недоступен (регион/лицензия). «⬇ Скачать» может помочь.',
-        '/api/stream/tidal/':  'Tidal stream error — возможно токен истёк (Settings → Tidal)',
-        '/api/stream/qobuz/':  'Qobuz stream error — проверь токен (Settings → Qobuz)',
+        '/api/stream/deezer/': t('p.hint_deezer'),
+        '/api/stream/tidal/':  t('p.hint_tidal'),
+        '/api/stream/qobuz/':  t('p.hint_qobuz'),
       };
       const hint = Object.entries(svcHints).find(([k]) => (item.url || '').includes(k));
-      toast(hint ? hint[1] : 'Ошибка воспроизведения аудио', 'var(--red)', 5000);
+      toast(hint ? hint[1] : t('p.audio_err'), 'var(--red)', 5000);
       const btn = document.getElementById('pp-play'); if(btn) btn.textContent = '▶';
       const btnB = document.getElementById('pp-play-big'); if(btnB) btnB.textContent = '▶';
     }, 900);
@@ -1503,8 +1503,8 @@ async function _playPreviewAt(idx) {
     }
     // Sync mini player title/artist/cover (WA path skips the normal assignment below)
     const _waArtistSub = item.full
-      ? (item.label || (item.artist ? `${item.artist} · полный трек` : 'Полный трек'))
-      : (item.artist ? `${item.artist} · 30 сек` : 'Предпрослушка');
+      ? (item.label || (item.artist ? item.artist+' · '+t('player.full_track') : t('p.full_track_cap')))
+      : (item.artist ? item.artist+' · '+t('player.preview_30') : t('p.preview_cap'));
     const _waPpTitle   = document.getElementById('pp-title');
     const _waPpArtist  = document.getElementById('pp-artist');
     const _waPpTitleB  = document.getElementById('pp-title-big');
@@ -1604,14 +1604,14 @@ async function _playPreviewAt(idx) {
           const n = _FP._drmHits;
           _FP._drmHits = 0;
           if (item.service === 'soundcloud') {
-            toast(`SC: ${n} тр. пропущено — платный контент (нет Go+). Попробуй «⬇ Скачать».`, 'var(--orange)', '', 6000);
+            toast(ti('p.sc_paid_skipped',{n:n}), 'var(--orange)', '', 6000);
           } else {
-            toast(`Треков с DRM пропущено: ${n}. «⬇ Скачать» обходит это.`,
+            toast(ti('p.drm_skipped',{n:n}),
                   'var(--orange)', '', 6000);
           }
           return;
         }
-        toast(`Стрим ${item.service}: ${detail}`, 'var(--red)');
+        toast(ti('p.stream_svc',{svc:item.service,st:detail}), 'var(--red)');
         if (idx < Preview.queue.length - 1) { Preview.idx = idx + 1; return _playPreviewAt(idx + 1); }
         return;
       }
@@ -1619,7 +1619,7 @@ async function _playPreviewAt(idx) {
       const ct = (resp.headers.get('content-type') || '').toLowerCase();
       if (ct.includes('application/json')) {
         const r = await resp.json();
-        if (!r.url) { toast('Нет stream URL', 'var(--red)'); return; }
+        if (!r.url) { toast(t('p.no_stream'), 'var(--red)'); return; }
         item.url           = r.url;
         item.format        = r.format || item.format;
         item.license_token = r.license_token || '';
@@ -1633,7 +1633,7 @@ async function _playPreviewAt(idx) {
         item.format = 'mp3';
       }
     } catch (e) {
-      toast('Стрим: ' + e.message, 'var(--red)');
+      toast(t('p.stream_c') + e.message, 'var(--red)');
       return;
     }
   }
@@ -1657,7 +1657,7 @@ async function _playPreviewAt(idx) {
         audio.removeEventListener('loadedmetadata', _seek);
         if (audio.duration && audio.duration > 600 && _resumeAt < audio.duration - 20) {
           try { audio.currentTime = _resumeAt; } catch(_) {}
-          toast(`▶ Продолжаю с ${fmtDur(_resumeAt)}`, 'var(--muted)', 2600);
+          toast(ti('p.resume_from',{t:fmtDur(_resumeAt)}), 'var(--muted)', 2600);
         }
       });
     }
@@ -1672,8 +1672,8 @@ async function _playPreviewAt(idx) {
   }
 
   const artistSub = item.full
-    ? (item.label || (item.artist ? `${item.artist} · полный трек` : 'Полный трек'))
-    : (item.artist ? `${item.artist} · 30 сек` : 'Предпрослушка');
+    ? (item.label || (item.artist ? item.artist+' · '+t('player.full_track') : t('p.full_track_cap')))
+    : (item.artist ? item.artist+' · '+t('player.preview_30') : t('p.preview_cap'));
 
   document.getElementById('pp-title').textContent  = item.title   || '—';
   document.getElementById('pp-artist').textContent = artistSub;
@@ -1799,7 +1799,7 @@ async function playStreamTrack(service, trackId, title, artist, cover) {
         }
         const r = await resp.json();
         if(!r.url) {
-          toast('Нет stream URL: ' + (r.detail || r.error || '?'), 'var(--red)');
+          toast(t('p.no_stream_c') + (r.detail || r.error || '?'), 'var(--red)');
           return;
         }
         streamUrl    = r.url;
@@ -1838,7 +1838,7 @@ async function playStreamTrack(service, trackId, title, artist, cover) {
     setTimeout(() => _syncAlbumPlayBtns?.(), 150);
 
   } catch(e) {
-    toast('Ошибка стрима: ' + e.message, 'var(--red)');
+    toast(t('p.stream_err') + e.message, 'var(--red)');
   }
 }
 
@@ -1982,7 +1982,7 @@ function _playerSetChapters(chapters) {
   const cnt  = document.getElementById('pp-chapter-count');
   const has  = Preview._chapters.length > 0;
   if (wrap) wrap.style.display = has ? '' : 'none';
-  if (cnt)  cnt.textContent = has ? Preview._chapters.length + ' тр.' : '';
+  if (cnt)  cnt.textContent = has ? Preview._chapters.length + ' ' + t('p.trk_abbr') : '';
   if (list) {
     list.innerHTML = has ? Preview._chapters.map((ch, i) =>
       `<div class="pp-chap" data-i="${i}" onclick="previewSeekTo(${ch.seconds})"
@@ -2150,7 +2150,7 @@ async function floatPlayer() {
   // Fallback: a regular popup. Not always-on-top but better than nothing.
   _floatWin = window.open('', 'ripster-float', 'width=380,height=180,resizable=yes,toolbar=no,location=no,menubar=no');
   if (!_floatWin) {
-    toast('Не удалось открыть окно — браузер заблокировал popup', 'var(--orange)');
+    toast(t('p.popup'), 'var(--orange)');
     return;
   }
   _renderFloatPlayer(_floatWin, item, audio);
@@ -2498,10 +2498,10 @@ async function fpFetchLyrics() {
   const body   = document.getElementById('fp-lyrics-body');
   if (_LRC.fetchKey === key) { _renderLrcBody(); return; }
   _LRC.fetchKey = key; _LRC.lines = []; _LRC.plain = ''; _LRC.activeIdx = -1;
-  if (status) status.textContent = 'Загрузка…';
+  if (status) status.textContent = t('player.loading');
   if (body)   body.innerHTML = '';
   if (!item.artist || !item.title) {
-    if (status) status.textContent = 'Нет метаданных трека';
+    if (status) status.textContent = t('p.no_track_meta');
     return;
   }
   try {
@@ -2513,12 +2513,12 @@ async function fpFetchLyrics() {
     const d = await r.json();
     if (d.synced) {
       _LRC.lines = _lrcParse(d.synced);
-      if (status) status.textContent = `🎵 LRCLIB · ${_LRC.lines.length} строк`;
+      if (status) status.textContent = ti('p.lrc_lines',{n:_LRC.lines.length});
     } else if (d.plain) {
       _LRC.plain = d.plain;
-      if (status) status.textContent = '📄 LRCLIB · без таймингов';
+      if (status) status.textContent = t('p.lrc_plain');
     } else {
-      if (status) status.textContent = '— Текст не найден';
+      if (status) status.textContent = t('p.lrc_none');
     }
     _renderLrcBody();
   } catch (e) {
@@ -2584,9 +2584,9 @@ function fpShare() {
   } else {
     try {
       navigator.clipboard.writeText(link);
-      toast('🔗 Ссылка скопирована', 'var(--green)', '', 2000);
+      toast(t('p.link_copied'), 'var(--green)', '', 2000);
     } catch {
-      toast('Не удалось скопировать', 'var(--red)');
+      toast(t('t.copy_fail'), 'var(--red)');
     }
   }
   _haptic(6);
@@ -2833,10 +2833,10 @@ function _offerMixResume() {
       Preview.idx = 0;
       _playPreviewAt(0);
     };
-    const safeName = (lt.title || 'микс').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0, 40);
+    const safeName = (lt.title || t('p.mix_word')).replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0, 40);
     toast(
-      '<span>▶ «' + safeName + '» — продолжить с ' + durStr + '?</span>' +
-      '<button onclick="event.stopPropagation();_resumeLastTrack()" style="margin-left:8px;padding:2px 9px;border-radius:5px;font-size:11px;font-weight:700;background:rgba(192,132,160,.18);border:1px solid rgba(192,132,160,.3);color:var(--red);cursor:pointer;font-family:var(--font)">▶ Слушать</button>',
+      '<span>▶ «' + safeName + '» — ' + t('p.resume_q') + ' ' + durStr + '?</span>' +
+      '<button onclick="event.stopPropagation();_resumeLastTrack()" style="margin-left:8px;padding:2px 9px;border-radius:5px;font-size:11px;font-weight:700;background:rgba(192,132,160,.18);border:1px solid rgba(192,132,160,.3);color:var(--red);cursor:pointer;font-family:var(--font)">'+t('player.resume_toast_btn')+'</button>',
       'var(--muted)', '', 9000
     );
   } catch {}

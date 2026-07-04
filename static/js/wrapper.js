@@ -1,5 +1,5 @@
 // ======================================================================
-// WRAPPER MANAGEMENT (Apple Docker wrapper UI)
+// Wrapper management UI
 // Extracted from app.js (mechanical split — same global functions, no behaviour
 // change). Loaded AFTER app.js in index.html, so it sees S/api/toast/etc.
 // ======================================================================
@@ -7,6 +7,10 @@
 // ── WRAPPER MANAGEMENT ────────────────────────────────────────
 
 async function checkWrapperStatus() {
+  // The Apple wrapper is an OWNER-side thing (guests download via the owner's
+  // engines). /api/wrapper-status is not guest-allowed → a guest would get 403,
+  // render running=undefined and flash a false "wrapper unavailable" banner.
+  if (document.body.classList.contains('guest-mode')) return;
   try {
     const r = await fetch('/api/wrapper-status');
     const d = await r.json();
@@ -22,6 +26,33 @@ async function checkWrapperStatus() {
 async function recheckWrapper() {
   await checkWrapperStatus();
   toast(t('s.wrapper_updated'));
+}
+
+// Health of the PUBLIC Apple wrapper-manager (wm.wol.moe). This is what the AMD
+// engine decrypts through, and it periodically overloads (502 / gRPC Deadline).
+// We surface it in its own topbar pill so the owner can tell "public is down"
+// apart from "my local wrapper is off" — even while the local wrapper is active.
+async function checkPublicWrapperStatus(manual) {
+  if (document.body.classList.contains('guest-mode')) return;
+  const pill = document.getElementById('public-wrapper-pill');
+  if (!pill) return;
+  if (manual) pill.innerHTML = '<div class="dot"></div>Public…';
+  try {
+    const r = await fetch('/api/amd/wrapper-status');
+    const d = await r.json();
+    const ok = !!d.ready && !d.error;
+    pill.className = 'pill ' + (ok ? 'pill-ok' : 'pill-err');
+    pill.innerHTML = '<div class="dot"></div>' + (ok ? 'Public ✓' : 'Public ✗');
+    const inst = d.instance || 'wm.wol.moe';
+    pill.title = ok
+      ? `${inst} — ${t('s.pubw_ok')} (${d.client_count ?? '?'})`
+      : `${inst} — ${t('s.pubw_down')}: ${d.error || 'not ready'}`;
+    if (manual) toast(pill.title, ok ? 'var(--green)' : 'var(--red)');
+  } catch (e) {
+    pill.className = 'pill pill-warn';
+    pill.innerHTML = '<div class="dot"></div>Public ?';
+    pill.title = 'wm.wol.moe — ' + e.message;
+  }
 }
 
 function updateWrapperUI(running, port, dockerOk, dockerMsg, hasSession) {
@@ -236,13 +267,13 @@ async function submitWrapper2FA() {
   const inp = document.getElementById('wrapper-2fa-input');
   if(!inp) return;
   const code = inp.value.replace(/\D/g,'');
-  if(code.length < 6) { toast('Введи 6-значный код','var(--orange)'); return; }
+  if(code.length < 6) { toast(t('w.enter_2fa'),'var(--orange)'); return; }
   try {
     const r = await fetch('/api/wrapper/2fa', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({code})});
     const d = await r.json();
-    if(d.ok) { toast('✓ Код отправлен — wrapper завершает вход…','var(--green)'); document.getElementById('wrapper-2fa-modal').remove(); }
+    if(d.ok) { toast(t('w.code_sent'),'var(--green)'); document.getElementById('wrapper-2fa-modal').remove(); }
     else toast('✗ '+d.msg,'var(--red)');
-  } catch(e) { toast('Ошибка: '+e.message,'var(--red)'); }
+  } catch(e) { toast(t('t.error_c')+e.message,'var(--red)'); }
 }
 
 function appendWrapperLog(text) {
@@ -264,10 +295,10 @@ function wrapperPull() {
     toast('Building local image…', 'var(--blue)');
     fetch('/api/wrapper/build', {method:'POST'});
   } else if(mode === 'non-docker') {
-    toast('Non-docker режим — pull не нужен', 'var(--muted)');
+    toast(t('w.nondocker'), 'var(--muted)');
   } else {
     if(logTxt) logTxt.textContent = 'Скачиваю Docker образ…\n';
-    toast('Скачиваю образ…', 'var(--blue)');
+    toast(t('w.pulling'), 'var(--blue)');
     fetch('/api/wrapper/pull', {method:'POST'});
   }
 }
@@ -344,12 +375,13 @@ function switchToAAC() {
   _wrapperDismissed = true;
   const banner = document.getElementById('wrapper-banner');
   if(banner) banner.style.display = 'none';
-  toast('Качество: AAC 256 kbps', 'var(--orange)');
+  toast(t('w.q_aac'), 'var(--orange)');
 }
 
 function copyWrapperCmd() {
   const cmd = document.getElementById('wrapper-cmd-text')?.textContent?.trim();
-  if(cmd){ navigator.clipboard.writeText(cmd); toast('Скопировано!'); }
+  if(cmd){ navigator.clipboard.writeText(cmd); toast(t('t.copied')); }
   const btn = document.getElementById('wrapper-cmd-copy');
   if(btn){ btn.textContent='✓'; setTimeout(()=>btn.textContent='⎘ Copy',2000); }
 }
+

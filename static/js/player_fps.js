@@ -54,7 +54,7 @@ window._scDrmHls = async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
 
     if (!hasWebKitKeys && !hasStdFps) {
       Preview._fpsEl = null;
-      _scDrmSkip('FairPlay DRM — трек только для Safari');
+      _scDrmSkip(t('p.drm_fps_safari'));
       return;
     }
     _fpsLog(`[FPS] patch1 wk=${hasWebKitKeys} std=${hasStdFps}`);
@@ -74,7 +74,7 @@ window._scDrmHls = async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
       }
     } catch (e) {
       _fpsLog('[FPS] cert fail: ' + e.message);
-      Preview._fpsEl = null; _scDrmSkip('FairPlay: сертификат недоступен'); return;
+      Preview._fpsEl = null; _scDrmSkip(t('p.drm_fps_cert')); return;
     }
 
     let _keyInstalled = false;

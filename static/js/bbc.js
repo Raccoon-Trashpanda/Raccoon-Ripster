@@ -16,7 +16,7 @@ function _bbcDlProgress(pid, pct) {
 function _bbcDlDone(pid, title) {
   delete _bbcDls[pid];
   _bbcDlRender();
-  toast(`✓ BBC скачано: ${title}`);
+  toast(t('b.done_c')+title);
 }
 function _bbcDlRender() {
   const box = document.getElementById('bbc-dl-list');
@@ -96,15 +96,22 @@ function bbcSelectBrand(id, el) {
 }
 
 async function bbcLoadEpisodes(reset) {
+  // Guard: an empty brand_id makes the BBC API return 400 → "BBC API 400" (502).
+  if (!BBC.activeBrand) BBC.activeBrand = (BBC.brands[0] && BBC.brands[0].id) || 'b006wkfp';
   if (reset) { BBC.offset = 0; BBC.total = 0; }
   const status = document.getElementById('bbc-status');
   const grid   = document.getElementById('bbc-grid');
   const more   = document.getElementById('bbc-more-btn');
-  if (status) { status.textContent = 'Загружаю…'; status.style.display = ''; }
+  if (status) { status.textContent = t('b.loading'); status.style.display = ''; }
   if (more)   more.style.display = 'none';
   if (reset && grid) grid.innerHTML = '';
   try {
     const data = await api('GET', `/api/bbc/episodes?brand_id=${BBC.activeBrand}&offset=${BBC.offset}&limit=${BBC.limit}`);
+    // api() returns the JSON body even on a non-2xx (e.g. 502 {"detail":"BBC API 400"}
+    // or 401 {"error":...}) — so a missing `items` is really that upstream error.
+    if (!data || !Array.isArray(data.items)) {
+      throw new Error((data && (data.detail || data.error)) || t('b.bad_resp'));
+    }
     if (status) status.style.display = 'none';
     BBC.total = data.total || 0;
     BBC.offset += data.items.length;
@@ -112,7 +119,8 @@ async function bbcLoadEpisodes(reset) {
     if (more) more.style.display = BBC.offset < BBC.total ? '' : 'none';
     _bbcEnrichGrid();
   } catch(e) {
-    if (status) { status.textContent = 'Ошибка загрузки BBC API'; status.style.display = ''; }
+    // surface the REAL cause (HTTP 401 = session not carried, 502 = BBC upstream)
+    if (status) { status.textContent = t('b.load_err_c') + (e && e.message || e); status.style.display = ''; }
   }
 }
 
@@ -126,7 +134,7 @@ async function bbcSearch() {
   const grid   = document.getElementById('bbc-grid');
   const more   = document.getElementById('bbc-more-btn');
   const clr    = document.getElementById('bbc-clear-btn');
-  if (status) { status.textContent = 'Ищу…'; status.style.display = ''; }
+  if (status) { status.textContent = t('b.searching'); status.style.display = ''; }
   if (grid)   grid.innerHTML = '';
   if (more)   more.style.display = 'none';
   if (clr)    clr.style.display = '';
@@ -135,11 +143,11 @@ async function bbcSearch() {
     if (status) status.style.display = 'none';
     if (grid) grid.innerHTML = (data.items || []).map(bbcCard).join('');
     if (!data.items?.length) {
-      if (status) { status.textContent = 'Ничего не найдено'; status.style.display = ''; }
+      if (status) { status.textContent = t('b.nothing'); status.style.display = ''; }
     }
     _bbcEnrichGrid();
   } catch(e) {
-    if (status) { status.textContent = 'Ошибка поиска'; status.style.display = ''; }
+    if (status) { status.textContent = t('b.search_err'); status.style.display = ''; }
   }
 }
 
@@ -159,7 +167,7 @@ function bbcCard(ep) {
   const dur   = ep.duration ? _bbcFmtDur(ep.duration) : '';
   const date  = ep.date ? ep.date.slice(0,10) : '';
   const img   = ep.image || '';
-  const title = ep.title || 'Без названия';
+  const title = ep.title || t('b.untitled');
   const sub   = ep.subtitle || '';
   const pid   = ep.pid  || '';
   const vpid  = ep.vpid || '';
@@ -169,14 +177,14 @@ function bbcCard(ep) {
   <div id="bbccard-${pid}" data-bbc-pid="${pid}" data-bbc-title="${_esc(title)}" data-bbc-artist="${_esc(sub)}" data-bbc-img="${_esc(img)}" data-bbc-vpid="${_esc(vpid)}" data-bbc-brand="${_esc(brandLabel)}"
     style="background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:border-color .15s"
     onmouseenter="this.style.borderColor='var(--border2)'" onmouseleave="this.style.borderColor='var(--border)'">
-    <div style="position:relative;cursor:pointer" onclick="_bbcOpenMix('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}',${ep.duration||0},'${date}')" title="Открыть карточку микса">
+    <div style="position:relative;cursor:pointer" onclick="_bbcOpenMix('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}',${ep.duration||0},'${date}')" title="${t('b.open_mix')}">
       <img id="bbccard-img-${pid}" ${imgAttr} loading="lazy"
         style="width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--surface2)"
         onerror="this.removeAttribute('src')"/>
-      <div onclick="event.stopPropagation();bbcPlay('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}')" title="Играть" style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer">▶</div>
+      <div onclick="event.stopPropagation();bbcPlay('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}')" title="${t('btn.play')}" style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer">▶</div>
       ${dur ? `<div style="position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,.72);border-radius:4px;font-size:10px;color:#fff;padding:2px 5px;font-family:var(--mono)">${dur}</div>` : ''}
       <div id="bbcmdb-badge-${pid}" style="display:none;position:absolute;top:6px;left:6px;background:rgba(175,82,222,.88);color:#fff;font-size:9px;padding:2px 7px;border-radius:4px;font-weight:700;backdrop-filter:blur(4px);cursor:pointer;user-select:none"
-        onclick="event.stopPropagation();_bbcMdbTracklist('${pid}')" title="Трек-лист с MixesDB">🗄 MixesDB</div>
+        onclick="event.stopPropagation();_bbcMdbTracklist('${pid}')" title="${t('b.tl_mdb')}">🗄 MixesDB</div>
     </div>
     <div style="padding:8px 9px 9px">
       <div style="font-size:11.5px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</div>
@@ -188,7 +196,7 @@ function bbcCard(ep) {
           style="flex:1;padding:5px 0;background:rgba(192,132,160,.12);border:1px solid rgba(192,132,160,.22);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;color:var(--red);font-family:var(--font)">
           ⬇ MP3
         </button>
-        <button onclick="bbcGetCue('${pid}','${_esc(title)}','${_esc(sub)}')" title="Скачать CUE"
+        <button onclick="bbcGetCue('${pid}','${_esc(title)}','${_esc(sub)}')" title="${t('b.dl_cue')}"
           style="padding:5px 9px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)">
           CUE
         </button>
@@ -231,7 +239,7 @@ function _bbcMdbTracklist(pid) {
   if (!tl) return;
   if (tl.style.display !== 'none') { tl.style.display = 'none'; return; }
   const d = _bbcMdb.get(pid);
-  if (!d?.tracklist?.length) { toast('Трек-лист не найден'); return; }
+  if (!d?.tracklist?.length) { toast(t('b.no_tl')); return; }
   tl.innerHTML = d.tracklist.map(t =>
     `<div style="display:flex;gap:5px;padding:1px 0"><span style="color:var(--muted2);font-family:var(--mono);flex-shrink:0">${esc(t.timestamp||'')}</span><span>${esc(t.artist?t.artist+' — ':'')}${esc(t.title)}</span></div>`
   ).join('');
@@ -262,7 +270,7 @@ function _bbcShowCoverChoice(pid, vpid, title, artist, bbcImg, mdbImg) {
 
   overlay.innerHTML = `
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px;max-width:480px;width:90%;box-shadow:0 24px 80px rgba(0,0,0,.6)">
-      <div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:4px">Выбери обложку для скачивания</div>
+      <div style="font-size:14px;font-weight:700;color:var(--text);margin-bottom:4px">${t('b.pick_cover')}</div>
       <div style="font-size:11px;color:var(--muted);margin-bottom:18px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(title)}</div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:18px">
         <div>
@@ -270,18 +278,18 @@ function _bbcShowCoverChoice(pid, vpid, title, artist, bbcImg, mdbImg) {
             onmouseover="this.style.borderColor='var(--red)'" onmouseout="this.style.borderColor='transparent'"/>
           <div style="font-size:10px;font-weight:700;color:var(--muted);text-align:center;margin-top:5px">BBC</div>
           <button onclick="document.getElementById('bbc-cover-choice').remove();bbcDownload('${_esc(pid)}','${_esc(vpid)}','${_esc(title)}','${_esc(artist)}','${_esc(bbcImg)}','')"
-            style="width:100%;margin-top:6px;padding:6px 0;background:rgba(255,255,255,.08);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">Использовать</button>
+            style="width:100%;margin-top:6px;padding:6px 0;background:rgba(255,255,255,.08);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">${t('b.use_word')}</button>
         </div>
         <div>
           <img src="${esc(mdbImgUrl)}" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;border:2px solid transparent;cursor:pointer;transition:border-color .15s" id="bbc-cover-opt-mdb"
             onmouseover="this.style.borderColor='#af52de'" onmouseout="this.style.borderColor='transparent'"/>
           <div style="font-size:10px;font-weight:700;color:#af52de;text-align:center;margin-top:5px">🗄 MixesDB</div>
           <button onclick="document.getElementById('bbc-cover-choice').remove();bbcDownload('${_esc(pid)}','${_esc(vpid)}','${_esc(title)}','${_esc(artist)}','${_esc(bbcImg)}','${_esc(mdbImg)}')"
-            style="width:100%;margin-top:6px;padding:6px 0;background:rgba(175,82,222,.18);border:1px solid rgba(175,82,222,.35);border-radius:7px;color:#af52de;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">Использовать</button>
+            style="width:100%;margin-top:6px;padding:6px 0;background:rgba(175,82,222,.18);border:1px solid rgba(175,82,222,.35);border-radius:7px;color:#af52de;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">${t('b.use_word')}</button>
         </div>
       </div>
       <button onclick="document.getElementById('bbc-cover-choice').remove()"
-        style="width:100%;padding:7px 0;background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--muted);font-size:11px;cursor:pointer;font-family:var(--font)">Отмена</button>
+        style="width:100%;padding:7px 0;background:transparent;border:1px solid var(--border);border-radius:8px;color:var(--muted);font-size:11px;cursor:pointer;font-family:var(--font)">${t('s.cancel')}</button>
     </div>`;
   document.body.appendChild(overlay);
 }
@@ -354,11 +362,11 @@ async function bbcPlay(pid, vpid, title, artist, art) {
     main.setAttribute(isExpanded ? 'data-preview-expanded' : 'data-preview-open', '1');
   }
 
-  toast('BBC: получаю поток…');
+  toast(t('b.getting'));
   try {
     const qs = `pid=${encodeURIComponent(pid)}${vpid ? '&vpid=' + encodeURIComponent(vpid) : ''}&name=${encodeURIComponent(title || pid)}`;
     const info = await api('GET', `/api/bbc/stream?${qs}`);
-    if (!info.url) throw new Error(info.detail || 'Нет URL потока');
+    if (!info.url) throw new Error(info.detail || t('b.no_stream_url'));
     BBC.duration = info.duration || 0;
     _bbcStartStream(info.url);
     // 1001Tracklists — authoritative tracklist + cue-time chapters for the mix.
@@ -366,7 +374,7 @@ async function bbcPlay(pid, vpid, title, artist, art) {
     BBC._ticksDone = false;
     _bbcFetch1001(pid, title, artist, BBC.duration);
   } catch(e) {
-    toast('Ошибка потока BBC: ' + e.message);
+    toast(t('b.stream_err') + e.message);
     if (playBtn)  playBtn.textContent  = '▶';
     if (playBtnB) playBtnB.textContent = '▶';
   }
@@ -391,7 +399,7 @@ function _bbcStartStream(url) {
       if (playBtnB) playBtnB.textContent = '⏸';
     });
     hls.on(Hls.Events.ERROR, (ev, data) => {
-      if (data.fatal) toast('HLS ошибка: ' + data.type);
+      if (data.fatal) toast(t('b.hls_err') + data.type);
     });
   } else if (audio.canPlayType('application/vnd.apple.mpegurl')) {
     audio.src = url;
@@ -399,7 +407,7 @@ function _bbcStartStream(url) {
     if (playBtn)  playBtn.textContent  = '⏸';
     if (playBtnB) playBtnB.textContent = '⏸';
   } else {
-    toast('HLS не поддерживается в этом браузере');
+    toast(t('b.hls_no'));
     return;
   }
 
@@ -415,7 +423,7 @@ function _bbcStartStream(url) {
       audio.removeEventListener('loadedmetadata', _r);
       if (audio.duration && _bbcResumeAt < audio.duration - 20) {
         try { audio.currentTime = _bbcResumeAt; } catch(_) {}
-        toast(`▶ Продолжаю с ${_bbcFmtDur(_bbcResumeAt)}`, 'var(--muted)', 2600);
+        toast(ti('p.resume_from',{t:_bbcFmtDur(_bbcResumeAt)}), 'var(--muted)', 2600);
       }
     });
   }
@@ -478,10 +486,10 @@ function _bbcFetch1001(pid, title, artist, dur, cb) {
 function _bbcRenderTL(tl, tracks, creditLabel) {
   if (!tl || !tracks || !tracks.length) return;
   const nm = (tr) => (tr.artist ? tr.artist + ' — ' : '') + (tr.title || '');
-  const credit = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted2);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)"><span>${esc(creditLabel)} · ${tracks.length} тр.</span></div>`;
+  const credit = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted2);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)"><span>${esc(creditLabel)} · ${tracks.length} ${t('p.trk_abbr')}</span></div>`;
   tl.innerHTML = credit + tracks.map((tr, i) => {
     const tsEl = tr.timestamp
-      ? `<span class="ts" onclick="previewSeekTo(${tr.seconds || 0})" title="Перемотать">${esc(tr.timestamp)}</span>`
+      ? `<span class="ts" onclick="previewSeekTo(${tr.seconds || 0})" title="${t('b.seek')}">${esc(tr.timestamp)}</span>`
       : '';
     return `<div class="scd-trk"><span class="n">${i+1}</span>${tsEl}<span class="nm">${esc(nm(tr))}</span></div>`;
   }).join('');
@@ -493,10 +501,10 @@ function _bbcLoadTracklistInto(pid, title, artist, dur, tl) {
   if (!tl) return;
   const mdb = (_bbcMdb.get(pid) || {}).tracklist || [];
   if (mdb.length) _bbcRenderTL(tl, mdb, '🗄 MixesDB');
-  else tl.innerHTML = `<div style="font-size:11px;color:var(--muted2)">⏱ Ищу трек-лист…</div>`;
+  else tl.innerHTML = `<div style="font-size:11px;color:var(--muted2)">⏱ ${t('b.tl_searching')}</div>`;
   _bbcFetch1001(pid, title, artist, dur, (r) => {
     if (r.found && r.tracks.length) _bbcRenderTL(tl, r.tracks, '🎚 1001Tracklists');
-    else if (!mdb.length) tl.innerHTML = `<div style="font-size:11px;color:var(--muted2)">Трек-лист не найден</div>`;
+    else if (!mdb.length) tl.innerHTML = `<div style="font-size:11px;color:var(--muted2)">${t('b.tl_none')}</div>`;
   });
 }
 
@@ -509,8 +517,8 @@ function _bbcDetailHTML(pid, vpid, title, artist, art, dur, date) {
   const j = (s) => (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
   return `
     <div class="scd-head" style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--border);flex:0 0 auto">
-      <div style="font-size:13px;font-weight:700;color:var(--text)">📻 BBC · карточка микса</div>
-      <button class="scd-close" onclick="_scCloseMix()" title="Закрыть (Esc)" style="width:30px;height:30px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;font-size:15px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;line-height:1;padding:0">✕</button>
+      <div style="font-size:13px;font-weight:700;color:var(--text)">📻 BBC · ${t('b.mix_card')}</div>
+      <button class="scd-close" onclick="_scCloseMix()" title="${t('b.close_esc')}" style="width:30px;height:30px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;font-size:15px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;line-height:1;padding:0">✕</button>
     </div>
     <div class="scd-body" style="overflow-y:auto;padding:16px 16px 168px;flex:1 1 auto">
       ${art ? `<img class="scd-cover" src="${esc(art)}" onerror="this.removeAttribute('src')" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:12px;display:block;background:var(--surface2)"/>` : ''}
@@ -518,11 +526,11 @@ function _bbcDetailHTML(pid, vpid, title, artist, art, dur, date) {
       <div style="font-size:13px;color:var(--muted);margin-top:3px">${esc(artist || '📻 BBC Sounds')}</div>
       ${meta.length ? `<div style="font-size:11px;color:var(--muted2);margin-top:7px">${meta.join('  ·  ')}</div>` : ''}
       <div style="display:flex;gap:7px;margin-top:14px">
-        <button onclick="bbcPlay('${j(pid)}','${j(vpid)}','${j(title)}','${j(artist)}','${j(art)}')" style="${btn('rgba(255,85,0,.14)','rgba(255,85,0,.25)','#ff7a33')}">▶ Играть</button>
+        <button onclick="bbcPlay('${j(pid)}','${j(vpid)}','${j(title)}','${j(artist)}','${j(art)}')" style="${btn('rgba(255,85,0,.14)','rgba(255,85,0,.25)','#ff7a33')}">▶ ${t('btn.play')}</button>
         <button onclick="bbcDownloadSmart('${j(pid)}','${j(vpid)}','${j(title)}','${j(artist)}','${j(art)}')" style="${btn('rgba(255,255,255,.06)','var(--border)','var(--text)')}">⬇ MP3</button>
-        <button onclick="bbcGetCue('${j(pid)}','${j(title)}','${j(artist)}')" title="Скачать CUE" style="padding:8px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);background:transparent;cursor:pointer;font-family:var(--font)">CUE</button>
+        <button onclick="bbcGetCue('${j(pid)}','${j(title)}','${j(artist)}')" title="${t('b.dl_cue')}" style="padding:8px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);background:transparent;cursor:pointer;font-family:var(--font)">CUE</button>
       </div>
-      <div style="font-size:11px;font-weight:700;color:var(--muted);margin:18px 0 8px;text-transform:uppercase;letter-spacing:.4px">Трек-лист</div>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);margin:18px 0 8px;text-transform:uppercase;letter-spacing:.4px">${t('b.tl_word')}</div>
       <div id="scd-tl"></div>
     </div>`;
 }
@@ -601,15 +609,15 @@ function bbcVol(v) {
 }
 
 async function bbcDownload(pid, vpid, title, artist, image_url, cover_url = '') {
-  toast(`Скачиваю: ${title}…`);
+  toast(t('b.dling_c')+title+'…');
   try {
     await api('POST', '/api/bbc/download', {
       pid, vpid: vpid || '', title, artist: artist || 'BBC Radio',
       image_url: image_url || '', cover_url: cover_url || ''
     });
-    toast(`⬇ BBC: ${title} — скачивание запущено`);
+    toast('⬇ BBC: '+title+' — '+t('b.dl_started'));
   } catch(e) {
-    toast('Ошибка загрузки BBC: ' + e.message);
+    toast(t('b.dl_err') + e.message);
   }
 }
 
@@ -617,15 +625,15 @@ async function bbcGetCue(pid, title, artist) {
   const url = `/api/bbc/cue?pid=${pid}&title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist||'BBC Radio')}`;
   try {
     const r = await fetch(url);
-    if (!r.ok) { toast('Нет трек-листа для этого эпизода'); return; }
+    if (!r.ok) { toast(t('b.no_tl_ep')); return; }
     const blob = await r.blob();
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = `${title}.cue`;
     a.click();
-    toast('CUE скачан');
+    toast(t('b.cue_dl'));
   } catch(e) {
-    toast('Ошибка CUE: ' + e.message);
+    toast(t('b.cue_err') + e.message);
   }
 }
 

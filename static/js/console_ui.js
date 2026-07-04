@@ -1,5 +1,5 @@
 // ======================================================================
-// CONSOLE (log console view: render, copy, download, fix-deps)
+// Console log view
 // Extracted from app.js (mechanical split — same global functions, no behaviour
 // change). Loaded AFTER app.js in index.html, so it sees S/api/toast/etc.
 // ======================================================================
@@ -62,9 +62,9 @@ function _consolePass(entry) {
 }
 
 function _taskLabel(id) {
-  const t = (S.queue || []).find(x => x.id === id);
-  const title = t && t.meta && (t.meta.title || t.meta.artist);
-  return title || `Задача ${String(id).slice(0, 6)}`;
+  const tk = (S.queue || []).find(x => x.id === id);   // not `t` — shadows the i18n t()
+  const title = tk && tk.meta && (tk.meta.title || tk.meta.artist);
+  return title || t('cn.task_word') + ' ' + String(id).slice(0, 6);
 }
 
 // Rebuild the per-task <select> from task ids seen in the log buffer.
@@ -73,7 +73,7 @@ function _rebuildConsoleTaskFilter() {
   if (!sel) return;
   const cur = sel.value || 'all';
   const seen = new Set();
-  let html = '<option value="all">Все задачи</option>';
+  let html = '<option value="all">' + t('cn.all_tasks') + '</option>';
   for (const e of _LOG) {
     if (e.task_id && !seen.has(e.task_id)) {
       seen.add(e.task_id);
@@ -212,7 +212,7 @@ function _rebuildConsoleSvcFilter() {
   if (!sel) return;
   const cur = sel.value || 'all';
   const seen = new Set();
-  let html = '<option value="all">Все сервисы</option>';
+  let html = '<option value="all">' + t('cn.all_svcs') + '</option>';
   for (const e of _LOG) if (e.service && !seen.has(e.service)) { seen.add(e.service); }
   // Stable ordering: alphabetical
   for (const svc of [...seen].sort()) {
@@ -249,8 +249,8 @@ function _refreshConsole(_tries) {
     const hint = document.createElement('div');
     hint.style.cssText = 'color:var(--muted);font-style:italic;padding:10px 0';
     hint.textContent = _LOG.length
-      ? 'Для выбранной задачи логов пока нет.'
-      : 'Консоль пуста. Добавь ссылку в очередь и нажми ▶ Старт — логи появятся здесь.';
+      ? t('cn.no_task_logs')
+      : t('cn.empty');
     out.appendChild(hint);
   } else {
     for (const e of visible) _appendLogLine(out, e);
@@ -312,7 +312,7 @@ async function copyConsole(elId, btn) {
   const el = document.getElementById(elId || 'console-out');
   if (!el) return;
   const text = (el.innerText || el.textContent || '').trim();
-  if (!text) { if (window.toast) toast('Консоль пуста', 'var(--muted)'); return; }
+  if (!text) { if (window.toast) toast(t('cn.empty'), 'var(--muted)'); return; }
   let ok = false;
   try {
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -333,10 +333,10 @@ async function copyConsole(elId, btn) {
   }
   if (btn) {
     const orig = btn.textContent;
-    btn.textContent = ok ? '✓ Скопировано' : '✗ Не вышло';
+    btn.textContent = ok ? '✓ ' + t('cn.copied_word') : '✗ ' + t('cn.copy_fail_word');
     setTimeout(() => { btn.textContent = orig; }, 1500);
   }
-  if (window.toast) toast(ok ? `📋 Скопировано (${text.length} симв.)` : 'Не удалось скопировать — выдели вручную', ok ? 'var(--green)' : 'var(--red)');
+  if (window.toast) toast(ok ? ti('cn.copied_n',{n:text.length}) : t('cn.copy_fail'), ok ? 'var(--green)' : 'var(--red)');
 }
 
 // Download ALL diagnostic logs as one zip (console + errors + launcher). The
@@ -350,10 +350,10 @@ function downloadLogs(btn) {
     document.body.appendChild(a);
     a.click();
     a.remove();
-    if (btn) { const o = btn.textContent; btn.textContent = '⬇ Готово'; setTimeout(() => { btn.textContent = o; }, 1500); }
-    if (window.toast) toast('⬇ Скачиваю zip с логами — пришли этот файл для диагностики', 'var(--green)', '', 6000);
+    if (btn) { const o = btn.textContent; btn.textContent = '⬇ ' + t('cn.ready_word'); setTimeout(() => { btn.textContent = o; }, 1500); }
+    if (window.toast) toast(t('cn.dl_logs'), 'var(--green)', 6000);
   } catch (e) {
-    if (window.toast) toast('Не удалось скачать лог: ' + ((e && e.message) || e), 'var(--red)');
+    if (window.toast) toast(t('cn.dl_fail') + ((e && e.message) || e), 'var(--red)');
   }
 }
 
@@ -369,3 +369,4 @@ async function fixGamdlDeps() {
   appendLog('[FIX] Upgrading protobuf + pywidevine…', 'warn');
   await fetch('/api/fix-gamdl-deps', {method:'POST'});
 }
+

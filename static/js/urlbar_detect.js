@@ -11,7 +11,7 @@ const SVC_LABELS = {
   qobuz:      '🎼 Qobuz',
   deezer:     '🎵 Deezer',
   tidal:      '🌊 Tidal',
-  spotify:    '🟢 Spotify — будет конвертирован',
+  spotify:    '🟢 Spotify',
   soundcloud: '🎵 SoundCloud',
   beatport:   '🟣 Beatport',
   yandex:     '🟡 Yandex Music',
@@ -35,11 +35,10 @@ function detectUrlService(val) {
   const lbl = document.getElementById('url-svc-label');
   if(dot) dot.style.background = svc ? (SVC_COLORS[svc]||'var(--muted)') : 'var(--muted)';
   if(lbl) {
-    let label = SVC_LABELS[svc] || svc || (val.startsWith('http') ? '🌐 Неизвестный сервис' : '');
+    let label = SVC_LABELS[svc] || svc || (val.startsWith('http') ? t('u.unknown_svc') : '');
     if(svc === 'spotify') {
       const spEng = (S.config && S.config['spotify-engine']) || 'convert';
-      if(spEng === 'orpheus_spotify') label = '🟢 Spotify → OrpheusDL';
-      // else keep default "будет конвертирован"
+      label = (spEng === 'orpheus_spotify') ? '🟢 Spotify → OrpheusDL' : '🟢 Spotify — ' + t('u.will_convert');
     }
     lbl.textContent = label;
   }
@@ -60,12 +59,12 @@ function setActiveService(svc, btn) {
   // Update URL bar placeholder
   const inp = document.getElementById('url-input');
   const placeholders = {
-    apple:  'Вставь ссылку Apple Music — album, song, playlist, artist…',
-    qobuz:  'Вставь ссылку Qobuz — album, track, playlist…',
-    deezer: 'Вставь ссылку Deezer — album, track, playlist, artist…',
-    tidal:  'Вставь ссылку Tidal — album, track, playlist…',
+    apple:  ti('u.ph_svc',{svc:'Apple Music',types:'album, song, playlist, artist'}),
+    qobuz:  ti('u.ph_svc',{svc:'Qobuz',types:'album, track, playlist'}),
+    deezer: ti('u.ph_svc',{svc:'Deezer',types:'album, track, playlist, artist'}),
+    tidal:  ti('u.ph_svc',{svc:'Tidal',types:'album, track, playlist'}),
   };
-  if(inp) inp.placeholder = placeholders[svc] || 'Вставь ссылку…';
+  if(inp) inp.placeholder = placeholders[svc] || t('u.ph_generic');
 
   // Update dot color
   const dot = document.getElementById('url-svc-dot');
@@ -82,7 +81,7 @@ function setActiveService(svc, btn) {
 function detectSpotifyInUrl(val) {
   // If user pastes a Spotify link in the main URL bar, offer to convert
   if(val && val.includes('spotify.com')) {
-    toast('Spotify ссылка — перейди в Поиск → Spotify → Конвертировать', 'var(--green,#1db954)');
+    toast(t('u.sp_hint'), 'var(--green,#1db954)');
   }
 }
 // ══ SETTINGS TABS ════════════════════════════════════════════════
@@ -162,6 +161,8 @@ function showStab(id, btn) {
     setChk('s-queue-autostart', c['queue-autostart']!==false);
     setChk('s-notify-on-done', !!c['notify-on-done']);
     setChk('s-minimize-to-tray', c['minimize-to-tray']!==false);
+    const _mz = document.getElementById('s-minimize-to');
+    if(_mz) _mz.value = (c['minimize-to'] === 'tray') ? 'tray' : 'taskbar';
     const mp = +(c['max-parallel'] || 1);
     const sl = document.getElementById('s-max-parallel');
     const vl = document.getElementById('s-max-parallel-val');

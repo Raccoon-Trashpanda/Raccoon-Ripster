@@ -17,9 +17,9 @@ async function importCookiesFile(input) {
     S.config['gamdl-cookies-path'] = r.path || '';
     setVal('s-cookies-path', r.path||'');
     setVal('t-cookies-path', r.path||'');
-    toast('cookies.txt импортирован ✓','var(--green)');
+    toast(t('ck.imported'),'var(--green)');
     checkCookies();
-  } else toast('Ошибка: '+(r.detail||r.msg||''),'var(--red)');
+  } else toast(t('t.error_c')+(r.detail||r.msg||''),'var(--red)');
   input.value='';
 }
 
@@ -37,10 +37,10 @@ async function importAppleCookiesFile(input) {
     if(st){ st.textContent='…'; st.style.color='var(--muted)'; }
     const r = await api('POST','/api/apple/cookies',{text});
     if(r&&r.ok){
-      if(st){ st.textContent = r.exists?('✅ Сохранено: '+r.lines+' cookies'+(r.looks_apple?'':' ⚠ нет apple.com')):'🗑 очищено'; st.style.color='var(--green,#30d158)'; }
-      toast('cookies.txt загружен из файла ✓','var(--green)');
+      if(st){ st.textContent = r.exists?(t('ck.saved_c')+r.lines+' cookies'+(r.looks_apple?'':' ⚠ '+t('ck.no_apple'))):'🗑 '+t('ck.cleared'); st.style.color='var(--green,#30d158)'; }
+      toast(t('ck.loaded'),'var(--green)');
     } else {
-      if(st){ st.textContent='✗ '+((r&&r.error)||'ошибка'); st.style.color='#fc3c44'; }
+      if(st){ st.textContent='✗ '+((r&&r.error)||t('t.error')); st.style.color='#fc3c44'; }
     }
   } catch(e){ if(st){ st.textContent='✗ '+e; st.style.color='#fc3c44'; } }
   input.value='';
@@ -72,7 +72,7 @@ async function checkCookies() {
       cookiePill.title = msg;
     }
   } catch(e) {
-    if(statusEl){ statusEl.textContent='✗ Ошибка'; statusEl.style.color='var(--red)'; }
+    if(statusEl){ statusEl.textContent='✗ '+t('t.error'); statusEl.style.color='var(--red)'; }
   }
 }
 
@@ -84,12 +84,12 @@ async function checkAMDStatus() {
     const btn=document.getElementById('amd-install-btn');
     if(d.cloned){
       if(dot) dot.textContent='✓';
-      if(txt){txt.textContent='Установлен · '+d.path; txt.style.color='var(--green)';}
-      if(btn){btn.textContent='↺ Переустановить'; btn.disabled=false;}
+      if(txt){txt.textContent=t('ck.installed_c')+d.path; txt.style.color='var(--green)';}
+      if(btn){btn.textContent='↺ '+t('setup.btn_reinstall'); btn.disabled=false;}
     } else {
       if(dot) dot.textContent='○';
-      if(txt){txt.textContent='Не установлен'; txt.style.color='var(--orange)';}
-      if(btn){btn.textContent='⬇ Установить'; btn.disabled=false;}
+      if(txt){txt.textContent=t('ck.not_installed'); txt.style.color='var(--orange)';}
+      if(btn){btn.textContent='⬇ '+t('setup.btn_install'); btn.disabled=false;}
     }
   } catch(e){}
 }
@@ -143,13 +143,13 @@ async function checkAMDWrapperStatus() {
 async function installAMD() {
   const btn=document.getElementById('amd-install-btn');
   const txt=document.getElementById('amd-status-text');
-  if(btn){btn.disabled=true; btn.textContent='⏳ Устанавливаю…';}
-  if(txt){txt.textContent='Клонирование + зависимости…'; txt.style.color='var(--muted)';}
+  if(btn){btn.disabled=true; btn.textContent='⏳ '+t('setup.st_installing');}
+  if(txt){txt.textContent=t('ck.cloning'); txt.style.color='var(--muted)';}
   const sNav=document.querySelector('.nav-item[data-view="setup"]');
   if(sNav) showView('setup',sNav);
-  toast('⬇ Устанавливаю AMD v2…','var(--blue)');
+  toast(t('ck.inst_amd'),'var(--blue)');
   try { await fetch('/api/setup/amd',{method:'POST'}); }
-  catch(e){ toast('Ошибка: '+e.message,'var(--red)'); if(btn){btn.disabled=false;} }
+  catch(e){ toast(t('t.error_c')+e.message,'var(--red)'); if(btn){btn.disabled=false;} }
 }
 
 // ══ SEARCH ═══════════════════════════════════════════════════════
@@ -185,13 +185,13 @@ function onSearchSvcChange() {
   // Beatport has tracks/releases instead of album/track/artist
   if(typeEl) {
     if(svc === 'beatport') {
-      typeEl.innerHTML = `<option value="tracks">Треки</option><option value="releases">Релизы</option>`;
+      typeEl.innerHTML = `<option value="tracks">${t('ck.opt_tracks')}</option><option value="releases">${t('ck.opt_releases')}</option>`;
     } else {
       typeEl.innerHTML = `
         <option value="album" data-i18n="search.type_album">Альбомы</option>
         <option value="track" data-i18n="search.type_track">Треки</option>
         <option value="artist" data-i18n="search.type_artist">Артисты</option>
-        ${svc === 'apple' ? '<option value="video">Видео (клипы)</option>' : ''}`;
+        ${svc === 'apple' ? '<option value="video">'+t('ck.opt_video')+'</option>' : ''}`;
     }
   }
 }
@@ -220,7 +220,7 @@ function _renderSearchGrid(grid, items) {
   const svc = document.getElementById('search-svc')?.value || 'apple';
   grid.innerHTML = items.map(item => _renderSearchCard(item, svc)).join('');
   const cnt = document.getElementById('search-count');
-  if(cnt) cnt.textContent = `${items.length} результатов`;
+  if(cnt) cnt.textContent = ti('ck.n_results',{n:items.length});
 }
 
 async function doSearch() {
@@ -230,7 +230,7 @@ async function doSearch() {
   const st   = document.getElementById('search-status');
   const grid = document.getElementById('search-results');
   const sortBar = document.getElementById('search-sort-bar');
-  if(!q){ toast('Введи запрос'); return; }
+  if(!q){ toast(t('cd.enter_query')); return; }
 
   // If it's a direct URL — use smart service modal (same as main URL bar)
   if(q.startsWith('http')) {
@@ -249,7 +249,7 @@ async function doSearch() {
     document.getElementById('search-q').value='';
     return;
   }
-  if(st){ st.textContent='Ищу…'; st.style.display='block'; }
+  if(st){ st.textContent=t('ck.searching'); st.style.display='block'; }
   if(grid) grid.innerHTML='';
   try {
     let items = [], error = null;
@@ -269,7 +269,7 @@ async function doSearch() {
       let d;
       try { d = await r.json(); }
       catch (_) {
-        if (r.status === 401) { error = 'Нужен вход (сессия истекла) — обнови страницу.'; }
+        if (r.status === 401) { error = t('ck.need_login'); }
         else { error = `HTTP ${r.status}${r.statusText ? ' — '+r.statusText : ''}`; }
         d = null;
       }
@@ -280,7 +280,7 @@ async function doSearch() {
     }
 
     if(st) st.style.display='none';
-    if(error){ if(st){st.textContent='Ошибка: '+error;st.style.display='block';} return; }
+    if(error){ if(st){st.textContent=t('t.error_c')+error;st.style.display='block';} return; }
     if(!items.length){
       if(sortBar) sortBar.style.display='none';
       // Suggest other services for the same query — Qobuz/Tidal/Beatport
@@ -290,7 +290,7 @@ async function doSearch() {
         `<button onclick="document.getElementById('search-svc').value='${s}';doSearch()" style="padding:4px 11px;background:rgba(255,255,255,.06);color:${_svcColor(s)};border:1px solid ${_svcColor(s)}55;border-radius:7px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);margin:2px">${esc(_svcLabel(s))}</button>`
       ).join('');
       if(st){
-        st.innerHTML = `Ничего не найдено в <b style="color:${_svcColor(svc)}">${esc(_svcLabel(svc))}</b>.<br><span style="font-size:11px;color:var(--muted2)">Каталог отличается — попробуй другой сервис:</span><div style="margin-top:8px">${links}</div>`;
+        st.innerHTML = `${t('ck.nf_pre')} <b style="color:${_svcColor(svc)}">${esc(_svcLabel(svc))}</b>.<br><span style="font-size:11px;color:var(--muted2)">${t('ck.nf_try')}</span><div style="margin-top:8px">${links}</div>`;
         st.style.display='block';
       }
       return;
@@ -309,7 +309,7 @@ async function doSearch() {
     }
     if(grid) { _renderSearchGrid(grid, items); }
   } catch(e) {
-    if(st){ st.textContent='Ошибка: '+e.message; st.style.display='block'; }
+    if(st){ st.textContent=t('t.error_c')+e.message; st.style.display='block'; }
   }
 }
 
@@ -317,14 +317,18 @@ async function doSearch() {
 // hi-res flag the search API already returns) — no extra per-release metadata calls,
 // so it can't slow search down or fail. Rendered top-right on the cover, stacked.
 function _qualityTags(item) {
+  // The AVAILABLE download tiers for this service (best-first), NOT just the max —
+  // these are what the user can actually pick, rendered stacked top→bottom. Per-
+  // release specifics (e.g. Atmos on a given Tidal album) come from item.available
+  // when the engine reports it; this is the cheap service-wide fallback.
   const svc = item.service || '';
   const hr  = !!item.hires;
-  if (svc === 'apple')       return ['ALAC'];                    // Apple lossless is catalog-wide
+  if (svc === 'apple')       return ['ALAC', 'AAC'];             // lossless catalog-wide + AAC
   if (svc === 'qobuz')       return hr ? ['HI-RES', 'FLAC'] : ['FLAC'];
-  if (svc === 'tidal')       return hr ? ['HI-RES', 'FLAC'] : ['FLAC'];
-  if (svc === 'deezer')      return ['FLAC'];
-  if (svc === 'beatport')    return ['FLAC'];
-  if (svc === 'yandex')      return ['FLAC'];
+  if (svc === 'tidal')       return hr ? ['HI-RES', 'FLAC', 'AAC'] : ['FLAC', 'AAC'];
+  if (svc === 'deezer')      return ['FLAC', 'MP3'];
+  if (svc === 'beatport')    return ['FLAC', 'AAC'];
+  if (svc === 'yandex')      return ['FLAC', 'AAC'];
   if (svc === 'soundcloud')  return ['AAC'];
   if (svc === 'spotify')     return ['320'];
   return [];
@@ -339,6 +343,7 @@ function _qualityBadges(item) {
   const col = q => (q === 'HI-RES' || q === 'ALAC') ? '#ffd60a'
                  : q === 'FLAC' ? '#3ecfaa'
                  : q === 'ATMOS' ? '#9090c8'
+                 : (q === 'AAC' || q === 'MP3' || q === '320') ? '#EF9F27'
                  : '#c8c8d0';
   const chip = q => `<span style="background:rgba(0,0,0,.72);color:${col(q)};font-size:8px;`
     + `font-weight:800;padding:2px 5px;border-radius:3px;letter-spacing:.4px;`
@@ -363,7 +368,7 @@ function _renderSearchCard(item, svc) {
       ? `<a href="${esc(item.url)}" target="_blank" onclick="event.stopPropagation()" style="padding:5px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);text-decoration:none;display:flex;align-items:center;flex-shrink:0">↗</a>`
       : '';
     const copyBtn = item.url
-      ? `<button onclick="event.stopPropagation();navigator.clipboard.writeText('${escJ(item.url)}');toast(t('toast.link_copied'),'var(--green)')" title="Скопировать ссылку" style="padding:5px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);cursor:pointer;flex-shrink:0">⎘</button>`
+      ? `<button onclick="event.stopPropagation();navigator.clipboard.writeText('${escJ(item.url)}');toast(t('toast.link_copied'),'var(--green)')" title="${t('ck.copy_link')}" style="padding:5px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);cursor:pointer;flex-shrink:0">⎘</button>`
       : '';
 
 
@@ -401,13 +406,13 @@ function _renderSearchCard(item, svc) {
       // ── Beatport release card ────────────────────────────────────
       // Same scope-fix as the track branch above.
       if(item.type === 'release' && item.service === 'beatport') {
-        const tcLabel = item.trackCount ? `<span style="font-size:10px;color:var(--muted2);flex-shrink:0">${item.trackCount} тр.</span>` : '';
+        const tcLabel = item.trackCount ? `<span style="font-size:10px;color:var(--muted2);flex-shrink:0">${item.trackCount} ${t('p.trk_abbr')}</span>` : '';
         const labelRow = item.label ? `<div style="font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${esc(item.label)}</div>` : '';
         const upcomingBadge = item.is_upcoming ? `<span style="font-size:8px;background:rgba(255,214,10,.15);color:#ffd60a;padding:1px 4px;border-radius:3px;font-weight:700">PRE</span>` : '';
         return `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s;position:relative" onmouseover="this.style.borderColor='#01f49c'" onmouseout="this.style.borderColor='var(--border)'">
             ${cover}
-            <div style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,.7);color:#01f49c;font-size:8px;font-weight:700;padding:2px 5px;border-radius:3px;letter-spacing:.4px">РЕЛИЗ ${upcomingBadge}</div>
+            <div style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,.7);color:#01f49c;font-size:8px;font-weight:700;padding:2px 5px;border-radius:3px;letter-spacing:.4px">${t('ck.release_badge')} ${upcomingBadge}</div>
             <div style="padding:8px 9px">
               <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escJ(item.title)}">${esc(item.title)||'—'}</div>
               <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">${esc(item.artist)||''}</div>
@@ -429,7 +434,7 @@ function _renderSearchCard(item, svc) {
         return `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s;position:relative" onmouseover="this.style.borderColor='var(--red)'" onmouseout="this.style.borderColor='var(--border)'">
             ${cover}
-            <div style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.7);color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;letter-spacing:.5px">АРТИСТ</div>
+            <div style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.7);color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;letter-spacing:.5px">${t('ck.artist_badge')}</div>
             <div style="padding:8px 9px">
               <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escJ(item.title)}">${item.title||'—'}</div>
               <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:7px">${item.artist||''}</div>
@@ -443,8 +448,8 @@ function _renderSearchCard(item, svc) {
 
       // ── Standard album / playlist card ──────────────────────────
       if(item.type === 'album' || item.type === 'playlist') {
-        const tcLabel = item.tracks ? `<span style="font-size:10px;color:var(--muted2);flex-shrink:0">${item.tracks} тр.</span>` : '';
-        const typeTag = item.type === 'playlist' ? 'ПЛЕЙЛИСТ' : 'АЛЬБОМ';
+        const tcLabel = item.tracks ? `<span style="font-size:10px;color:var(--muted2);flex-shrink:0">${item.tracks} ${t('p.trk_abbr')}</span>` : '';
+        const typeTag = item.type === 'playlist' ? t('card.playlist') : t('card.album');
         const labelRow = item.label ? `<div style="font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px" title="${escJ(item.label)}">${esc(item.label)}</div>` : '';
         const canStream = (item.service === 'qobuz' || item.service === 'tidal' || item.service === 'deezer');
         const playOverlay = canStream
@@ -565,7 +570,7 @@ function closeDetail(){
 function _detailLoading(msg){
   const c  = document.getElementById('detail-content');
   const bc = document.getElementById('detail-breadcrumb');
-  if(c)  c.innerHTML = `<div style="text-align:center;padding:80px 0;color:var(--muted)">${msg||'Загрузка…'}</div>`;
+  if(c)  c.innerHTML = `<div style="text-align:center;padding:80px 0;color:var(--muted)">${msg||t('player.loading')}</div>`;
   if(bc) bc.textContent = '';
   const o = document.getElementById('detail-overlay');
   if(!o) return;
@@ -577,14 +582,14 @@ function _detailLoading(msg){
 
 function _detailError(msg){
   const c = document.getElementById('detail-content');
-  if(c) c.innerHTML = `<div style="text-align:center;padding:80px 0;color:var(--red)">Ошибка: ${esc(msg)}</div>`;
+  if(c) c.innerHTML = `<div style="text-align:center;padding:80px 0;color:var(--red)">${t('t.error_c')}${esc(msg)}</div>`;
 }
 
 // ─── Artist page ─────────────────────────────────────────────────────────
 async function openArtistPage(service, artistId){
   Detail._stack = [];          // root navigation — clear history
   _detailUpdateBack();
-  _detailLoading(`Гружу артиста…`);
+  _detailLoading(t('ck.loading_artist'));
   try {
     // Ask backend for every release type; we filter client-side for responsiveness.
     const r = await fetch(`/api/artist/${service}/${encodeURIComponent(artistId)}?types=album,single,ep,compilation,live`);
@@ -620,26 +625,26 @@ function renderArtistPage(){
     <div style="display:flex;gap:20px;margin-bottom:24px;align-items:flex-start;flex-wrap:wrap">
       ${artist.picture ? `<img src="${artist.picture}" data-lightbox style="width:140px;height:140px;border-radius:50%;object-fit:cover;flex-shrink:0;cursor:zoom-in" onerror="this.style.display='none'"/>` : ''}
       <div style="flex:1;min-width:260px">
-        <div style="font-size:11px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;font-family:var(--display)">Артист · ${artist.service}</div>
+        <div style="font-size:11px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;font-family:var(--display)">${t('card.artist')} · ${artist.service}</div>
         <div style="font-family:var(--display);font-size:32px;font-weight:800;color:var(--text);margin-top:4px;line-height:1.1">${esc(artist.name||'—')}</div>
         <div style="font-size:12px;color:var(--muted);margin-top:8px">
-          ${artist.albums_total ? `${artist.albums_total} релизов · ` : ''}${artist.fans ? artist.fans.toLocaleString('ru')+' слушателей · ' : ''}${artist.genre ? esc(artist.genre) : ''}
+          ${artist.albums_total ? `${artist.albums_total} ${t('ck.releases_word')} · ` : ''}${artist.fans ? artist.fans.toLocaleString('ru')+' '+t('ck.listeners_word')+' · ' : ''}${artist.genre ? esc(artist.genre) : ''}
         </div>
-        ${artist.url ? `<a href="${artist.url}" target="_blank" style="font-size:11px;color:var(--red);margin-top:6px;display:inline-block">↗ Открыть на ${artist.service}</a>` : ''}
+        ${artist.url ? `<a href="${artist.url}" target="_blank" style="font-size:11px;color:var(--red);margin-top:6px;display:inline-block">↗ ${t('ck.open_on')} ${artist.service}</a>` : ''}
       </div>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px">
-      ${pill('all', 'Все')}
-      ${pill('album', 'Альбомы')}
+      ${pill('all', t('ck.f_all'))}
+      ${pill('album', t('ck.f_albums'))}
       ${pill('ep', 'EP')}
-      ${pill('single', 'Синглы')}
-      ${pill('compilation', 'Сборники')}
-      ${pill('live', 'Лайвы')}
-      ${pill('appears_on', 'Участие')}
+      ${pill('single', t('ck.f_singles'))}
+      ${pill('compilation', t('ck.f_comps'))}
+      ${pill('live', t('ck.f_live'))}
+      ${pill('appears_on', t('ck.f_appears'))}
     </div>`;
 
   const grid = filtered.length === 0
-    ? `<div style="text-align:center;padding:60px 0;color:var(--muted)">В этой категории ничего нет</div>`
+    ? `<div style="text-align:center;padding:60px 0;color:var(--muted)">${t('ck.cat_empty')}</div>`
     : `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:12px">
         ${filtered.map(r => `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s" onmouseover="this.style.borderColor='var(--red)'" onmouseout="this.style.borderColor='var(--border)'">
@@ -660,7 +665,7 @@ function renderArtistPage(){
       </div>`;
 
   const bc = document.getElementById('detail-breadcrumb');
-  if(bc) bc.textContent = artist.name || 'Артист';
+  if(bc) bc.textContent = artist.name || t('card.artist');
   document.getElementById('detail-content').innerHTML = header + grid;
 }
 
@@ -680,7 +685,7 @@ async function openAlbumPage(service, albumId){
     Detail._stack.push({type:'album', ...Detail.currentAlbum});
     _detailUpdateBack();
   }
-  _detailLoading('Гружу альбом…');
+  _detailLoading(t('ck.loading_album'));
   try {
     const r = await fetch(`/api/album/${service}/${encodeURIComponent(albumId)}`);
     const d = await r.json();
@@ -726,18 +731,18 @@ function renderAlbumPage(){
     : `<div style="width:220px;height:220px;border-radius:8px;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:48px;flex-shrink:0">♪</div>`;
 
   const meta = [
-    album.label ? `Лейбл: <span style="color:var(--text)">${esc(album.label)}</span>` : '',
-    album.date ? `Релиз: <span style="color:var(--text)">${esc(album.date)}</span>` : '',
-    album.genre ? `Жанр: <span style="color:var(--text)">${esc(album.genre)}</span>` : '',
+    album.label ? `${t('ck.lbl_label')}: <span style="color:var(--text)">${esc(album.label)}</span>` : '',
+    album.date ? `${t('ck.lbl_release')}: <span style="color:var(--text)">${esc(album.date)}</span>` : '',
+    album.genre ? `${t('ck.lbl_genre')}: <span style="color:var(--text)">${esc(album.genre)}</span>` : '',
     album.upc ? `UPC: <span style="color:var(--text);font-family:var(--mono);font-size:11px">${esc(album.upc)}</span>` : '',
-    album.tracks ? `Треков: <span style="color:var(--text)">${album.tracks}</span>` : '',
+    album.tracks ? `${t('ck.lbl_tracks')}: <span style="color:var(--text)">${album.tracks}</span>` : '',
   ].filter(Boolean).join(' · ');
 
   const header = `
     <div style="display:flex;gap:24px;margin-bottom:24px;flex-wrap:wrap">
       ${coverHtml}
       <div style="flex:1;min-width:280px">
-        <div style="font-size:11px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;font-family:var(--display)">Альбом · ${album.service}</div>
+        <div style="font-size:11px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;font-family:var(--display)">${t('card.album')} · ${album.service}</div>
         <div style="font-family:var(--display);font-size:28px;font-weight:800;color:var(--text);margin-top:4px;line-height:1.15">${esc(album.title||'—')}</div>
         <div style="font-size:14px;color:var(--muted2);margin-top:4px">${esc(album.artist||'')}</div>
         <div style="font-size:11px;color:var(--muted);margin-top:12px;line-height:1.7">${meta}</div>
@@ -750,39 +755,41 @@ function renderAlbumPage(){
     </div>`;
 
   const _emptyMsg = service === 'apple'
-    ? 'DJ-миксы и live-записи Apple Music не возвращают отдельные треки — скачать можно весь альбом целиком.'
-    : 'Трек-лист недоступен — скачать можно весь альбом целиком.';
+    ? t('ck.apple_no_tracks')
+    : t('ck.tl_unavail_dl');
   // Per-track selection toolbar (checkboxes + select-all / per-disc / clear all).
   const _discsSet = [...new Set(tracks.map(t => t.disc || 1))].sort((a,b)=>(+a)-(+b));
   const _selBtnCss = 'padding:5px 11px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)';
+  // Precomputed: the per-track template below shadows `t` (map param = track).
+  const _TT = {sel:t('ck.sel_for_dl'), full:t('ck.full_play'), prev:t('ck.prev30'), q:t('ck.to_queue')};
   const _selToolbar = tracks.length === 0 ? '' : `
     <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:10px">
-      <button onclick="albumSelectAll(true)" style="${_selBtnCss}">☑ Выбрать всё</button>
-      <button onclick="albumSelectAll(false)" style="${_selBtnCss}">☐ Снять все</button>
-      ${_discsSet.length>1 ? _discsSet.map(d=>`<button onclick="albumSelectDisc('${d}')" style="${_selBtnCss}">💿 Диск ${d}</button>`).join('') : ''}
-      <button id="alb-dl-sel" onclick="albumDownloadSelected()" disabled style="margin-left:auto;padding:6px 14px;background:var(--red);color:#fff;border:none;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font);opacity:.5">⬇ Скачать выбранное (0)</button>
+      <button onclick="albumSelectAll(true)" style="${_selBtnCss}">☑ ${t('ck.sel_all')}</button>
+      <button onclick="albumSelectAll(false)" style="${_selBtnCss}">☐ ${t('ck.sel_none')}</button>
+      ${_discsSet.length>1 ? _discsSet.map(d=>`<button onclick="albumSelectDisc('${d}')" style="${_selBtnCss}">💿 ${t('ck.disc_word')} ${d}</button>`).join('') : ''}
+      <button id="alb-dl-sel" onclick="albumDownloadSelected()" disabled style="margin-left:auto;padding:6px 14px;background:var(--red);color:#fff;border:none;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font);opacity:.5">⬇ ${ti('ck.dl_sel_n',{n:0})}</button>
     </div>`;
   const tracksList = tracks.length === 0
     ? `<div style="text-align:center;padding:40px 0;color:var(--muted)">
         <div style="font-size:28px;margin-bottom:8px">📻</div>
-        <div style="margin-bottom:4px">${service === 'apple' ? 'Трек-лист не доступен в iTunes API' : 'Трек-лист недоступен'}</div>
+        <div style="margin-bottom:4px">${service === 'apple' ? t('ck.tl_itunes') : t('ck.tl_unavail')}</div>
         <div style="font-size:11px;margin-bottom:14px">${_emptyMsg}</div>
         <button onclick="albumAddAll()" style="padding:7px 16px;background:var(--red);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">${t('btn.download_album')}</button>
       </div>`
     : _selToolbar + `<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">
         ${tracks.map((t, i) => `
           <div id="alb-row-${t.id}" style="display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid var(--border);${i===tracks.length-1?'border-bottom:none':''}" onmouseover="this.style.background='rgba(255,255,255,.03)'" onmouseout="this.style.background=''">
-            <input type="checkbox" class="alb-trk-cb" data-disc="${t.disc||1}" data-url="${esc(t.url||'')}" ${t.url?'':'disabled'} onchange="_albumUpdateSelCount()" style="width:auto;margin:0;padding:0;background:none;border:none;flex-shrink:0;cursor:pointer" title="Выбрать для скачивания"/>
+            <input type="checkbox" class="alb-trk-cb" data-disc="${t.disc||1}" data-url="${esc(t.url||'')}" ${t.url?'':'disabled'} onchange="_albumUpdateSelCount()" style="width:auto;margin:0;padding:0;background:none;border:none;flex-shrink:0;cursor:pointer" title="${_TT.sel}"/>
             <div style="width:26px;text-align:center;color:var(--muted);font-size:11px;font-family:var(--mono);flex-shrink:0">${t.track_no||i+1}</div>
             ${canStream
-              ? `<button id="alb-play-${t.id}" onclick="playAlbumStreamTrack(${_streamIdx[t.id]??0})" style="width:28px;height:28px;border-radius:50%;background:rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.12);color:${streamColor};border:1px solid rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.25);cursor:pointer;font-size:10px;flex-shrink:0;transition:background .12s,color .12s;display:inline-flex;align-items:center;justify-content:center;line-height:1" title="Полный трек ▶">▶</button>`
-              : t.preview ? `<button onclick="playAlbumTrackPreview(${_prevIdx[t.preview]??0})" style="width:28px;height:28px;border-radius:50%;background:rgba(255,255,255,.08);color:var(--text);border:none;cursor:pointer;font-size:10px;flex-shrink:0" title="Предпрослушка 30с">▶</button>` : `<div style="width:28px;flex-shrink:0"></div>`}
+              ? `<button id="alb-play-${t.id}" onclick="playAlbumStreamTrack(${_streamIdx[t.id]??0})" style="width:28px;height:28px;border-radius:50%;background:rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.12);color:${streamColor};border:1px solid rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.25);cursor:pointer;font-size:10px;flex-shrink:0;transition:background .12s,color .12s;display:inline-flex;align-items:center;justify-content:center;line-height:1" title="${_TT.full} ▶">▶</button>`
+              : t.preview ? `<button onclick="playAlbumTrackPreview(${_prevIdx[t.preview]??0})" style="width:28px;height:28px;border-radius:50%;background:rgba(255,255,255,.08);color:var(--text);border:none;cursor:pointer;font-size:10px;flex-shrink:0" title="${_TT.prev}">▶</button>` : `<div style="width:28px;flex-shrink:0"></div>`}
             <div style="flex:1;min-width:0">
               <div style="font-size:13px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(t.title)}">${esc(t.title)}${t.explicit?' <span style="background:rgba(255,255,255,.15);color:var(--muted);font-size:9px;padding:0 4px;border-radius:2px;vertical-align:middle">E</span>':''}</div>
               ${t.artist && t.artist!==album.artist ? `<div style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.artist)}</div>` : ''}
             </div>
             <div style="color:var(--muted);font-size:11px;font-family:var(--mono);flex-shrink:0">${fmtDur(t.duration)}</div>
-            <button onclick="albumAddTrack('${esc(t.url||t.id)}','${esc(t.title)}','${esc(t.artist||album.artist||'')}')" style="padding:4px 10px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;font-family:var(--font);flex-shrink:0" title="В очередь">⬇</button>
+            <button onclick="albumAddTrack('${esc(t.url||t.id)}','${esc(t.title)}','${esc(t.artist||album.artist||'')}')" style="padding:4px 10px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;font-family:var(--font);flex-shrink:0" title="${_TT.q}">⬇</button>
           </div>`).join('')}
       </div>`;
 
@@ -839,9 +846,9 @@ function fmtDur(s){
 
 async function albumAddAll(){
   const {album} = Detail.currentAlbum;
-  if(!album?.url){ toast('Нет URL альбома','var(--red)'); return; }
+  if(!album?.url){ toast(t('t.no_alb_url'),'var(--red)'); return; }
   const r = await api('POST', '/api/queue/add', {url: album.url, quality: resolveQuality(detectSvcFromUrl(album.url) || 'apple'), title: album.title, artist: album.artist});
-  if(r.ok) toast(`+ ${album.title} → очередь`);
-  else toast('Ошибка: '+(r.detail||'?'),'var(--red)');
+  if(r.ok) toast('+ '+album.title+' → '+t('q.queue_word'));
+  else toast(t('t.error_c')+(r.detail||'?'),'var(--red)');
 }
 

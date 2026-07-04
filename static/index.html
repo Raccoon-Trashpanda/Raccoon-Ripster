@@ -17,16 +17,16 @@
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/css/main.css?v=59"/>
+<link rel="stylesheet" href="/static/css/main.css?v=67"/>
 </head>
 <body>
 <div id="net-progress"></div>
 <div id="guest-banner">
-  🔗 Гостевой доступ
+  <span data-i18n="g.banner">🔗 Гостевой доступ</span>
   <span id="guest-label" style="opacity:.7;font-weight:400"></span>
   <span id="guest-expiry" style="opacity:.7;margin-left:8px;font-size:11px"></span>
   <span id="guest-quota" style="margin-left:auto;opacity:.7"></span>
-  <button onclick="showGuestServiceInfo()" title="О сервисе" style="margin-left:10px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18);border-radius:50%;width:22px;height:22px;color:#fff;font-size:12px;cursor:pointer;padding:0;flex-shrink:0">ℹ</button>
+  <button onclick="showGuestServiceInfo()" data-i18n-title="g.about" title="О сервисе" style="margin-left:10px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18);border-radius:50%;width:22px;height:22px;color:#fff;font-size:12px;cursor:pointer;padding:0;flex-shrink:0">ℹ</button>
 </div>
 
 <div class="app">
@@ -54,7 +54,7 @@
         <div class="tb-sub" id="tb-ver">v—</div>
       </div>
     </div>
-    <button id="mobile-menu-btn" onclick="toggleMobileDrawer()" title="Меню"
+    <button id="mobile-menu-btn" onclick="toggleMobileDrawer()" data-i18n-title="tb.menu" title="Меню"
       style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:32px;height:32px;font-size:17px;cursor:pointer;align-items:center;justify-content:center;flex-shrink:0;color:var(--text);padding:0;line-height:1">☰</button>
     <div class="tb-controls" style="display:flex;align-items:center;gap:8px;margin-left:8px">
       <!-- Font picker (compact, icon + dropdown) -->
@@ -82,11 +82,11 @@
     </div>
     <!-- One tidy button that opens a popover with engine / tokens / quality details -->
     <button id="tb-details-btn" type="button" onclick="toggleDetailsPopover(event)"
-            title="Подробности: движок, токены, качество"
+            data-i18n-title="tb.details_t" title="Подробности: движок, токены, качество"
             class="owner-only"
             style="background:var(--surface);border:1px solid var(--border);border-radius:8px;height:32px;padding:0 12px;font-size:11px;font-weight:600;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:7px;font-family:var(--font);transition:.15s">
       <span id="tb-details-dot" style="width:6px;height:6px;border-radius:50%;background:var(--muted);transition:background .2s"></span>
-      <span>Инфо</span>
+      <span data-i18n="tb.info">Инфо</span>
     </button>
     <div class="lang-switcher" id="lang-switcher" title="Interface language">
       <button class="lang-flag-btn" id="lang-current" onclick="toggleLangDropdown(event)">🇷🇺</button>
@@ -99,11 +99,11 @@
       </div>
     </div>
     <div class="tb-status" id="tb-status" title="WebSocket status">● Disconnected</div>
-    <button class="tb-restart owner-only" id="tb-restart-btn" onclick="restartServer()" title="Перезапустить сервер" style="display:none">↺</button>
+    <button class="tb-restart owner-only" id="tb-restart-btn" onclick="restartServer()" data-i18n-title="tb.restart_t" title="Перезапустить сервер" style="display:none">↺</button>
   </header>
   <div id="restart-overlay" style="display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.7);align-items:center;justify-content:center;flex-direction:column;gap:12px">
-    <div style="color:#fff;font-size:18px;font-weight:600">Перезапуск сервера…</div>
-    <div style="color:var(--muted);font-size:13px">Страница обновится автоматически</div>
+    <div style="color:#fff;font-size:18px;font-weight:600" data-i18n="tb.restarting">Перезапуск сервера…</div>
+    <div style="color:var(--muted);font-size:13px" data-i18n="tb.reload_auto">Страница обновится автоматически</div>
   </div>
 
   <!-- Details popover — lives outside topbar (which has overflow:hidden) so it
@@ -413,33 +413,34 @@
   <button type="button" onclick="closeLightbox()" style="position:absolute;top:16px;right:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:none;cursor:pointer;font-size:16px;backdrop-filter:blur(4px)">✕</button>
 </div>
 
-<script src="/static/js/i18n.js?v=10028"></script>
-<script src="/static/js/views.js?v=10038"></script>
-<script src="/static/js/app.js?v=10095"></script>
-<script src="/static/js/wrapper.js?v=2"></script>
-<script src="/static/js/coder.js?v=2"></script>
+<script src="/static/js/i18n.js?v=10050"></script>
+<script src="/static/js/views.js?v=10052"></script>
+<script src="/static/js/app.js?v=10102"></script>
+<script src="/static/js/wrapper.js?v=5"></script>
+<script src="/static/js/coder.js?v=5"></script>
 <script src="/static/js/guest.js?v=1"></script>
-<script src="/static/js/setup_ui.js?v=4"></script>
+<script src="/static/js/setup_ui.js?v=5"></script>
+<script src="/static/js/selfupdate_ui.js?v=5"></script>
 <script src="/static/js/search.js?v=1"></script>
-<script src="/static/js/console_ui.js?v=2"></script>
+<script src="/static/js/console_ui.js?v=4"></script>
 <script src="/static/js/stats_ui.js?v=1"></script>
-<script src="/static/js/orpheus_ui.js?v=1"></script>
-<script src="/static/js/sc_tab.js?v=1"></script>
-<script src="/static/js/cookies_ui.js?v=3"></script>
-<script src="/static/js/lightbox.js?v=1"></script>
-<script src="/static/js/urlbar_detect.js?v=1"></script>
-<script src="/static/js/auth_ui.js?v=1"></script>
+<script src="/static/js/orpheus_ui.js?v=5"></script>
+<script src="/static/js/sc_tab.js?v=3"></script>
+<script src="/static/js/cookies_ui.js?v=8"></script>
+<script src="/static/js/lightbox.js?v=3"></script>
+<script src="/static/js/urlbar_detect.js?v=3"></script>
+<script src="/static/js/auth_ui.js?v=3"></script>
 <script src="/static/js/player_lib.js?v=2"></script>
-<script src="/static/js/remote_ui.js?v=1"></script>
-<script src="/static/js/service_colors_ui.js?v=2"></script>
+<script src="/static/js/remote_ui.js?v=3"></script>
+<script src="/static/js/service_colors_ui.js?v=6"></script>
 <script src="/static/js/deps_ui.js?v=1"></script>
 <script src="/static/js/tokens_ui.js?v=1"></script>
 <script src="/static/js/config_yaml_ui.js?v=1"></script>
-<script src="/static/js/player.js?v=10029"></script>
-<script src="/static/js/player_fps.js?v=10"></script>
-<script src="/static/js/bbc.js?v=10003"></script>
-<script src="/static/js/sc.js?v=10014"></script>
-<script src="/static/js/fx_ui.js?v=3"></script>
+<script src="/static/js/player.js?v=10031"></script>
+<script src="/static/js/player_fps.js?v=11"></script>
+<script src="/static/js/bbc.js?v=10007"></script>
+<script src="/static/js/sc.js?v=10015"></script>
+<script src="/static/js/fx_ui.js?v=4"></script>
 
 <!-- Mobile sidebar drawer overlay -->
 <div id="drawer-overlay" class="drawer-overlay" onclick="closeMobileDrawer()"></div>

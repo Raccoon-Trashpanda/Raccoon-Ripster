@@ -75,8 +75,8 @@ function resolveQuality(service) {
 async function searchAddToQueue(url, title, artist) {
   const task = { url, quality: resolveQuality(detectSvcFromUrl(url) || 'apple'), title, artist };
   const r = await api('POST', '/api/queue/add', task);
-  if(r.ok) toast(`+ ${title} → очередь`);
-  else toast('Ошибка: '+r.detail,'var(--red)');
+  if(r.ok) toast('+ '+title+' → '+t('q.queue_word'));
+  else toast(t('t.error_c')+r.detail,'var(--red)');
 }
 
 function toggleBatch() {
@@ -93,22 +93,22 @@ async function addBatch() {
   const text = document.getElementById('batch-urls')?.value||'';
   const qual = document.getElementById('batch-quality')?.value || S.config['quality'] || 'alac';
   const r = await api('POST', '/api/queue/batch', {text, quality: qual});
-  if(r.ok){ toast(`+ ${r.added} ссылок в очередь`); document.getElementById('batch-urls').value=''; }
-  else toast('Ошибка: '+(r.error||''),'var(--red)');
+  if(r.ok){ toast(ti('lb.added_links',{n:r.added})); document.getElementById('batch-urls').value=''; }
+  else toast(t('t.error_c')+(r.error||''),'var(--red)');
 }
 
 async function convertSpotifyFromSearch() {
-  const url = document.getElementById('search-q')?.value?.trim() || prompt('Вставь Spotify URL:');
-  if(!url || !url.includes('spotify.com')){ toast('Введи Spotify URL в поиске'); return; }
+  const url = document.getElementById('search-q')?.value?.trim() || prompt(t('lb.paste_sp'));
+  if(!url || !url.includes('spotify.com')){ toast(t('lb.enter_sp')); return; }
   const svc = document.getElementById('search-svc')?.value || 'apple';
-  toast('Конвертирую Spotify…','var(--blue)');
+  toast(t('t.conv_sp'),'var(--blue)');
   const r = await api('POST','/api/convert/spotify',{url, target: svc});
   if(r.ok && r.target?.url){
-    toast(`Найдено: ${r.target.title||r.target.url}`,'var(--green)');
+    toast(t('lb.found_c')+(r.target.title||r.target.url),'var(--green)');
     await api('POST','/api/queue/add',{url: r.target.url, quality: resolveQuality(svc), title: r.target.title});
-    toast('Добавлено в очередь!','var(--green)');
+    toast(t('t.added_q_x'),'var(--green)');
   } else {
-    toast('Не найдено: '+(r.error||''),'var(--red)');
+    toast(t('t.not_found_c')+(r.error||''),'var(--red)');
   }
 }
 
@@ -138,7 +138,7 @@ async function loadHistory() {
     const ts  = h.ts ? new Date(h.ts).toLocaleString('ru') : '';
     const title = h.title || _titleFromUrl(h.url);
     const artist = h.artist || '';
-    const tracksInfo = h.tracks > 1 ? ` · ${h.tracks} треков` : '';
+    const tracksInfo = h.tracks > 1 ? ' · '+ti('q.n_tracks',{n:h.tracks}) : '';
     const art = h.artworkUrl ? `<img src="${h.artworkUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:6px" loading="lazy"/>` : lbl;
     return `
     <div class="hist-row" style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px">
@@ -153,7 +153,7 @@ async function loadHistory() {
       </div>
       <button onclick="redownload(${esc(JSON.stringify(h.url))}, ${esc(JSON.stringify(h.quality||''))})"
         style="padding:5px 11px;background:rgba(192,132,160,.1);border:1px solid rgba(192,132,160,.2);border-radius:7px;font-size:11px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--font);white-space:nowrap;flex-shrink:0">
-        ↺ Повторить
+        ↺ ${t('lb.retry')}
       </button>
     </div>`;
   }).join('');
@@ -161,8 +161,8 @@ async function loadHistory() {
 
 async function redownload(url, quality) {
   const r = await api('POST','/api/queue/add',{url, quality});
-  if(r.ok) toast('Добавлено в очередь!');
-  else toast('Ошибка','var(--red)');
+  if(r.ok) toast(t('t.added_q_x'));
+  else toast(t('t.error'),'var(--red)');
 }
 
 async function clearHistory() {
@@ -171,13 +171,13 @@ async function clearHistory() {
   const sel = document.getElementById('hist-clear-period');
   const v = sel ? sel.value : '';
   let qs = '', what = t('h.clr_confirm_all') || 'всю историю';
-  if (v.startsWith('h:'))      { qs = '?hours=' + v.slice(2); what = `историю старше ${v.slice(2)} ч`; }
-  else if (v.startsWith('d:')) { qs = '?days='  + v.slice(2); what = `историю старше ${v.slice(2)} дн`; }
-  if(!confirm('Очистить ' + what + '?')) return;
+  if (v.startsWith('h:'))      { qs = '?hours=' + v.slice(2); what = ti('lb.hist_older_h',{n:v.slice(2)}); }
+  else if (v.startsWith('d:')) { qs = '?days='  + v.slice(2); what = ti('lb.hist_older_d',{n:v.slice(2)}); }
+  if(!confirm(t('lb.clear_word') + ' ' + what + '?')) return;
   const r = await api('DELETE','/api/history' + qs);
   loadHistory();
   const n = (r && typeof r.removed !== 'undefined') ? r.removed : '';
-  toast('История очищена' + (n !== '' && n !== 'all' ? ` (${n})` : ''));
+  toast(t('lb.hist_clear') + (n !== '' && n !== 'all' ? ` (${n})` : ''));
 }
 
 // ══ WATCHLIST ═════════════════════════════════════════════════════
@@ -213,10 +213,10 @@ async function wlAdd() {
   const url  = document.getElementById('wl-url')?.value?.trim();
   const svc  = document.getElementById('wl-svc')?.value||'apple';
   const auto = document.getElementById('wl-auto')?.checked !== false;
-  if(!name && !url){ toast('Введи имя артиста'); return; }
+  if(!name && !url){ toast(t('lb.enter_artist')); return; }
   const r = await api('POST','/api/watchlist',{name,url,service:svc,auto_download:auto});
   if(r.ok){ toast(`+ ${name||url} → watchlist`,'var(--green)'); loadWatchlist(); document.getElementById('wl-name').value=''; document.getElementById('wl-url').value=''; }
-  else toast('Ошибка: '+(r.detail||''),'var(--red)');
+  else toast(t('t.error_c')+(r.detail||''),'var(--red)');
 }
 
 async function wlRemove(id) {

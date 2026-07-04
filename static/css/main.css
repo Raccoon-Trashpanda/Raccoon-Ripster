@@ -173,6 +173,13 @@ body{height:100%;margin:0}
 .view-body{flex:1 1 auto;overflow-y:auto;padding:20px 28px;min-height:0;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.1) transparent}
 .view-body::-webkit-scrollbar{width:4px}
 .view-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:2px}
+/* The mini-player (#preview-player) is position:fixed;bottom:0 and floats OVER
+   the layout, so at small window heights it hides the bottom of the scrollable
+   content and the last sidebar items. When it's visible, reserve its height as
+   bottom padding on the scroll areas so nothing sits under it. ~72px = the
+   58px #pp-bar + border + a little breathing room. */
+body:has(#preview-player.visible) .view-body{padding-bottom:78px}
+body:has(#preview-player.visible) .sidebar{padding-bottom:72px}
 /* Safety net: any direct <div> child of an active view that is NOT a
    .view-header / .view-body / .console-toolbar still needs to stretch and
    scroll so views like Search / Watchlist / Releases (which use an inline
@@ -811,6 +818,54 @@ img[data-cover].loaded{
 .lang-dropdown button:hover{background:var(--surface3,#2a2a3a)}
 /* ── Guest mode ──────────────────────────────────────────────── */
 body.guest-mode .owner-only { display:none !important; }
+/* Guest / Telegram Mini App: strip owner-only queue chrome. The Apple wrapper is
+   owner-side; quality/engine is owner-fixed for guests; Start/Pause/Stop act on
+   the WHOLE queue (a guest manages only their own tasks via the × on each card). */
+body.guest-mode #wrapper-banner,
+body.guest-mode #wrapper-ok-banner,
+body.guest-mode #wrapper-pill,
+body.guest-mode #url-quality,
+body.guest-mode #btn-start,
+body.guest-mode #btn-pause,
+body.guest-mode #btn-stop { display:none !important; }
+/* extra clutter a bot user never needs: guest-access header, tokens tab, font/theme pickers */
+body.guest-mode #guest-banner,
+body.guest-mode #mgt-tokens,
+body.guest-mode #font-picker,
+body.guest-mode #theme-btn { display:none !important; }
+/* de-clutter the queue view: the bottom guest add-bar is the single add point, so
+   drop the duplicate top add-bar; the queue transport (Start/Pause/Stop/counter) is
+   owner-wide; the in-app preview player just overlaps the bottom bars on mobile. */
+body.guest-mode .queue-input-area,
+body.guest-mode .transport { display:none !important; }
+/* Telegram Mini App (html.tg-webapp set by the /tg bootstrap) — hide the same
+   owner-only chrome REGARDLESS of guest-mode detection, so the desktop-Telegram
+   WebApp (where guest-mode may apply differently) also stays clean. */
+html.tg-webapp #wrapper-pill,
+html.tg-webapp #wrapper-banner,
+html.tg-webapp #wrapper-ok-banner,
+html.tg-webapp #guest-banner,
+html.tg-webapp #mgt-tokens,
+html.tg-webapp #font-picker,
+html.tg-webapp #theme-btn,
+html.tg-webapp #tb-details-btn,
+html.tg-webapp #url-quality,
+html.tg-webapp #btn-start,
+html.tg-webapp #btn-pause,
+html.tg-webapp #btn-stop,
+html.tg-webapp .queue-input-area,
+html.tg-webapp .transport { display:none !important; }
+/* the preview player MUST stay — BBC/SoundCloud/search "play" uses it. Just lift
+   it clear of the bottom add-bar + tabbar so it never overlaps them. */
+body.guest-mode #preview-player,
+html.tg-webapp #preview-player { bottom:120px !important; }
+/* SECURITY: the Telegram Mini App must NEVER expose owner controls, whatever the
+   session mode reports (a shared/owner cookie must not reveal Admin/Settings/etc).
+   Hide every owner-only element + the two owner tabs that aren't tagged owner-only. */
+html.tg-webapp .owner-only,
+html.tg-webapp .nav-item[data-view="setup"],
+html.tg-webapp .nav-item[data-view="console"],
+html.tg-webapp #tb-details-pop { display:none !important; }
 body.guest-mode .guest-only { display:flex !important; }
 /* Views use .active class for visibility — prevent guest-only class from
    always showing a view regardless of active state (e.g. view-guest-prefs
@@ -1065,11 +1120,15 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
        midpoint fixes it regardless of what's in the side zones. The time readout
        sits to the RIGHT of the buttons on this ONE row (reverted from a stacked
        row above — that poked into the top cache strip). */
+    /* On a phone there is NO spare width, so absolute-centering this group made it
+       overlap the title (left) and the side controls (right). Keep it IN FLOW here
+       (left title flex-shrinks with ellipsis, right zone is minimal for guests) so
+       nothing overlaps; true-centering is only worth pinning on roomy desktops. */
     .pp-zone-center {
-      position: absolute !important; left: 50% !important; top: 50% !important;
-      transform: translate(-50%, -50%) !important; flex: none !important;
+      position: static !important; left: auto !important; top: auto !important;
+      transform: none !important; flex: 0 0 auto !important;
       display: flex !important; flex-direction: row !important;
-      align-items: center !important; gap: 10px !important;
+      align-items: center !important; gap: 8px !important;
     }
     /* BIG time readout on the LEFT of the transport buttons — sized like the Play
        button so the seconds are clearly readable. Flat (no chip). Fixed width so
@@ -1080,11 +1139,12 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
       font-variant-numeric: tabular-nums;
     }
     .pp-zone-center > .pp-time-big .pp-time-cur {
-      min-width: 0; width: 120px; text-align: right;
-      font-size: 26px; font-weight: 800; letter-spacing: .3px; color: var(--text);
+      min-width: 58px; width: auto; text-align: right;
+      font-size: 18px; font-weight: 800; letter-spacing: .3px; color: var(--text);
+      font-variant-numeric: tabular-nums;
     }
-    .pp-zone-center > .pp-time-big .pp-time-sep { font-size: 18px; }
-    .pp-zone-center > .pp-time-big .pp-time-dur { font-size: 18px; }
+    .pp-zone-center > .pp-time-big .pp-time-sep { font-size: 12px; }
+    .pp-zone-center > .pp-time-big .pp-time-dur { font-size: 12px; }
     /* Milliseconds: smaller + dim so the eye reads M:SS, not the 60fps blur. */
     .pp-zone-center > .pp-time-big .pp-ms { font-size: .6em; opacity: .5; font-weight: 600; }
 

@@ -1,5 +1,5 @@
 // ======================================================================
-// Service login UIs (Yandex/Tidal/Spotify) + token probe + Tidal import
+// Service login UIs + token probe + Tidal import
 // Extracted from app.js (mechanical split — same global functions, no behaviour
 // change). Loaded AFTER app.js in index.html, so it sees S/api/toast/etc.
 // ======================================================================
@@ -162,13 +162,13 @@ async function testAuth(service){
       if(u.hires === true)         parts.push('<span style="color:#ffd60a;font-weight:700">Hi-Res ✓</span>');
       else if(u.lossless === true) parts.push('<span style="color:var(--green);font-weight:700">Lossless ✓</span>');
       else if(u.hq === true)       parts.push('<span style="color:var(--orange);font-weight:700">HQ ✓</span>');
-      if(u.expiry) parts.push(`<span style="color:var(--muted)">до ${esc(u.expiry)}</span>`);
+      if(u.expiry) parts.push(`<span style="color:var(--muted)">${ti('s.until',{date:esc(u.expiry)})}</span>`);
       if(u.sub_offer) parts.push(`<span style="color:var(--muted)">${esc(u.sub_offer)}</span>`);
       if(u.sub_end){
         const dl = u.sub_days_left;
         const col = u.sub_expired ? 'var(--red)' : (dl!=null && dl<=14) ? 'var(--orange)' : 'var(--green)';
-        const left = (dl!=null) ? (u.sub_expired ? ' (истекла)' : ` · ${dl} дн.`) : '';
-        parts.push(`<span style="color:${col};font-weight:600">подписка до ${esc(u.sub_end)}${left}</span>`);
+        const left = (dl!=null) ? (u.sub_expired ? ` ${t('s.sub_expired')}` : ` · ${ti('s.sub_days',{n:dl})}`) : '';
+        parts.push(`<span style="color:${col};font-weight:600">${ti('s.sub_until',{date:esc(u.sub_end)})}${left}</span>`);
       }
       if(u.note) parts.push(`<span style="color:var(--muted)">${esc(u.note)}</span>`);
       const tag = parts.length ? ' &nbsp;' + parts.join(' · ') : '';
@@ -282,7 +282,7 @@ async function saveServiceTab(service) {
     const tok = gs('s-yandex-token'); if(tok !== undefined && !tok.startsWith('••')) cfg['yandex-token'] = tok;
   }
   Object.assign(S.config, cfg);
-  try { await api('POST','/api/config',cfg); toast('✓ Сохранено','var(--green)'); }
+  try { await api('POST','/api/config',cfg); toast(t('t.saved_ok'),'var(--green)'); }
   catch(e) { toast('✗ '+e.message,'var(--red)'); }
 }
 
@@ -373,9 +373,9 @@ async function resetSpotifyDefaultTarget() {
     await api('POST','/api/config', { 'spotify-default-target': '' });
     if(S.config) S.config['spotify-default-target'] = '';
     _renderSpotifySavedTarget();
-    toast('Выбор сброшен — будет спрашивать снова', 'var(--muted)');
+    toast(t('au.reset_ask'), 'var(--muted)');
   } catch(e) {
-    toast('Не удалось сбросить: '+e.message, 'var(--red)');
+    toast(t('au.reset_fail')+e.message, 'var(--red)');
   }
 }
 
@@ -465,10 +465,4 @@ async function autoExtractSpDc() {
     if(btn) { btn.disabled = false; btn.textContent = t('sp.auto_btn'); }
   }
 }
-
-// Statistics view → moved to its own module file (see index.html).
-
-// OrpheusDL (Spotify) setup UI → moved to its own module file (see index.html).
-
-// SoundCloud / Lucida tab UI → moved to its own module file (see index.html).
 

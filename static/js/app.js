@@ -65,15 +65,14 @@ function applyLang() {
   const lang = S.lang || 'ru';
   const flags = {ru:'🇷🇺',en:'🇬🇧',hi:'🇮🇳',ja:'🇯🇵',zh:'🇨🇳'};
   document.documentElement.lang = lang;
-  // Defensive: t() returns the raw KEY when a translation is missing. Assign only
-  // when a real translation exists (v !== key) — otherwise KEEP the element's
-  // existing HTML fallback text instead of showing an ugly raw key like
-  // "setup.deps_hdr". Fixes the whole missing-key class, not one-off keys.
-  const _set = (el, attr, prop) => { const k = el.dataset[attr], v = t(k); if (v !== k) el[prop] = v; };
-  document.querySelectorAll('[data-i18n]').forEach(el => _set(el, 'i18n', 'textContent'));
-  document.querySelectorAll('[data-i18n-ph]').forEach(el => _set(el, 'i18nPh', 'placeholder'));
-  document.querySelectorAll('[data-i18n-title]').forEach(el => _set(el, 'i18nTitle', 'title'));
-  document.querySelectorAll('[data-i18n-html]').forEach(el => _set(el, 'i18nHtml', 'innerHTML'));
+  // t() returns the key itself when a translation is missing — in that case KEEP
+  // the element's inline (authored) text instead of overwriting it with the raw
+  // key string (that's how "setup.deps_note" leaked into the UI).
+  const _tx = (k) => { const v = t(k); return v === k ? null : v; };
+  document.querySelectorAll('[data-i18n]').forEach(el => { const v=_tx(el.dataset.i18n); if(v!=null) el.textContent = v; });
+  document.querySelectorAll('[data-i18n-ph]').forEach(el => { const v=_tx(el.dataset.i18nPh); if(v!=null) el.placeholder = v; });
+  document.querySelectorAll('[data-i18n-title]').forEach(el => { const v=_tx(el.dataset.i18nTitle); if(v!=null) el.title = v; });
+  document.querySelectorAll('[data-i18n-html]').forEach(el => { const v=_tx(el.dataset.i18nHtml); if(v!=null) el.innerHTML = v; });
   const cur = document.getElementById('lang-current');
   if(cur) cur.textContent = flags[lang] || lang.toUpperCase();
 }
@@ -124,12 +123,12 @@ async function restartServer() {
 // nobody is cut off mid-download. Restarts immediately if guests are already idle.
 async function restartAppWhenIdle() {
   const r = await api('POST', '/api/admin/restart-when-idle', {});
-  if (!r || !r.ok) { toast('Ошибка', 'var(--red)'); return; }
-  if (r.restarting) { toast('Гости простаивают — перезапускаю сейчас', 'var(--green)'); return; }
+  if (!r || !r.ok) { toast(t('t.error'), 'var(--red)'); return; }
+  if (r.restarting) { toast(t('t.guests_idle'), 'var(--green)'); return; }
   if (r.pending) {
-    toast(`↺ Перезапущу, как гости освободятся (сессий: ${r.sessions||0}${r.queue_running?', очередь идёт':''})`, 'var(--accent)', '', 5000);
+    toast(ti('t.restart_when_free',{n:r.sessions||0,extra:(r.queue_running?t('t.queue_going'):'')}), 'var(--accent)', '', 5000);
   } else {
-    toast('Отложенный рестарт снят', 'var(--muted)');
+    toast(t('t.deferred_off'), 'var(--muted)');
   }
 }
 
@@ -144,9 +143,9 @@ function connectWS() {
     }
     setStatus('● Connected', 'var(--green)');
     appendLog('WebSocket connected — ready', 'success');
-    pullQueue();   // re-sync the queue over REST on EVERY (re)connect — heals a
-                   // half-open socket that silently missed queue_update pushes
-                   // (the "task didn't appear / console empty, only F5 fixes it" bug)
+    pullQueue();   // resync queue from the authoritative REST on every (re)connect —
+                   // a long-lived socket that silently missed queue_update events
+                   // otherwise leaves S.queue frozen on a stale snapshot.
   };
   ws.onclose = () => {
     setStatus('● Disconnected', 'var(--red)');
@@ -171,17 +170,14 @@ function _wsWatchdog() {
   if (st === WebSocket.CLOSED || st === WebSocket.CLOSING || st === undefined) {
     connectWS();
   } else if (st === WebSocket.OPEN && Date.now() - _wsLastMsg > 30000) {
-    // Open but silent past ~1.5× the server's 20s heartbeat → probably half-open.
-    // Cycle it (a needless cycle on a live server is cheap: reconnect re-sends init
-    // + pullQueue re-syncs instantly). Was 45s — too slow to feel responsive.
+    // Open but silent far past the server's heartbeat → probably half-open. Cycle it.
     try { ws.close(); } catch {}  // triggers onclose → reconnect in 2s
   }
 }
 setInterval(_wsWatchdog, 15000);
-// Self-heal the queue: a socket can stay "alive" (log/progress events keep
-// resetting _wsLastMsg so the watchdog never cycles it) yet silently miss a
-// queue_update — leaving S.queue frozen on a stale snapshot ("bot added a task
-// but Ripster never shows it"). Periodically re-pull the authoritative REST queue.
+// Self-heal the queue: even an "alive but stale" socket that silently missed a
+// queue_update is corrected by periodically re-pulling the authoritative REST
+// queue. Fixes "bot added a task but Ripster shows a stale/empty queue".
 setInterval(() => { if (ws && ws.readyState === WebSocket.OPEN) pullQueue(); }, 15000);
 document.addEventListener('visibilitychange', () => { if (!document.hidden) { _wsWatchdog(); pullQueue(); } });
 
@@ -242,8 +238,8 @@ function handleMessage(msg) {
     case 'queue_done':    S.running=false; S.paused=false; updateTransport(); toast('All done! 🎉','var(--green)'); break;
     case 'sc_fallback_added': {
       const svc = (msg.service || '').toUpperCase();
-      const title = msg.title || 'трек';
-      toast(`🔁 SC недоступен → ${svc}: ${title}`, '#ff5500', '', 4500);
+      const title = msg.title || t('cd.op_track');
+      toast('🔁 '+ti('t.sc_fallback',{svc:svc,title:title}), '#ff5500', '', 4500);
       // Re-render so the origin tile shows "→ перенаправлено" right away
       renderQueue();
       break;
@@ -309,7 +305,7 @@ function handleMessage(msg) {
             task.log.push(text);
             const toggle = panel.previousElementSibling;
             if(toggle?.classList.contains('qi-log-toggle')) {
-              toggle.textContent = (toggle.textContent.startsWith('▼') ? '▼' : '▶') + ` лог (${panel.children.length})`;
+              toggle.textContent = (toggle.textContent.startsWith('▼') ? '▼' : '▶') + ` ${t('q.log_word')} (${panel.children.length})`;
             }
           }
           break;
@@ -344,33 +340,33 @@ function handleMessage(msg) {
     }
     case 'spotify_authed': {
       loadSpotifyStatus();
-      toast('Spotify подключён!', '#1db954');
+      toast(t('t.sp_connected'), '#1db954');
       break;
     }
     case 'spotify_sp_dc_updated': {
       const inp = document.getElementById('s-sp-dc');
       const sts = document.getElementById('sp-dc-auto-status');
-      if(sts) { sts.textContent = '✓ sp_dc сохранена'; sts.style.color = 'var(--green)'; }
+      if(sts) { sts.textContent = t('t.spdc_saved'); sts.style.color = 'var(--green)'; }
       loadSpotifyStatus();
-      toast('sp_dc обновлена!', '#1db954');
+      toast(t('t.spdc_upd'), '#1db954');
       // Reload config to update the input field value
       api('GET','/api/config').then(cfg => { if(inp && cfg['spotify-sp-dc']) inp.value = cfg['spotify-sp-dc']; });
       break;
     }
     case 'apple_authed': {
       refreshAppleAuthStatus();
-      toast('🍎 Apple Music токен обновлён!', '#0a84ff');
+      toast(t('t.apple_tok_upd'), '#0a84ff');
       break;
     }
     case 'watchlist_new_release': {
-      const txt = `Новый релиз: ${msg.release || ''} — ${msg.artist || ''}`;
+      const txt = ti('t.new_release',{r:msg.release || '',a:msg.artist || ''});
       toast(txt, 'var(--green)');
       // Refresh watchlist if open
       if(document.getElementById('view-watchlist')?.style.display !== 'none') loadWatchlist();
       break;
     }
     case 'watchlist_check_start': {
-      setWatchlistStatus(`⟳ Проверяю ${msg.total} артистов…`, 0, msg.total);
+      setWatchlistStatus(ti('w.checking_n',{n:msg.total}), 0, msg.total);
       break;
     }
     case 'watchlist_check_progress': {
@@ -378,8 +374,8 @@ function handleMessage(msg) {
       break;
     }
     case 'watchlist_check_done': {
-      if(msg.new > 0) setWatchlistStatus(`✓ Проверено ${msg.checked} · новых релизов: ${msg.new}`, msg.checked, msg.checked, 'var(--green)');
-      else            setWatchlistStatus(`✓ Проверено ${msg.checked} · новых нет`, msg.checked, msg.checked);
+      if(msg.new > 0) setWatchlistStatus(ti('w.checked_new',{c:msg.checked,n:msg.new}), msg.checked, msg.checked, 'var(--green)');
+      else            setWatchlistStatus(ti('w.checked_none',{c:msg.checked}), msg.checked, msg.checked);
       // Auto-clear after 4s
       setTimeout(() => clearWatchlistStatus(), 4000);
       break;
@@ -388,16 +384,16 @@ function handleMessage(msg) {
       const _svcLbl = msg.service ? ` [${msg.service}]` : '';
       const _svcClr = ({spotify:'#1db954',qobuz:'#1870f5',tidal:'#00d4b3'})[msg.service] || 'var(--red)';
       if(msg.phase === 'artists') {
-        setReleasesStatus(`⟳ Получаю артистов${_svcLbl}…`, 0, 1, _svcClr);
+        setReleasesStatus(ti('w.fetch_artists',{svc:_svcLbl}), 0, 1, _svcClr);
       } else if(msg.phase === 'albums') {
-        setReleasesStatus(`⟳ Сканирую ${msg.total} арт.${_svcLbl}…`, 0, msg.total, _svcClr);
+        setReleasesStatus(ti('w.scanning_n',{n:msg.total,svc:_svcLbl}), 0, msg.total, _svcClr);
       }
       break;
     }
     case 'releases_scan_progress': {
       const _svcLbl2 = msg.service ? ` [${msg.service}]` : '';
       const _svcClr2 = ({spotify:'#1db954',qobuz:'#1870f5',tidal:'#00d4b3'})[msg.service] || 'var(--red)';
-      const foundTxt = msg.found ? ` · найдено: ${msg.found}` : '';
+      const foundTxt = msg.found ? ` · ${t('w.found_word')}: ${msg.found}` : '';
       setReleasesStatus(`⟳ ${msg.current}/${msg.total}${_svcLbl2} · ${msg.artist}${foundTxt}`, msg.current, msg.total, _svcClr2);
       break;
     }
@@ -410,7 +406,7 @@ function handleMessage(msg) {
         _relShowAuthHint(msg.error);
         break;
       }
-      setReleasesStatus(`✓${_svcLbl3} ${msg.artists_checked} арт. · ${msg.releases_count} рел.`, msg.artists_checked, msg.artists_checked, 'var(--green)');
+      setReleasesStatus(`✓${_svcLbl3} ${msg.artists_checked} ${t('w.art_abbr')} · ${msg.releases_count} ${t('w.rel_abbr')}`, msg.artists_checked, msg.artists_checked, 'var(--green)');
       setTimeout(() => clearReleasesStatus(), 3000);
       // If backend sent releases in the WS message, render them directly
       if(msg.releases?.length) {
@@ -444,25 +440,25 @@ function handleMessage(msg) {
     }
     case 'amd_ready': {
       checkAMDStatus();
-      toast('✅ AMD v2 готов! Нажми AMD в топбаре','var(--green)');
+      toast(t('t.amd_ready'),'var(--green)');
       break;
     }
     case 'gamdl_deps_fixed': {
       const btn2 = document.getElementById('fix-deps-btn');
       if(btn2){ btn2.disabled=false; btn2.textContent='🔧 Fix gamdl deps (protobuf)'; btn2.style.display='none'; }
-      toast('✅ gamdl зависимости исправлены!', 'var(--green)');
+      toast(t('t.gamdl_fixed'), 'var(--green)');
       break;
     }
     case 'gamdl_needs_upgrade': {
       const sNav = document.querySelector('.nav-item[data-view="setup"]');
       if(sNav) showView('setup', sNav);
-      toast('⚠ Устаревший gamdl — нажми Auto-install', 'var(--orange)');
+      toast(t('t.gamdl_old'), 'var(--orange)');
       break;
     }
     case 'show_wrapper_logs_hint': {
       const ob = document.getElementById('wrapper-ok-banner');
       if(ob && ob.style.display!=='none') toggleWrapperLogs();
-      toast('💡 no codec found — открой 📋 Логи в баннере wrapper', 'var(--orange)');
+      toast(t('t.no_codec'), 'var(--orange)');
       break;
     }
     case 'show_wrapper_needed': {
@@ -473,7 +469,7 @@ function handleMessage(msg) {
       const wb = document.getElementById('wrapper-banner');
       if(wb) wb.style.display='';
       _wrapperDismissed = false;
-      toast('⚠ ALAC/Atmos требует wrapper — запусти Docker или переключись на AAC', 'var(--orange)');
+      toast(t('t.alac_wrap'), 'var(--orange)');
       break;
     }
     case 'bearer_updated':
@@ -511,12 +507,12 @@ function handleMessage(msg) {
     case 'tunnel_status':
       updateTunnelUI(msg.running, msg.connecting || false, msg.url || '');
       if (msg.running && msg.url) {
-        toast('🔌 Туннель готов: ' + msg.url, '#22c55e');
+        toast(t('t.tunnel_ready') + msg.url, '#22c55e');
         updateRemoteUI(true, msg.url, 0);
       } else if (!msg.running && !msg.connecting) {
         // tunnel died unexpectedly
         if (document.getElementById('tunnel-stop-btn')?.style.display !== 'none') {
-          toast('Туннель serveo отключился', 'var(--red)');
+          toast(t('t.tunnel_off'), 'var(--red)');
         }
       }
       break;
@@ -540,18 +536,18 @@ function handleMessage(msg) {
       break;
     case 'wrapper_login_failed':
       _wrapperStarting = false;
-      toast('✗ Неверный пароль Apple ID — wrapper остановлен', 'var(--red)', 'Проверь Settings → Apple Music → Wrapper');
-      appendLog('[WRAPPER] ✗ Login failed — исправь пароль в настройках и перезапусти wrapper', 'error');
+      toast(t('t.wrong_apple_pw'), 'var(--red)', t('t.check_wrapper_path'));
+      appendLog('[WRAPPER] ✗ Login failed — '+t('t.wrapper_fix_pw'), 'error');
       checkWrapperStatus();
       break;
     case 'wrapper_started':
       _wrapperStarting=false;
-      toast('✓ Wrapper запущен!','var(--green)');
+      toast(t('t.wrapper_up'),'var(--green)');
       checkWrapperStatus();
       break;
     case 'amd_wrapper_not_ready': {
       const _inst = msg.instance || 'wm.wol.moe';
-      toast(`⚠ AMD wrapper «${_inst}» не готов — загрузки пропущены`, 'var(--orange)');
+      toast('⚠ '+ti('t.wrapper_not_ready',{inst:_inst}), 'var(--orange)');
       // Refresh the status widget if visible
       const _wmEl = document.getElementById('amd-wm-status');
       if(_wmEl && _wmEl.style.display !== 'none') checkAMDWrapperStatus();
@@ -560,25 +556,25 @@ function handleMessage(msg) {
     case 'orpheus_authed': {
       loadOrpheusStatus();
       const authUser = msg.username ? ` (${msg.username})` : '';
-      toast(`✓ Spotify: вход выполнен${authUser}`, 'var(--green)');
+      toast(t('t.sp_authed')+authUser, 'var(--green)');
       if(window._orpheusLoginDone) { window._orpheusLoginDone(); window._orpheusLoginDone = null; }
       break;
     }
     case 'orpheus_not_authed':
-      toast('OrpheusDL: нет авторизации Spotify', 'var(--red)', 'Войди через Settings → Spotify', 10000);
+      toast(t('t.orph_no_auth'), 'var(--red)', t('t.login_via_sp'), 10000);
       loadOrpheusStatus();
       showStab('spotify');
       break;
     case 'soundcloud_installed':
-      toast('✅ SoundCloud готов к работе!', '#ff5500');
+      toast(t('t.sc_ready'), '#ff5500');
       scEngineCheck();
       break;
     case 'wrapper_built': {
       const bBtn = document.getElementById('btn-wrapper-build');
       const bSt  = document.getElementById('wrapper-build-status');
       if(bBtn) { bBtn.disabled=false; bBtn.textContent='🔨 Build local image'; }
-      if(bSt)  bSt.textContent = '✓ Собран';
-      toast('✅ Local wrapper image собран!', 'var(--blue)');
+      if(bSt)  bSt.textContent = t('t.built');
+      toast(t('t.local_img'), 'var(--blue)');
       break;
     }
     case 'wrapper_2fa_needed':
@@ -616,13 +612,13 @@ async function api(method, path, body) {
   // (server) is down or restarting. Surface a clean message instead of letting
   // r.json() throw the cryptic "Unexpected end of JSON input".
   if (!text.trim()) {
-    if (!r.ok) throw new Error(`сервер недоступен (HTTP ${r.status})`);
+    if (!r.ok) throw new Error(`${t('t.server_down')} (HTTP ${r.status})`);
     return {};
   }
   try {
     return JSON.parse(text);   // valid JSON (200 or a 4xx with a {detail} body) → caller handles
   } catch (_) {
-    throw new Error(!r.ok ? `сервер недоступен (HTTP ${r.status})` : 'некорректный ответ сервера');
+    throw new Error(!r.ok ? `${t('t.server_down')} (HTTP ${r.status})` : t('t.bad_server_resp'));
   }
 }
 
@@ -634,7 +630,7 @@ async function loadQualities() {
   renderQualityGrid();
 }
 
-// GUEST / ADMIN (guest sessions, admin links, per-guest activity) → moved to its own module file (see index.html).
+// Guest/admin + per-guest live lamp helpers → moved to its own module file (see index.html).
 
 // Remote access + Serveo tunnel UI → moved to its own module file (see index.html).
 
@@ -663,9 +659,14 @@ window.addEventListener('load', async () => {
   // Wrapper status polling every 10 seconds
   checkWrapperStatus();
   setInterval(checkWrapperStatus, 10000);
+  // Public Apple wrapper (wm.wol.moe) health — shown even when the LOCAL wrapper
+  // is the active engine, so a public-wrapper outage is visible. Heavier gRPC
+  // check → poll it less often than the local one.
+  setTimeout(checkPublicWrapperStatus, 2000);
+  setInterval(checkPublicWrapperStatus, 90000);
 });
 
-// WRAPPER MANAGEMENT (Apple Docker wrapper UI) → moved to its own module file (see index.html).
+// Wrapper management UI → moved to its own module file (see index.html).
 
 // ── VIEW SWITCHING ────────────────────────────────────────────
 function showView(name, el) {
@@ -692,6 +693,7 @@ function showView(name, el) {
   if(name==='coder')     { coderInit(); coderFmtChange(); }
   if(name==='tagger')    taggerInit();
   if(name==='stats')     loadStats();
+  if(name==='telemetry') telemetryInit();
   if(name==='console')   _refreshConsole();
   if(name==='guest-tokens') loadGuestSvcStatus();
   if(name==='settings') {
@@ -720,7 +722,7 @@ function _extractUrls(text) {
 async function addUrl() {
   const _raw = document.getElementById('url-input').value.trim();
   const q   = document.getElementById('url-quality').value;
-  if(!_raw){ toast('Вставь ссылку','var(--red)'); return; }
+  if(!_raw){ toast(t('t.paste_link'),'var(--red)'); return; }
 
   // Multi-link: several URLs pasted at once → ask what to do (all / first / cancel).
   const _urls = _extractUrls(_raw);
@@ -778,19 +780,19 @@ function _multiUrlPrompt(urls, quality) {
   const list = urls.slice(0,8).map((u,i) => {
     const short = u.length>56 ? u.slice(0,53)+'…' : u;
     return `<div style="font-size:10px;font-family:monospace;color:var(--muted);padding:1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${i+1}. ${short}</div>`;
-  }).join('') + (n>8 ? `<div style="font-size:10px;color:var(--muted);margin-top:2px">…и ещё ${n-8}</div>` : '');
+  }).join('') + (n>8 ? `<div style="font-size:10px;color:var(--muted);margin-top:2px">…${t('t.and_more')} ${n-8}</div>` : '');
 
   const modal = document.createElement('div');
   modal.id = 'multi-url-modal';
   modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.7);backdrop-filter:blur(4px)';
   modal.innerHTML = `<div style="background:var(--surface,#1c1c1e);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:24px;width:440px;max-width:90vw">
-    <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px">Вставлено несколько ссылок</div>
-    <div style="font-size:12px;color:var(--muted);margin-bottom:12px">Найдено <b style="color:var(--text)">${n}</b> ссылок одним запросом${summary?` · ${summary}`:''}. Что делать?</div>
+    <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px">${t('t.multi_pasted')}</div>
+    <div style="font-size:12px;color:var(--muted);margin-bottom:12px">${t('t.found_word')} <b style="color:var(--text)">${n}</b> ${t('t.links_one_req')}${summary?` · ${summary}`:''}. ${t('t.what_do')}</div>
     <div style="background:rgba(0,0,0,.3);border-radius:8px;padding:8px 10px;margin-bottom:16px;max-height:170px;overflow:auto">${list}</div>
     <div style="display:flex;flex-direction:column;gap:8px">
-      <button onclick="_multiUrlChoose('all')" style="padding:11px;background:var(--green,#34c759);color:#000;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇ Качать все (${n})</button>
-      <button onclick="_multiUrlChoose('first')" style="padding:10px;background:rgba(255,255,255,.06);color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:10px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font)">1️⃣ Только первую</button>
-      <button onclick="_multiUrlChoose('cancel')" style="padding:8px;background:transparent;color:var(--muted);border:1px solid rgba(255,255,255,.1);border-radius:10px;font-size:12px;cursor:pointer;font-family:var(--font)">Отмена</button>
+      <button onclick="_multiUrlChoose('all')" style="padding:11px;background:var(--green,#34c759);color:#000;border:none;border-radius:10px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇ ${ti('t.dl_all',{n:n})}</button>
+      <button onclick="_multiUrlChoose('first')" style="padding:10px;background:rgba(255,255,255,.06);color:var(--text);border:1px solid rgba(255,255,255,.12);border-radius:10px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font)">${t('t.only_first')}</button>
+      <button onclick="_multiUrlChoose('cancel')" style="padding:8px;background:transparent;color:var(--muted);border:1px solid rgba(255,255,255,.1);border-radius:10px;font-size:12px;cursor:pointer;font-family:var(--font)">${t('s.cancel')}</button>
     </div>
   </div>`;
   document.body.appendChild(modal);
@@ -814,9 +816,9 @@ async function _multiUrlChoose(action) {
   if(r && r.ok) {
     document.getElementById('url-input').value = '';
     try { detectUrlService(''); } catch(e) {}
-    toast(`Добавлено в очередь: ${r.added != null ? r.added : st.urls.length}`, 'var(--green)');
+    toast(t('t.added_q')+': '+(r.added != null ? r.added : st.urls.length), 'var(--green)');
   } else {
-    toast('Не удалось добавить пакет ссылок', 'var(--red)');
+    toast(t('t.batch_fail'), 'var(--red)');
   }
 }
 
@@ -833,7 +835,7 @@ async function _chooseSpTargetDirect(url, quality, target) {
   } else {
     // Conversion failed — show a friendly toast with the option to pick
     // a different service, since the remembered one couldn't find the track.
-    toast('Не найдено на '+_svcLabel(target)+' — выбери другой', 'var(--orange)', r.error||'');
+    toast(t('t.not_found_on')+_svcLabel(target)+' — '+t('t.pick_other'), 'var(--orange)', r.error||'');
     _showSpotifyChoiceToast(url, quality);
   }
 }
@@ -865,6 +867,8 @@ function svcLabelHTML(svc, label){
 
 // Settings per-service color picker → moved to its own module file (see index.html).
 
+// Coder + Tagger + shared folder tree → moved to its own module file (see index.html).
+
 // ── TRANSPORT ─────────────────────────────────────────────────
 function updateTransport() {
   const total = S.queue.length;
@@ -884,7 +888,7 @@ function updateTransport() {
 async function startQueue() {
   const r = await api('POST','/api/queue/start');
   if(r && r.ok === false) {
-    toast(r.msg || 'Не удалось запустить очередь','var(--orange)');
+    toast(r.msg || t('t.queue_start_fail'),'var(--orange)');
   }
 }
 async function pauseQueue() { await api('POST','/api/queue/pause'); }
@@ -1021,7 +1025,7 @@ function applyConfig() {
   { const _ad = +(c['auto-delete-minutes'] || 0);
     setVal('s-autodel', _ad);
     const _adv = document.getElementById('s-autodel-val');
-    if(_adv) _adv.textContent = (_ad === 0 ? 'Выкл' : _ad + ' мин'); }
+    if(_adv) _adv.textContent = (_ad === 0 ? t('gp.off') : _ad + ' ' + t('gp.min')); }
   { const _ap = +(c['amd-parallel'] || 2);
     setVal('s-amd-parallel', _ap); }
   setChk('s-apple-parallel', c['apple-parallel-tracks']);
@@ -1150,7 +1154,7 @@ function renderGuestPrefs() {
   };
   const qSel = (svc) => `
     <div class="field-group">
-      <label class="lbl">${esc(svc.toUpperCase())} · качество по умолчанию</label>
+      <label class="lbl">${esc(svc.toUpperCase())} · ${t('gp.def_quality')}</label>
       <select onchange="saveSetting('guest-quality-${svc}',this.value)" style="width:100%">
         ${QSEL[svc].map(([v,l]) =>
           `<option value="${v}" ${(cfg['guest-quality-'+svc]===v)?'selected':''}>${esc(l)}</option>`
@@ -1160,22 +1164,22 @@ function renderGuestPrefs() {
 
   root.innerHTML = `
     <div class="block">
-      <div class="block-title">🎧 Плеер</div>
-      ${toggle('player-gapless','Идеально без разрыва (gapless)','Web Audio API gapless. Пред-декодирует следующий трек (10–20 МБ).')}
-      ${toggle('player-preload','Pre-load следующего трека','Гэп до ~200мс', true)}
-      ${toggle('player-spin','Вращение обложки', 'CD-эффект на полноэкранном плеере.', true)}
-      ${toggle('player-mobile-fs','Авто-полноэкранный на телефоне','Тап по плееру → fullscreen.', true)}
-      ${toggle('player-viz','Визуализатор','FFT-спектр на background.', false)}
+      <div class="block-title">${t('p.player')}</div>
+      ${toggle('player-gapless',t('gp.gapless'),t('gp.gapless_sub'))}
+      ${toggle('player-preload',t('gp.preload'),t('gp.preload_sub'), true)}
+      ${toggle('player-spin',t('gp.spin'), t('gp.spin_sub'), true)}
+      ${toggle('player-mobile-fs',t('gp.mobile_fs'),t('gp.mobile_fs_sub'), true)}
+      ${toggle('player-viz',t('gp.viz'),t('gp.viz_sub'), false)}
       <div class="settings-grid mt8">
         <div class="field-group">
-          <label class="lbl">Громкость по умолчанию</label>
+          <label class="lbl">${t('p.def_volume')}</label>
           <input type="range" min="0" max="1" step="0.05" value="${cfg['player-volume']??1}"
             oninput="saveSetting('player-volume',parseFloat(this.value));const _sv=parseFloat(this.value);if(window._WA?._audioSourceNode||window._WA?.curSource){if(typeof _waSetVolume==='function')_waSetVolume(_sv);const _sa=document.getElementById('pp-audio');if(_sa){_sa.volume=1;_sa.muted=(_sv===0);}}else{const _sa=document.getElementById('pp-audio');if(_sa){_sa.volume=_sv;}}"/>
         </div>
         <div class="field-group">
-          <label class="lbl">Скорость воспроизведения</label>
+          <label class="lbl">${t('p.pb_speed')}</label>
           <select onchange="saveSetting('player-speed',parseFloat(this.value));const a=document.getElementById('pp-audio');if(a)a.playbackRate=parseFloat(this.value)">
-            <option value="1" ${cfg['player-speed']==1?'selected':''}>1× (нормально)</option>
+            <option value="1" ${cfg['player-speed']==1?'selected':''}>1× (${t('gp.normal_word')})</option>
             <option value="1.25" ${cfg['player-speed']==1.25?'selected':''}>1.25×</option>
             <option value="1.5"  ${cfg['player-speed']==1.5?'selected':''}>1.5×</option>
             <option value="1.75" ${cfg['player-speed']==1.75?'selected':''}>1.75×</option>
@@ -1183,7 +1187,7 @@ function renderGuestPrefs() {
           </select>
         </div>
         <div class="field-group">
-          <label class="lbl">Качество потока</label>
+          <label class="lbl">${t('p.stream_q')}</label>
           <select onchange="saveSetting('player-stream-quality',this.value)">
             <option value="mp3"      ${ cfg['player-stream-quality']==='mp3'      || !cfg['player-stream-quality'] ? 'selected':''}>MP3 · 320 kbps</option>
             <option value="lossless" ${ cfg['player-stream-quality']==='lossless' ? 'selected':''}>FLAC · Lossless</option>
@@ -1194,34 +1198,34 @@ function renderGuestPrefs() {
     </div>
 
     <div class="block mt12">
-      <div class="block-title">🎚 Эквалайзер</div>
+      <div class="block-title">${t('p.eq')}</div>
       <div class="settings-grid" style="grid-template-columns:1fr 1fr 1fr">
         ${['bass','mid','treble'].map(b => `
           <div class="field-group">
-            <label class="lbl">${esc(b==='bass'?'Низкие':b==='mid'?'Средние':'Высокие')} · ${parseFloat(cfg['player-eq-'+b]??0)} dB</label>
+            <label class="lbl">${esc(b==='bass'?t('gp.bass'):b==='mid'?t('gp.mid'):t('gp.high'))} · ${parseFloat(cfg['player-eq-'+b]??0)} dB</label>
             <input type="range" min="-12" max="12" step="0.5" value="${cfg['player-eq-'+b]??0}"
-              oninput="setEQ('${b}',this.value);this.previousElementSibling.firstElementChild?.replaceWith(document.createTextNode(this.value+' dB'));this.parentElement.querySelector('.lbl').textContent='${b==='bass'?'Низкие':b==='mid'?'Средние':'Высокие'} · '+this.value+' dB'"/>
+              oninput="setEQ('${b}',this.value);this.previousElementSibling.firstElementChild?.replaceWith(document.createTextNode(this.value+' dB'));this.parentElement.querySelector('.lbl').textContent='${b==='bass'?t('gp.bass'):b==='mid'?t('gp.mid'):t('gp.high')} · '+this.value+' dB'"/>
           </div>`).join('')}
       </div>
       <div style="display:flex;gap:8px;margin-top:10px">
-        <button class="btn-ghost btn-sm" onclick="resetEQ();renderGuestPrefs()">↺ Сбросить</button>
+        <button class="btn-ghost btn-sm" onclick="resetEQ();renderGuestPrefs()">↺ ${t('gp.reset')}</button>
       </div>
     </div>
 
     <div class="block mt12">
-      <div class="block-title">🎵 Качество скачивания (по умолчанию)</div>
+      <div class="block-title">${t('p.dl_q')}</div>
       <div class="settings-grid">
         ${qSel('qobuz')}
         ${qSel('tidal')}
         ${qSel('deezer')}
       </div>
       <div style="font-size:10px;color:var(--muted2);margin-top:8px;line-height:1.5">
-        Применяется при добавлении трека в очередь. Хозяин системы может ограничить максимальное качество.
+        ${t('gp.q_note')}
       </div>
     </div>
 
     <div class="block mt12">
-      <div class="block-title">🌐 Язык интерфейса</div>
+      <div class="block-title">${t('p.ui_lang')}</div>
       <select onchange="setLang(this.value)" style="width:auto">
         <option value="ru" ${(cfg['language']||'ru')==='ru'?'selected':''}>🇷🇺 Русский</option>
         <option value="en" ${cfg['language']==='en'?'selected':''}>🇬🇧 English</option>
@@ -1269,11 +1273,13 @@ function _showSavedChip(el) {
   });
 }
 
-// Dependency updates (owner Settings) → moved to its own module file (see index.html).
+// Dependency updates UI → moved to its own module file (see index.html).
 
 // Tokens view UI → moved to its own module file (see index.html).
 
 // Config YAML editor UI → moved to its own module file (see index.html).
+
+// Console log view → moved to its own module file (see index.html).
 
 // ── PILLS ─────────────────────────────────────────────────────
 function updatePills() {
@@ -1296,31 +1302,31 @@ function updatePills() {
     deezer:  'Deezer (deemix)',
   };
 
-  rows.push(_detailRow('Движок',  engineLabels[engine] || engine, '#0a84ff'));
+  rows.push(_detailRow(t('dt.engine'),  engineLabels[engine] || engine, '#0a84ff'));
 
   if(engine === 'amd') {
     rows.push(_detailRow('Instance', c['amd-instance-url'] || 'wm.wol.moe', 'var(--green)'));
     dotColor = 'var(--green)';  // AMD v2 works via public instance, so OK by default
   } else if(engine === 'gamdl') {
-    rows.push(_detailRow('Cookies', (c['gamdl-cookies-path'] ? '✓ настроены' : '✗ не настроены'),
+    rows.push(_detailRow('Cookies', (c['gamdl-cookies-path'] ? '✓ '+t('dt.configured') : '✗ '+t('dt.not_configured')),
                          c['gamdl-cookies-path'] ? 'var(--green)' : 'var(--danger)'));
     dotColor = c['gamdl-cookies-path'] ? 'var(--green)' : 'var(--red)';
   } else if(engine === 'zhaarey') {
     // Apple Music with zhaarey needs both tokens
     const mut    = c['media-user-token'];
     const bearer = c['authorization-token'];
-    rows.push(_detailRow('MUT',    mut    ? '✓ установлен' : '✗ отсутствует', mut    ? 'var(--green)' : 'var(--danger)'));
-    rows.push(_detailRow('Bearer', bearer ? '✓ установлен' : '⏳ не получен',  bearer ? 'var(--green)' : 'var(--orange)'));
+    rows.push(_detailRow('MUT',    mut    ? '✓ '+t('dt.set_word') : '✗ '+t('dt.missing_word'), mut    ? 'var(--green)' : 'var(--danger)'));
+    rows.push(_detailRow('Bearer', bearer ? '✓ '+t('dt.set_word') : '⏳ '+t('dt.not_received'),  bearer ? 'var(--green)' : 'var(--orange)'));
     if(mut && bearer)       dotColor = 'var(--green)';
     else if(mut || bearer)  dotColor = 'var(--orange)';
     else                    dotColor = 'var(--red)';
   } else if(engine === 'deezer') {
     const arl = c['deezer-arl'];
-    rows.push(_detailRow('ARL', arl ? '✓ установлен' : '✗ отсутствует', arl ? 'var(--green)' : 'var(--danger)'));
+    rows.push(_detailRow('ARL', arl ? '✓ '+t('dt.set_word') : '✗ '+t('dt.missing_word'), arl ? 'var(--green)' : 'var(--danger)'));
     dotColor = arl ? 'var(--green)' : 'var(--red)';
   }
 
-  if(q && q.label) rows.push(_detailRow('Качество', q.label, q.color || '#0a84ff'));
+  if(q && q.label) rows.push(_detailRow(t('dt.quality'), q.label, q.color || '#0a84ff'));
   if(c['storefront']) rows.push(_detailRow('Storefront', (c['storefront']||'').toUpperCase(), '#0a84ff'));
 
   // Quick-link shortcuts inside the popover
@@ -1443,7 +1449,9 @@ function _closeNotif(id) {
   setTimeout(()=>el.remove(), 300);
 }
 
-// SETUP + SELF-UPDATE (component checklist, installer, self-update, restart) → moved to its own module file (see index.html).
+// Setup tab provisioning UI → moved to its own module file (see index.html).
+
+// Ripster self-update UI → moved to its own module file (see index.html).
 
 // ── THEME & FONT ────────────────────────────────────────────────────────
 const FONT_MAP = {
@@ -1608,7 +1616,7 @@ async function switchEngine(engine) {
   renderQualityGrid();
   updatePills();
   updateQualitySelector('apple');
-  const _msgs = {zhaarey:'🔵 zhaarey engine', gamdl:'🐍 gamdl engine', amd:'✨ AMD v2 — ALAC/Atmos без Apple ID!'};
+  const _msgs = {zhaarey:'🔵 zhaarey engine', gamdl:'🐍 gamdl engine', amd:'✨ '+t('t.amd_v2_msg')};
   const _clrs = {zhaarey:'var(--blue)', gamdl:'var(--blue)', amd:'var(--green)'};
   toast(_msgs[engine]||engine, _clrs[engine]||'var(--text)');
   if(engine === 'amd') checkAMDWrapperStatus();
@@ -1623,21 +1631,21 @@ function albumSelectDisc(d){ _albumSelCbs().forEach(cb => { cb.checked = !cb.dis
 function _albumUpdateSelCount(){
   const n = _albumSelCbs().filter(cb => cb.checked).length;
   const b = document.getElementById('alb-dl-sel');
-  if(b){ b.textContent = `⬇ Скачать выбранное (${n})`; b.disabled = n === 0; b.style.opacity = n ? '1' : '.5'; }
+  if(b){ b.textContent = '⬇ '+ti('ck.dl_sel_n',{n:n}); b.disabled = n === 0; b.style.opacity = n ? '1' : '.5'; }
 }
 async function albumDownloadSelected(){
   const sel = _albumSelCbs().filter(cb => cb.checked && cb.dataset.url);
-  if(!sel.length){ toast('Отметь треки галочками','var(--orange)'); return; }
+  if(!sel.length){ toast(t('t.check_tracks'),'var(--orange)'); return; }
   const svc = (typeof Detail !== 'undefined' && Detail.currentAlbum) ? Detail.currentAlbum.service : 'apple';
   const q = resolveQuality(svc);
   const b = document.getElementById('alb-dl-sel');
-  if(b){ b.disabled = true; b.textContent = '⏳ Добавляю…'; }
+  if(b){ b.disabled = true; b.textContent = t('t.adding'); }
   let ok = 0;
   for(const cb of sel){
     try { const r = await api('POST','/api/queue/add',{url: cb.dataset.url, quality: q}); if(r && r.ok) ok++; } catch {}
   }
-  toast(`+ ${ok}/${sel.length} ${ok===1?'трек':'треков'} → очередь`, ok ? 'var(--green)' : 'var(--red)');
-  if(b){ b.textContent = `⬇ Скачать выбранное (${sel.length})`; b.disabled = false; b.style.opacity = '1'; }
+  toast(`+ ${ok}/${sel.length} ${t('ck.trk_to_queue')}`, ok ? 'var(--green)' : 'var(--red)');
+  if(b){ b.textContent = '⬇ '+ti('ck.dl_sel_n',{n:sel.length}); b.disabled = false; b.style.opacity = '1'; }
 }
 
 async function artistReleaseDownload(service, releaseId, title, artist) {
@@ -1645,10 +1653,10 @@ async function artistReleaseDownload(service, releaseId, title, artist) {
     const r = await fetch(`/api/album/${service}/${encodeURIComponent(releaseId)}`);
     const d = await r.json();
     const url = d.album?.url;
-    if (!url) { toast('Нет URL альбома', 'var(--red)'); return; }
+    if (!url) { toast(t('t.no_alb_url'), 'var(--red)'); return; }
     const res = await api('POST', '/api/queue/add', {url, quality: resolveQuality(service), title, artist});
-    if (res.ok) toast(`+ ${title} → очередь`);
-    else toast('Ошибка: ' + (res.detail || '?'), 'var(--red)');
+    if (res.ok) toast('+ '+title+' → '+t('q.queue_word'));
+    else toast(t('t.error_c') + (res.detail || '?'), 'var(--red)');
   } catch(e) {
     toast(t('err.generic') + ': ' + e.message, 'var(--red)');
   }
@@ -1656,11 +1664,11 @@ async function artistReleaseDownload(service, releaseId, title, artist) {
 
 async function albumAddTrack(urlOrId, title, artist){
   if(!urlOrId || !urlOrId.startsWith('http')){
-    toast('Не могу добавить — нет URL трека','var(--red)'); return;
+    toast(t('t.no_trk_url'),'var(--red)'); return;
   }
   const r = await api('POST', '/api/queue/add', {url: urlOrId, quality: resolveQuality(detectSvcFromUrl(urlOrId) || 'apple'), title, artist});
   if(r.ok) toast(`+ ${title}`);
-  else toast('Ошибка: '+(r.detail||'?'),'var(--red)');
+  else toast(t('t.error_c')+(r.detail||'?'),'var(--red)');
 }
 
 // ─── Preview player ──────────────────────────────────────────────────────
@@ -1719,7 +1727,13 @@ function clearReleasesStatus(){
 
 // Service detection in URL bar → moved to its own module file (see index.html).
 
-// Service login UIs (Yandex/Tidal/Spotify) + token probe + Tidal import → moved to its own module file (see index.html).
+// Service login UIs + token probe + Tidal import → moved to its own module file (see index.html).
+
+// Statistics view → moved to its own module file (see index.html).
+
+// OrpheusDL (Spotify) setup UI → moved to its own module file (see index.html).
+
+// SoundCloud / Lucida tab UI → moved to its own module file (see index.html).
 
 // ── Release-radar poll fallback ────────────────────────────────────────────
 // The WS done event can be missed if the user switches tabs and the tunnel
@@ -1742,7 +1756,7 @@ async function _relPollOnce() {
   _relPollRuns++;
   if (_relPollRuns > _REL_POLL_MAX_RUNS) {
     _relStopPoll();
-    setReleasesStatus('✗ Сканер не отвечает — обнови страницу', 0, 1, 'var(--red)');
+    setReleasesStatus('✗ '+t('w.scanner_dead'), 0, 1, 'var(--red)');
     return;
   }
   const days     = document.getElementById('rel-days')?.value || (S.config?.['releases-days'] || '90');
@@ -1776,7 +1790,7 @@ function _relShowAuthHint(err) {
   const sp_dc = lower.includes('sp_dc') || lower.includes('cookie') || lower.includes('не авторизован') || lower.includes('обновить oauth');
   if (!sp_dc) return;
   // Reuse the toast — keep wording concrete + action-oriented
-  try { toast('⚠ Spotify: ' + err + ' — Settings → Spotify', 'var(--orange)', '', 9000); } catch {}
+  try { toast(t('t.sp_c') + err + ' — Settings → Spotify', 'var(--orange)', 9000); } catch {}
 }
 
 async function loadReleases(force = false) {
@@ -1806,7 +1820,7 @@ async function loadReleases(force = false) {
     if(grid)  grid.innerHTML = '';
     if(empty) empty.style.display = 'none';
   }
-  if(st) { st.textContent = hasPrev ? 'Обновляю…' : 'Загружаю релизы…'; st.style.display = 'block'; }
+  if(st) { st.textContent = hasPrev ? t('su.updating') : t('w.loading_rel'); st.style.display = 'block'; }
   if(btn) btn.disabled = true;
 
   const activeSvcs = _relActiveSvcs();
@@ -1832,7 +1846,7 @@ async function loadReleases(force = false) {
     if(st) st.style.display = 'none';
     if(btn) btn.disabled = false;
     if(!hasPrev && empty) {
-      empty.textContent = 'Нет подключённых сервисов — настрой в Settings → Релизы';
+      empty.textContent = t('t.no_services');
       empty.style.display = '';
     }
     return;
@@ -1858,7 +1872,7 @@ async function loadReleases(force = false) {
   // We also start a poll fallback in case the WS message is lost (slow client,
   // tab in background, broker drop, tunnel cut).
   if(anyScanning && !allReleases.length && !hasPrev) {
-    if(st) { st.textContent = '⟳ Сканирование…'; st.style.display = 'block'; }
+    if(st) { st.textContent = t('t.scanning'); st.style.display = 'block'; }
     _relStartPoll();
     return;
   }
@@ -1877,16 +1891,16 @@ async function loadReleases(force = false) {
   if(errors.length) {
     const has403 = errors.some(e => e && e.toLowerCase().includes('not registered'));
     if(has403) {
-      toast('⚠ Spotify 403: добавь аккаунт в developer.spotify.com/dashboard → Settings → User Management', 'var(--orange)', '', 8000);
+      toast(t('t.sp_403'), 'var(--orange)', 8000);
     } else {
-      toast('⚠ ' + errors.slice(0, 2).join('; '), 'var(--orange)', '', 4000);
+      toast('⚠ ' + errors.slice(0, 2).join('; '), 'var(--orange)', 4000);
     }
   }
 
   if(!allReleases.length) {
     // No new results — keep previous data visible if available
     if(hasPrev) {
-      toast('Нет новых релизов за выбранный период', 'var(--muted)', '', 3000);
+      toast(t('t.no_new_rel'), 'var(--muted)', 3000);
     } else {
       if(empty) empty.style.display = '';
     }
@@ -1911,6 +1925,15 @@ async function convertRelease(spotifyUrl, title, artist) {
 // SoundCloud UI extracted to /static/js/sc.js
 
 // Media Session + local library + play-album + quality + spectrogram → moved to its own module file (see index.html).
+
+
+
+
+
+
+
+
+
 
 
 

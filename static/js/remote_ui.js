@@ -38,7 +38,7 @@ async function remoteStart() {
     const r = await api('POST', '/api/remote/start', { public_url: pub });
     if (r.ok) {
       updateRemoteUI(true, r.public_url, 0);
-      toast(S.lang==='en'?'Remote access enabled':'Удалённый доступ включён', '#22c55e');
+      toast(t('rm.enabled'), '#22c55e');
       await loadAdminLinks();
     } else {
       toast(r.detail || 'Error', 'var(--red)');
@@ -51,7 +51,7 @@ async function remoteStop() {
     const r = await api('POST', '/api/remote/stop');
     if (r.ok) {
       updateRemoteUI(false, '', 0);
-      toast(S.lang==='en'?`Remote stopped, ${r.revoked} links revoked`:`Остановлено, ${r.revoked} ссылок отозвано`, 'var(--red)');
+      toast(ti('rm.stopped',{n:r.revoked}), 'var(--red)');
       await loadAdminLinks();
     } else {
       toast(r.detail || 'Error', 'var(--red)');
@@ -74,19 +74,19 @@ function updateTunnelUI(running, connecting, url) {
   const stopBtn  = document.getElementById('tunnel-stop-btn');
   if (pill) {
     if (connecting) {
-      pill.textContent = '⏳ Подключение…';
+      pill.textContent = '⏳ ' + t('rm.connecting');
       pill.style.background = 'rgba(234,179,8,.15)'; pill.style.color = '#eab308';
     } else if (running) {
-      pill.textContent = '● Активен';
+      pill.textContent = '● ' + t('rm.active');
       pill.style.background = 'rgba(34,197,94,.15)'; pill.style.color = '#22c55e';
     } else {
-      pill.textContent = '● Выключен';
+      pill.textContent = '● ' + t('rm.off_word');
       pill.style.background = 'rgba(252,60,68,.15)'; pill.style.color = 'var(--red)';
     }
   }
   if (urlRow)   urlRow.style.display   = url ? '' : 'none';
   if (urlInput && url) urlInput.value  = url;
-  if (startBtn) { startBtn.style.display = running || connecting ? 'none' : ''; startBtn.textContent = '▶ Запустить'; startBtn.disabled = false; }
+  if (startBtn) { startBtn.style.display = running || connecting ? 'none' : ''; startBtn.textContent = '▶ ' + t('rm.start'); startBtn.disabled = false; }
   if (stopBtn)  stopBtn.style.display  = running || connecting ? '' : 'none';
   if (url) {
     const pubInput = document.getElementById('remote-public-url');
@@ -102,7 +102,7 @@ async function tunnelStart() {
     const r = await api('POST', '/api/tunnel/start', {});
     if (!r.ok) {
       updateTunnelUI(false, false, '');
-      toast('Ошибка туннеля: ' + (r.error || '?'), 'var(--red)');
+      toast(t('r.tun_err') + (r.error || '?'), 'var(--red)');
     }
     // URL arrives via WebSocket tunnel_status event
   } catch(e) {
@@ -115,7 +115,7 @@ async function tunnelStop() {
   try {
     await api('POST', '/api/tunnel/stop');
     updateTunnelUI(false, false, '');
-    toast('Туннель остановлен');
+    toast(t('r.tun_stop'));
   } catch(e) { toast(t('err.generic') + ': ' + e.message, 'var(--red)'); }
 }
 
@@ -142,7 +142,7 @@ async function createGuestLink() {
       document.getElementById('gl-label').value = '';
       await loadAdminLinks();
     } else {
-      toast(r.detail || 'Ошибка создания ссылки', 'var(--red)');
+      toast(r.detail || t('rm.link_err'), 'var(--red)');
     }
   } catch(e) { toast(t('err.generic') + ': ' + e.message, 'var(--red)'); }
 }
@@ -162,7 +162,7 @@ async function revokeGuestLink(token) {
   try {
     await api('POST', '/api/admin/links/revoke', {token});
     await loadAdminLinks();
-    toast('Ссылка отозвана');
+    toast(t('r.link_revoked'));
   } catch(e) { toast(t('err.generic') + ': ' + e.message, 'var(--red)'); }
 }
 

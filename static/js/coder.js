@@ -8,12 +8,12 @@
 async function mountFolderTree(container, onSelect) {
   if(!container) return;
   const state = { cur: null };
-  container.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:6px">Загрузка…</div>';
+  container.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:6px">'+t('player.loading')+'</div>';
   try {
     const r = await api('GET','/api/coder/browse');
     container.innerHTML = '';
     (r.nodes||[]).forEach(n => container.appendChild(_treeNode(n, 0, state, onSelect)));
-    if(!(r.nodes||[]).length) container.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:6px">Пусто</div>';
+    if(!(r.nodes||[]).length) container.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:6px">'+t('cd.empty_word')+'</div>';
   } catch(e){ container.innerHTML = '<div style="color:var(--red);font-size:11px;padding:6px">'+esc(e.message)+'</div>'; }
 }
 function _treeNode(n, depth, state, onSelect) {
@@ -34,7 +34,7 @@ function _treeNode(n, depth, state, onSelect) {
   // the checkbox across the whole row.
   cb.style.cssText = 'flex:0 0 16px;width:16px;min-width:16px;height:16px;padding:0;margin:0;border-radius:3px;accent-color:var(--green);cursor:'+(selectable?'pointer':'default');
   const lbl = document.createElement('span');
-  lbl.textContent = n.name + (n.tracks ? `  ·  ${n.tracks} тр.` : (n.has_subdirs ? '  ·  ▸ диски' : ''));
+  lbl.textContent = n.name + (n.tracks ? `  ·  ${n.tracks} ${t('p.trk_abbr')}` : (n.has_subdirs ? '  ·  ▸ '+t('cd.discs_word') : ''));
   lbl.style.cssText = 'flex:1 1 auto;min-width:0;text-align:left;cursor:pointer;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;'+(selectable?'':'opacity:.5');
   head.append(caret, cb, lbl);
   const childBox = document.createElement('div'); childBox.style.display='none';
@@ -126,7 +126,7 @@ function cxAction(){ return document.querySelector('input[name=cx-action]:checke
 
 function cxBytes(n){
   if(!n) return '—';
-  const u=['Б','КБ','МБ','ГБ']; let i=0; n=+n;
+  const u=t('cd.size_units').split(','); let i=0; n=+n;
   while(n>=1024 && i<u.length-1){ n/=1024; i++; }
   return n.toFixed(i?2:0).replace('.',',')+' '+u[i];
 }
@@ -137,10 +137,10 @@ function cxDur(s){
 }
 
 async function cxLoadFiles(dir){
-  if(!dir){ toast('Укажи путь к папке','var(--red)'); return; }
+  if(!dir){ toast(t('cd.need_path'),'var(--red)'); return; }
   document.getElementById('coder-path').value = dir;
   const tb = document.getElementById('cx-tbody');
-  if(tb) tb.innerHTML = `<tr><td colspan="5" class="cx-empty">Загрузка…</td></tr>`;
+  if(tb) tb.innerHTML = `<tr><td colspan="5" class="cx-empty">${t('player.loading')}</td></tr>`;
   try{
     const r = await api('POST','/api/coder/files',{dir});
     _cxFiles=r.files||[]; _cxDir=r.dir||dir; _cxAlbum=r.album||''; _cxArtist=r.artist||'';
@@ -156,7 +156,7 @@ function cxRenderTable(){
   const tb = document.getElementById('cx-tbody'); if(!tb) return;
   const sumEl = document.getElementById('cx-summary');
   if(!_cxFiles.length){
-    tb.innerHTML = `<tr><td colspan="5" class="cx-empty">Нет аудиофайлов в папке</td></tr>`;
+    tb.innerHTML = `<tr><td colspan="5" class="cx-empty">${t('cd.no_audio')}</td></tr>`;
     if(sumEl) sumEl.textContent=''; return;
   }
   const title = [_cxArtist,_cxAlbum].filter(Boolean).join(' - ') || _cxDir.split(/[\\/]/).pop();
@@ -178,10 +178,10 @@ function cxRenderTable(){
 
 function cxResultName(name){
   const act = cxAction();
-  if(act==='merge') return '→ один файл + .cue';
-  if(act==='retag') return '(теги на месте, по ISRC)';
-  if(act==='split') return '(разрез по .cue → split/)';
-  if(document.getElementById('coder-rename')?.checked) return '↻ по шаблону тегов';
+  if(act==='merge') return t('cd.hint_merge');
+  if(act==='retag') return t('cd.hint_retag');
+  if(act==='split') return t('cd.hint_split');
+  if(document.getElementById('coder-rename')?.checked) return t('cd.hint_rename');
   return name.replace(/\.[^.]+$/,'') + '.' + cxFmtExt();
 }
 function cxRenderResultCol(){
@@ -209,7 +209,7 @@ function cxUpdateCount(){
   const sumSel = _cxFiles.filter(f=>sel.includes(f.name)).reduce((a,f)=>a+(f.size||0),0);
   const s = document.getElementById('cx-summary');
   if(s) s.innerHTML = _cxFiles.length
-    ? `Выбрано <b>${sel.length}</b> из ${_cxFiles.length} · ${cxBytes(sumSel)}${_cxTotalDur?' · '+cxDur(_cxTotalDur):''}`
+    ? ti('cd.selected_of',{n:sel.length,total:_cxFiles.length}) + ` · ${cxBytes(sumSel)}${_cxTotalDur?' · '+cxDur(_cxTotalDur):''}`
     : '';
   const all = document.getElementById('cx-all');
   if(all) all.checked = _cxFiles.length>0 && sel.length===_cxFiles.length;
@@ -230,7 +230,7 @@ function cxSetAction(){
 
 async function cxRun(){
   const dir = document.getElementById('coder-path').value.trim();
-  if(!dir){ toast('Выбери папку — «📂 Обзор» или путь','var(--red)'); return; }
+  if(!dir){ toast(t('cd.pick_or'),'var(--red)'); return; }
   const act = cxAction(), fmt = cxFmt();
   const btn = document.getElementById('coder-run'), out = document.getElementById('coder-result');
   btn.disabled = true; const _t = btn.textContent; btn.textContent = (window.t?t('cd.working'):'Работаю…'); out.textContent='';
@@ -239,7 +239,7 @@ async function cxRun(){
     let r;
     if(act==='encode'){
       const only = cxSelectedNames();
-      if(!only.length) throw new Error('Не выбрано ни одного файла');
+      if(!only.length) throw new Error(t('cd.none_selected'));
       const insrc = document.getElementById('cx-insrc').checked;
       const outdir = insrc ? (dir + '/converted/' + fmt.toUpperCase())
                            : (document.getElementById('cx-outdir').value.trim());
@@ -251,7 +251,7 @@ async function cxRun(){
         rename:document.getElementById('coder-rename').checked,
         rename_template:document.getElementById('coder-tmpl').value||'',
         out_dir: outdir});
-      out.innerHTML = `<span style="color:var(--green)">✓ ${r.converted} → ${fmt.toUpperCase()}</span>${r.failed?` · ${r.failed} ошибок`:''} → ${esc(r.out_dir||'')}`;
+      out.innerHTML = `<span style="color:var(--green)">✓ ${r.converted} → ${fmt.toUpperCase()}</span>${r.failed?` · ${r.failed} ${t('cd.errors_word')}`:''} → ${esc(r.out_dir||'')}`;
     } else if(act==='merge'){
       r = await api('POST','/api/coder/mix',{dir, name:document.getElementById('coder-name').value.trim(), fmt:(['flac','alac'].includes(fmt)?fmt:'mp3')});
       const nm=(r.names&&r.names.length)?r.names.join(', '):(r.name||'');
@@ -259,18 +259,18 @@ async function cxRun(){
     } else if(act==='split'){
       const reenc=document.getElementById('coder-split-reenc').checked;
       r = await api('POST','/api/coder/split',{dir, fmt:reenc?fmt:'source', bitrate:document.getElementById('coder-br').value});
-      out.innerHTML = `<span style="color:var(--green)">✓ ${r.converted} треков</span>${r.failed?` · <span style="color:var(--red)">${r.failed} ошибок</span>`:''} → ${esc(r.out_dir||'')}`;
+      out.innerHTML = `<span style="color:var(--green)">✓ ${r.converted} ${t('cd.tracks_word')}</span>${r.failed?` · <span style="color:var(--red)">${r.failed} ${t('cd.errors_word')}</span>`:''} → ${esc(r.out_dir||'')}`;
     } else if(act==='retag'){
       r = await api('POST','/api/coder/retag',{dir});
-      out.innerHTML = `<span style="color:var(--green)">✓ перетеговано ${r.retagged}</span> · <span style="color:var(--muted)">проверено ${r.checked}, пропущено ${r.skipped}</span>`;
+      out.innerHTML = `<span style="color:var(--green)">✓ ${t('cd.retagged_word')} ${r.retagged}</span> · <span style="color:var(--muted)">${ti('cd.checked_skipped',{c:r.checked,s:r.skipped})}</span>`;
     }
     if(r && r.cancelled){
       const msg = window.t ? t('cd.stopped') : 'Остановлено';
       out.innerHTML = `<span style="color:var(--orange)">⏹ ${esc(msg)}</span>` +
-        (r.converted ? ` · ${r.converted} готово до отмены` : '');
-      toast('⏹ '+msg,'var(--orange)');
+        (r.converted ? ` · ${r.converted} ${t('cd.done_before_cancel')}` : '');
+      toast(t('cd.stop_c')+msg,'var(--orange)');
     } else {
-      toast('🎛 Готово','var(--green)');
+      toast(t('cd.done'),'var(--green)');
     }
   }catch(e){ out.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`; toast('Coder: '+e.message,'var(--red)'); }
   finally{ btn.disabled=false; btn.textContent=_t;
@@ -298,30 +298,30 @@ function coderFmtChange() {
 }
 async function coderSplit() {
   const dir = _coderDir();
-  if(!dir){ toast('Выбери папку с .cue','var(--red)'); return; }
+  if(!dir){ toast(t('cd.pick_cue'),'var(--red)'); return; }
   const reenc = document.getElementById('coder-split-reenc')?.checked;
   const fmt = reenc ? document.getElementById('coder-fmt').value : 'source';
   const btn = document.getElementById('coder-split'); if(btn) btn.disabled = true;
-  const res = document.getElementById('coder-split-res'); if(res) res.textContent = 'Режу…';
+  const res = document.getElementById('coder-split-res'); if(res) res.textContent = t('cd.splitting');
   try {
     const r = await api('POST','/api/coder/split',{dir, fmt, bitrate:document.getElementById('coder-br').value});
-    if(res) res.innerHTML = `<span style="color:var(--green)">✓ ${r.converted} треков</span>${r.failed?` · <span style="color:var(--red)">${r.failed} ошибок</span>`:''} → ${esc(r.out_dir)}`;
-    toast(`✂ Разрезано ${r.converted} треков`,'var(--green)');
-  } catch(e){ if(res) res.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`; toast('CUE-сплит: '+e.message,'var(--red)'); }
+    if(res) res.innerHTML = `<span style="color:var(--green)">✓ ${r.converted} ${t('cd.tracks_word')}</span>${r.failed?` · <span style="color:var(--red)">${r.failed} ${t('cd.errors_word')}</span>`:''} → ${esc(r.out_dir)}`;
+    toast('✂ '+ti('cd.split_n',{n:r.converted}),'var(--green)');
+  } catch(e){ if(res) res.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`; toast(t('cd.cue_c')+e.message,'var(--red)'); }
   finally { if(btn) btn.disabled = false; }
 }
 
 // ── Coder: retag from service (ISRC) + batch convert ──────────────────
 async function coderRetag() {
   const dir = _coderDir();
-  if(!dir){ toast('Выбери папку','var(--red)'); return; }
+  if(!dir){ toast(t('cd.pick'),'var(--red)'); return; }
   const btn = document.getElementById('coder-retag'); if(btn) btn.disabled = true;
-  const res = document.getElementById('coder-retag-res'); if(res) res.textContent = 'Ретег…';
+  const res = document.getElementById('coder-retag-res'); if(res) res.textContent = t('cd.retagging');
   try {
     const r = await api('POST','/api/coder/retag',{dir});
-    if(res) res.innerHTML = `<span style="color:var(--green)">✓ перетеговано ${r.retagged}</span> · <span style="color:var(--muted)">проверено ${r.checked}, пропущено ${r.skipped}</span>`;
-    toast(`🏷 Ретег: ${r.retagged} исправлено`,'var(--green)');
-  } catch(e){ if(res) res.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`; toast('Ретег: '+e.message,'var(--red)'); }
+    if(res) res.innerHTML = `<span style="color:var(--green)">✓ ${t('cd.retagged_word')} ${r.retagged}</span> · <span style="color:var(--muted)">${ti('cd.checked_skipped',{c:r.checked,s:r.skipped})}</span>`;
+    toast('🏷 '+ti('cd.retag_n',{n:r.retagged}),'var(--green)');
+  } catch(e){ if(res) res.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`; toast(t('cd.retag_c')+e.message,'var(--red)'); }
   finally { if(btn) btn.disabled = false; }
 }
 
@@ -330,19 +330,19 @@ function _coderBatchRender() {
   const box = document.getElementById('coder-batch-list'); if(!box) return;
   box.innerHTML = _coderBatch.map((d,i)=>`<div style="display:flex;align-items:center;gap:8px;font-size:11px;padding:3px 8px;border:1px solid var(--border);border-radius:6px;background:var(--surface)">
     <span style="flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(d)}">${esc(d)}</span>
-    <span onclick="coderBatchRemove(${i})" style="cursor:pointer;color:var(--muted)" title="Убрать">✕</span></div>`).join('');
+    <span onclick="coderBatchRemove(${i})" style="cursor:pointer;color:var(--muted)" title="${t('cd.remove_word')}">✕</span></div>`).join('');
 }
 function coderBatchAdd() {
   const dir = _coderDir();
-  if(!dir){ toast('Выбери папку выше','var(--red)'); return; }
-  if(_coderBatch.includes(dir)){ toast('Уже в пакете','var(--muted)'); return; }
+  if(!dir){ toast(t('cd.pick_above'),'var(--red)'); return; }
+  if(_coderBatch.includes(dir)){ toast(t('cd.in_batch'),'var(--muted)'); return; }
   _coderBatch.push(dir); _coderBatchRender();
-  toast(`В пакете: ${_coderBatch.length}`,'var(--green)');
+  toast(t('cd.batch_c')+_coderBatch.length,'var(--green)');
 }
 function coderBatchRemove(i){ _coderBatch.splice(i,1); _coderBatchRender(); }
 function coderBatchClear(){ _coderBatch=[]; _coderBatchRender(); const r=document.getElementById('coder-batch-res'); if(r) r.textContent=''; }
 async function coderBatchRun() {
-  if(!_coderBatch.length){ toast('Пакет пуст — добавь папки','var(--red)'); return; }
+  if(!_coderBatch.length){ toast(t('cd.batch_empty'),'var(--red)'); return; }
   const fmt = document.getElementById('coder-fmt').value;
   const opts = { fmt, bitrate:document.getElementById('coder-br').value,
     sample_rate:document.getElementById('coder-srate')?.value||'',
@@ -354,21 +354,21 @@ async function coderBatchRun() {
   const res = document.getElementById('coder-batch-res');
   let ok=0, fail=0, conv=0; const total=_coderBatch.length;
   for(let i=0;i<total;i++){
-    if(res) res.textContent = `Конвертирую ${i+1}/${total}…`;
+    if(res) res.textContent = ti('cd.converting_n',{i:i+1,total:total});
     try {
       const r = await api('POST','/api/coder/convert',{dir:_coderBatch[i], ...opts});
       if(r.ok){ ok++; conv += (r.converted||0); } else fail++;
     } catch(e){ fail++; }
   }
   if(btn) btn.disabled = false;
-  if(res) res.innerHTML = `<span style="color:var(--green)">✓ ${ok}/${total} папок · ${conv} файлов</span>${fail?` · <span style="color:var(--red)">${fail} ошибок</span>`:''}`;
-  toast(`📚 Пакет: ${ok}/${total} папок (${conv} файлов)`,'var(--green)');
+  if(res) res.innerHTML = `<span style="color:var(--green)">✓ ${ok}/${total} ${t('cd.folders_word')} · ${conv} ${t('cd.files_word')}</span>${fail?` · <span style="color:var(--red)">${fail} ${t('cd.errors_word')}</span>`:''}`;
+  toast('📚 '+ti('cd.batch_done',{ok:ok,total:total,files:conv}),'var(--green)');
 }
 
 // Per-track match: for loose files (no album), look each file up on the chosen
 // service by its ISRC (exact) or artist+title, and fill the row from the match.
 async function taggerMatchAll() {
-  if(!_tagRows.length){ toast('Нет файлов','var(--red)'); return; }
+  if(!_tagRows.length){ toast(t('cd.no_files'),'var(--red)'); return; }
   const svc = document.getElementById('tag-svc').value;
   const trs = document.querySelectorAll('#tag-tbody tr');
   const res = document.getElementById('tag-applyres');
@@ -388,10 +388,10 @@ async function taggerMatchAll() {
         ok++; if(numCell) numCell.innerHTML='<span style="color:var(--green)">✓</span>';
       } else { miss++; if(numCell) numCell.innerHTML='<span style="color:var(--muted)">—</span>'; }
     } catch(e){ miss++; if(numCell) numCell.innerHTML='<span style="color:var(--red)">✗</span>'; }
-    if(res) res.textContent=`Матчинг… ${ok+miss}/${total}`;
+    if(res) res.textContent=ti('cd.matching_n',{n:ok+miss,total:total});
   }
-  if(res) res.innerHTML=`<span style="color:var(--green)">✓ ${ok} сматчено</span>${miss?` · <span style="color:var(--muted)">${miss} не найдено</span>`:''}`;
-  toast(`🔍 Сматчено ${ok}/${total}`,'var(--green)');
+  if(res) res.innerHTML=`<span style="color:var(--green)">✓ ${ok} ${t('cd.matched_word')}</span>${miss?` · <span style="color:var(--muted)">${miss} ${t('cd.notfound_word')}</span>`:''}`;
+  toast('🔍 '+ti('cd.matched_n',{ok:ok,total:total}),'var(--green)');
 }
 async function coderPickFolder() {
   const dir = document.getElementById('coder-path').value.trim();
@@ -401,7 +401,7 @@ async function coderPickFolder() {
     const p = await api('POST','/api/coder/preview',{dir});
     if(p.ok){
       document.getElementById('coder-srcinfo').innerHTML =
-        `${p.count} треков · ${p.codec||p.source_ext} ${p.lossless?'<span style="color:var(--green)">lossless</span>':'<span style="color:var(--orange)">lossy</span>'}`;
+        `${p.count} ${t('cd.tracks_word')} · ${p.codec||p.source_ext} ${p.lossless?'<span style="color:var(--green)">lossless</span>':'<span style="color:var(--orange)">lossy</span>'}`;
       const nm = document.getElementById('coder-name'); if(nm) nm.value = p.name||'';
     }
   } catch(e){}
@@ -418,18 +418,18 @@ function _coderDir() {
 }
 async function coderRun() {
   const dir = _coderDir();
-  if(!dir){ toast('Выбери папку или путь','var(--red)'); return; }
+  if(!dir){ toast(t('cd.pick_path'),'var(--red)'); return; }
   const fmt = document.getElementById('coder-fmt').value;
   const merge = document.getElementById('coder-merge').checked;
   const btn = document.getElementById('coder-run');
   const out = document.getElementById('coder-result');
-  btn.disabled = true; const _txt = btn.textContent; btn.textContent = 'Работаю…'; out.textContent = '';
+  btn.disabled = true; const _txt = btn.textContent; btn.textContent = t('cd.working'); out.textContent = '';
   try {
     let r;
     if(merge){
       r = await api('POST','/api/coder/mix',{dir, name:document.getElementById('coder-name').value.trim(), fmt: (['flac','alac'].includes(fmt)?fmt:'mp3')});
       const nm = (r.names&&r.names.length)?r.names.join(', '):(r.name||'');
-      const dn = r.multi?` (${r.discs} диска → ${r.names.length} миксов)`:'';
+      const dn = r.multi?(' ('+ti('cd.discs_mixes',{d:r.discs,m:r.names.length})+')'):'';
       out.innerHTML = `<span style="color:var(--green)">✓ ${esc(nm)}</span>${dn} + .cue → ${esc(r.out_dir)}` + (r.warning?` · <span style="color:var(--orange)">${esc(r.warning)}</span>`:'');
     } else {
       r = await api('POST','/api/coder/convert',{dir, fmt, bitrate:document.getElementById('coder-br').value,
@@ -438,9 +438,9 @@ async function coderRun() {
             normalize:document.getElementById('coder-norm')?.checked||false,
             rename:document.getElementById('coder-rename')?.checked||false,
             rename_template:document.getElementById('coder-tmpl')?.value||''});
-      out.innerHTML = `<span style="color:var(--green)">✓ ${r.converted} → ${fmt.toUpperCase()}</span>${r.failed?` · ${r.failed} ошибок`:''} → ${esc(r.out_dir)}`;
+      out.innerHTML = `<span style="color:var(--green)">✓ ${r.converted} → ${fmt.toUpperCase()}</span>${r.failed?` · ${r.failed} ${t('cd.errors_word')}`:''} → ${esc(r.out_dir)}`;
     }
-    toast('🎛 Готово','var(--green)');
+    toast(t('cd.done'),'var(--green)');
   } catch(e){ out.innerHTML = `<span style="color:var(--red)">${esc(e.message)}</span>`; }
   finally { btn.disabled = false; btn.textContent = _txt; }
 }
@@ -453,21 +453,21 @@ function coderProgress(m) {
   const lbl = document.getElementById('coder-plabel');
   const opName = window.t
     ? t(m.op==='mix'?'cd.op_mix':m.op==='split'?'cd.op_split':'cd.op_convert')
-    : (m.op==='mix'?'Склейка':m.op==='split'?'Сплит':'Конвертация');
+    : (m.op==='mix'?t('cd.op_mix'):m.op==='split'?t('cd.op_split'):t('cd.op_convert'));
   const trk = window.t ? t('cd.op_track') : 'трек';
   if(lbl) lbl.textContent = `${opName}: ${m.label||''} — ${trk} ${m.current}/${m.total} · ${m.pct||0}%`;
   if((m.pct||0) >= 100) setTimeout(()=>{ box.style.display='none'; }, 1800);
 }
 async function coderDownloadConvert() {
   const url = document.getElementById('coder-url').value.trim();
-  if(!url){ toast('Вставь ссылку','var(--red)'); return; }
+  if(!url){ toast(t('t.paste_link'),'var(--red)'); return; }
   // Just enqueue the download in the service's NATIVE quality — we do NOT touch
   // the global transcode setting (that silently degraded every download). Convert
   // afterwards here in Coder by picking the downloaded folder.
   document.getElementById('url-input').value = url;
   await addUrl();
   document.getElementById('coder-url').value = '';
-  toast('Скачиваю в исходном качестве. После загрузки выбери папку тут и сконвертируй.','var(--green)',7000);
+  toast(t('cd.dl_orig'),'var(--green)',7000);
   showView('queue', document.querySelector('[data-view=queue]'));
 }
 
@@ -490,7 +490,7 @@ function _tagCell(v, minw=90) {
 }
 function _tagRender() {
   const tb = document.getElementById('tag-tbody');
-  if(!_tagRows.length){ tb.innerHTML = '<tr><td colspan="9" style="padding:18px;text-align:center;color:var(--muted)">Пусто</td></tr>'; return; }
+  if(!_tagRows.length){ tb.innerHTML = '<tr><td colspan="9" style="padding:18px;text-align:center;color:var(--muted)">'+t('cd.empty_word')+'</td></tr>'; return; }
   tb.innerHTML = _tagRows.map((r,i)=>`<tr data-i="${i}" style="border-top:1px solid var(--border)">
     <td style="padding:3px 8px;color:var(--muted)">${r.track||i+1}</td>
     <td style="padding:3px 8px;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc((r.subdir?r.subdir+'/':'')+r.file)}">${r.subdir?`<span style="color:#5ec8e0">${esc(r.subdir)}/</span>`:''}${esc(r.file)}</td>
@@ -504,23 +504,23 @@ function _tagRender() {
 }
 async function taggerLoad() {
   const dir = document.getElementById('tag-path').value.trim();
-  if(!dir){ toast('Выбери папку или путь','var(--red)'); return; }
+  if(!dir){ toast(t('cd.pick_path'),'var(--red)'); return; }
   try {
     const r = await api('POST','/api/tagger/read',{dir});
     _tagRows = r.rows || [];
     _tagRender();
-    document.getElementById('tag-srcinfo').textContent = `${_tagRows.length} файлов загружено`;
-  } catch(e){ toast('Теггер: '+e.message,'var(--red)'); }
+    document.getElementById('tag-srcinfo').textContent = ti('cd.files_loaded',{n:_tagRows.length});
+  } catch(e){ toast(t('cd.tagger_c')+e.message,'var(--red)'); }
 }
 async function taggerFetchAlbum() {
   const url = document.getElementById('tag-url').value.trim();
-  if(!url){ toast('Вставь ссылку альбома','var(--red)'); return; }
-  if(!_tagRows.length){ toast('Сначала загрузи папку','var(--red)'); return; }
+  if(!url){ toast(t('cd.paste_album'),'var(--red)'); return; }
+  if(!_tagRows.length){ toast(t('cd.load_first'),'var(--red)'); return; }
   try {
     const a = await api('POST','/api/tagger/album',{url});
     const tracks = a.tracks || [];
     document.getElementById('tag-albuminfo').innerHTML =
-      `<span style="color:var(--green)">«${esc(a.album)}» — ${a.count} тр. · ${esc(a.albumartist||'')} · ${esc(a.year||'')}</span>`;
+      `<span style="color:var(--green)">«${esc(a.album)}» — ${a.count} ${t('p.trk_abbr')} · ${esc(a.albumartist||'')} · ${esc(a.year||'')}</span>`;
     // Show the canonical tracklist so you can verify it's the right release
     // (and spot a track-count mismatch) BEFORE it overwrites your files.
     const tl = document.getElementById('tag-tracklist');
@@ -529,8 +529,8 @@ async function taggerFetchAlbum() {
       tl.style.display = 'block';
       tl.innerHTML =
         `<div style="position:sticky;top:0;background:var(--surface2);padding:5px 10px;font-size:11px;font-weight:700;display:flex;justify-content:space-between;align-items:center">
-           <span>Треклист релиза — ${tracks.length} тр.</span>
-           ${mism?`<span style="color:var(--orange)">⚠ файлов загружено ${_tagRows.length}</span>`:`<span style="color:var(--green)">✓ совпадает с файлами (${_tagRows.length})</span>`}
+           <span>${t('cd.release_tl')} — ${tracks.length} ${t('p.trk_abbr')}</span>
+           ${mism?`<span style="color:var(--orange)">⚠ ${ti('cd.files_loaded',{n:_tagRows.length})}</span>`:`<span style="color:var(--green)">✓ ${ti('cd.matches_files',{n:_tagRows.length})}</span>`}
          </div>` +
         tracks.map(t=>`<div style="display:flex;gap:8px;padding:3px 10px;font-size:11px;border-top:1px solid var(--border)">
           <span style="color:var(--muted);min-width:22px;text-align:right">${t.num||''}</span>
@@ -554,23 +554,23 @@ async function taggerFetchAlbum() {
       set('tc-title',t.title); set('tc-artist',t.artist); set('tc-album',a.album);
       set('tc-albumartist',a.albumartist); set('tc-track',t.num||r.track); set('tc-year',a.year);
     });
-    toast('Треклист лёг на файлы — проверь и применяй','var(--green)');
-  } catch(e){ toast('Теггер: '+e.message,'var(--red)'); }
+    toast(t('cd.tl_applied'),'var(--green)');
+  } catch(e){ toast(t('cd.tagger_c')+e.message,'var(--red)'); }
 }
 async function taggerSearch() {
   const q = document.getElementById('tag-q').value.trim();
   const svc = document.getElementById('tag-svc').value;
-  if(!q){ toast('Введи запрос','var(--red)'); return; }
+  if(!q){ toast(t('cd.enter_query'),'var(--red)'); return; }
   const box = document.getElementById('tag-results');
-  box.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:6px">Ищу…</div>';
+  box.innerHTML = '<div style="font-size:11px;color:var(--muted);padding:6px">'+t('b.searching')+'</div>';
   try {
     const r = await api('POST','/api/tagger/search',{query:q,service:svc});
     const res = r.results||[];
-    if(!res.length){ box.innerHTML='<div style="font-size:11px;color:var(--muted);padding:6px">Ничего не найдено</div>'; return; }
+    if(!res.length){ box.innerHTML='<div style="font-size:11px;color:var(--muted);padding:6px">'+t('b.nothing')+'</div>'; return; }
     box.innerHTML = res.map(x=>`<div onclick="taggerPickResult('${encodeURIComponent(x.url)}')" style="display:flex;align-items:center;gap:9px;padding:6px 8px;border:1px solid var(--border);border-radius:8px;margin-bottom:4px;cursor:pointer" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='transparent'">
       ${x.cover?`<img src="${esc(x.cover)}" style="width:34px;height:34px;border-radius:5px;object-fit:cover"/>`:'<div style="width:34px;height:34px;border-radius:5px;background:var(--surface2);display:flex;align-items:center;justify-content:center">🎵</div>'}
       <div style="min-width:0"><div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(x.title)}</div>
-      <div style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text)">${esc(x.artist||'—')}</span><span style="color:var(--muted)">${x.year?' · '+esc(x.year):''}${x.tracks?' · '+x.tracks+' тр.':''}</span></div></div></div>`).join('');
+      <div style="font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis"><span style="color:var(--text)">${esc(x.artist||'—')}</span><span style="color:var(--muted)">${x.year?' · '+esc(x.year):''}${x.tracks?' · '+x.tracks+' '+t('p.trk_abbr'):''}</span></div></div></div>`).join('');
   } catch(e){ box.innerHTML=`<div style="font-size:11px;color:var(--red);padding:6px">${esc(e.message)}</div>`; }
 }
 function taggerPickResult(encUrl) {
@@ -580,7 +580,7 @@ function taggerPickResult(encUrl) {
   taggerFetchAlbum();
 }
 async function taggerApplyAll() {
-  if(!_tagRows.length){ toast('Нет файлов','var(--red)'); return; }
+  if(!_tagRows.length){ toast(t('cd.no_files'),'var(--red)'); return; }
   const clear = document.getElementById('tag-clear').checked;
   const keep  = document.getElementById('tag-keepcover').checked;
   const embed = document.getElementById('tag-embedcover')?.checked;
@@ -605,19 +605,19 @@ async function taggerApplyAll() {
     catch(e){}
     good?ok++:fail++; if(cov) coversDone++;
     if(numCell) numCell.innerHTML = good ? '<span style="color:var(--green)">✓</span>' : '<span style="color:var(--red)">✗</span>';
-    res.textContent=`Применяю… ${ok+fail}/${total}`;
+    res.textContent=ti('cd.applying_n',{n:ok+fail,total:total});
     if(bar) bar.style.width = Math.round((ok+fail)/total*100)+'%';
   }
   btn.disabled=false;
-  res.innerHTML=`<span style="color:var(--green)">✓ ${ok} применено</span>${coversDone?` · <span style="color:var(--muted)">🖼 ${coversDone} обложек</span>`:''}${fail?` · <span style="color:var(--red)">${fail} ошибок</span>`:''}`;
+  res.innerHTML=`<span style="color:var(--green)">✓ ${ok} ${t('cd.applied_word')}</span>${coversDone?` · <span style="color:var(--muted)">🖼 ${coversDone} ${t('cd.covers_word')}</span>`:''}${fail?` · <span style="color:var(--red)">${fail} ${t('cd.errors_word')}</span>`:''}`;
   if(box) setTimeout(()=>{ box.style.display='none'; }, 1800);
-  toast('🏷 Теги записаны','var(--green)');
+  toast(t('cd.tags_written'),'var(--green)');
 }
 
 async function taggerRename(dry) {
   const template = document.getElementById('tag-mask').value.trim();
-  if(!template){ toast('Введи маску','var(--red)'); return; }
-  if(!_tagRows.length){ toast('Сначала загрузи папку','var(--red)'); return; }
+  if(!template){ toast(t('cd.enter_mask'),'var(--red)'); return; }
+  if(!_tagRows.length){ toast(t('cd.load_first'),'var(--red)'); return; }
   const files = _tagRows.map(r=>r.path);
   const prev  = document.getElementById('tag-renamepreview');
   const res   = document.getElementById('tag-renameres');
@@ -631,16 +631,16 @@ async function taggerRename(dry) {
         <span style="flex:1;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(x.old)}">${esc(x.old)}</span>
         <span style="color:${x.change?'var(--orange)':'var(--muted)'}">→</span>
         <span style="flex:1;color:${x.change?'var(--text)':'var(--muted)'};white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(x.new)}">${esc(x.new)}</span></div>`).join('');
-      res.innerHTML = `<span style="color:var(--muted)">Изменится: ${r.count} из ${rows.length}</span>`;
+      res.innerHTML = `<span style="color:var(--muted)">${ti('cd.will_change',{n:r.count,total:rows.length})}</span>`;
       const can = r.count>0;
       btn.disabled=!can; btn.style.opacity=can?'1':'.5';
     } else {
-      res.innerHTML = `<span style="color:var(--green)">✓ Переименовано ${r.renamed}</span>`;
+      res.innerHTML = `<span style="color:var(--green)">✓ ${t('cd.renamed_word')} ${r.renamed}</span>`;
       prev.style.display='none'; btn.disabled=true; btn.style.opacity='.5';
-      toast(`✏️ Переименовано ${r.renamed}`,'var(--green)');
+      toast('✏️ '+t('cd.renamed_word')+' '+r.renamed,'var(--green)');
       await taggerLoad();   // reload so the table shows the new filenames
     }
-  } catch(e){ toast('Переименование: '+e.message,'var(--red)'); }
+  } catch(e){ toast(t('cd.rename_c')+e.message,'var(--red)'); }
 }
 
 function toggleTaskLog(id, btn) {
@@ -656,11 +656,11 @@ function _typeLabel(m) {
   if(!m) return '';
   if(m.albumType) return m.albumType;
   return {
-    albums:'Альбом', album:'Альбом',
-    single:'Сингл', ep:'EP', compilation:'Сборник',
-    songs:'Трек', song:'Трек', track:'Трек',
-    playlists:'Плейлист', playlist:'Плейлист',
-    artist:'Артист', 'music-videos':'Видео',
+    albums:t('card.album'), album:t('card.album'),
+    single:t('card.single'), ep:'EP', compilation:t('card.compilation'),
+    songs:t('card.track'), song:t('card.track'), track:t('card.track'),
+    playlists:t('card.playlist'), playlist:t('card.playlist'),
+    artist:t('card.artist'), 'music-videos':t('card.video'),
   }[m.type] || '';
 }
 
@@ -713,7 +713,7 @@ function updateQueueItem(task, el) {
   if(m.title || m.artist){
     const titleEl = el.querySelector('.qi-title');
     if(titleEl) titleEl.textContent = m.title || _titleFromUrl(task.url);
-    const tcInfo  = tc > 1 ? `${tc} треков` : (tc === 1 ? '1 трек' : '');
+    const tcInfo  = tc > 1 ? ti('q.n_tracks',{n:tc}) : (tc === 1 ? t('q.one_track') : '');
     const durInfo = (m.duration && ['soundcloud','bbc'].includes(m.service)) ? _scDur(m.duration) : '';
     const line = [m.artist || '—', m.year, m.label, _typeLabel(m), tcInfo, durInfo].filter(Boolean).join(' · ');
     let artistEl = el.querySelector('.qi-artist');
@@ -764,15 +764,15 @@ async function removeTask(id) {
 
 async function retryTask(id) {
   const r = await api('POST', `/api/queue/retry/${id}`);
-  if(r.ok) toast(r.reused ? '↺ Повтор запущен' : '↺ Добавлено в очередь');
-  else if(r.duplicate) toast('Уже в очереди', 'var(--muted)');
-  else toast(r.msg || 'Ошибка повтора', 'var(--red)');
+  if(r.ok) toast(r.reused ? '↺ '+t('cd.retry_started') : '↺ '+t('t.added_q'));
+  else if(r.duplicate) toast(t('cd.in_queue'), 'var(--muted)');
+  else toast(r.msg || t('cd.retry_err'), 'var(--red)');
 }
 
 async function clearDone() {
   // Finished = done / error / cancelled.
   const done = S.queue.filter(t => t.status==='done' || t.status==='error' || t.status==='cancelled');
-  if(!done.length){ toast('Нет готовых задач для очистки','var(--muted)'); return; }
+  if(!done.length){ toast(t('cd.no_done'),'var(--muted)'); return; }
   const removed = [];
   for(const t of done){
     try { await api('DELETE',`/api/queue/${t.id}`); removed.push(t.id); }
@@ -786,7 +786,7 @@ async function clearDone() {
     renderQueue(); updateTransport();
   }
   const failed = done.length - removed.length;
-  if(failed) toast(`Не удалось убрать ${failed} — сервер ответил ошибкой`,'var(--orange)');
-  else toast(`Убрано: ${removed.length}`,'var(--green)');
+  if(failed) toast(ti('cd.remove_fail',{n:failed}),'var(--orange)');
+  else toast(t('cd.removed_c')+removed.length,'var(--green)');
 }
 

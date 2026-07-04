@@ -78,11 +78,19 @@
           </div>
           <div class="toggle-row">
             <div class="toggle-info">
-              <div class="toggle-label" data-i18n="s.tray_label">🗕 Сворачивать в трей</div>
-              <div class="toggle-sub" data-i18n="s.tray_sub">Закрытие или сворачивание окна прячет Ripster в системный трей — загрузки продолжаются. Применяется после перезапуска.</div>
+              <div class="toggle-label" data-i18n="s.tray_label">🗕 Закрытие прячет в трей</div>
+              <div class="toggle-sub" data-i18n="s.tray_sub">Нажатие «✕» прячет Ripster в системный трей вместо выхода — загрузки продолжаются. Значок в трее вернёт окно, «Выход» закроет программу. Применяется после перезапуска.</div>
             </div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-minimize-to-tray"
               onchange="saveSetting('minimize-to-tray',this.checked)"><div class="toggle-slider"></div></label>
+          </div>
+          <div class="field-group mt8">
+            <label class="lbl" data-i18n="s.minimize_label">При сворачивании (🗕)</label>
+            <div class="toggle-sub" data-i18n="s.minimize_sub" style="margin-bottom:6px">Куда уходит окно при обычном сворачивании. Применяется после перезапуска.</div>
+            <select id="s-minimize-to" onchange="saveSetting('minimize-to',this.value)" style="width:auto">
+              <option value="taskbar" data-i18n="s.minimize_taskbar">На панель задач</option>
+              <option value="tray" data-i18n="s.minimize_tray">В системный трей</option>
+            </select>
           </div>
           <div class="field-group mt8">
             <label class="lbl" data-i18n="s.parallel_label">Параллельные загрузки</label>
@@ -101,7 +109,7 @@
               <input type="range" id="s-autodel" min="0" max="60" step="1" value="0"
                 style="flex:1;accent-color:var(--red)"
                 oninput="document.getElementById('s-autodel-val').textContent=(+this.value===0?'Выкл':this.value+' мин');saveSetting('auto-delete-minutes',+this.value)"/>
-              <span id="s-autodel-val" style="font-size:13px;font-weight:700;color:var(--text);min-width:48px;text-align:center">Выкл</span>
+              <span id="s-autodel-val" style="font-size:13px;font-weight:700;color:var(--text);min-width:48px;text-align:center"><span data-i18n="s.off">Выкл</span></span>
             </div>
             <div style="font-size:10px;color:var(--muted);margin-top:3px" data-i18n="s.autodel_sub">Удалять скачанные релизы с диска ПК через N минут после завершения (0 = выкл, 1–60).</div>
           </div>
@@ -227,43 +235,42 @@
           <div class="block-title" data-i18n="s.paths">📁 Пути сохранения</div>
           <div class="settings-grid">
             <div class="field-group">
-              <label class="lbl" data-i18n="set.001">Папка загрузок</label>
-              <input id="s-savepath" data-i18n-ph="set.002" placeholder="Музыка\Ripster (по умолчанию)" oninput="saveSetting('save-path',this.value)"/>
-              <div style="font-size:11px;color:var(--muted);margin-top:3px;line-height:1.5">Пусто = <code>Музыка\Ripster</code>. Можно указать свою папку (напр. <code>D:\Музыка</code>) — туда пойдут ВСЕ загрузки, включая Apple.</div>
+              <label class="lbl"><span data-i18n="s.dl_folder">Папка загрузок</span></label>
+              <input id="s-savepath" placeholder="downloads" oninput="saveSetting('save-path',this.value)"/>
             </div>
             <div class="field-group">
-              <label class="lbl" data-i18n="set.003">Путь к загрузчику / main.go</label>
+              <label class="lbl"><span data-i18n="s.dl_path">Путь к загрузчику / main.go</span></label>
               <input id="s-dlpath" placeholder="./apple-music-downloader" oninput="saveSetting('main-go-path',this.value)"/>
             </div>
           </div>
           <div class="toggle-row mt8">
-            <div class="toggle-info"><div class="toggle-label" data-i18n="set.004">Папки по качеству</div><div class="toggle-sub" data-i18n="set.005">alac/, flac/, 320/ … — любой сервис кладёт файлы в папку по формату, не по имени сервиса</div></div>
+            <div class="toggle-info"><div class="toggle-label">Папки по качеству</div><div class="toggle-sub"><span data-i18n="s.folder_by_fmt">alac/, flac/, 320/ … — любой сервис кладёт файлы в папку по формату, не по имени сервиса</span></div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-quality-subfolders" onchange="saveSetting('quality-subfolders',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="field-group mt8">
-            <label class="lbl" data-i18n="set.006">Формат вывода (конвертация для ВСЕХ сервисов)</label>
+            <label class="lbl"><span data-i18n="s.out_fmt"><span data-i18n="s.out_fmt">Формат вывода (конвертация для ВСЕХ сервисов)</span></span></label>
             <select id="s-transcode-format" onchange="saveSetting('transcode-format',this.value)">
-              <option value="" data-i18n="set.007">Нативное качество — без конвертации</option>
+              <option value=""><span data-i18n="s.native_q">Нативное качество — без конвертации</span></option>
               <option value="alac">ALAC — Apple Lossless (.m4a)</option>
               <option value="flac">FLAC — Lossless (.flac)</option>
               <option value="mp3">MP3 320 kbps — Lossy (.mp3)</option>
             </select>
-            <div class="toggle-sub" style="margin-top:6px" data-i18n="set.008">После скачивания каждый файл перекодируется в выбранный формат (ffmpeg, метаданные+обложка переносятся). «Нативное» = отдаётся как есть. Из lossy в lossless качество не вырастет — это для единого формата.</div>
+            <div class="toggle-sub" style="margin-top:6px"><span data-i18n="s.transcode_desc">После скачивания каждый файл перекодируется в выбранный формат (ffmpeg, метаданные+обложка переносятся). «Нативное» = отдаётся как есть. Из lossy в lossless качество не вырастет — это для единого формата.</span></div>
           </div>
           <div class="toggle-row mt8">
-            <div class="toggle-info"><div class="toggle-label" data-i18n="set.009">Сохранять оригинал</div><div class="toggle-sub" data-i18n="set.010">Оставлять исходный файл рядом с результатом конвертации (по умолчанию оригинал удаляется). Игнорируется при «Нативное качество».</div></div>
+            <div class="toggle-info"><div class="toggle-label">Сохранять оригинал</div><div class="toggle-sub"><span data-i18n="s.keep_orig">Оставлять исходный файл рядом с результатом конвертации (по умолчанию оригинал удаляется). Игнорируется при «Нативное качество».</span></div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-transcode-keep" onchange="saveSetting('transcode-keep-original',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row mt8">
-            <div class="toggle-info"><div class="toggle-label" data-i18n="set.011">Запуск через go run (разработка)</div><div class="toggle-sub" data-i18n="set.012">Запускает исходный код командой go run main.go</div></div>
+            <div class="toggle-info"><div class="toggle-label">Запуск через go run (разработка)</div><div class="toggle-sub"><span data-i18n="s.go_run">Запускает исходный код командой go run main.go</span></div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gorun" onchange="saveSetting('use-go-run',this.checked)"><div class="toggle-slider"></div></label>
           </div>
         </div>
 
         <div class="block mt12">
-          <div class="block-title" data-i18n="set.013">🏷 Переименование по тегам</div>
+          <div class="block-title"><span data-i18n="s.rename_tags">🏷 Переименование по тегам</span></div>
           <div class="field-group">
-            <label class="lbl" data-i18n="set.014">Шаблон имени файла (пусто = не переименовывать)</label>
+            <label class="lbl"><span data-i18n="s.fname_tpl">Шаблон имени файла (пусто = не переименовывать)</span></label>
             <input id="s-rename-tmpl" placeholder="{tracknumber:02d}. {artist} - {title}"
               style="font-family:var(--mono);font-size:11px"
               oninput="saveSetting('file-rename-template',this.value)"/>
@@ -278,26 +285,26 @@
         </div>
 
         <div class="block mt12">
-          <div class="block-title" data-i18n="set.015">🖼 Обложка</div>
+          <div class="block-title">🖼 Artwork</div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label" data-i18n="set.016">Встроить обложку в файл</div></div>
+            <div class="toggle-info"><div class="toggle-label">Embed artwork in audio file</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-embedcover" onchange="saveSetting('embed-cover',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label" data-i18n="set.017">Сохранять cover.jpg в папку</div><div class="toggle-sub" data-i18n="set.018">Картинка обложки рядом с музыкой</div></div>
+            <div class="toggle-info"><div class="toggle-label">Save cover.jpg to folder</div><div class="toggle-sub">Saves artwork image alongside music files</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-savecover" onchange="saveSetting('save-cover-to-folder',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <!-- zhaarey / AMD -->
           <div class="settings-row mt8" id="cover-std-opts">
             <div class="field-group flex1">
-              <label class="lbl" data-i18n="set.019">Размер обложки</label>
+              <label class="lbl">Cover size</label>
               <select id="s-coversize" onchange="saveSetting('cover-size',this.value)">
                 <option>100x100</option><option>600x600</option><option>1200x1200</option>
                 <option>3000x3000</option><option>5000x5000</option><option>original</option>
               </select>
             </div>
             <div class="field-group" style="width:120px">
-              <label class="lbl" data-i18n="set.020">Формат</label>
+              <label class="lbl">Format</label>
               <select id="s-coverfmt" onchange="saveSetting('cover-format',this.value)">
                 <option>jpg</option><option>png</option><option>original</option>
               </select>
@@ -312,7 +319,7 @@
                   oninput="saveSetting('gamdl-cover-size',parseInt(this.value))"/>
               </div>
               <div class="field-group" style="width:110px">
-                <label class="lbl">Формат <span style="color:var(--blue);font-size:9px">gamdl</span></label>
+                <label class="lbl">Format <span style="color:var(--blue);font-size:9px">gamdl</span></label>
                 <select id="s-gamdl-coverfmt" onchange="saveSetting('gamdl-cover-format',this.value)">
                   <option value="jpg">jpg</option><option value="png">png</option><option value="raw">raw</option>
                 </select>
@@ -322,25 +329,25 @@
         </div>
 
         <div class="block mt12">
-          <div class="block-title" data-i18n="set.021">🏷 Теги и текст</div>
+          <div class="block-title">🏷 Tags &amp; Lyrics</div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label" data-i18n="set.022">Встроить LRC в файл</div></div>
+            <div class="toggle-info"><div class="toggle-label">Embed LRC in audio file</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-embedlrc" onchange="saveSetting('embed-lrc',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label" data-i18n="set.023">Сохранять .lrc файл</div></div>
+            <div class="toggle-info"><div class="toggle-label">Save .lrc file</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-savelrc" onchange="saveSetting('save-lrc-file',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="settings-row mt8" id="lrc-std-opts">
             <div class="field-group flex1">
-              <label class="lbl" data-i18n="set.024">Тип текста</label>
+              <label class="lbl">Lyric type</label>
               <select id="s-lrctype" onchange="saveSetting('lrc-type',this.value)">
-                <option value="lyrics" data-i18n="set.025">текст (синхрон.)</option>
-                <option value="syllable-lyrics" data-i18n="set.026">по словам (syllable)</option>
+                <option value="lyrics">lyrics (synced)</option>
+                <option value="syllable-lyrics">syllable-lyrics (word-by-word)</option>
               </select>
             </div>
             <div class="field-group" style="width:120px">
-              <label class="lbl" data-i18n="set.020">Формат</label>
+              <label class="lbl">Format</label>
               <select id="s-lrcfmt" onchange="saveSetting('lrc-format',this.value)">
                 <option>lrc</option><option>ttml</option>
               </select>
@@ -353,27 +360,27 @@
             <div style="font-size:10px;color:var(--blue);font-weight:600;margin:6px 0 4px">gamdl</div>
             <div class="settings-row">
               <div class="field-group flex1">
-                <label class="lbl" data-i18n="set.027">Формат синхро-текста</label>
+                <label class="lbl">Synced lyrics format</label>
                 <select id="s-gamdl-lrc" onchange="saveSetting('gamdl-synced-lyrics-format',this.value)">
                   <option value="lrc">LRC</option><option value="srt">SRT</option><option value="ttml">TTML</option>
                 </select>
               </div>
             </div>
             <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label" data-i18n="set.028">Без синхро-текста</div></div>
+              <div class="toggle-info"><div class="toggle-label">No synced lyrics</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-nolrc" onchange="saveSetting('gamdl-no-synced-lyrics',this.checked)"><div class="toggle-slider"></div></label>
             </div>
             <div class="toggle-row">
-              <div class="toggle-info"><div class="toggle-label" data-i18n="set.029">Только текст</div><div class="toggle-sub" data-i18n="set.030">Качать только текст, без аудио</div></div>
+              <div class="toggle-info"><div class="toggle-label">Lyrics only mode</div><div class="toggle-sub">Download only lyrics, skip audio</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-lrconly" onchange="saveSetting('gamdl-lyrics-only',this.checked)"><div class="toggle-slider"></div></label>
             </div>
             <div class="field-group mt8">
-              <label class="lbl" data-i18n="set.031">Исключить теги (через запятую)</label>
+              <label class="lbl">Exclude tags (comma-sep)</label>
               <input id="s-gamdl-exclude" placeholder="comment,compilation" style="font-family:var(--mono);font-size:11px"
                 oninput="saveSetting('gamdl-exclude-tags',this.value)"/>
             </div>
             <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label" data-i18n="set.032">Доп. теги</div><div class="toggle-sub" data-i18n="set.033">Данные нормализации и плавного воспроизведения</div></div>
+              <div class="toggle-info"><div class="toggle-label">Fetch extra tags</div><div class="toggle-sub">Normalization &amp; smooth playback data</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-extratags" onchange="saveSetting('gamdl-fetch-extra-tags',this.checked)"><div class="toggle-slider"></div></label>
             </div>
           </div>
@@ -384,14 +391,14 @@
             <div style="font-size:10px;color:var(--green);font-weight:600;margin:6px 0 4px">AMD</div>
             <div class="settings-row">
               <div class="field-group flex1">
-                <label class="lbl" data-i18n="set.034">Формат лирики</label>
+                <label class="lbl"><span data-i18n="s.lrc_fmt">Формат лирики</span></label>
                 <select id="s-amd-lrc" onchange="saveSetting('amd-lyrics-format',this.value)">
                   <option value="lrc">LRC</option><option value="ttml">TTML</option>
                 </select>
               </div>
             </div>
             <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label" data-i18n="set.035">Сохранять лирику</div></div>
+              <div class="toggle-info"><div class="toggle-label"><span data-i18n="s.save_lrc">Сохранять лирику</span></div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-amd-savelrc"
                 onchange="saveSetting('amd-save-lyrics',this.checked)"><div class="toggle-slider"></div></label>
             </div>
@@ -400,7 +407,7 @@
 
         <!-- ═══ Service colors ═══ -->
         <div class="block mt12">
-          <div class="block-title" data-i18n="set.036">🎨 Цвета сервисов</div>
+          <div class="block-title"><span data-i18n="s.svc_colors">🎨 Цвета сервисов</span></div>
           <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">
             По умолчанию — бренд-цвета. Можно переопределить под себя.
           </div>
@@ -408,7 +415,7 @@
             <!-- populated by JS: renderSvcColorGrid() -->
           </div>
           <div style="display:flex;gap:8px;margin-top:10px">
-            <button class="btn-ghost btn-sm" onclick="resetSvcColors()">↺ Сбросить к бренд-цветам</button>
+            <button class="btn-ghost btn-sm" onclick="resetSvcColors()"><span data-i18n="s.reset_colors">↺ Сбросить к бренд-цветам</span></button>
           </div>
         </div>
 
@@ -551,22 +558,22 @@
           <div style="margin-top:14px;font-size:11px;font-weight:700" data-i18n="s.wrapper_for">Wrapper для ALAC/Atmos</div>
           <div style="display:flex;background:var(--surface2);border:1px solid var(--border);border-radius:9px;overflow:hidden;padding:3px;gap:2px;margin-top:6px">
             <button id="aw-auto" onclick="setAppleWrapper('auto')"
-              style="flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_auto">Авто</button>
+              style="flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_auto"><span data-i18n="s.auto">Авто</span></button>
             <button id="aw-local" onclick="setAppleWrapper('local')"
-              style="display:none;flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_local">Локальный</button>
+              style="display:none;flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_local"><span data-i18n="s.local">Локальный</span></button>
             <button id="aw-public" onclick="setAppleWrapper('public')"
-              style="flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_public">Публичный</button>
+              style="flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_public"><span data-i18n="s.public">Публичный</span></button>
           </div>
           <div data-i18n-html="s.wrapper_modes_desc" style="margin-top:6px;font-size:11px;color:var(--muted);line-height:1.5">
-            <b>Публичный</b> — пул wm.wol.moe (без Apple ID, работает сразу).
-            <b>Авто</b> — публичный, а при своём wrapper'е — локальный для своего региона.
+            <b><span data-i18n="s.public">Публичный</span></b> — пул wm.wol.moe (без Apple ID, работает сразу).
+            <b><span data-i18n="s.auto">Авто</span></b> — публичный, а при своём wrapper'е — локальный для своего региона.
           </div>
           <!-- Advanced reveal for the own-premium local wrapper -->
           <div id="aw-advanced-link" style="margin-top:6px;font-size:11px">
-            <a href="#" onclick="revealLocalWrapper();return false" style="color:var(--blue);text-decoration:none">⚙️ Свой premium-wrapper (advanced)</a>
+            <a href="#" onclick="revealLocalWrapper();return false" style="color:var(--blue);text-decoration:none"><span data-i18n="s.own_premium">⚙️ Свой premium-wrapper (advanced)</span></a>
           </div>
           <div id="aw-local-desc" data-i18n-html="s.wrapper_local_desc" style="display:none;margin-top:6px;font-size:11px;color:var(--muted);line-height:1.5">
-            <b>Локальный</b> — свой Docker-образ <code>ripster-wrapper</code> со <b>своим</b> премиум Apple ID (надёжно, без зависаний). Требует Docker + сборку образа со своей учёткой ниже.
+            <b><span data-i18n="s.local">Локальный</span></b> — свой Docker-образ <code>ripster-wrapper</code> со <b>своим</b> премиум Apple ID (надёжно, без зависаний). Требует Docker + сборку образа со своей учёткой ниже.
           </div>
           <!-- Traffic-light: Docker is only ever needed for Apple lossless via the
                local wrapper. Everything else (and "Публичный") works without it. -->
@@ -618,6 +625,11 @@
         </div>
 
         <!-- ═══ Apple Music tokens (MUT + Bearer + Storefront) ═══ -->
+        <!-- Advanced: manual tokens/cookies live behind a collapsible <details> so
+             a clean install isn't overwhelmed. Most users never touch these — the
+             lossless wrapper carries its own session. -->
+        <details class="apple-adv" style="margin-top:12px">
+        <summary style="cursor:pointer;font-weight:700;color:var(--text);padding:8px 2px" data-i18n="s.apple_adv_tokens">🔑 Токены и cookies (продвинутое — обычно не нужно)</summary>
         <div class="block mt12">
           <div class="block-title" data-i18n="s.tokens">🔑 Токены</div>
 
@@ -675,10 +687,10 @@
           <!-- Apple cookies.txt (gamdl: AAC / music videos) -->
           <div class="field-group" style="grid-column:1/-1;margin-top:14px">
             <label class="lbl">
-              🍪 cookies.txt (gamdl — AAC / клипы)
+              <span data-i18n="s.cookies_label">🍪 cookies.txt (gamdl — AAC / клипы)</span>
               <span id="apple-cookies-status" style="font-size:10px;color:var(--muted);margin-left:6px"></span>
             </label>
-            <div style="font-size:10.5px;color:var(--muted);line-height:1.55;margin:2px 0 6px">
+            <div style="font-size:10.5px;color:var(--muted);line-height:1.55;margin:2px 0 6px" data-i18n-html="s.cookies_help">
               Экспортируй cookies с залогиненного <b>music.apple.com</b> (расширение «Get cookies.txt» / Netscape-формат) и вставь сюда. Нужно для <b>gamdl</b> (AAC, музыкальные клипы); для ALAC/Atmos через wrapper — не требуется.
             </div>
             <textarea id="apple-cookies" rows="5" spellcheck="false"
@@ -686,23 +698,22 @@
               style="width:100%;font-family:monospace;font-size:11px;background:rgba(0,0,0,.25);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px;resize:vertical"></textarea>
             <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
-                onclick="document.getElementById('apple-cookies-file').click()" data-i18n-title="set.037" title="Выбрать файл cookies.txt из проводника">📂 Выбрать файл cookies.txt</button>
+                onclick="document.getElementById('apple-cookies-file').click()" title="Выбрать файл cookies.txt из проводника"><span data-i18n="s.pick_cookies">📂 Выбрать файл cookies.txt</span></button>
               <input type="file" id="apple-cookies-file" accept=".txt,text/plain" style="display:none" onchange="importAppleCookiesFile(this)"/>
               <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
-                onclick="(async()=>{const el=document.getElementById('apple-cookies'),st=document.getElementById('apple-cookies-status');st.textContent='…';try{const r=await api('POST','/api/apple/cookies',{text:el.value});st.textContent=r&&r.ok?(r.exists?('✅ Сохранено: '+r.lines+' cookies'+(r.looks_apple?'':' ⚠ нет apple.com')):'🗑 очищено'):('✗ '+((r&&r.error)||'ошибка'));st.style.color=r&&r.ok?'var(--green,#30d158)':'#fc3c44';}catch(e){st.textContent='✗ '+e;st.style.color='#fc3c44';}})()">💾 Сохранить cookies</button>
+                onclick="(async()=>{const el=document.getElementById('apple-cookies'),st=document.getElementById('apple-cookies-status');st.textContent='…';try{const r=await api('POST','/api/apple/cookies',{text:el.value});st.textContent=r&&r.ok?(r.exists?('✅ Сохранено: '+r.lines+' cookies'+(r.looks_apple?'':' ⚠ нет apple.com')):'🗑 очищено'):('✗ '+((r&&r.error)||'ошибка'));st.style.color=r&&r.ok?'var(--green,#30d158)':'#fc3c44';}catch(e){st.textContent='✗ '+e;st.style.color='#fc3c44';}})()"><span data-i18n="s.save_cookies">💾 Сохранить cookies</span></button>
               <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.08);color:#fc3c44;border:1px solid rgba(252,60,68,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
-                onclick="(async()=>{const st=document.getElementById('apple-cookies-status');try{const r=await api('GET','/api/apple/cookies-status');st.textContent=r&&r.exists?('✅ установлено: '+r.lines+' cookies'):'— не задано';st.style.color='var(--muted)';}catch(e){}})()">🔄 Статус</button>
+                onclick="(async()=>{const st=document.getElementById('apple-cookies-status');try{const r=await api('GET','/api/apple/cookies-status');st.textContent=r&&r.exists?('✅ установлено: '+r.lines+' cookies'):'— не задано';st.style.color='var(--muted)';}catch(e){}})()"><span data-i18n="s.refresh_status">🔄 Статус</span></button>
             </div>
           </div>
         </div>
+        </details>
 
         <!-- ═══ Quality selector ═══ -->
         <div class="block mt12">
           <div class="block-title" data-i18n="s.quality">🎚 Качество</div>
           <div id="quality-grid" class="qgrid"></div>
         </div>
-        <details class="adv-block" style="margin-top:12px">
-          <summary style="cursor:pointer;padding:11px 14px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:9px;font-size:12px;font-weight:700;color:var(--text);user-select:none">Расширенные настройки Apple <span style="font-weight:400;color:var(--muted)">— wrapper, декрипт, кодеки, лирика, порты</span></summary>
         <div class="block mt12" id="zhaarey-settings-block">
           <div class="block-title" data-i18n="s.wrapper_title">⚙️ Wrapper / Decryption</div>
           <div data-i18n-html="s.wrapper_help" style="font-size:10.5px;color:var(--muted);line-height:1.6;margin:2px 0 12px;padding:9px 12px;background:rgba(192,132,160,.06);border:1px solid rgba(192,132,160,.18);border-radius:8px">
@@ -1052,8 +1063,8 @@
               </div>
             </div>
             <div style="font-size:10px;color:var(--muted);line-height:1.5;margin-bottom:8px" data-i18n-html="as.wrapper_hint">
-              <b style="color:var(--text)">▶ Запустить</b> — использует сохранённую сессию, 2FA не нужна.<br>
-              <b style="color:var(--orange)">🔄 Войти заново</b> — только если сессия истекла и нужна новая авторизация.
+              <b style="color:var(--text)"><span data-i18n="s.run">▶ Запустить</span></b> — использует сохранённую сессию, 2FA не нужна.<br>
+              <b style="color:var(--orange)"><span data-i18n="s.relogin">🔄 Войти заново</span></b> — только если сессия истекла и нужна новая авторизация.
             </div>
             <div class="code-block" style="font-size:10px">docker run -v ./rootfs/data:/app/rootfs/data \
   -p 10020:10020 -p 20020:20020 \
@@ -1061,7 +1072,6 @@
   ghcr.io/itouakirai/wrapper:x86</div>
           </div>
 
-        </details><!-- /Расширенные Apple -->
           <!-- ── Unified save row (matches Qobuz/Deezer/Tidal/SC/BP layout) ── -->
           <div class="block mt12">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1083,7 +1093,7 @@
             <div class="settings-grid">
               <div class="field-group">
                 <label class="lbl">user-id</label>
-                <input id="s-qobuz-userid" data-i18n-ph="set.038" placeholder="Цифры из cookie user-id"
+                <input id="s-qobuz-userid" placeholder="Цифры из cookie user-id"
                   style="font-family:var(--mono);font-size:11px"
                   oninput="saveSetting('qobuz-user-id',this.value)"/>
               </div>
@@ -1104,10 +1114,8 @@
             </div>
           </div>
 
-          <!-- Fallback: email + password (advanced — token mode is preferred) -->
-          <details style="margin-bottom:10px">
-            <summary style="cursor:pointer;font-size:11px;color:var(--muted);padding:4px 0;user-select:none">▸ Или войти по email + паролю</summary>
-          <div style="background:rgba(0,0,0,.15);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-top:8px;margin-bottom:10px">
+          <!-- Fallback: email + password -->
+          <div style="background:rgba(0,0,0,.15);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-bottom:10px">
             <div style="font-size:11px;font-weight:700;color:var(--muted);margin-bottom:8px" data-i18n="s.qobuz_or_pass">Или email + пароль (если не удалось достать токен)</div>
             <div class="settings-grid">
               <div class="field-group">
@@ -1116,7 +1124,7 @@
                   oninput="saveSetting('qobuz-email',this.value)"/>
               </div>
               <div class="field-group">
-                <label class="lbl" data-i18n="s.qobuz_pass">Пароль</label>
+                <label class="lbl" data-i18n="s.qobuz_pass"><span data-i18n="s.password">Пароль</span></label>
                 <input id="s-qobuz-pass" type="password" placeholder="••••••••"
                   oninput="saveSetting('qobuz-password',this.value)"/>
               </div>
@@ -1129,7 +1137,6 @@
               <div id="qobuz-pw-status" style="font-size:11px;color:var(--muted);flex:1;min-width:180px"></div>
             </div>
           </div>
-          </details><!-- /email+password -->
 
           <!-- Optional app_id / secrets override -->
           <details style="margin-bottom:10px">
@@ -1154,7 +1161,7 @@
 
           <div class="settings-grid">
             <div class="field-group">
-              <label class="lbl" data-i18n="s.qobuz_quality">Качество по умолчанию</label>
+              <label class="lbl" data-i18n="s.qobuz_quality"><span data-i18n="s.def_quality">Качество по умолчанию</span></label>
               <select id="s-qobuz-qual" onchange="saveSetting('qobuz-quality',this.value)">
                 <option value="27" data-i18n="s.qobuz_q27">24bit / 192kHz — Hi-Res максимум</option>
                 <option value="7" data-i18n="s.qobuz_q7">24bit / 96kHz — Hi-Res стандарт</option>
@@ -1196,7 +1203,7 @@
 
           <div class="settings-grid">
             <div class="field-group">
-              <label class="lbl" data-i18n="s.qobuz_quality">Качество по умолчанию</label>
+              <label class="lbl" data-i18n="s.qobuz_quality"><span data-i18n="s.def_quality">Качество по умолчанию</span></label>
               <select id="s-deezer-qual" onchange="saveSetting('deezer-quality',this.value)">
                 <option value="flac">FLAC — Lossless</option>
                 <option value="mp3_320">MP3 320kbps</option>
@@ -1234,7 +1241,7 @@
 
           <div class="settings-grid">
             <div class="field-group">
-              <label class="lbl" data-i18n="s.qobuz_quality">Качество по умолчанию</label>
+              <label class="lbl" data-i18n="s.qobuz_quality"><span data-i18n="s.def_quality">Качество по умолчанию</span></label>
               <select id="s-amazon-qual" onchange="saveSetting('amazon-quality',this.value)">
                 <option value="High">HD — FLAC 16/44</option>
                 <option value="Master">Hi-Res — 24/96</option>
@@ -1258,7 +1265,7 @@
                Manual token fields below stay as an advanced fallback. -->
           <div style="background:rgba(0,212,179,.06);border:1px solid rgba(0,212,179,.15);border-radius:9px;padding:10px 12px;margin-bottom:10px">
             <div style="font-size:11px;font-weight:700;color:#00d4b3;margin-bottom:6px" data-i18n="s.tidal_quick_login">🔗 Быстрый вход (рекомендуется)</div>
-            <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:8px">
+            <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:8px" data-i18n-html="s.tidal_quick_help">
               Нажми «Войти в Tidal» → откроется <code>link.tidal.com</code>, введи показанный код и подтверди вход в аккаунт. Сессия сохранится сама и будет обновляться без ручных токенов.
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1267,7 +1274,7 @@
             </div>
             <!-- Live session status: device-flow is self-refreshing, so this is
                  the real "is Tidal working" signal (not the manual JWT expiry). -->
-            <div id="tidal-tok-expiry" style="font-size:11px;font-weight:600;margin-top:8px;color:var(--muted)">⏳ Проверяю сессию…</div>
+            <div id="tidal-tok-expiry" style="font-size:11px;font-weight:600;margin-top:8px;color:var(--muted)" data-i18n="s.tidal_checking">⏳ Проверяю сессию…</div>
           </div>
 
           <!-- Manual tokens — advanced fallback only. The device-flow login above
@@ -1292,7 +1299,7 @@
               </div>
               <div class="field-group">
                 <label class="lbl">user_id</label>
-                <input id="s-tidal-userid" data-i18n-ph="set.039" placeholder="цифры"
+                <input id="s-tidal-userid" placeholder="цифры"
                   style="font-family:var(--mono);font-size:11px"
                   oninput="saveSetting('tidal-user-id',this.value)"/>
               </div>
@@ -1304,7 +1311,7 @@
               </div>
               <div class="field-group" style="grid-column:1/-1">
                 <label class="lbl" data-i18n="s.tidal_expiry">token_expiry (Unix timestamp, опционально)</label>
-                <input id="s-tidal-expiry" data-i18n-ph="set.040" placeholder="9999999999 (= никогда)"
+                <input id="s-tidal-expiry" placeholder="9999999999 (= никогда)"
                   style="font-family:var(--mono);font-size:11px"
                   oninput="saveSetting('tidal-token-expiry',this.value)"/>
               </div>
@@ -1331,8 +1338,8 @@
               <textarea id="tidal-import-json" rows="7" placeholder='{"token_type": "Bearer", "access_token": "eyJ...", "refresh_token": "eyJ...", "expiry_time": "2025-05-20T12:34:56"}'
                 style="width:100%;box-sizing:border-box;font-family:var(--mono);font-size:10px;background:var(--surface);border:1px solid var(--border);border-radius:7px;padding:8px;color:var(--text);resize:vertical;outline:none"></textarea>
               <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
-                <button class="btn-sm" onclick="importTidalToken()" style="padding:6px 14px;background:#00d4b3;color:#000;border:none;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font)">Импортировать</button>
-                <button class="btn-sm" onclick="toggleTidalImport()" style="padding:6px 12px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;font-family:var(--font)">Отмена</button>
+                <button class="btn-sm" onclick="importTidalToken()" style="padding:6px 14px;background:#00d4b3;color:#000;border:none;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font)" data-i18n="s.import_btn">Импортировать</button>
+                <button class="btn-sm" onclick="toggleTidalImport()" style="padding:6px 12px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;font-family:var(--font)" data-i18n="s.cancel">Отмена</button>
                 <div id="tidal-import-msg" style="font-size:11px;flex:1"></div>
               </div>
             </div>
@@ -1341,7 +1348,7 @@
 
           <div class="settings-grid">
             <div class="field-group">
-              <label class="lbl" data-i18n="s.qobuz_quality">Качество по умолчанию</label>
+              <label class="lbl" data-i18n="s.qobuz_quality"><span data-i18n="s.def_quality">Качество по умолчанию</span></label>
               <select id="s-tidal-qual" onchange="saveSetting('tidal-quality',this.value)">
                 <option value="hi_res" data-i18n="s.tidal_q_hires">Hi-Res / MQA — 24-bit до 192kHz</option>
                 <option value="lossless" data-i18n="s.tidal_q_lossless">FLAC 16/44.1 — HiFi</option>
@@ -1382,18 +1389,18 @@
               <div class="field-group flex1">
                 <label class="lbl" data-i18n="s.sp_period">Период новых релизов</label>
                 <select id="s-sp-days" onchange="saveSetting('spotify-release-days',parseInt(this.value))">
-                  <option value="7" data-i18n="sp.days_7">7 дней</option>
-                  <option value="14" data-i18n="sp.days_14">14 дней</option>
-                  <option value="30" data-i18n="sp.days_30">30 дней</option>
-                  <option value="90" data-i18n="sp.days_90">3 месяца</option>
+                  <option value="7" data-i18n="sp.days_7"><span data-i18n="s.days_7">7 дней</span></option>
+                  <option value="14" data-i18n="sp.days_14"><span data-i18n="s.days_14">14 дней</span></option>
+                  <option value="30" data-i18n="sp.days_30"><span data-i18n="s.days_30">30 дней</span></option>
+                  <option value="90" data-i18n="sp.days_90"><span data-i18n="s.months_3">3 месяца</span></option>
                 </select>
               </div>
               <div class="field-group flex1">
-                <label class="lbl" data-i18n="s.sp_types">Типы релизов</label>
+                <label class="lbl" data-i18n="s.sp_types"><span data-i18n="s.rel_types">Типы релизов</span></label>
                 <select id="s-sp-types" onchange="saveSetting('spotify-release-types',this.value)">
-                  <option value="album,single" data-i18n="rel_type.album_single">Альбомы + синглы</option>
-                  <option value="album" data-i18n="rel_type.album">Только альбомы</option>
-                  <option value="single" data-i18n="rel_type.single">Только синглы</option>
+                  <option value="album,single" data-i18n="rel_type.album_single"><span data-i18n="s.rt_albsing">Альбомы + синглы</span></option>
+                  <option value="album" data-i18n="rel_type.album"><span data-i18n="s.rt_alb">Только альбомы</span></option>
+                  <option value="single" data-i18n="rel_type.single"><span data-i18n="s.rt_sing">Только синглы</span></option>
                 </select>
               </div>
             </div>
@@ -1417,7 +1424,7 @@
                   </div>
                 </div>
                 <button onclick="resetSpotifyDefaultTarget()" data-i18n="s.sp_reset"
-                  style="padding:5px 11px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;font-family:var(--font)">Сбросить</button>
+                  style="padding:5px 11px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;font-family:var(--font)"><span data-i18n="s.reset_btn">Сбросить</span></button>
               </div>
             </div>
 
@@ -1433,7 +1440,7 @@
                   <div style="display:flex;align-items:center;gap:10px">
                     <div id="sp-avatar" style="width:32px;height:32px;border-radius:50%;background:rgba(29,185,84,.2);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0">♪</div>
                     <div>
-                      <div id="sp-name" style="font-size:12px;font-weight:600;color:var(--text)">Не подключён</div>
+                      <div id="sp-name" style="font-size:12px;font-weight:600;color:var(--text)"><span data-i18n="s.not_connected">Не подключён</span></div>
                       <div id="sp-email" style="font-size:10px;color:var(--muted)"></div>
                     </div>
                     <div style="margin-left:auto;display:flex;gap:6px">
@@ -1491,14 +1498,12 @@
             </details>
           </div>
 
-          <!-- ─ Блок 2: Скачивание (advanced — ручной web-player токен) ──── -->
-          <details style="margin-top:12px">
-            <summary style="cursor:pointer;padding:11px 14px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:9px;font-size:12px;font-weight:700;color:var(--text);user-select:none">Скачивание Spotify-треков напрямую <span style="font-weight:400;color:var(--muted)">— ручной Bearer-токен</span></summary>
-          <div class="block mt12" style="border:1px solid rgba(29,185,84,.25);border-radius:10px;padding:14px;margin-top:8px">
+          <!-- ─ Блок 2: Скачивание ──────────────────────────────────────── -->
+          <div class="block mt12" style="border:1px solid rgba(29,185,84,.25);border-radius:10px;padding:14px">
             <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
               <span style="font-size:15px">⬇</span>
               <div style="font-weight:600;font-size:13px;color:var(--text)" data-i18n="sp.dl_title">Скачивание Spotify-треков</div>
-              <div id="orp-badge" style="margin-left:auto;font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;background:rgba(255,255,255,.07);color:var(--muted)">не авторизован</div>
+              <div id="orp-badge" style="margin-left:auto;font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;background:rgba(255,255,255,.07);color:var(--muted)"><span data-i18n="s.not_authed">не авторизован</span></div>
             </div>
             <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:12px" data-i18n="sp.dl_desc">
               OrpheusDL — PKCE OAuth (Apple ID, Google, обычный аккаунт). OGG ~320 kbps, нужен Spotify Premium.
@@ -1520,15 +1525,10 @@
                 <span id="sp-token-status" style="font-size:11px;color:var(--muted)"></span>
               </div>
 
-              <!-- Auto-sync status + extension push log -->
-              <div style="margin-top:10px;padding-top:10px;border-top:1px dashed rgba(255,255,255,.1)">
-                <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
-                  <span style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.6px" data-i18n="sp.autosync">🔄 Авто-синк (расширение)</span>
-                  <span id="sp-tok-fresh" style="font-size:11px;margin-left:auto">—</span>
-                  <button class="btn-ghost btn-sm" style="padding:2px 8px;font-size:10px" onclick="loadSpotifyTokenStatus()">↺</button>
-                </div>
-                <div id="sp-push-log" style="font-family:var(--mono);font-size:10px;color:var(--muted);max-height:120px;overflow:auto;background:rgba(0,0,0,.2);border-radius:6px;padding:6px 8px;line-height:1.6" data-i18n="sp.pushlog_hint">Нажми ↺ или открой вкладку.</div>
-              </div>
+              <!-- Extension auto-sync push-log removed: it required a browser
+                   extension most users never install and only showed a confusing
+                   "token expired N min ago / no pushes yet" line. The manual
+                   web-token paste above is the primary path. -->
             </div>
 
             <!-- Auth status bar -->
@@ -1577,13 +1577,12 @@
             <div class="toggle-row" style="margin-bottom:10px">
               <div class="toggle-info">
                 <div class="toggle-label" data-i18n="sp.orp_mode_label">Использовать OrpheusDL вместо конвертации</div>
-                <div id="orp-toggle-sub" class="toggle-sub">Spotify-ссылки идут в очередь напрямую</div>
+                <div id="orp-toggle-sub" class="toggle-sub"><span data-i18n="s.sp_direct">Spotify-ссылки идут в очередь напрямую</span></div>
               </div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-orp-mode"
                 onchange="setOrpheusMode(this.checked)"><div class="toggle-slider"></div></label>
             </div>
           </div>
-          </details><!-- /Spotify Скачивание -->
 
           <!-- ── Unified save row (matches Apple/Qobuz/Deezer/Tidal/SC/BP layout) ── -->
           <div class="block mt12">
@@ -1601,9 +1600,9 @@
         <div class="block mt12">
           <div class="block-title" style="color:#ff5500">🎵 SoundCloud</div>
 
-          <!-- Engine install -->
+          <!-- Engine install moved to the Setup tab (centralised installers). -->
           <div style="margin-top:8px;padding:10px 12px;background:rgba(255,85,0,.04);border:1px solid rgba(255,85,0,.12);border-radius:8px">
-            <div style="font-size:11px;color:var(--muted);line-height:1.6">
+            <div style="font-size:11px;color:var(--muted);line-height:1.6" data-i18n-html="sc.install_note">
               ⬇ Установка движка SoundCloud (Node.js + Lucida) — во вкладке
               <b style="color:#ff5500">⚙️ Setup</b> → кнопка «SoundCloud (Node + Lucida)».
               Здесь — только OAuth-токен и настройки.
@@ -1646,10 +1645,9 @@
                 <button class="btn-ghost btn-sm btn-icon" onclick="const f=document.getElementById('s-sc-oauth');f.type=f.type==='password'?'text':'password'" data-i18n-title="s.show_hide" title="Показать/скрыть">👁</button>
               </div>
             </div>
-            <!-- ── Widevine L3 CDM (advanced — для DRM треков, миксов и приватных ссылок) ── -->
-            <details style="margin-top:10px">
-              <summary style="cursor:pointer;padding:10px 13px;background:rgba(255,85,0,.05);border:1px solid rgba(255,85,0,.18);border-radius:9px;font-size:12px;font-weight:700;color:#ff7a33;user-select:none">🔐 Widevine L3 CDM <span style="font-weight:400;color:var(--muted)">— для DRM-треков (миксы, приваты)</span></summary>
-            <div class="block" style="margin-top:8px;background:rgba(255,85,0,.04);border:1px solid rgba(255,85,0,.18)">
+            <!-- ── Widevine L3 CDM (для DRM треков, миксов и приватных ссылок) ── -->
+            <div class="block" style="margin-top:10px;background:rgba(255,85,0,.04);border:1px solid rgba(255,85,0,.18)">
+              <div class="block-title" style="color:#ff7a33;font-size:11px" data-i18n="sc.wvd_title">🔐 Widevine L3 CDM (опционально)</div>
               <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:8px" data-i18n-html="sc.wvd_desc">
                 Lucida не дешифрует DRM-защищённые SC треки (миксы, приваты, большинство Go+ с 2024).
                 Загрузи L3 <code>device.wvd</code> — Ripster будет сам делать Widevine handshake и сохранять AAC 256k.
@@ -1691,7 +1689,6 @@
                 Полезно для релизов и популярных миксов (есть на Deezer/Apple). Бесполезно для приватных и эксклюзивных SC миксов — их нет нигде кроме SC.
               </div>
             </div>
-            </details><!-- /SoundCloud WVD -->
 
             <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('soundcloud')" style="padding:6px 12px;background:rgba(255,85,0,.18);color:#ff5500;border:1px solid rgba(255,85,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.save_btn">💾 Сохранить</button>
@@ -1712,7 +1709,7 @@
                   style="font-family:var(--mono);font-size:11px"/>
               </div>
               <div class="field-group mt6">
-                <label class="lbl" data-i18n="s.qobuz_pass">Пароль</label>
+                <label class="lbl" data-i18n="s.qobuz_pass"><span data-i18n="s.password">Пароль</span></label>
                 <input id="s-sc-pass" type="password" autocomplete="current-password" placeholder="••••••••"
                   style="font-family:var(--mono);font-size:11px"/>
               </div>
@@ -1730,20 +1727,20 @@
         <div class="stab-panel owner-only" id="stab-beatport">
         <div class="block mt12">
           <div class="block-title" style="color:#01f49c">🎵 Beatport</div>
-          <div style="font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.6">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:12px;line-height:1.6" data-i18n="bp.dl_note">
             Скачивание через OrpheusDL. Уровни качества — в селекторе ниже.
           </div>
 
           <!-- Install status -->
           <div id="bp-install-status" style="display:none;align-items:center;gap:10px;margin-bottom:12px;padding:10px 14px;background:rgba(1,244,156,.07);border:1px solid rgba(1,244,156,.2);border-radius:9px">
             <div style="flex:1">
-              <div style="font-size:12px;font-weight:700;color:#01f49c" id="bp-install-label">✓ Модуль установлен</div>
+              <div style="font-size:12px;font-weight:700;color:#01f49c" id="bp-install-label"><span data-i18n="s.module_ok">✓ Модуль установлен</span></div>
             </div>
           </div>
 
           <!-- Clone instruction + install button -->
           <div id="bp-clone-section" style="margin-bottom:12px;padding:10px 12px;background:rgba(1,244,156,.05);border:1px solid rgba(1,244,156,.14);border-radius:8px">
-            <div style="font-size:11px;font-weight:700;color:#01f49c;margin-bottom:4px">Установка модуля</div>
+            <div style="font-size:11px;font-weight:700;color:#01f49c;margin-bottom:4px" data-i18n="s.bp_install">Установка модуля</div>
             <div style="font-size:10px;color:var(--muted);margin-bottom:8px">
               Или вручную в папку <code style="background:rgba(255,255,255,.06);padding:1px 4px;border-radius:3px">orpheus/modules/beatport/</code>:
             </div>
@@ -1759,13 +1756,13 @@
           <div id="bp-reinstall-section" style="display:none;margin-bottom:12px">
             <button onclick="installBeatportModule()"
               style="padding:5px 12px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:10px;cursor:pointer;font-family:var(--font)">
-              ↻ Переустановить модуль
+              ↻ <span data-i18n="bp.reinstall">Переустановить модуль</span>
             </button>
           </div>
 
           <!-- Credentials -->
           <div style="margin-bottom:10px">
-            <div style="font-size:11px;font-weight:700;color:#01f49c;margin-bottom:8px">Аккаунт Beatport</div>
+            <div style="font-size:11px;font-weight:700;color:#01f49c;margin-bottom:8px" data-i18n="s.bp_account">Аккаунт Beatport</div>
             <div class="field-group" style="margin-bottom:8px">
               <label class="lbl">Email / Username</label>
               <input id="s-bp-user" type="email" placeholder="your@email.com"
@@ -1773,8 +1770,8 @@
                 style="font-family:var(--mono);font-size:11px"/>
             </div>
             <div class="field-group" style="margin-bottom:8px">
-              <label class="lbl" data-i18n="set.041">Пароль</label>
-              <input id="s-bp-pass" type="password" data-i18n-ph="set.042" placeholder="Пароль Beatport"
+              <label class="lbl"><span data-i18n="s.password">Пароль</span></label>
+              <input id="s-bp-pass" type="password" placeholder="Пароль Beatport"
                 oninput="saveSetting('beatport-password',this.value)"
                 style="font-family:var(--mono);font-size:11px"/>
             </div>
@@ -1793,7 +1790,7 @@
 
           <!-- Quality + save path -->
           <div class="field-group mt8">
-            <label class="lbl" data-i18n="set.043">Качество по умолчанию</label>
+            <label class="lbl"><span data-i18n="s.def_quality">Качество по умолчанию</span></label>
             <select id="s-bp-quality" onchange="saveSetting('beatport-quality',this.value)"
               style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:7px 10px;font-size:12px;font-family:var(--font);cursor:pointer">
               <option value="hifi">FLAC 16-bit (Professional)</option>
@@ -1808,7 +1805,7 @@
         <!-- ══════════ YANDEX TAB ══════════ -->
         <div class="stab-panel" id="stab-yandex">
         <div class="block mt12">
-          <div class="block-title" style="color:#ffcc00" data-i18n="set.044">🟡 Яндекс.Музыка</div>
+          <div class="block-title" style="color:#ffcc00"><span data-i18n="s.yandex">🟡 Яндекс.Музыка</span></div>
 
           <div style="background:rgba(255,204,0,.06);border:1px solid rgba(255,204,0,.18);border-radius:9px;padding:10px 12px;margin-bottom:10px">
             <div style="font-size:11px;font-weight:700;color:#ffcc00;margin-bottom:8px" data-i18n="ya.oauth">🔑 OAuth токен</div>
@@ -1822,8 +1819,8 @@
               </div>
             </div>
             <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5" data-i18n-html="ya.howto">
-              <b>Способ 1 — код:</b> «Получить токен» → введи код на ya.ru/device.<br>
-              <b>Способ 2 — браузер (надёжнее):</b> «Через браузер» → войди → попадёшь
+              <b><span data-i18n="s.method1">Способ 1 — код:</span></b> «Получить токен» → введи код на ya.ru/device.<br>
+              <b><span data-i18n="s.method2">Способ 2 — браузер (надёжнее):</span></b> «Через браузер» → войди → попадёшь
               на music.yandex.ru → <b>скопируй из адресной строки весь URL</b> и вставь
               в поле ниже (я сам выну токен).<br>
               Без токена — только 30-сек превью. FLAC требует подписки Яндекс Плюс.
@@ -1835,7 +1832,7 @@
             </div>
             <div class="field-group" style="margin-top:10px">
               <label class="lbl" data-i18n="ya.paste_label">Вставь URL после входа (или сам токен)</label>
-              <input id="s-yandex-paste" data-i18n-ph="set.045" placeholder="music.yandex.ru/#access_token=…  или  AQAA…"
+              <input id="s-yandex-paste" placeholder="music.yandex.ru/#access_token=…  или  AQAA…"
                 style="font-family:var(--mono);font-size:11px"
                 oninput="yandexSaveToken(this.value)"/>
             </div>
@@ -1843,7 +1840,7 @@
 
           <div class="settings-grid">
             <div class="field-group">
-              <label class="lbl" data-i18n="s.default_quality">Качество по умолчанию</label>
+              <label class="lbl" data-i18n="s.default_quality"><span data-i18n="s.def_quality">Качество по умолчанию</span></label>
               <select id="s-yandex-qual" onchange="saveSetting('yandex-quality',this.value)">
                 <option value="flac">FLAC — Lossless</option>
                 <option value="aac_192">AAC 192kbps</option>
@@ -1865,8 +1862,8 @@
         <!-- ══════════ RELEASES TAB ══════════ -->
         <div class="stab-panel" id="stab-releases">
         <div class="block mt12">
-          <div class="block-title" data-i18n="set.046">📡 Радар релизов</div>
-          <div style="font-size:11px;color:var(--muted);margin-bottom:12px">Выбери сервисы для сканирования новых релизов. Сервис скрыт если нет токена.</div>
+          <div class="block-title"><span data-i18n="s.rel_radar">📡 Радар релизов</span></div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:12px"><span data-i18n="s.radar_pick">Выбери сервисы для сканирования новых релизов. Сервис скрыт если нет токена.</span></div>
 
           <div style="display:flex;flex-direction:column;gap:8px;margin-bottom:14px">
             <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
@@ -1897,21 +1894,21 @@
               <label class="lbl" data-i18n="s.rel_period">Период по умолчанию</label>
               <select id="rel-cfg-days" onchange="saveSetting('releases-days',this.value)"
                 style="padding:6px 8px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);width:100%;outline:none">
-                <option value="7" data-i18n="set.047">7 дней</option>
-                <option value="14" data-i18n="set.048">14 дней</option>
-                <option value="30" data-i18n="set.049">30 дней</option>
-                <option value="90" data-i18n="set.050">3 месяца</option>
-                <option value="180" data-i18n="set.051">6 месяцев</option>
+                <option value="7"><span data-i18n="s.days_7">7 дней</span></option>
+                <option value="14"><span data-i18n="s.days_14">14 дней</span></option>
+                <option value="30"><span data-i18n="s.days_30">30 дней</span></option>
+                <option value="90"><span data-i18n="s.months_3">3 месяца</span></option>
+                <option value="180"><span data-i18n="s.months_6">6 месяцев</span></option>
               </select>
             </div>
             <div class="field-group" style="flex:1;min-width:160px">
-              <label class="lbl" data-i18n="set.052">Типы релизов</label>
+              <label class="lbl"><span data-i18n="s.rel_types">Типы релизов</span></label>
               <select id="rel-cfg-types" onchange="saveSetting('releases-types',this.value)"
                 style="padding:6px 8px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);width:100%;outline:none">
-                <option value="album,single" data-i18n="set.053">Альбомы + синглы</option>
-                <option value="album" data-i18n="set.054">Только альбомы</option>
-                <option value="single" data-i18n="set.055">Только синглы</option>
-                <option value="album,single,appears_on,compilation" data-i18n="set.056">Всё</option>
+                <option value="album,single"><span data-i18n="s.rt_albsing">Альбомы + синглы</span></option>
+                <option value="album"><span data-i18n="s.rt_alb">Только альбомы</span></option>
+                <option value="single"><span data-i18n="s.rt_sing">Только синглы</span></option>
+                <option value="album,single,appears_on,compilation"><span data-i18n="s.rt_all">Всё</span></option>
               </select>
             </div>
           </div>
