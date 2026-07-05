@@ -157,9 +157,35 @@ def _blob_path() -> Path:
     return _orpheus_dir() / "config" / ".librespot_cache" / "reusable_credentials.json"
 
 
+def _blob_bak_path() -> Path:
+    """Backup the re-login flow (routes/core.py spotify_auth_start) parks the live
+    blob into before opening a browser OAuth. An ABANDONED re-login (browser closed
+    without finishing) used to strand the durable credential here forever, so
+    downloads died with ORPHEUS_NOT_AUTHED even though the account was still valid."""
+    return _orpheus_dir() / "config" / ".librespot_cache" / "reusable_credentials.json.bak"
+
+
+def _heal_blob() -> bool:
+    """Self-heal: if the live blob is missing but a backup exists, restore it.
+    Makes Spotify auth autonomous — an interrupted re-login can no longer log the
+    account out permanently. Returns True if a usable blob exists afterwards."""
+    live, bak = _blob_path(), _blob_bak_path()
+    if live.exists():
+        return True
+    if bak.exists():
+        try:
+            import shutil as _sh
+            _sh.copy2(bak, live)   # copy, not move — keep the backup as a safety net
+            return True
+        except OSError:
+            return bak.exists()
+    return False
+
+
 def is_authenticated() -> bool:
     # Durable desktop/zeroconf blob is a full, long-lived credential — prefer it.
-    if _blob_path().exists():
+    # Self-heal from the .bak an abandoned re-login may have left behind.
+    if _heal_blob():
         return True
     p = _creds_path()
     if not p.exists():

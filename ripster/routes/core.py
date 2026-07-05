@@ -362,9 +362,13 @@ async def spotify_auth_start(body: dict = None):
             pass
     P["cache"].mkdir(parents=True, exist_ok=True)
     # Back up an existing blob so a failed re-login can be restored (status does it).
+    # COPY (not move): the live blob must keep working during the browser OAuth so an
+    # ABANDONED re-login (browser closed without finishing) never logs the account
+    # out. is_authenticated()/_heal_blob() also restore from .bak as a safety net.
     if P["blob"].exists():
         try:
-            P["blob"].replace(P["bak"])
+            import shutil as _sh
+            _sh.copy2(P["blob"], P["bak"])
         except Exception:
             pass
     for f in ("url", "done", "err"):
