@@ -56,10 +56,8 @@ def _age_seconds(p: Path) -> float:
         return 1e9   # missing → infinitely stale → mint
 
 
-async def _mint_once(base_dir: Path) -> bool:
-    helper = _helper_path(base_dir)
+async def _run_helper(base_dir: Path, helper: Path) -> bool:
     if not helper.exists():
-        print(f"[sp-keeper] helper missing: {helper}", flush=True)
         return False
     env = dict(os.environ)
     env.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
@@ -72,15 +70,28 @@ async def _mint_once(base_dir: Path) -> bool:
             out, _ = await asyncio.wait_for(proc.communicate(), timeout=_MINT_TIMEOUT)
         except asyncio.TimeoutError:
             proc.kill()
-            print("[sp-keeper] mint timed out", flush=True)
+            print(f"[sp-keeper] {helper.name} timed out", flush=True)
             return False
         msg = (out or b"").decode("utf-8", "replace").strip()
         if msg:
             print(f"[sp-keeper] {msg.splitlines()[-1]}", flush=True)
         return proc.returncode == 0
     except Exception as e:
-        print(f"[sp-keeper] mint error: {e}", flush=True)
+        print(f"[sp-keeper] {helper.name} error: {e}", flush=True)
         return False
+
+
+async def _mint_once(base_dir: Path) -> bool:
+    # PRIMARY: the CORRECT token — a web-player bearer minted from the sp_dc cookie
+    # (the only kind api-partner/getTrack accepts). Works autonomously ONLY when a
+    # non-RU `spotify-proxy` + current TOTP secret are configured (Spotify blocks our
+    # RU IP with 403 and rotates the TOTP). See tools/spotify_web_token.py.
+    web = base_dir / "tools" / "spotify_web_token.py"
+    if await _run_helper(base_dir, web):
+        return True
+    # FALLBACK: librespot/keymaster bearer (works for some endpoints; often 401s on
+    # getTrack, but kept so nothing regresses where it still helps).
+    return await _run_helper(base_dir, _helper_path(base_dir))
 
 
 async def run(config, base_dir: Path) -> None:

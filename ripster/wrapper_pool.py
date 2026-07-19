@@ -204,7 +204,13 @@ def pool_enabled(config: dict) -> bool:
     no wrapper credentials are configured."""
     if docker is None:
         return False
-    if (config.get("apple-pool") in (False, "off", "0")):
+    # A SINGLE Apple account cannot sustain multiple concurrent wrapper
+    # sessions: every extra container does a fresh `-L` login and Apple trips
+    # "maximum concurrent playing devices" (lease code 3062), which breaks ALL
+    # Apple downloads until the leases expire. So the pool is strictly OPT-IN —
+    # it only runs when `apple-pool` is explicitly turned on (multi-account /
+    # advanced users). Absent or falsey → disabled.
+    if config.get("apple-pool") not in (True, "on", "1", 1):
         return False
     mode = (config.get("apple-wrapper") or "auto").strip().lower()
     if mode == "public":

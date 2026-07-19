@@ -175,6 +175,16 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict) -> None
         if save_path:
             gen["download_path"] = save_path.rstrip("/\\") + "\\"
 
+        # The owner's Beatport account has an active (Pro Plus) subscription, but the
+        # module's post-login `get_account()` introspect can transiently return an
+        # empty `subscription` (e.g. right after a refresh-token rotation), which
+        # makes OrpheusDL raise a FALSE "Account does not have an active 'Link'
+        # subscription" and blocks every download. Skip that check — a real lack of
+        # entitlement still surfaces later as a stream/territory error, so we lose no
+        # honesty, only the false-negative that paralysed Beatport for guests.
+        adv = cfg["global"].setdefault("advanced", {})
+        adv["disable_subscription_checks"] = True
+
         covers = cfg["global"].setdefault("covers", {})
         covers["embed_cover"]         = True
         # Embedded (in-audio) cover pinned to 1000×1000 across ALL services.

@@ -431,6 +431,96 @@ async def _sp_dc_get_token() -> str | None:
     return None
 
 
+# ── api-partner GraphQL (транспорт качалки — НЕ банится, в отличие от /v1) ──
+# 2026-07-19: api.spotify.com/v1 для наших веб-токенов перманентно 429-банит
+# (даже artist/albums со свежим токеном), а api-partner работает. Радар-краул
+# ходит сюда: queryArtistDiscographyAll = вся дискография артиста одним запросом.
+_SP_GQL_URL = "https://api-partner.spotify.com/pathfinder/v1/query"
+_SP_GQL_DISCO_HASH = "5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564fc56599"
+_SP_CT_URL = "https://clienttoken.spotify.com/v1/clienttoken"
+_SP_WEB_CLIENT_ID = "d8a5ed958d274c2e8ee717e6a4b0971d"
+
+
+def _sp_ct_path() -> "Path | None":
+    if not _sp_state_file:
+        return None
+    return _sp_state_file.parent / "orpheus" / "config" / "spotify-client-token.txt"
+
+
+async def _sp_client_token() -> str | None:
+    """api-partner требует заголовок client-token (живёт ~14 дней). Файл ведёт
+    orpheus/spotify_embed_api (авто-минт); здесь читаем его, а если стух/нет —
+    минтим сами тем же способом (без кредов) и персистим."""
+    import time as _t
+    import uuid
+    p = _sp_ct_path()
+    try:
+        if p and p.exists() and (_t.time() - p.stat().st_mtime) < 13 * 24 * 3600:
+            tok = p.read_text(encoding="utf-8").strip()
+            if tok:
+                return tok
+    except Exception:
+        pass
+    payload = {"client_data": {
+        "client_version": "1.2.70.61.g856ccd63",
+        "client_id": _SP_WEB_CLIENT_ID,
+        "js_sdk_data": {"device_brand": "unknown", "device_model": "unknown",
+                        "os": "windows", "os_version": "NT 10.0",
+                        "device_id": uuid.uuid4().hex, "device_type": "computer"}}}
+    try:
+        async with httpx.AsyncClient(timeout=20, headers={
+                "Accept": "application/json", "User-Agent": _SP_WEB_UA,
+                "Origin": "https://open.spotify.com",
+                "Referer": "https://open.spotify.com/"}) as c:
+            r = await c.post(_SP_CT_URL, json=payload)
+            tok = ((r.json().get("granted_token") or {}).get("token") or "").strip()
+            if tok:
+                if p:
+                    try:
+                        tmp = p.with_suffix(".txt.tmp")
+                        tmp.write_text(tok, encoding="utf-8")
+                        tmp.replace(p)
+                    except Exception:
+                        pass
+                print("[spotify] client-token: свежий наминчен (radar)", flush=True)
+                return tok
+            print(f"[spotify] client-token mint: пустой ответ {str(r.json())[:120]}", flush=True)
+    except Exception as e:
+        print(f"[spotify] client-token mint failed: {e}", flush=True)
+    return None
+
+
+def _sp_gql_to_rel(item: dict, artist: dict) -> dict | None:
+    """Релиз из queryArtistDiscographyAll → формат стора (_sp_alb_to_rel-совместимый)."""
+    try:
+        rel = ((item.get("releases") or {}).get("items") or [{}])[0]
+        rid = rel.get("id") or (rel.get("uri", "").split(":")[-1])
+        if not rid:
+            return None
+        rtype = (rel.get("type") or "ALBUM").lower()
+        if rtype == "ep":
+            rtype = "single"
+        date_iso = ((rel.get("date") or {}).get("isoString") or "")[:10]
+        covers = ((rel.get("coverArt") or {}).get("sources") or [{}])
+        cover = max(covers, key=lambda s: s.get("width") or 0).get("url", "")
+        return {
+            "id":        rid,
+            "title":     rel.get("name", ""),
+            "artist":    artist["name"],
+            "artist_id": artist["id"],
+            "type":      rtype,
+            "group":     rtype,
+            "date":      date_iso,
+            "year":      date_iso[:4],
+            "tracks":    ((rel.get("tracks") or {}).get("totalCount")),
+            "cover":     cover,
+            "url":       f"https://open.spotify.com/album/{rid}",
+            "service":   "spotify",
+        }
+    except Exception:
+        return None
+
+
 def _sp_minted_bearer() -> str | None:
     """The web-player Bearer that `spotify_token_keeper` AUTO-mints from the durable
     librespot blob into orpheus/config/spotify-token.txt (refreshed ~every 40 min,
@@ -771,47 +861,22 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             }
             _save_artist_state()
         else:
-            # No artists this pass (ban / transient error). Serve the store rather
-            # than overwriting good data with an empty result.
-            feed = _build_feed(days, types)
-            _sp_releases_cache[cache_key] = {**feed, "ts": datetime.now().timestamp(),
-                                             "partial": feed["ban_left"] > 0}
-            _save_disk_cache()
-            _sp_scan_running = False
-            print(f"[spotify] following empty — served store: {len(feed['releases'])} releases", flush=True)
-            if _broadcast:
-                await _broadcast({"type": "releases_scan_done",
-                                  "artists_checked": feed["artists_checked"],
-                                  "releases_count": len(feed["releases"]),
-                                  "releases": feed["releases"],
-                                  "partial": feed["ban_left"] > 0})
-            return
-        market = _sp_followed_cache.get("market", market)
+            # /me/following не отдался (v1-бан / транзиент). Это НЕ повод не краулить:
+            # берём durable-кэш подписок и идём в api-partner (2026-07-19: /v1 у нас
+            # перманентно 429, а подписки меняются редко — кэш из 5.7k артистов живой).
+            cached = list(_sp_followed_cache.get("artists") or [])
+            if cached:
+                artists = cached
+                market = _sp_followed_cache.get("market", market)
 
-        # ── Paced, ban-aware, persistent DELTA crawl ────────────────────────
-        # Never burst. One throttled request at a time; honour any active 429
-        # ban; persist per-artist results so partial crawls accumulate and repeat
-        # scans only re-check stale artists. This is what the public release-radar
-        # sites effectively do (background crawler + served cache) and what keeps
-        # us off Spotify's rate-limit radar.
-        incl_appears = "appears_on" in [x.strip() for x in types.split(",")]
-        # Crawl each release group in its OWN include_groups call. A combined
-        # "album,single,compilation" call lets Spotify dedup compilations away
-        # (it returns a release once, preferring album/single), so the artist's
-        # compilations never land. Separate calls guarantee each group is fetched
-        # and tagged. appears_on (Various-Artists сборники) stays opt-in (heavy).
-        crawl_groups = ["album,single", "compilation"] + (["appears_on"] if incl_appears else [])
-        mkt          = f"&market={market}" if market else ""
+        # ── Paced, persistent DELTA crawl — api-partner GraphQL ─────────────
+        # 2026-07-19: api.spotify.com/v1 для наших веб-токенов перманентно 429
+        # (даже artist/albums), поэтому краул ходит в api-partner
+        # queryArtistDiscographyAll — транспорт качалки, который не банится.
+        # 1 запрос на артиста (вместо 2 у /v1), v1-бан этот путь НЕ блокирует.
         state_cutoff = (datetime.now() - timedelta(days=_SP_STATE_WINDOW_DAYS)).strftime("%Y-%m-%d")
         interval     = float(_cfg.get("spotify-crawl-interval", _SP_CRAWL_INTERVAL) or _SP_CRAWL_INTERVAL)
-
-        def _norm_date(rd: str, precision: str) -> str:
-            """Normalize partial dates so string comparison works correctly."""
-            if precision == "year" or (rd and len(rd) == 4):
-                return rd + "-07-01"   # mid-year — don't miss H2 releases
-            if precision == "month" or (rd and len(rd) == 7):
-                return rd + "-15"      # mid-month
-            return rd
+        interval     = max(0.3, interval * 0.5)   # 1 GQL-запрос вместо 2 «/v1»
 
         total     = len(artists)
         completed = 0
@@ -820,104 +885,129 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
         step      = max(1, total // 40)
         now_ts    = datetime.now().timestamp()
 
+        gql_bearer = web_token or _sp_minted_bearer()
+        gql_ct     = await _sp_client_token()
+        gql_dead   = ""
+        if not gql_bearer:
+            gql_dead = "нет web-player токена (кипер не минтит?)"
+        elif not gql_ct:
+            gql_dead = "не удалось получить client-token"
+        if gql_dead:
+            _sp_last_error = "Радар: " + gql_dead
+            print(f"[spotify] crawl: GraphQL недоступен — {gql_dead}; отдаю стор", flush=True)
+
         if _broadcast:
             await _broadcast({"type": "releases_scan_start", "phase": "albums",
                                "total": total, "service": "spotify"})
 
-        async def _paced_get(pg: str, _tries: int = 0):
-            """One throttled GET. Returns (data|None, status, retry_after).
+        gql_headers = {
+            "Authorization": f"Bearer {gql_bearer}",
+            "client-token":  gql_ct or "",
+            "User-Agent":    _SP_WEB_UA,
+            "Origin":        "https://open.spotify.com",
+            "Referer":       "https://open.spotify.com/",
+        }
 
-            On 429 with a SHORT Retry-After we sleep it out and retry the same
-            request (bounded) — exactly like spotify-release-list — instead of
-            self-banning. Only a long Retry-After or exhausted retries surfaces
-            429 to the caller (which then applies a short cooldown, not a freeze)."""
+        async def _gql_disco(gc, aid: str, offset: int = 0, _tries: int = 0):
+            """Одна пейснутая страница дискографии. Возвращает (items|None, status).
+            429 с коротким Retry-After пересиживаем и повторяем (как референс
+            spotify-release-list); 401 лечим перечитыванием кипер-токена —
+            50-минутный пасс переживает часовую жизнь bearer'a."""
             import time as _t
             dt = _t.monotonic() - last_req[0]
             if dt < interval:
                 await asyncio.sleep(interval - dt)
             last_req[0] = _t.monotonic()
+            params = {
+                "operationName": "queryArtistDiscographyAll",
+                "variables": json.dumps({"uri": f"spotify:artist:{aid}",
+                                          "offset": offset, "limit": 50}),
+                "extensions": json.dumps({"persistedQuery": {
+                    "version": 1, "sha256Hash": _SP_GQL_DISCO_HASH}}),
+            }
             try:
-                dr = await client.get(pg)
+                dr = await gc.get(_SP_GQL_URL, params=params)
             except Exception:
-                return None, 0, 0
-            if dr.status_code == 200:
-                return dr.json(), 200, 0
+                return None, 0
+            if dr.status_code == 401 and _tries < 1:
+                fresh_b = _sp_minted_bearer()
+                if fresh_b:
+                    gc.headers["Authorization"] = f"Bearer {fresh_b}"
+                ct2 = await _sp_client_token()
+                if ct2:
+                    gc.headers["client-token"] = ct2
+                return await _gql_disco(gc, aid, offset, _tries + 1)
             if dr.status_code == 429:
                 ra = int(dr.headers.get("Retry-After", "5") or 5)
                 if ra <= _SP_RETRY_WAIT_CAP and _tries < 3:
                     await asyncio.sleep(ra + 1)
-                    return await _paced_get(pg, _tries + 1)
-                return None, 429, ra
-            return None, dr.status_code, 0
+                    return await _gql_disco(gc, aid, offset, _tries + 1)
+                return None, 429
+            if dr.status_code != 200:
+                return None, dr.status_code
+            try:
+                items = (((dr.json().get("data") or {}).get("artistUnion") or {})
+                         .get("discography") or {}).get("all", {}).get("items") or []
+                return items, 200
+            except Exception:
+                return None, 0
 
-        banned = _time.time() < _sp_banned_until
-        if banned:
-            print(f"[spotify] crawl: rate-limit ban active "
-                  f"{int(_sp_banned_until - _time.time())}s — serving stored state only",
-                  flush=True)
-
-        for idx, artist in enumerate(artists):
-            aid  = artist.get("id", "")
-            name = artist.get("name", "?")
-            if not aid:
-                continue
-            st    = _sp_artist_state.get(aid)
-            fresh = st and (now_ts - st.get("ts", 0)) < _SP_ARTIST_REFRESH
-            if fresh or banned:
-                # Reuse stored data (fresh), or — if banned — we simply cannot
-                # fetch right now; the served feed is rebuilt from the store below.
-                if st:
+        gql_429s = 0
+        async with httpx.AsyncClient(timeout=20, headers=gql_headers, limits=limits,
+                                     **_sp_httpx_kwargs()) as gql:
+            for idx, artist in enumerate(artists):
+                if gql_dead:
+                    break
+                aid  = artist.get("id", "")
+                name = artist.get("name", "?")
+                if not aid:
+                    continue
+                st    = _sp_artist_state.get(aid)
+                fresh = st and (now_ts - st.get("ts", 0)) < _SP_ARTIST_REFRESH
+                if fresh:
                     completed += 1
-            else:
-                rels    = []
-                hit_429 = False
-                for group in crawl_groups:
-                    # limit=50 is Spotify's max for this endpoint (spotify-release-list
-                    # uses it too). We fetch one page per group (no pagination), so the
-                    # larger page = fewer requests → fewer 429s AND wider recent-release
-                    # coverage in a single call. Was 20.
-                    pg = (f"https://api.spotify.com/v1/artists/{aid}/albums"
-                          f"?include_groups={group}&limit=50{mkt}")
-                    data, status, ra = await _paced_get(pg)
+                else:
+                    items, status = await _gql_disco(gql, aid)
                     if status == 429:
-                        _sp_banned_until = _time.time() + min(ra, _SP_BAN_CAP)
-                        _save_artist_state()
-                        banned = hit_429 = True
-                        print(f"[spotify] crawl 429 at '{name}' ({idx+1}/{total}) — "
-                              f"ban {min(ra, _SP_BAN_CAP)}s; serving stored state",
-                              flush=True)
-                        break
-                    if not data:
+                        gql_429s += 1
+                        if gql_429s >= 3:
+                            print(f"[spotify] crawl: 429×{gql_429s} на api-partner у '{name}' "
+                                  f"({idx+1}/{total}) — стоп пасса, добор в следующий скан", flush=True)
+                            break
                         continue
-                    # Tag the release with the include_group it came from so the
-                    # served feed can filter by type (appears_on / compilation).
-                    grp_tag = ("appears_on" if group == "appears_on"
-                               else "compilation" if group == "compilation" else "")
-                    for alb in data.get("items") or []:
-                        rd = _norm_date(alb.get("release_date", ""),
-                                        alb.get("release_date_precision", "day"))
-                        if rd >= state_cutoff:
-                            rels.append(_sp_alb_to_rel(alb, artist, grp_tag))
-                if not hit_429:
+                    if items is None:
+                        continue   # транзиент: артист остаётся stale, доберём позже
+                    rels  = []
+                    pages = 0
+                    while True:
+                        for it in items:
+                            r = _sp_gql_to_rel(it, {"id": aid, "name": name})
+                            if r and r["date"] >= state_cutoff:
+                                rels.append(r)
+                        pages += 1
+                        # вторая страница — только если первая полная и вся в окне
+                        if (pages >= 2 or len(items) < 50 or not rels
+                                or rels[-1]["date"] < state_cutoff):
+                            break
+                        items, status = await _gql_disco(gql, aid, offset=50)
+                        if not items:
+                            break
                     _sp_artist_state[aid] = {"name": name, "releases": rels, "ts": now_ts}
                     fetched   += 1
                     completed += 1
                     if fetched % 25 == 0:
                         _save_artist_state()
-            if _broadcast and (idx % step == 0 or idx == total - 1):
-                await _broadcast({
-                    "type": "releases_scan_progress",
-                    "current": completed, "total": total,
-                    "artist": name, "found": 0, "service": "spotify",
-                })
-            if banned:
-                break   # stop hammering; serve the store
+                if _broadcast and (idx % step == 0 or idx == total - 1):
+                    await _broadcast({
+                        "type": "releases_scan_progress",
+                        "current": completed, "total": total,
+                        "artist": name, "found": 0, "service": "spotify",
+                    })
 
         _save_artist_state()
-        print(f"[spotify] crawl pass: {completed}/{total} covered, "
+        print(f"[spotify] crawl pass (api-partner): {completed}/{total} covered, "
               f"{fetched} fetched live"
-              + (f", BANNED {int(_sp_banned_until - _time.time())}s left" if banned else ""),
-              flush=True)
+              + (f", 429s: {gql_429s}" if gql_429s else ""), flush=True)
 
     # ── Serve the feed from the durable store (single source of truth) ───────
     feed     = _build_feed(days, types)
@@ -950,7 +1040,8 @@ async def sp_releases(days: int = 30, types: str = "album,single", force: int = 
 
     t = _load_sp()
     sp_dc = _cfg.get("spotify-sp-dc", "").strip()
-    if not t.get("access_token") and not sp_dc:
+    if not t.get("access_token") and not sp_dc and not _sp_minted_bearer():
+        # keeper-bearer достаточно: краул идёт через api-partner (2026-07-19)
         return {"ok": False, "error": "Not connected", "releases": []}
 
     cache_key = f"{days}|{types}"

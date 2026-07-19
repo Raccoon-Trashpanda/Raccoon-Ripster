@@ -23,17 +23,21 @@ _RE_NO_RETRY = _re.compile(
     r'Не\s+найден\s+исполняемый|binary\s+not\s+found|No\s+such\s+file|'
     r'токен\s+недействителен|wrapper\s+not\s+responding|ORPHEUS_NOT_AUTHED|'
     r'-1002|KeyError.*AUDIO-SESSION|codec\s+not\s+found|cookies|'
+    r'\bForbidden\b|запрос\s+отклонён|токен\s+истёк|'
     # Qobuz "0 tracks" is a permanent no-account / bad-link condition (downloads
-    # need the user's own paid Qobuz login) — retrying just spins the tile ~28 min.
+    # need the user's own paid Qobuz login) — retrying it just spins the task for
+    # ~28 min and the tile looks stuck. Fail fast with the clear message instead.
     r'Qobuz:\s*0\s+треков|'
     # Qobuz precise diagnostics (geo/licensing lock, wrong custom app_id/secret,
-    # missing creds) are ALL permanent until the user changes something.
+    # missing creds) are ALL permanent until the user changes something — retrying
+    # just spins the tile. Match their distinctive wording from engines/qobuz.py.
     r'гео-?/?лицензионное\s+ограничение|app_id/secret\s+не\s+подошли|'
     r'не\s+заданы\s+данные\s+входа|'
-    # Deezer ARL missing/expired — permanent until ARL updated.
+    # Deezer ARL missing/expired (engines/deezer.py) — permanent until ARL updated.
     r'ARL\s+не\s+задан|'
-    # SoundCloud engine not installed / no Node — permanent.
+    # SoundCloud engine not installed / no Node (engines/soundcloud.py) — permanent.
     r'движок\s+не\s+установлен|'
+    # Beatport territory restriction is permanent for this account/region.
     r'Territory\s+Restricted|недоступен в регионе|region\s+locked',
     _re.I,
 )
@@ -48,9 +52,10 @@ _RETRY_BACKOFF    = [15, 45, 120]   # seconds before each retry attempt
 # 'directory error' that followed an empty download). A genuine no-lossless
 # asset is matched by _RE_NO_RETRY-style messages and is NOT patient-retried.
 _RE_PATIENT = _re.compile(
-    # do NOT match a bare "0 треков" — that also matches Qobuz's permanent
-    # no-account failure (must not patient-retry). AMD/wrapper cases still match
-    # via wm.wol.moe / "не вернул device" / ready=false.
+    # NOTE: do NOT match a bare "0 треков" here — that also matches Qobuz's
+    # no-account failure, which is permanent and must NOT be patient-retried (it
+    # spun the tile for ~28 min). The AMD/wrapper "0 треков" cases still match via
+    # wm.wol.moe / "не вернул device" / ready=false below.
     r'wm\.wol\.moe|wrapper-manager unreachable|ready=false|не\s+ready|'
     r'не\s+вернул device|wrapper\s+не\s+ready|no\s+device',
     _re.I,
@@ -69,13 +74,29 @@ _RE_DECRYPT_DOWN = _re.compile(
     r'decrypt_init|AioRpcError|decrypt.*UNAVAILABLE|внутренн.*ошибку\s+декрипт',
     _re.I,
 )
-_MAX_DECRYPT_RETRIES = 5   # ~8 min, then stop — decrypt core won't self-heal now
+_MAX_DECRYPT_RETRIES = 2   # ~3 min, then stop — decrypt core won't self-heal now
+
+# Public wrapper is DEAD/UNREACHABLE (not merely busy): wm.wol.moe not resolving/
+# refusing/timing out its manager API. Retrying a server that is DOWN is pure waste
+# — it just makes the tile "hang" for many minutes while the user keeps re-queuing
+# the same release. Fail FAST (one honest retry) with a clear message that names the
+# real cause (public server down → use local ALAC / try later), so the owner does
+# NOT keep pulling the same Hi-Res release. Checked BEFORE _RE_DECRYPT_DOWN /
+# _RE_PATIENT (all three can mention wm.wol.moe).
+_RE_WRAPPER_DEAD = _re.compile(
+    r'wrapper-manager unreachable|Wrapper-manager\s+недоступен|Deadline\s+Exceeded|'
+    r'getaddrinfo|Name or service not known|Connection refused|'
+    r'connection refused|Max retries exceeded|Failed to establish a new connection|'
+    r'ConnectError|ConnectTimeout|11001',
+    _re.I,
+)
+_MAX_DEAD_RETRIES = 1   # one quick re-check, then stop with clear guidance
 
 
 # ── Partial-download reason classifier (issue #5) ───────────────────────────────
-# When a release comes back short, name WHY in one canonical token so the
-# web history can show it ("3/5 — region-locked") instead of a vague "some
-# tracks missing". Ordered most-specific → generic; first match wins.
+# When a release comes back short, name WHY in one canonical token so the bot
+# card / web history can show it ("3/5 — region-locked") instead of a vague
+# "some tracks missing". Ordered most-specific → generic; first match wins.
 _PARTIAL_REASON_PATTERNS = [
     ("decryption", _re.compile(r"Decryption is not available|AAC.*wrapper|"
                                r"-1002|AUDIO-SESSION-KEY", _re.I)),
@@ -124,9 +145,9 @@ _MAX_FAILED_TRACKS = 25
 def _extract_failed_tracks(log_text: str) -> list:
     """Best-effort [{track, reason}] for the tracks that failed, parsed from the
     engine log. `reason` is a canonical token (via _classify_partial_reason) so
-    the web history can render it localised. Deduped by track name, capped.
-    Returns [] when the engine has no recognised per-track format — caller then
-    shows the aggregate reason instead."""
+    the bot/web can render it localised. Deduped by track name, capped. Returns
+    [] when the engine has no recognised per-track format — caller then shows the
+    aggregate reason instead."""
     out: list = []
     seen: set = set()
     for pat in _FAILED_TRACK_RE:
@@ -574,19 +595,26 @@ def _add_to_history(task: dict) -> None:
                 status == "done", entry.get("got"))
         except Exception:
             pass
-    # Persistent error log — so a failed download leaves a diagnosable trail
-    # (full error + tail of the engine output) even after history rotates.
-    if status == "error":
+    # Persistent error trail — so a failed download leaves a diagnosable record
+    # (full error + tail of the engine output) even after history rotates. Log not
+    # just hard "error" status but ALSO partials and any task carrying an error
+    # message / partial flag: a CKC-salvaged Apple task records status "done" with
+    # partial=True, so the old `status=="error"` gate missed real failures entirely
+    # (nothing in errors.log to diagnose — e.g. the "Invalid CKC" wrapper failures).
+    # The log tail still carries the engine's failure lines.
+    _has_problem = (status in ("error", "partial")
+                    or bool(task.get("error")) or bool(task.get("partial")))
+    if _has_problem:
         try:
             from pathlib import Path as _P
             logf = _P(__file__).resolve().parent.parent / "errors.log"
             tail = "\n".join(str(x) for x in (task.get("log") or [])[-30:])
             with open(logf, "a", encoding="utf-8") as f:
-                f.write(f"\n===== {entry['ts']} | {entry['service']} | "
+                f.write(f"\n===== {entry['ts']} | {status.upper()} | {entry['service']} | "
                         f"{entry.get('title') or entry['url']} =====\n")
                 f.write(f"url:     {entry['url']}\n")
                 f.write(f"engine:  {entry['engine']}   quality: {entry['quality']}\n")
-                f.write(f"error:   {task.get('error') or '(none captured)'}\n")
+                f.write(f"error:   {task.get('error') or '(none captured — see output below)'}\n")
                 f.write(f"--- last engine output ---\n{tail}\n")
         except Exception:
             pass
@@ -594,6 +622,35 @@ def _add_to_history(task: dict) -> None:
         loop = asyncio.get_running_loop()
         loop.create_task(_broadcast({"type": "history_updated"}))
     except RuntimeError:
+        pass
+
+    # Stats collector
+    try:
+        from ripster import stats_collector as _sc
+        _sc.record_download(entry)
+    except Exception:
+        pass
+
+    # Guest activity tracking — record download and consume quota on completion
+    try:
+        sid = task.get("session_id", "")
+        if sid:
+            from ripster.guest_manager import get_manager as _get_gm
+            gm = _get_gm()
+            gm.log_activity(sid, {
+                "url":     entry["url"],
+                "title":   entry.get("title") or "",
+                "service": entry.get("service", ""),
+                "status":  entry["status"],
+                "quality": entry.get("quality", ""),
+            })
+            # Idempotent per task object: a task that re-finalizes (retry-in-place,
+            # re-delivery) must NOT charge the guest's quota twice. A genuinely new
+            # download is a new task object → _quota_consumed unset → charged once.
+            if entry["status"] == "done" and not task.get("_quota_consumed"):
+                gm.consume_quota(sid)
+                task["_quota_consumed"] = True
+    except Exception:
         pass
 
 
@@ -981,6 +1038,9 @@ async def _soundcloud_preflight(task: dict) -> bool:
     from ripster.engines import soundcloud as _sc_eng
     from ripster import setup as _setup_mod
 
+    # 1) Node ≥ 20 — install_node_windows() now enforces the minimum and drops a
+    #    portable v20 beside a stale system Node, prepending it to PATH so the
+    #    runner.mjs child process picks it up.
     node_exe = _setup_mod.tool_path("node")
     if node_exe is None or _setup_mod._node_version(node_exe) < _setup_mod._MIN_NODE_MAJOR:
         await _log("📦 SoundCloud: ставлю Node.js 20 (старый/отсутствующий Node ломает "
@@ -990,6 +1050,7 @@ async def _soundcloud_preflight(task: dict) -> bool:
         except Exception as e:                                       # noqa: BLE001
             await _log(f"⚠ Авто-установка Node не удалась: {e}", "warn", tid)
 
+    # 2) Lucida built? (runner.mjs + lucida-src/build/index.js)
     if not _sc_eng.is_installed():
         await _log("📦 SoundCloud: устанавливаю движок Lucida (один раз, ~1–2 мин)…",
                    "info", tid)
@@ -1009,6 +1070,88 @@ async def _soundcloud_preflight(task: dict) -> bool:
         _try_advance_task(task, TaskStatus.ERROR)
         return False
     return True
+
+
+# Quality folders produced ONLY by Apple's Go downloaders (zhaarey/AMD). These are
+# unambiguous — no other service emits them — so a bare-root copy can be re-homed
+# under apple/ without guessing the source service. (AAC 256 is intentionally NOT
+# here: SoundCloud-hq and Tidal-high also map to it.)
+_APPLE_EXCLUSIVE_QFOLDERS = {"ALAC (Lossless)", "Atmos", "Binaural", "AAC Downmix", "Downmix"}
+
+
+def _merge_dir(src: Path, dst: Path) -> None:
+    """Move every child of ``src`` into ``dst``, recursing on directory collisions.
+    The destination copy is authoritative and never overwritten; a file that
+    already exists in ``dst`` is a redundant duplicate of the same release track, so
+    the SOURCE copy is dropped (otherwise the emptied bare-root dir could never be
+    removed and the very debris we're cleaning would persist). Emptied source dirs
+    are removed."""
+    import shutil
+    dst.mkdir(parents=True, exist_ok=True)
+    for child in sorted(src.iterdir()):
+        target = dst / child.name
+        if not target.exists():
+            shutil.move(str(child), str(target))
+        elif child.is_dir() and target.is_dir():
+            _merge_dir(child, target)
+        else:
+            # File already present in dest (authoritative) → drop the redundant
+            # source copy so the bare-root dir can be fully cleaned up.
+            try:
+                child.unlink()
+            except OSError:
+                pass
+    try:
+        src.rmdir()
+    except OSError:
+        pass
+
+
+def _reclaim_bare_apple(config: dict) -> list[str]:
+    """Safety net: re-home Apple-exclusive quality folders that landed at the bare
+    downloads root into ``<base>/apple/<quality>/<artist>/<album>``.
+
+    zhaarey/AMD write ``<base>/<quality>/…`` and the runner normally relocates each
+    task's dir immediately — but when the engine log didn't yield a parseable
+    output dir (``extract_save_dir`` → None) the per-task relocate never ran and the
+    release was orphaned at the root (on disk but invisible to the manifest/bot =
+    "downloaded, delivered nothing"). This sweep runs after every Apple task and
+    catches any such stragglers. Apple-exclusive folders only → attribution is
+    unambiguous. Returns the canonical dirs it moved."""
+    moved: list[str] = []
+    try:
+        import shutil
+        base = Path(config.get("save-path") or "downloads")
+        if not base.is_dir():
+            return moved
+        for qname in _APPLE_EXCLUSIVE_QFOLDERS:
+            bare = base / qname
+            if not bare.is_dir():
+                continue
+            canon_q = base / "apple" / qname
+            for artist in sorted(p for p in bare.iterdir() if p.is_dir()):
+                for album in sorted(p for p in artist.iterdir() if p.is_dir()):
+                    dest = canon_q / artist.name / album.name
+                    if dest.resolve() == album.resolve():
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if dest.exists():
+                        _merge_dir(album, dest)
+                    else:
+                        shutil.move(str(album), str(dest))
+                    moved.append(str(dest))
+                    print(f"[reclaim] {album} -> {dest}", flush=True)
+            # Tidy now-empty bare <quality>/ (and its emptied artist dirs).
+            try:
+                for artist in [p for p in bare.iterdir() if p.is_dir()]:
+                    try: artist.rmdir()
+                    except OSError: pass
+                bare.rmdir()
+            except OSError:
+                pass
+    except Exception as e:                            # never let cleanup break a task
+        print(f"[reclaim] skipped: {e}", flush=True)
+    return moved
 
 
 def _filter_engine_files(audio: list, engine_files) -> list:
@@ -1073,17 +1216,48 @@ def _relocate_to_service_folder(save_dir: str, service: str, quality: str, confi
             return save_dir
         sub  = Path(*parts[1:]) if len(parts) > 1 else None
         dest = (canon / sub) if sub else canon
-        if dest.resolve() == sd_r or dest.exists():
-            return save_dir                                       # collision — don't risk a merge
+        if dest.resolve() == sd_r:
+            return save_dir
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(sd), str(dest))
+        if dest.exists():
+            # The release is already under the service folder (re-download or a
+            # parallel task) — MERGE the bare-root copy in rather than orphaning it
+            # at the downloads root (the old code bailed here, which is exactly how
+            # bare <base>/<quality>/ debris accumulated). Never overwrites files.
+            _merge_dir(sd, dest)
+        else:
+            shutil.move(str(sd), str(dest))
         print(f"[relocate] {sd} -> {dest}", flush=True)
-        # Tidy now-empty bare-quality parents (artist/, then <quality>/) up to base.
+        # Tidy now-empty bare parents (artist/, then <quality>/) up to base. If a
+        # parent still holds STRAY FILES — zhaarey writes an artist-level folder.jpg
+        # next to the album dir — fold those into the canonical sibling so nothing
+        # is orphaned at the bare root (this is the leftover `Artist/folder.jpg`
+        # debris). Subdirs (a concurrent task's album) are left untouched: we stop
+        # climbing the moment one remains.
         try:
-            p = sd.parent
+            p  = sd.parent
+            dp = dest.parent
             while p.resolve() != base and base in p.resolve().parents:
-                p.rmdir()                                         # removes only if empty → else OSError
-                p = p.parent
+                try:
+                    p.rmdir()
+                except OSError:
+                    try:
+                        dp.mkdir(parents=True, exist_ok=True)
+                        for f in list(p.iterdir()):
+                            if f.is_file():
+                                tgt = dp / f.name
+                                if tgt.exists():
+                                    f.unlink()
+                                else:
+                                    shutil.move(str(f), str(tgt))
+                    except OSError:
+                        pass
+                    try:
+                        p.rmdir()
+                    except OSError:
+                        break          # subdirs remain (concurrent album) → stop
+                p  = p.parent
+                dp = dp.parent
         except OSError:
             pass
         return str(dest)
@@ -1188,14 +1362,14 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         if engine_name == "amd":
             line_timeout = 600.0    # long silent mp4decrypt/tagging windows
         elif engine_name == "qobuz":
-            # streamrip renders a rich/tqdm progress bar via CR (no newline) for
-            # the whole duration of a track transfer, same as OrpheusDL below.
-            # readline() blocks on a newline, so the runner sees ZERO output while a
-            # big file downloads. A long Hi-Res album (e.g. Yes -- "Tales From
-            # Topographic Oceans", 4 tracks ~20 min each, 24/192 ~700 MB, all
-            # downloading concurrently) stays silent past 300 s -> the watchdog
-            # killed a LIVE download. Give it Tidal/SC-style 20-min headroom; each
-            # finished track prints a newline that resets the watchdog.
+            # streamrip renders a rich/tqdm progress bar via \r (NO \n) for the whole
+            # duration of a track transfer — same as OrpheusDL below. readline() blocks
+            # on a newline, so the runner sees ZERO output while a big file downloads.
+            # A long Hi-Res album (e.g. Yes — "Tales From Topographic Oceans", 4 tracks
+            # ~20 min each, 24/192 ≈ 700 MB/track, all downloading concurrently) stays
+            # newline-silent well past 300 s → the watchdog killed a LIVE download.
+            # Give it the same 20-min headroom as Tidal/SC; each finished track prints
+            # a newline that resets the watchdog, so a genuine hang still fails eventually.
             line_timeout = 1200.0
         elif engine_name == "soundcloud":
             line_timeout = 1200.0   # 20 min — heartbeats every 30 s anyway
@@ -1428,6 +1602,23 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 task["_engine_files"] = _ef(log_text) if _ef else None
             except Exception:
                 task["_engine_files"] = None
+            # Apple Go downloaders (zhaarey/AMD) write to a bare <base>/<quality>/
+            # root; sweep any stragglers under apple/ so they're never orphaned at
+            # the downloads root (orphaned = invisible to the manifest = "downloaded
+            # but delivered nothing"). If the engine log gave no dir but the sweep
+            # moved exactly ONE release, that's almost certainly THIS task's output
+            # → adopt it so the marker/manifest still get written and delivery
+            # happens. More than one moved → too ambiguous to attribute, leave it
+            # (files are at least correctly placed now).
+            # Only sweep the bare root as a FALLBACK when the engine gave no dir.
+            # On the common path save_dir is known and `_relocate_to_service_folder`
+            # below moves THIS task's own dir — safe under parallel zhaarey. A blind
+            # sweep on every success could grab a concurrent task's in-progress dir.
+            if (not save_dir) and (task.get("service") in ("apple", "")) and engine_name in ("zhaarey", "amd"):
+                _reclaimed = _reclaim_bare_apple(_config)
+                if len(_reclaimed) == 1:
+                    save_dir = _reclaimed[0]
+                    task["log"].append(f"[reclaim] adopted orphaned output: {save_dir}")
             if save_dir:
                 # Engine-agnostic layout fix: re-home output that landed at a bare
                 # <base>/<quality>/… (Apple's Go downloaders) under the canonical
@@ -1435,21 +1626,6 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 save_dir = _relocate_to_service_folder(save_dir, task.get("service") or "",
                                                        quality, _config)
                 task["_save_dir"] = save_dir
-                # Qobuz: streamrip tags only the primary `performer` → a collab lands
-                # with one artist (or all crammed into one string). Re-derive the FULL
-                # artist list from the Qobuz API and write proper multi-value ARTIST.
-                if task.get("service") == "qobuz":
-                    try:
-                        import re as _re_q
-                        _am = _re_q.search(r'/album/(?:[^/]+/)?([A-Za-z0-9]+)', url or "")
-                        if _am:
-                            from ripster.engines.qobuz_retag import retag_qobuz_album
-                            _rn = await retag_qobuz_album(_am.group(1), _cfg_view, str(save_dir))
-                            if _rn:
-                                task.setdefault("log", []).append(
-                                    f"[qobuz] артисты в тегах исправлены: {_rn} файл(ов)")
-                    except Exception as _re_e:
-                        task.setdefault("log", []).append(f"[qobuz] retag пропущен: {_re_e}")
                 # Write marker file so download.py can find this dir by task ID
                 try:
                     from ripster.task_marker import write_marker as _write_marker
@@ -1522,6 +1698,30 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     d = _gtd(task)          # robust resolver at the freshest moment
                 if d and d.is_dir():
                     task["_save_dir"] = str(d)
+                    # Qobuz: streamrip tags only the primary `performer` → collabs
+                    # land with ONE artist and no composer. Re-derive the FULL credits
+                    # from the Qobuz API (per-track credits) and rewrite ARTIST +
+                    # COMPOSER. Runs HERE, on the robustly-resolved delivered folder
+                    # `d` — the earlier `if save_dir:` gate never fired for streamrip
+                    # (its extract_save_dir returns empty), so the retag was silently
+                    # skipped for every Qobuz download.
+                    if task.get("service") == "qobuz":
+                        try:
+                            import re as _re_q
+                            _u = task.get("url") or url or ""
+                            _am = _re_q.search(r'/album/(?:[^/]+/)?([A-Za-z0-9]{6,})', _u)
+                            if _am:
+                                from ripster.engines.qobuz_retag import retag_qobuz_album
+                                _rn = await retag_qobuz_album(_am.group(1), _cfg_view, str(d))
+                                print(f"[qobuz-retag] {_am.group(1)} → {_rn} file(s) retagged", flush=True)
+                                if _rn:
+                                    task.setdefault("log", []).append(
+                                        f"[qobuz] артисты/композиторы в тегах исправлены: {_rn} файл(ов)")
+                            else:
+                                print(f"[qobuz-retag] no album id in url {_u!r}", flush=True)
+                        except Exception as _re_e:
+                            import traceback as _tb
+                            print(f"[qobuz-retag] FAILED: {_re_e}\n{_tb.format_exc()[:500]}", flush=True)
                     audio = _faf(d)
                     # Issue #19: if the engine reported the EXACT files it saved,
                     # keep only those so a shared output dir can't leak a parallel
@@ -1599,9 +1799,9 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 task["_partial"]  = True
                 task["_missing"]  = _miss
                 # Issue #5: carry a canonical, human reason for the shortfall so the
-                # web history can say WHY N of M arrived — not just that some are
-                # missing. Classified from the engine log; runner already knows
-                # `_permanent_miss`, this just names it.
+                # delivery card / web history can say WHY N of M arrived — not just
+                # that some are missing. Classified from the engine log; runner
+                # already knows `_permanent_miss`, this just names it.
                 _reason = _classify_partial_reason(log_text, _permanent_miss)
                 task["_partial_reason"] = _reason
                 task.setdefault("meta", {})["_partial_reason"] = _reason
@@ -1690,7 +1890,9 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # normal small cap. Either way capped at 120s spacing (no hammering).
             # Decrypt-core-down first (fewest retries — won't self-heal), then the
             # patient wrapper-busy class, else the normal small cap.
-            if _RE_DECRYPT_DOWN.search(msg):
+            if _RE_WRAPPER_DEAD.search(msg):
+                max_r = _MAX_DEAD_RETRIES
+            elif _RE_DECRYPT_DOWN.search(msg):
                 max_r = _MAX_DECRYPT_RETRIES
             elif _RE_PATIENT.search(msg):
                 max_r = _MAX_PATIENT_RETRIES
@@ -1734,6 +1936,13 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                         _get_task_dir as _gtd, _find_audio_files as _faf)
                     from ripster import download_manifest as _dm
                     _d = _gtd(task)
+                    # Apple Go output lands at a bare <base>/<quality>/ root. Re-home
+                    # it under <service>/ BEFORE recording — otherwise a CKC/partial
+                    # salvage leaves a bare orphan folder at the downloads root (the
+                    # success path relocates; the salvage path used to skip it).
+                    if _d and _d.is_dir() and _faf(_d):
+                        _d = Path(_relocate_to_service_folder(
+                            str(_d), task.get("service") or "", quality, _config))
                     _audio = _faf(_d) if (_d and _d.is_dir()) else []
                     if _audio:
                         task["_save_dir"] = str(_d)

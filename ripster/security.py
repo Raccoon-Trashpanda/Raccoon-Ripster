@@ -43,6 +43,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "spotify-release-days", "spotify-release-types", "spotify-auto-convert",
     "spotify-default-target", "spotify-engine",
     "spotify-proxy", "spotify-crawl-interval", "spotify-bg-scan",
+    "spotify-totp",   # spotify-totp-secret / -ver (owner drops in a fresh TOTP when Spotify rotates)
     "orpheus-",   # orpheus-quality, orpheus-save-path, orpheus-convert-mp3, …
     "beatport-username", "beatport-password", "beatport-quality", "beatport-save-path",
     "soundcloud-save-path", "soundcloud-oauth-token", "soundcloud-hq",
@@ -79,14 +80,33 @@ def config_key_allowed(k: str) -> bool:
 # ── WebSocket guest filter ─────────────────────────────────────────────────────
 # Event types that must never be forwarded to guest WebSocket connections.
 
+# ⚠️ The WS fan-out (app.py broadcast) is ALLOW-BY-DEFAULT for guests: queue_update
+# / log / progress / guest_link_revoked are special-cased, and EVERYTHING ELSE is
+# forwarded to guests verbatim via the final `else`. So every owner-sensitive
+# event type MUST be listed here or it leaks. The robust fix is to flip that
+# fan-out to a deny-by-default ALLOWLIST (guests need only their own queue/log/
+# progress + public search-enrichment meta + their BBC/SC progress) — tracked as a
+# follow-up; flipping blind risks silently breaking guest live-updates, so until
+# then this blocklist is kept exhaustive. (vuln-sweep pass 3 expanded it.)
 GUEST_BLOCKED_WS_TYPES: frozenset[str] = frozenset({
     "history_updated",
     "queue_started", "queue_stopped", "queue_paused", "queue_resumed",
-    "releases_scan_progress", "releases_scan_done",
-    "orpheus_not_authed",
+    "releases_scan_start", "releases_scan_progress", "releases_scan_done",
     "watchlist_new_release", "watchlist_scan_progress",
-    "spotify_authed",
-    "remote_stopped",
+    "watchlist_check_start", "watchlist_check_progress", "watchlist_check_done",
+    "spotify_authed", "spotify_sp_dc_updated",
+    "orpheus_authed", "orpheus_not_authed",
+    "apple_authed", "bearer_updated",
+    "engine_changed", "restart_required",
+    "remote_stopped", "tunnel_status",
+    # Apple wrapper infra — Docker logs / fixed ports / owner Apple-session state.
+    "wrapper_built", "wrapper_log", "wrapper_login_failed",
+    "wrapper_started", "wrapper_status", "pool_update", "amd_ready",
+    # Setup tab — install logs can leak filesystem paths / tool versions.
+    "install_log", "install_step", "setup_done", "tools_status",
+    "gamdl_deps_fixed", "soundcloud_installed",
+    # Coder is an owner-only local-file tool (reveals owner folders/paths).
+    "coder_progress", "coder_done", "coder_cancelled",
 })
 
 
@@ -112,7 +132,21 @@ GUEST_BLOCKED_PATHS: tuple[str, ...] = (
     "/api/release/smart-resolve",  # acquisition helper — uses owner Qobuz/Tidal tokens
     "/api/isrc",            # ISRC resolve/upgrade — uses owner tokens (download helper)
     "/api/soundcloud/tracklist-1001",  # scrapes 1001tracklists on the owner's login/IP
+    "/api/soundcloud/upload-wvd",   # installs/overwrites the owner's Widevine CDM (device.wvd)
+    "/api/soundcloud/login",        # writes the owner's SoundCloud OAuth token
+    "/api/spectrogram/",            # owner-only tool — heavy ffmpeg analysis; nav is
+                                    # owner-only but had no backend guard (DoS surface)
     "/api/yandex/auth",     # OAuth device flow — writes the owner's yandex-token to config
     "/api/coder/",          # owner-only local file tool — lists/reads/writes arbitrary owner folders
     "/api/tagger/",         # owner-only local file tool — reads/writes arbitrary owner folders
+    "/api/library/",        # owner-only — scan/cover/file expose & stream the owner's
+                            # entire local music collection under the save-path roots.
+                            # library.py is documented owner-only but had no enforcement
+                            # of its own (relies on this allowlist).
+    "/api/history",         # owner's GLOBAL download log (all users' titles/timestamps).
+                            # Guests have their own scoped view at /api/guest/history and
+                            # never need this; leaving GET open leaked the owner's log.
+                            # Prefix also covers DELETE /api/history{,/<id>} (the app.py
+                            # DELETE special-case is now defence-in-depth). NOTE: matched
+                            # as a prefix — /api/guest/history does NOT start with this.
 )

@@ -229,11 +229,17 @@ class AMDEngine(EngineBase):
         # rotating doomed regions. This is a transient server-side overload — the
         # queue patient-retries (a fresh runner re-opens the decrypt stream).
         if "AMD_WRAPPER_DECRYPT_ERROR" in log_text or "DECRYPT STREAM DOWN" in log_text:
-            return EngineResult(False, error="wm.wol.moe: публичный Apple-wrapper вернул внутреннюю "
-                                             "ошибку декрипта (перегрузка сервера, не токен). "
-                                             "Повтори позже, выбери обычный ALAC или смени инстанс.")
+            return EngineResult(False, error="Apple Hi-Res/Atmos недоступны: публичный wrapper "
+                                             "wm.wol.moe вернул ошибку декрипта (сервер перегружен/лежит — "
+                                             "НЕ твой токен и НЕ релиз). Качество этого релиза здесь ни при "
+                                             "чём. Скачай обычный ALAC (работает через локальный wrapper) "
+                                             "или повтори Hi-Res позже. Не ставь релиз повторно — вернётся, "
+                                             "когда публичный сервер поднимется.")
         if _RE_CONN_FAIL.search(log_text):
-            return EngineResult(False, error="wrapper-manager unreachable (wm.wol.moe)")
+            return EngineResult(False, error="Apple Hi-Res/Atmos недоступны: публичный wrapper wm.wol.moe "
+                                             "сейчас не отвечает (wrapper-manager unreachable — сервер лежит, "
+                                             "не твой токен и не релиз). Скачай обычный ALAC (локальный "
+                                             "wrapper) или повтори Hi-Res позже. Не ставь этот релиз повторно.")
         # Wrapper served NO stream manifest: "failed to get m3u8 of adamId" (repeated),
         # which then raises "Error processing song: 0" ([0] index on the empty m3u8).
         # This is the free public wrapper being overloaded (ready=false) — the track is

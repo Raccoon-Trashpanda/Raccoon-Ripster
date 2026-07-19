@@ -20,12 +20,20 @@ _QOBUZ_DEFAULT_APP_ID = "798273057"
 
 _ARTIST_ROLES = {"mainartist", "performer", "featuredartist", "featuring",
                  "associatedperformer", "artist", "soloist"}
+# "Co-authors" the owner wants preserved: writers/composers/producers behind the
+# track. Written to the COMPOSER tag (Qobuz drops them entirely otherwise — streamrip
+# only writes the single performing artist). Kept separate from _ARTIST_ROLES so a
+# lyricist never pollutes the ARTIST tag.
+_COMPOSER_ROLES = {"composer", "composerlyricist", "author", "writer", "lyricist",
+                   "songwriter", "author,composer", "musicpublisher"}
+_PRODUCER_ROLES = {"producer", "coproducer", "executiveproducer", "mixer",
+                   "mixingengineer", "masteringengineer", "engineer"}
 _SPLIT_RE = re.compile(
     r'\s*(?:,|;|&|/|\bfeat\.?|\bft\.?|\bfeaturing\b|\bvs\.?|\s+x\s+|\bи\b)\s*', re.I)
 
 
-def parse_performers(s: str) -> list[str]:
-    """Qobuz `performers` string → artist names (only artist-role entries).
+def _parse_by_roles(s: str, want_roles: set[str]) -> list[str]:
+    """Qobuz `performers` string → names whose roles intersect *want_roles*.
     Format: 'Name, Role1, Role2 - Name2, Role - …' (entries split by ' - ')."""
     out: list[str] = []
     if not s:
@@ -36,9 +44,19 @@ def parse_performers(s: str) -> list[str]:
             continue
         name = parts[0]
         roles = {r.strip().lower().replace(" ", "") for r in parts[1:]}
-        if roles & _ARTIST_ROLES and name not in out:
+        if roles & want_roles and name not in out:
             out.append(name)
     return out
+
+
+def parse_performers(s: str) -> list[str]:
+    """Qobuz `performers` string → artist (performer-role) names only."""
+    return _parse_by_roles(s, _ARTIST_ROLES)
+
+
+def parse_composers(s: str) -> list[str]:
+    """Qobuz `performers` string → composer/author/writer ("co-author") names."""
+    return _parse_by_roles(s, _COMPOSER_ROLES)
 
 
 def split_joined(name: str) -> list[str]:
@@ -111,17 +129,24 @@ def _read_match_keys(f: Path):
     return isrc, disc, tn, album
 
 
-def _write_artists(f: Path, arts: list[str]) -> bool:
+def _write_credits(f: Path, arts: list[str], comps: list[str]) -> bool:
+    """Write the full ARTIST list (main + featured performers) AND the COMPOSER
+    list (co-authors: writers/composers/lyricists). Returns True if anything
+    changed. Composers are additive — we never clear an existing composer tag with
+    an empty list (Qobuz sometimes omits credits)."""
     ext = f.suffix.lower()
     try:
         if ext == ".flac":
             from mutagen.flac import FLAC
             m = FLAC(f)
-            if list(m.get("artist", [])) == arts:
-                return False
-            m["artist"] = arts
-            m.save()
-            return True
+            changed = False
+            if arts and list(m.get("artist", [])) != arts:
+                m["artist"] = arts; changed = True
+            if comps and list(m.get("composer", [])) != comps:
+                m["composer"] = comps; changed = True
+            if changed:
+                m.save()
+            return changed
         if ext == ".mp3":
             from mutagen.easyid3 import EasyID3
             from mutagen.id3 import ID3NoHeaderError, ID3
@@ -130,19 +155,25 @@ def _write_artists(f: Path, arts: list[str]) -> bool:
             except ID3NoHeaderError:
                 ID3().save(f)
                 m = EasyID3(f)
-            if list(m.get("artist", [])) == arts:
-                return False
-            m["artist"] = arts
-            m.save(v2_version=4)     # ID3v2.4 → multi-value TPE1
-            return True
+            changed = False
+            if arts and list(m.get("artist", [])) != arts:
+                m["artist"] = arts; changed = True
+            if comps and list(m.get("composer", [])) != comps:
+                m["composer"] = comps; changed = True
+            if changed:
+                m.save(v2_version=4)     # ID3v2.4 → multi-value TPE1/TCOM
+            return changed
         if ext in (".m4a", ".mp4"):
             from mutagen.mp4 import MP4
             m = MP4(f)
-            if list(m.get("\xa9ART", [])) == arts:
-                return False
-            m["\xa9ART"] = arts
-            m.save()
-            return True
+            changed = False
+            if arts and list(m.get("\xa9ART", [])) != arts:
+                m["\xa9ART"] = arts; changed = True
+            if comps and list(m.get("\xa9wrt", [])) != comps:
+                m["\xa9wrt"] = comps; changed = True
+            if changed:
+                m.save()
+            return changed
     except Exception:
         return False
     return False
@@ -173,16 +204,47 @@ async def retag_qobuz_album(album_id: str, config: dict, folder: str) -> int:
     album_is_va = ("various" in aartist.lower()) or len(album_artists) > 6
     album_title_norm = re.sub(r'\W+', '', (a.get("title") or "")).lower()
 
-    by_isrc: dict[str, list[str]] = {}
-    by_pos: dict[tuple[int, int], list[str]] = {}
-    for t in (a.get("tracks") or {}).get("items", []):
+    items = (a.get("tracks") or {}).get("items", [])
+
+    # album/get returns tracks WITHOUT the `performers` credits string (it comes
+    # back empty), so featured artists AND co-authors (composers/lyricists) are
+    # invisible here. Fetch each track individually — track/get DOES return the full
+    # credits — then derive both the artist list and the composer list. Concurrency
+    # is capped so a big album doesn't hammer Qobuz.
+    import asyncio
+    sem = asyncio.Semaphore(4)
+
+    async def _credits(track_id: str) -> str:
+        if not track_id:
+            return ""
+        async with sem:
+            try:
+                async with httpx.AsyncClient(timeout=20) as c:
+                    tr = (await c.get("https://www.qobuz.com/api.json/0.2/track/get",
+                                      params={"track_id": track_id, "app_id": app},
+                                      headers=headers)).json()
+                return tr.get("performers") or ""
+            except Exception:
+                return ""
+
+    perf_strings = await asyncio.gather(*[_credits(str(t.get("id") or "")) for t in items])
+
+    # (artists, composers) per ISRC and per (disc, track).
+    by_isrc: dict[str, tuple[list[str], list[str]]] = {}
+    by_pos: dict[tuple[int, int], tuple[list[str], list[str]]] = {}
+    for t, perfs in zip(items, perf_strings):
+        # Inject the freshly-fetched credits so track_artists()/parse_composers()
+        # see them (album/get had them empty).
+        if perfs:
+            t = {**t, "performers": perfs}
         arts = track_artists(t, album_artists, album_is_va)
-        if not arts:
+        comps = parse_composers(perfs)
+        if not arts and not comps:
             continue
         isrc = (t.get("isrc") or "").upper()
         if isrc:
-            by_isrc[isrc] = arts
-        by_pos[(t.get("media_number") or 1, t.get("track_number") or 0)] = arts
+            by_isrc[isrc] = (arts, comps)
+        by_pos[(t.get("media_number") or 1, t.get("track_number") or 0)] = (arts, comps)
 
     if not by_isrc and not by_pos:
         return 0
@@ -195,14 +257,14 @@ async def retag_qobuz_album(album_id: str, config: dict, folder: str) -> int:
         if not keys:
             continue
         isrc, disc, tn, album = keys
-        arts = by_isrc.get(isrc) if isrc else None
-        if not arts:
+        hit = by_isrc.get(isrc) if isrc else None
+        if not hit:
             # Position fallback only when the file's album tag EXACTLY matches this
             # Qobuz album (normalised) — a substring check is unsafe: "…2026" is a
-            # substring of "…2026 (Mixed)" and would apply the wrong master's artists.
+            # substring of "…2026 (Mixed)" and would apply the wrong master's credits.
             file_album_norm = re.sub(r'\W+', '', album or "").lower()
             if album_title_norm and file_album_norm == album_title_norm:
-                arts = by_pos.get((disc, tn))
-        if arts and _write_artists(f, arts):
+                hit = by_pos.get((disc, tn))
+        if hit and _write_credits(f, hit[0], hit[1]):
             n += 1
     return n
