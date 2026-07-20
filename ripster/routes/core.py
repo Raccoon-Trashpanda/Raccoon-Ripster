@@ -70,6 +70,9 @@ _SECRET_KEYS = {
     "ripster-repo-token",           # PAT for self-update from a private repo
     "spotify-push-secret",          # 32-char push secret (Spotify extension) — real secret
     "qobuz-token",                  # dead/typo key but redact for completeness (never non-empty)
+    "telemetry-token",              # sole gate of the public CSRF-exempt /api/telemetry/ingest
+    "spotify-proxy",                # proxy URL may embed user:pass credentials
+    "spotify-totp-secret",          # web-token TOTP secret (owner-injected on rotation)
     "app-password-hash", "session-secret",
 }
 

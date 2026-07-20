@@ -125,9 +125,10 @@
     <div class="nav-item" data-view="history" onclick="showView('history',this);loadHistory()">
       <span class="icon">◷</span> <span data-i18n="nav.history">История</span>
     </div>
-    <!-- Release radar removed from the public build: it scans new releases via a
-         shared Spotify dev token that gets rate-limited / banned, so it does not
-         work reliably for public users. Kept in the private build only. -->
+    <div class="nav-item owner-only" data-view="releases" onclick="showView('releases',this)">
+      <span class="icon" style="color:#1db954">♻</span> <span data-i18n="nav.releases">Релизы</span>
+      <span class="nav-badge" id="releases-badge" style="display:none;background:#1db954;color:#fff">0</span>
+    </div>
 
     <div class="nav-item" data-view="bbc" onclick="showView('bbc',this);bbcInit()">
       <span class="icon" style="color:#e4003b">📻</span> BBC Sounds

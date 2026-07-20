@@ -30,8 +30,13 @@ def install(app, ctx) -> None:
 
 # ── Credential probe ──────────────────────────────────────────────────────────
 
-async def _probe_yandex() -> dict:
-    token = (_cfg.get("yandex-token") or "").strip()
+def _view(overlay: dict | None) -> dict:
+    """Config view for a probe: saved config with an optional candidate overlay."""
+    return {**_cfg, **overlay} if overlay else _cfg
+
+
+async def _probe_yandex(overlay: dict | None = None) -> dict:
+    token = (_view(overlay).get("yandex-token") or "").strip()
     if not token:
         return {"ok": False, "error": "Токен не задан — Settings → Яндекс."}
     from fastapi.concurrency import run_in_threadpool
@@ -56,12 +61,12 @@ async def _probe_yandex() -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-async def _probe_amazon() -> dict:
+async def _probe_amazon(overlay: dict | None = None) -> dict:
     """Amazon Music: download goes through the `amz` CLI with a saved token.
     There's no cheap account-status endpoint, so we verify (1) the token is
     configured and (2) the `amz` executable is resolvable — that's what a
     real download needs at minimum."""
-    token = (_cfg.get("amazon-token") or "").strip()
+    token = (_view(overlay).get("amazon-token") or "").strip()
     if not token:
         return {"ok": False, "error": "Токен не задан — Settings → 🅰️ Amazon (amz.dezalty.com/login)."}
     from fastapi.concurrency import run_in_threadpool
@@ -97,11 +102,16 @@ async def _probe_amazon() -> dict:
 
 
 @router.post("/api/test-auth/{service}")
-async def test_auth(service: str):
+async def test_auth(service: str, body: dict | None = None):
     """Probe a service's API with saved credentials. Returns structured info:
 
     On success  ``{"ok": True,  "user": {...}, "note": "..."}``
     On failure  ``{"ok": False, "error": "human-readable message"}``
+
+    Optional JSON body = CANDIDATE credentials overlay: config keys (whitelist-
+    checked) probed ON TOP of the saved config WITHOUT persisting anything.
+    Lets a caller (bot token wizard, UI) validate a pasted token BEFORE saving,
+    so a dead candidate never clobbers a working credential.
 
     Never raises HTTPException for auth failures — an auth failure IS the
     normal response. Only returns non-200 for truly broken inputs
@@ -122,8 +132,14 @@ async def test_auth(service: str):
     fn = probes.get(s)
     if fn is None:
         raise HTTPException(400, f"Unsupported service: {service}")
+    overlay: dict | None = None
+    if isinstance(body, dict) and body:
+        from ripster.security import config_key_allowed as _allowed
+        overlay = {k: str(v) for k, v in body.items()
+                   if isinstance(k, str) and _allowed(k) and isinstance(v, (str, int))}
+        overlay = overlay or None
     try:
-        result = await fn()
+        result = await fn(overlay)
     except HTTPException:
         raise
     except Exception as e:
@@ -205,17 +221,18 @@ def _qobuz_eligibility_error(user_block: dict) -> dict | None:
     }
 
 
-async def _probe_qobuz() -> dict:
+async def _probe_qobuz(overlay: dict | None = None) -> dict:
     """Validate Qobuz credentials. Supports both modes:
       A. user-id + user-auth-token  (cookie token)
       B. email + password           (logs in, then auto-saves the captured
          user-id + token so downloads use the reliable token path).
     """
-    user_id    = str(_cfg.get("qobuz-user-id")    or "").strip()
-    auth_token = str(_cfg.get("qobuz-auth-token") or "").strip()
-    email      = str(_cfg.get("qobuz-email")      or "").strip()
-    password   = str(_cfg.get("qobuz-password")   or "").strip()
-    custom_app = str(_cfg.get("qobuz-app-id")     or "").strip()
+    cfg = _view(overlay)
+    user_id    = str(cfg.get("qobuz-user-id")    or "").strip()
+    auth_token = str(cfg.get("qobuz-auth-token") or "").strip()
+    email      = str(cfg.get("qobuz-email")      or "").strip()
+    password   = str(cfg.get("qobuz-password")   or "").strip()
+    custom_app = str(cfg.get("qobuz-app-id")     or "").strip()
     app_id     = custom_app or "312369995"
 
     if user_id and auth_token:
@@ -380,10 +397,12 @@ async def _tidal_refresh_token() -> str:
     return ""
 
 
-async def _probe_tidal() -> dict:
-    token   = (_cfg.get("tidal-token")   or "").strip()
-    user_id = (_cfg.get("tidal-user-id") or "").strip()
-    country = (_cfg.get("tidal-country") or "US").strip().upper() or "US"
+async def _probe_tidal(overlay: dict | None = None) -> dict:
+    cfg = _view(overlay)
+    candidate = bool(overlay)   # probing a pasted token → no refresh, no orpheus shortcut
+    token   = (cfg.get("tidal-token")   or "").strip()
+    user_id = (cfg.get("tidal-user-id") or "").strip()
+    country = (cfg.get("tidal-country") or "US").strip().upper() or "US"
 
     # Downloads now run through OrpheusDL's self-refreshing session, NOT the
     # pasted access_token (which is only used for search/metadata and dies in
@@ -392,7 +411,7 @@ async def _probe_tidal() -> dict:
     # stale metadata token would hide Tidal and the OrpheusDL path never runs.
     try:
         from ripster.engines.tidal import is_authenticated as _orph_tidal_authed
-        _orph_ready = bool(_orph_tidal_authed())
+        _orph_ready = (not candidate) and bool(_orph_tidal_authed())
     except Exception:
         _orph_ready = False
 
@@ -407,7 +426,7 @@ async def _probe_tidal() -> dict:
 
     if not token:
         # Try to mint one from the refresh_token before giving up.
-        token = await _tidal_refresh_token()
+        token = "" if candidate else await _tidal_refresh_token()
         if not token:
             if _orph_ready:
                 return _ok_via_orpheus("access_token не задан — качаю через OrpheusDL-сессию")
@@ -440,7 +459,7 @@ async def _probe_tidal() -> dict:
 
     code, payload = await _do_probe(token)
 
-    if code == 401:
+    if code == 401 and not candidate:
         # Try one auto-refresh and retry exactly once before reporting failure.
         new_tok = await _tidal_refresh_token()
         if new_tok:
@@ -476,8 +495,8 @@ async def _probe_tidal() -> dict:
     }
 
 
-async def _probe_deezer() -> dict:
-    arl = (_cfg.get("deezer-arl") or "").strip()
+async def _probe_deezer(overlay: dict | None = None) -> dict:
+    arl = (_view(overlay).get("deezer-arl") or "").strip()
     if not arl:
         return {"ok": False, "error": "Не заполнен ARL в Settings → Deezer."}
 
@@ -521,7 +540,9 @@ async def _probe_deezer() -> dict:
     }
 
 
-async def _probe_spotify() -> dict:
+async def _probe_spotify(overlay: dict | None = None) -> dict:
+    # sp_dc candidates can't be probed cheaply (web-token flow is IP-gated) —
+    # overlay is accepted for signature parity but the probe tests the live OAuth.
     try:
         from ripster.routes.spotify import get_access_token as _sp_token
     except ImportError:
@@ -560,8 +581,8 @@ async def _probe_spotify() -> dict:
     }
 
 
-async def _probe_soundcloud() -> dict:
-    token = (_cfg.get("soundcloud-oauth-token") or "").strip()
+async def _probe_soundcloud(overlay: dict | None = None) -> dict:
+    token = (_view(overlay).get("soundcloud-oauth-token") or "").strip()
     if not token:
         return {"ok": False,
                 "error": "Не заполнен OAuth токен в Settings → SoundCloud."}
@@ -614,10 +635,11 @@ async def _probe_soundcloud() -> dict:
     }
 
 
-async def _probe_apple() -> dict:
-    mut       = (_cfg.get("media-user-token")    or "").strip()
-    bearer    = (_cfg.get("authorization-token") or "").strip()
-    storefront = (_cfg.get("storefront") or "us").strip().lower()
+async def _probe_apple(overlay: dict | None = None) -> dict:
+    cfg = _view(overlay)
+    mut       = (cfg.get("media-user-token")    or "").strip()
+    bearer    = (cfg.get("authorization-token") or "").strip()
+    storefront = (cfg.get("storefront") or "us").strip().lower()
 
     if not mut:
         return {"ok": False,
@@ -627,7 +649,7 @@ async def _probe_apple() -> dict:
         try:
             from ripster.metadata.apple import auto_fetch_bearer
             bearer = (await auto_fetch_bearer()) or ""
-            if bearer:
+            if bearer and not overlay:      # candidate probe must not persist
                 _cfg["authorization-token"] = bearer
                 if _save_config:
                     try: _save_config(_cfg)
@@ -676,9 +698,10 @@ async def _probe_apple() -> dict:
     }
 
 
-async def _probe_beatport() -> dict:
-    username = (_cfg.get("beatport-username") or "").strip()
-    password = (_cfg.get("beatport-password") or "").strip()
+async def _probe_beatport(overlay: dict | None = None) -> dict:
+    cfg = _view(overlay)
+    username = (cfg.get("beatport-username") or "").strip()
+    password = (cfg.get("beatport-password") or "").strip()
     if not username or not password:
         return {"ok": False,
                 "error": "Не заполнены email/пароль в Settings → Beatport."}
