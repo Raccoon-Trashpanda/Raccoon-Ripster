@@ -67,7 +67,14 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "service-colors",
     "player-",
     "notify-",        # notify-on-done (native desktop toast on download finish)
-    "ripster-repo",   # ripster-repo + ripster-repo-token (self-update)
+    # NOTE: "ripster-repo" (the update source slug) is deliberately NOT here —
+    # writing it via the API lets anyone who can reach /api/config point
+    # self-update at an arbitrary repo, which auto-updates a running install
+    # to run whatever code is there (RCE). It's only settable by editing
+    # config.yaml directly (filesystem access = already a higher trust level).
+    # The auth token for a private fork is still API-writable — it doesn't
+    # change WHERE updates come from, only whether a fixed repo is reachable.
+    "ripster-repo-token",
     "telemetry-",     # diagnostics forwarding (telemetry-forward/url/level/token/...)
 )
 

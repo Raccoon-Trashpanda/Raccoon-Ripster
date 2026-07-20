@@ -281,6 +281,17 @@ def _apply_overlay(zip_bytes: bytes, base_dir: Path) -> tuple[bool, str]:
         return False, "пустой архив"
     root = names[0].split("/", 1)[0]
     with tempfile.TemporaryDirectory() as td:
+        td_resolved = Path(td).resolve()
+        # Defense in depth: zipfile.extractall already strips absolute paths
+        # and neutralises plain ".." on modern Python, but that's not a
+        # documented hard guarantee against every crafted archive. Verify
+        # every member resolves INSIDE td before trusting extractall with it
+        # — cheap, and this only ever runs against a zip fetched from the
+        # (now non-writable-via-API, see security.py) update repo.
+        for member in zf.namelist():
+            target = (td_resolved / member).resolve()
+            if target != td_resolved and td_resolved not in target.parents:
+                return False, f"архив содержит подозрительный путь: {member}"
         try:
             zf.extractall(td)
         except Exception as e:                        # noqa: BLE001

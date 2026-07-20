@@ -144,6 +144,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 
 # Ensure the script directory is on sys.path so ``ripster`` resolves
@@ -669,6 +670,19 @@ app.add_middleware(
     allow_origins=["http://localhost:7799", "http://127.0.0.1:7799"],
     allow_methods=["*"],
     allow_headers=["*"],
+)
+# Defense in depth against DNS-rebinding for side-effect GETs that don't go
+# through the CORS/CSRF Origin check (that check only guards mutations and
+# cross-site response reads). Wildcards cover the tunnel providers guest.py
+# actually uses (serveo's default/custom subdomain, cloudflared quick
+# tunnels) — the exact subdomain varies per install/restart, so we allow the
+# provider domain rather than hardcoding one instance's current subdomain.
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=[
+        "127.0.0.1", "localhost",
+        "*.serveousercontent.com", "*.serveo.net", "*.trycloudflare.com",
+    ],
 )
 if _STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")

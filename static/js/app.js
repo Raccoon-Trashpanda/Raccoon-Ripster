@@ -209,7 +209,7 @@ function handleMessage(msg) {
       S.paused  = msg.paused  || false;
       if(typeof STEP_DEFS_GAMDL!=='undefined') STEP_DEFS = (S.config['engine']==='gamdl') ? STEP_DEFS_GAMDL : STEP_DEFS_ZHAAREY;
       applyConfig(); renderQueue(); updateTransport(); updatePills(); renderQualityGrid(); renderConfig(); _syncReleasesSettingsTab();
-      setTimeout(_maybeAskTelemetryName, 2500);  // first-run: ask the tester for a name so the dev can tell instances apart
+      if(typeof _maybeAskTelemetryName!=='undefined') setTimeout(_maybeAskTelemetryName, 2500);  // first-run consent ask (owner/tester builds only — public mirror doesn't ship telemetry_ui.js)
       setTimeout(autoValidateServices, 1500);   // probe all configured tokens on startup — no need to open each tab
       if(S.config['engine']==='gamdl') setTimeout(checkCookies, 1200);
       if(S.config['engine']==='amd')   setTimeout(checkAMDStatus, 800);

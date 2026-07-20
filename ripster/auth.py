@@ -193,15 +193,21 @@ def is_enabled() -> bool:
 # ── Rate limiting for /api/login ────────────────────────────────────────────
 
 def _client_ip(request: Request) -> str:
-    """Resolve the real client IP. Trusts X-Forwarded-For only from localhost
-    (typical reverse-proxy setup); otherwise uses the direct peer address."""
-    peer = request.client.host if request.client else "unknown"
-    if peer in ("127.0.0.1", "::1", "localhost"):
-        fwd = request.headers.get("x-forwarded-for", "")
-        if fwd:
-            # X-Forwarded-For: client, proxy1, proxy2 → take the leftmost.
-            return fwd.split(",")[0].strip()
-    return peer
+    """Resolve the login rate-limit key. Deliberately does NOT trust
+    X-Forwarded-For: this app is reached either directly or through a tunnel
+    (cloudflared/serveo) whose client always connects from localhost — so
+    "trust XFF when the peer is localhost" (a normal reverse-proxy rule) is
+    exactly backwards here: it's the ONE case where the peer is NOT the real
+    caller, and a remote attacker going through the tunnel can set XFF to
+    anything they want on every request, giving each login attempt a "fresh"
+    IP and defeating the attempt counter below entirely (verified — this was
+    the actual behavior before this fix). Using the raw peer means every
+    tunnel-borne login attempt shares ONE bucket (peer stays 127.0.0.1),
+    which is a stricter but SAFE degrade: it still won't over-limit direct
+    local use (peer is the real LAN/loopback IP there), and it turns the
+    per-IP limit into a de-facto global limit for the one scenario (remote
+    access) where that's exactly what's needed."""
+    return request.client.host if request.client else "unknown"
 
 
 def _rate_limit_check(ip: str) -> int | None:

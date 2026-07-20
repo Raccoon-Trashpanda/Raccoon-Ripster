@@ -87,14 +87,14 @@ player-gapless: true
 player-viz: true
 player-stream-quality: mp3
 
-# ── Diagnostics (optional) ───────────────────────────────────────────────────
-# Sends only WARN/ERROR console lines (with credentials stripped out) to the
-# developer so problems can be fixed without you copying logs. No music, no
-# personal files, no tokens. Turn it off any time in Settings.
-telemetry-forward: true
-telemetry-url: https://raccoon-ripster.serveousercontent.com
+# ── Diagnostics (optional, OFF by default — opt in from Settings) ────────────
+# If enabled, sends only WARN/ERROR console lines (with credentials stripped
+# out) to the developer so problems can be fixed without you copying logs.
+# No music, no personal files, no tokens. Off unless you turn it on yourself.
+telemetry-forward: false
+telemetry-url: ''
 telemetry-level: warn      # warn = warnings + errors · error = errors only
-telemetry-token: rptlm_61f4cee4c61a06e9c3dd
+telemetry-token: ''
 telemetry-name: ''          # your name/label (asked on first run, shown to the developer)
 telemetry-instance-id: ''  # auto-generated anonymous id on first run
 

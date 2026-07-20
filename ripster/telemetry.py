@@ -14,7 +14,7 @@ Two roles live here, both gated by config so the SAME file ships everywhere:
     logs/remote/<instance_id>.jsonl, plus a small index for the owner UI.
 
 Config keys (see config.example.yaml):
-  telemetry-forward        bool  client sends                       (default True)
+  telemetry-forward        bool  client sends                       (default False, opt-in)
   telemetry-url            str   owner ingest base URL (the tunnel)
   telemetry-level          str   min level to forward: warn|error   (default warn)
   telemetry-instance-id    str   anonymous UUID, auto-generated once
@@ -118,10 +118,12 @@ def redact(text: str) -> str:
 
 # ── CLIENT ───────────────────────────────────────────────────────────────────
 def forwarding_enabled() -> bool:
-    # Default ON; an instance that itself ingests should not forward to itself.
+    # Opt-in (default OFF, security audit 2026-07-21): a fresh public install
+    # must not silently phone home before the user has agreed to it. An
+    # instance that itself ingests should also never forward to itself.
     if _cfg.get("telemetry-ingest-enabled"):
         return False
-    return bool(_cfg.get("telemetry-forward", True)) and bool((_cfg.get("telemetry-url") or "").strip())
+    return bool(_cfg.get("telemetry-forward", False)) and bool((_cfg.get("telemetry-url") or "").strip())
 
 
 def record(level: str, text: str) -> None:
