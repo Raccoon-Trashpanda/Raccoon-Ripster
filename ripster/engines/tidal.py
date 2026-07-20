@@ -24,7 +24,6 @@ Search / album / artist metadata still use Tidal's public API with the pasted
 from __future__ import annotations
 
 import json
-import pickle
 import re
 import sys
 import time
@@ -34,6 +33,7 @@ from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_
 from .errors import classify_download_error
 from .registry import register
 from ripster import http_client as _HTTP
+from ripster.safe_pickle import safe_loads as _pickle_loads
 
 
 # ── OrpheusDL paths ───────────────────────────────────────────────────────────
@@ -78,7 +78,7 @@ def _read_tv_session() -> dict | None:
     """TV session dict (refresh_token/country/user_id) from the pickled
     loginstorage. Plain dicts + datetime only — no orpheus import needed."""
     try:
-        blob = pickle.loads(_session_path().read_bytes())
+        blob = _pickle_loads(_session_path().read_bytes())
         return blob["modules"]["tidal"]["sessions"]["default"]["custom_data"]["sessions"]["TV"]
     except Exception:
         return None

@@ -87,14 +87,18 @@ def config_key_allowed(k: str) -> bool:
 # ── WebSocket guest filter ─────────────────────────────────────────────────────
 # Event types that must never be forwarded to guest WebSocket connections.
 
-# ⚠️ The WS fan-out (app.py broadcast) is ALLOW-BY-DEFAULT for guests: queue_update
-# / log / progress / guest_link_revoked are special-cased, and EVERYTHING ELSE is
-# forwarded to guests verbatim via the final `else`. So every owner-sensitive
-# event type MUST be listed here or it leaks. The robust fix is to flip that
-# fan-out to a deny-by-default ALLOWLIST (guests need only their own queue/log/
-# progress + public search-enrichment meta + their BBC/SC progress) — tracked as a
-# follow-up; flipping blind risks silently breaking guest live-updates, so until
-# then this blocklist is kept exhaustive. (vuln-sweep pass 3 expanded it.)
+# The WS fan-out (app.py broadcast) is DENY-BY-DEFAULT for guests (security
+# audit 2026-07-21): queue_update / log / progress / dl_counter /
+# sc_fallback_added / bbc_dl_* are scoped to the guest's own session/tasks,
+# guest_link_revoked has its own handling, queue_done/ping carry no payload
+# and are always safe, and anything NOT explicitly handled is now dropped —
+# a NEW owner-sensitive event type is safe by default instead of leaking
+# until someone remembers to add it here. This blocklist still exists as a
+# belt-and-suspenders early-exit for the known-sensitive types (checked
+# before the per-type branches), not because the fan-out depends on it.
+# (This mirror doesn't ship ripster/routes/guest.py — no guest session can
+# ever exist here — but the shared app.py/security.py logic stays aligned
+# with the owner build for maintainability.)
 GUEST_BLOCKED_WS_TYPES: frozenset[str] = frozenset({
     "history_updated",
     "queue_started", "queue_stopped", "queue_paused", "queue_resumed",
@@ -111,7 +115,7 @@ GUEST_BLOCKED_WS_TYPES: frozenset[str] = frozenset({
     "wrapper_started", "wrapper_status", "pool_update", "amd_ready",
     # Setup tab — install logs can leak filesystem paths / tool versions.
     "install_log", "install_step", "setup_done", "tools_status",
-    "gamdl_deps_fixed", "soundcloud_installed",
+    "gamdl_deps_fixed", "soundcloud_installed", "widevine_minted",
     # Coder is an owner-only local-file tool (reveals owner folders/paths).
     "coder_progress", "coder_done", "coder_cancelled",
 })

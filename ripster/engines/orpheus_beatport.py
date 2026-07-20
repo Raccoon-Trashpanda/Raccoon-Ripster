@@ -61,9 +61,9 @@ _BP_AT_CACHE: dict = {"token": "", "exp": 0.0}
 
 def _read_bp_session() -> dict | None:
     """The beatport module's saved {access_token, refresh_token, expires} dict."""
-    import pickle
+    from ripster.safe_pickle import safe_loads
     try:
-        blob = pickle.loads(_session_path().read_bytes())
+        blob = safe_loads(_session_path().read_bytes())
         return blob["modules"]["beatport"]["sessions"]["default"]["custom_data"]
     except Exception:
         return None

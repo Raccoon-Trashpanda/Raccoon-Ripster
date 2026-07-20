@@ -195,12 +195,13 @@ def _save_tidal_session(session_type, access_token, refresh_token, expires, user
     building the minimal skeleton if the file is absent. Returns True on success."""
     import pickle, os as _os
     from ripster.engines.tidal import _session_path
+    from ripster.safe_pickle import safe_loads as _pickle_loads
     sess = {"access_token": access_token, "refresh_token": refresh_token,
             "expires": expires, "user_id": user_id, "country_code": country_code}
     try:
         p = _session_path()
         try:
-            blob = pickle.loads(p.read_bytes())
+            blob = _pickle_loads(p.read_bytes())
         except Exception:
             blob = {"advancedmode": False, "modules": {}}
         default = (blob.setdefault("modules", {}).setdefault("tidal", {})
