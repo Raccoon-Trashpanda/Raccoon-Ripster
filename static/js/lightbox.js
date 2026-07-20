@@ -193,13 +193,13 @@ async function loadWatchlist() {
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;font-weight:600;color:var(--text)">${w.name||w.url}</div>
         <div style="font-size:11px;color:var(--muted);margin-top:2px">
-          ${w.service||'apple'} · ${w.auto_download?'Авто-скачивание':'Только уведомление'}
-          ${w.last_check?' · Проверено: '+new Date(w.last_check).toLocaleString('ru'):''}
-          ${w.last_release?'<span style="color:var(--green);margin-left:6px">Новый релиз!</span>':''}
+          ${w.service||'apple'} · ${w.auto_download?t('wl.auto_dl'):t('wl.notify_only')}
+          ${w.last_check?' · '+t('wl.checked_at')+' '+new Date(w.last_check).toLocaleString('ru'):''}
+          ${w.last_release?'<span style="color:var(--green);margin-left:6px">' + t('wl.new_release') + '</span>':''}
         </div>
       </div>
       <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);cursor:pointer;white-space:nowrap">
-        <input type="checkbox" ${w.auto_download?'checked':''} onchange="wlToggleAuto('${w.id}',this.checked)"/> Авто
+        <input type="checkbox" ${w.auto_download?'checked':''} onchange="wlToggleAuto('${w.id}',this.checked)"/> ${t('wl.auto_short')}
       </label>
       <button onclick="wlRemove('${w.id}')"
         style="padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)">
@@ -226,7 +226,7 @@ async function wlRemove(id) {
 
 async function wlToggleAuto(id, val) {
   // Update via re-add (simple)
-  toast(val?'Авто-скачивание включено':'Только уведомление');
+  toast(val?t('wl.auto_on'):t('wl.notify_only'));
 }
 
 async function wlCheckNow() {

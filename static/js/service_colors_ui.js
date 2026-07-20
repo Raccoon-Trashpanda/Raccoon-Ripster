@@ -51,6 +51,23 @@ function _showSpotifyChoiceToast(url, quality) {
   const id = 'sp_choice_' + Date.now();
   _spPickerData.set(id, { url, quality });
 
+  // Each target gets its own compact quality select underneath — service +
+  // quality picked together, both remembered as one choice.
+  const targets = [
+    {svc:'apple',  label:'Apple Music', clr:'var(--red)', bg:'rgba(192,132,160,.15)', bd:'rgba(192,132,160,.25)'},
+    {svc:'deezer', label:'Deezer',      clr:'#a238ff',    bg:'rgba(162,56,255,.18)',  bd:'rgba(162,56,255,.3)'},
+    {svc:'qobuz',  label:'Qobuz',       clr:'#1b68d3',    bg:'rgba(27,104,211,.18)',  bd:'rgba(27,104,211,.3)'},
+  ];
+  const colsHtml = targets.map(tg => `
+        <div style="display:flex;flex-direction:column;gap:4px">
+          <button data-target="${tg.svc}"
+            style="padding:5px 6px;background:${tg.bg};border:1px solid ${tg.bd};border-radius:8px;font-size:10px;font-weight:700;color:${tg.clr};cursor:pointer;font-family:var(--font);white-space:nowrap">${tg.label}</button>
+          <select class="sp-pick-q" data-svc="${tg.svc}" title="${t('rl.quality_label')}" onclick="event.stopPropagation()"
+            style="width:100%;padding:2px 4px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:9px;color:var(--muted);cursor:pointer;outline:none">
+            <option value="${esc(resolveQuality(tg.svc))}">${esc(resolveQuality(tg.svc))}</option>
+          </select>
+        </div>`).join('');
+
   const el = document.createElement('div');
   el.className = 'notif notif-enter';
   el.id = id;
@@ -59,13 +76,7 @@ function _showSpotifyChoiceToast(url, quality) {
     <div class="notif-dot" style="background:#1db954;color:#1db954"></div>
     <div class="notif-body">
       <div class="notif-msg">${t('q.sp_conv_via')}</div>
-      <div class="sp-picker-btns" style="display:flex;gap:6px;margin-top:8px;flex-wrap:wrap">
-        <button data-target="apple"
-          style="padding:5px 11px;background:rgba(192,132,160,.15);border:1px solid rgba(192,132,160,.25);border-radius:8px;font-size:11px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--font)">Apple Music</button>
-        <button data-target="deezer"
-          style="padding:5px 11px;background:rgba(162,56,255,.18);border:1px solid rgba(162,56,255,.3);border-radius:8px;font-size:11px;font-weight:700;color:#a238ff;cursor:pointer;font-family:var(--font)">Deezer</button>
-        <button data-target="qobuz"
-          style="padding:5px 11px;background:rgba(27,104,211,.18);border:1px solid rgba(27,104,211,.3);border-radius:8px;font-size:11px;font-weight:700;color:#1b68d3;cursor:pointer;font-family:var(--font)">Qobuz</button>
+      <div class="sp-picker-btns" style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:8px">${colsHtml}
       </div>
       <label class="sp-remember" style="display:flex;align-items:center;gap:6px;margin-top:8px;font-size:11px;color:var(--muted);cursor:pointer;user-select:none">
         <input type="checkbox" class="sp-remember-chk" style="accent-color:#1db954"/>
@@ -79,7 +90,9 @@ function _showSpotifyChoiceToast(url, quality) {
     btn.addEventListener('click', () => {
       const target   = btn.dataset.target;
       const remember = !!el.querySelector('.sp-remember-chk')?.checked;
-      _chooseSpTarget(id, target, remember);
+      const qSel     = el.querySelector(`.sp-pick-q[data-svc="${target}"]`);
+      const qChosen  = (qSel && qSel.value) ? qSel.value : resolveQuality(target);
+      _chooseSpTarget(id, target, remember, qChosen);
     });
   });
 
@@ -87,20 +100,39 @@ function _showSpotifyChoiceToast(url, quality) {
   requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.remove('notif-enter')));
   // Auto-dismiss after 15s — bit longer now that there's a checkbox to read.
   _notifTimers.set(id, setTimeout(()=>_closeNotif(id), 15000));
+
+  // Upgrade each compact select from its single placeholder option to the
+  // full per-service quality list (cached — cheap after the first fetch).
+  ['apple','deezer','qobuz'].forEach(async svc => {
+    let list;
+    try { list = await _qualitiesForEngine(svc); } catch(e) { return; }
+    if(!Array.isArray(list) || !list.length) return;
+    const sel = el.querySelector(`.sp-pick-q[data-svc="${svc}"]`);
+    if(!sel) return;
+    const cur = resolveQuality(svc);
+    sel.innerHTML = list.map(q =>
+      `<option value="${esc(q.id)}" ${q.id===cur?'selected':''}>${esc(q.badge||q.label||q.id)}</option>`
+    ).join('');
+  });
 }
 
-async function _chooseSpTarget(notifId, target, remember) {
+async function _chooseSpTarget(notifId, target, remember, quality) {
   const ctx = _spPickerData.get(notifId);
   if(!ctx) return;                         // already handled or expired
   _spPickerData.delete(notifId);
   _closeNotif(notifId);
 
+  const qFinal = quality || resolveQuality(target);
+  const qualityKeyMap = {apple:'quality', deezer:'deezer-quality', qobuz:'qobuz-quality'};
+
   // Persist the preference IMMEDIATELY so if the convert call is slow
   // and the user tries another URL, the new choice is already remembered.
+  // Service + quality are remembered together — one picker, one decision.
   if(remember) {
     try {
-      await api('POST','/api/config',{ 'spotify-default-target': target });
-      if(S.config) S.config['spotify-default-target'] = target;
+      const patch = { 'spotify-default-target': target, [qualityKeyMap[target]]: qFinal };
+      await api('POST','/api/config', patch);
+      if(S.config) Object.assign(S.config, patch);
       toast('Spotify → '+_svcLabel(target)+' '+t('q.remembered'), _svcColor(target));
     } catch(e) {
       console.warn('save remember:', e);
@@ -111,7 +143,7 @@ async function _chooseSpTarget(notifId, target, remember) {
 
   const r = await api('POST','/api/convert/spotify', { url: ctx.url, target });
   if(r.ok && r.target?.url) {
-    await api('POST','/api/queue/add', { url: r.target.url, quality: resolveQuality(target), title: r.target.title });
+    await api('POST','/api/queue/add', { url: r.target.url, quality: qFinal, title: r.target.title });
     document.getElementById('url-input').value = '';
     detectUrlService('');
     toast('+ '+r.target.title, _svcColor(target), _svcLabel(target));

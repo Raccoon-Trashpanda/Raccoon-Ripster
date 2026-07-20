@@ -317,13 +317,13 @@ function renderScTile(it) {
         : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:30px;color:var(--muted)">☁</div>`}
       <div style="position:absolute;top:6px;left:6px"><span style="font-size:9px;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,.72);color:${badgeClr};font-weight:700;backdrop-filter:blur(4px)">${badge}</span></div>
       <div id="scmdb-badge-${it.id}" style="display:${it.has_tracklist ? '' : 'none'};position:absolute;top:6px;right:6px;background:rgba(175,82,222,.9);color:#fff;font-size:8px;padding:2px 6px;border-radius:4px;font-weight:700;backdrop-filter:blur(4px);cursor:pointer"
-        onclick="event.stopPropagation();_scOpenMix('${it.id}')" title="Трек-лист">📋</div>
+        onclick="event.stopPropagation();_scOpenMix('${it.id}')" title="${t('b.tl_word')}">📋</div>
       ${!isPl ? `<div id="sc-fmt-${it.id}" style="display:none;position:absolute;top:28px;right:6px;font-size:8px;font-weight:700;padding:1px 5px;border-radius:4px;background:rgba(0,0,0,.72);backdrop-filter:blur(4px);pointer-events:none"></div>` : ''}
-      <div style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer" onclick="event.stopPropagation();${playCall}" title="${isPl ? 'Играть плейлист' : 'Играть'}">▶</div>
+      <div style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer" onclick="event.stopPropagation();${playCall}" title="${isPl ? t('sc2.play_pl') : t('btn.play')}">▶</div>
       ${sub ? `<div style="position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,.72);border-radius:4px;font-size:10px;color:#fff;padding:2px 5px;font-family:var(--mono)">${esc(sub)}</div>` : ''}
     </div>
     <div style="padding:8px 10px">
-      <div onclick="_scOpenMix('${it.id}')" style="cursor:pointer" title="Открыть карточку микса">
+      <div onclick="_scOpenMix('${it.id}')" style="cursor:pointer" title="${t('sc2.open_mix')}">
         <div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.title)}</div>
         <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.artist)}</div>
         ${it.date ? `<div style="font-size:10px;color:var(--muted2);margin-top:3px">${esc(it.date)}</div>` : ''}
@@ -331,7 +331,7 @@ function renderScTile(it) {
       <div style="display:flex;gap:5px;margin-top:7px">
         <button onclick="scDownload('${it.id}')"
           style="flex:1;padding:5px 0;background:rgba(255,85,0,.12);border:1px solid rgba(255,85,0,.22);border-radius:7px;font-size:11px;font-weight:600;color:#ff7a33;cursor:pointer;font-family:var(--font)">${t('btn.download')}</button>
-        <a href="${esc(it.url)}" target="_blank" style="padding:5px 9px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--muted);text-decoration:none;display:flex;align-items:center" title="Открыть на SoundCloud">↗</a>
+        <a href="${esc(it.url)}" target="_blank" style="padding:5px 9px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--muted);text-decoration:none;display:flex;align-items:center" title="${t('sc2.open_on_sc')}">↗</a>
       </div>
     </div>
   </div>`;
@@ -567,10 +567,10 @@ function _scRenderTracklist(id, tl) {
     const cue1 = hasTs1
       ? `<button onclick="_scDownloadCue('${id}')" style="font-size:10px;padding:3px 9px;background:rgba(175,82,222,.15);border:1px solid rgba(175,82,222,.3);border-radius:6px;color:#af52de;cursor:pointer;font-family:var(--font)">📄 .cue</button>`
       : '';
-    const cr1 = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted2);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)"><span>🎚 1001Tracklists · ${tl1.length} тр.</span>${cue1}</div>`;
+    const cr1 = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted2);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)"><span>🎚 1001Tracklists · ${tl1.length} ${t('p.trk_abbr')}</span>${cue1}</div>`;
     tl.innerHTML = cr1 + tl1.map((tr, i) => {
       const tsEl = tr.timestamp
-        ? `<span class="ts" onclick="scSeekTo(${tr.seconds||0})" title="Перемотать">${esc(tr.timestamp)}</span>`
+        ? `<span class="ts" onclick="scSeekTo(${tr.seconds||0})" title="${t('sc2.seek')}">${esc(tr.timestamp)}</span>`
         : '';
       return `<div class="scd-trk"><span class="n">${i+1}</span>${tsEl}<span class="nm">${esc(nm1(tr))}</span></div>`;
     }).join('');
@@ -601,7 +601,7 @@ function _scRenderTracklist(id, tl) {
         timestamp: tr.timestamp || '', seconds: _tsToSec(tr.timestamp), label: nameOf(tr),
       }));
     }
-    creditLabel = scTracks.length ? '📋 Из описания SoundCloud' : '🗄 MixesDB';
+    creditLabel = scTracks.length ? t('sc2.from_desc') : '🗄 MixesDB';
   } else if (ytCodes.length) {
     tracks = ytCodes.map(tc => ({ timestamp: tc.time, seconds: tc.seconds, label: tc.title }));
     creditLabel = '⏱ YouTube · ' + (d.yt?.title || '');
@@ -614,10 +614,10 @@ function _scRenderTracklist(id, tl) {
   const cueBtn = hasTs
     ? `<button onclick="_scDownloadCue('${id}')" style="font-size:10px;padding:3px 9px;background:rgba(175,82,222,.15);border:1px solid rgba(175,82,222,.3);border-radius:6px;color:#af52de;cursor:pointer;font-family:var(--font)">📄 .cue</button>`
     : '';
-  const credit = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted2);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)"><span>${esc(creditLabel)} · ${tracks.length} тр.</span>${cueBtn}</div>`;
+  const credit = `<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;font-size:10px;color:var(--muted2);margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border)"><span>${esc(creditLabel)} · ${tracks.length} ${t('p.trk_abbr')}</span>${cueBtn}</div>`;
   tl.innerHTML = credit + tracks.map((tr, i) => {
     const tsEl = tr.timestamp
-      ? `<span class="ts" onclick="scSeekTo(${tr.seconds||0})" title="Перемотать">${esc(tr.timestamp)}</span>`
+      ? `<span class="ts" onclick="scSeekTo(${tr.seconds||0})" title="${t('sc2.seek')}">${esc(tr.timestamp)}</span>`
       : '';
     return `<div class="scd-trk"><span class="n">${i+1}</span>${tsEl}<span class="nm">${esc(tr.label)}</span></div>`;
   }).join('');
@@ -642,11 +642,11 @@ function _scFallbackTracklist(id, tl) {
     _scRenderTracklist(id, tl);
     const hasTs = mdbTracks.some(tr => tr.timestamp) || ytCodes.length;
     if (!hasTs && !d.yt) {
-      tl.innerHTML += `<div id="sc-yt-loading-${id}" style="font-size:9px;color:var(--muted2);margin-top:4px">⏱ Ищу тайм-коды на YouTube…</div>`;
+      tl.innerHTML += `<div id="sc-yt-loading-${id}" style="font-size:9px;color:var(--muted2);margin-top:4px">${t('sc2.yt_tc')}</div>`;
       _scFetchYtTimecodes(id, () => { _scRenderTracklist(id, tl); });
     }
   } else {
-    tl.innerHTML = `<div style="font-size:9px;color:var(--muted2)">⏱ Ищу тайм-коды на YouTube…</div>`;
+    tl.innerHTML = `<div style="font-size:9px;color:var(--muted2)">${t('sc2.yt_tc')}</div>`;
     _scFetchYtTimecodes(id, () => {
       const ytC = (_scMdb.get(id) || {}).yt?.timecodes || [];
       if (ytC.length) { _scRenderTracklist(id, tl); }
@@ -669,7 +669,7 @@ function _scLoadTracklistInto(id, tl) {
     else                         { _scFallbackTracklist(id, tl); }
     return;
   }
-  tl.innerHTML = `<div style="font-size:11px;color:var(--muted2)">📋 Загружаю трек-лист…</div>`;
+  tl.innerHTML = `<div style="font-size:11px;color:var(--muted2)">${t('sc2.tl_loading')}</div>`;
   fetch(`/api/soundcloud/tracklist/${id}`)
     .then(r => r.json())
     .then(scd => {
@@ -706,8 +706,8 @@ function _scDetailHTML(it) {
   const btn = (bg, bd, clr) => `flex:1;padding:8px 0;border:1px solid ${bd};background:${bg};border-radius:8px;font-size:12px;font-weight:600;color:${clr};cursor:pointer;font-family:var(--font)`;
   return `
     <div class="scd-head" style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--border);flex:0 0 auto">
-      <div style="font-size:13px;font-weight:700;color:var(--text)">Карточка микса</div>
-      <button class="scd-close" onclick="_scCloseMix()" title="Закрыть (Esc)" style="width:30px;height:30px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;font-size:15px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;line-height:1;padding:0">✕</button>
+      <div style="font-size:13px;font-weight:700;color:var(--text)">${t('sc2.mix_card')}</div>
+      <button class="scd-close" onclick="_scCloseMix()" title="${t('b.close_esc')}" style="width:30px;height:30px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;font-size:15px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;line-height:1;padding:0">✕</button>
     </div>
     <div class="scd-body" style="overflow-y:auto;padding:16px 16px 168px;flex:1 1 auto">
       ${art ? `<img id="scd-cover-img" class="scd-cover" src="${esc(art)}" onerror="this.onerror=null;this.src='${escJ(it.artwork_sm||art)}'" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:12px;display:block;background:var(--surface2)"/>` : ''}
@@ -718,9 +718,9 @@ function _scDetailHTML(it) {
       <div style="display:flex;gap:7px;margin-top:14px">
         <button onclick="${playCall}" style="${btn('rgba(255,85,0,.14)','rgba(255,85,0,.25)','#ff7a33')}">▶ ${t('btn.play')||'Играть'}</button>
         <button onclick="scDownload('${it.id}')" style="${btn('rgba(255,255,255,.06)','var(--border)','var(--text)')}">${t('btn.download')}</button>
-        <a href="${esc(it.url)}" target="_blank" title="Открыть на SoundCloud" style="padding:8px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);text-decoration:none;display:flex;align-items:center">↗</a>
+        <a href="${esc(it.url)}" target="_blank" title="${t('sc2.open_on_sc')}" style="padding:8px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);text-decoration:none;display:flex;align-items:center">↗</a>
       </div>
-      <div style="font-size:11px;font-weight:700;color:var(--muted);margin:18px 0 8px;text-transform:uppercase;letter-spacing:.4px">Трек-лист</div>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);margin:18px 0 8px;text-transform:uppercase;letter-spacing:.4px">${t('b.tl_word')}</div>
       <div id="scd-tl"></div>
     </div>`;
 }
@@ -788,7 +788,7 @@ function _scRenderCoverPicker(id) {
   if (srcs.length < 2) { box.style.display = 'none'; return; }
   box.style.display = 'flex';
   const cur = it._coverKey || 'sc';
-  box.innerHTML = '<span style="font-size:10px;color:var(--muted2);align-self:center;margin-right:2px">Обложка:</span>' +
+  box.innerHTML = '<span style="font-size:10px;color:var(--muted2);align-self:center;margin-right:2px">' + t('sc2.cover_lbl') + '</span>' +
     srcs.map(s => `<button onclick="_scPickCover('${id}','${s.key}')" style="font-size:10px;padding:3px 9px;border-radius:6px;cursor:pointer;font-family:var(--font);border:1px solid ${s.key===cur?'var(--red)':'var(--border)'};background:${s.key===cur?'rgba(192,132,160,.12)':'transparent'};color:${s.key===cur?'var(--text)':'var(--muted)'}">${esc(s.label)}</button>`).join('');
 }
 
@@ -866,7 +866,7 @@ async function scDownloadCurrentQueue() {
       if (r?.ok) ok++; else fail++;
     } catch { fail++; }
   }
-  toast(`+ ${ok} в очередь${fail?` · ${fail} не вышло`:''}`, ok ? 'var(--green)' : 'var(--red)', '', 3500);
+  toast(`+ ${ok} ${t('sc2.q_ok')}${fail?` · ${fail} ${t('sc2.q_fail')}`:''}`, ok ? 'var(--green)' : 'var(--red)', '', 3500);
 }
 
 // ── SoundCloud: play an entire playlist (loads queue, plays first) ─────────
@@ -879,7 +879,7 @@ async function playScPlaylist(plId, plTitle, plArtist, plCover) {
     if (!r.ok) {
       let detail = '';
       try { const j = await r.clone().json(); detail = j?.detail || j?.error || ''; } catch {}
-      toast(`Не удалось загрузить плейлист (${r.status}${detail?': '+detail:''})`, 'var(--red)');
+      toast(`${t('sc2.pl_load_fail')} (${r.status}${detail?': '+detail:''})`, 'var(--red)');
       return;
     }
     const d = await r.json();
@@ -895,7 +895,7 @@ async function playScPlaylist(plId, plTitle, plArtist, plCover) {
       cover:     tr.artwork_sm || tr.artwork || plCover || '',
       permalink: tr.url || '',   // SC page URL — for downloads; NOT used as audio src
       full:      true,
-      label:     `SoundCloud · ${d.title || plTitle || 'плейлист'}`,
+      label:     `SoundCloud · ${d.title || plTitle || t('card.playlist')}`,
       posKey:    'soundcloud:' + tr.id,
     }));
     Preview.idx = 0;
@@ -910,7 +910,7 @@ async function playScPlaylist(plId, plTitle, plArtist, plCover) {
       }
     }
     console.log('[scplay] queue built, starting first track');
-    toast(`▶ ${plTitle || d.title}: ${d.tracks.length} тр.`, '#ff5500', '', 3000);
+    toast(`▶ ${plTitle || d.title}: ${d.tracks.length} ${t('p.trk_abbr')}`, '#ff5500', '', 3000);
     try {
       await _playPreviewAt(0);
       console.log('[scplay] _playPreviewAt(0) resolved');
@@ -936,11 +936,11 @@ async function scSignIn() {
   const out   = document.getElementById('sc-signin-status');
   if (!out) return;
   if (!email || !pass) {
-    out.textContent = '⚠ Введи email и пароль';
+    out.textContent = t('sc2.enter_creds');
     out.style.color = '#ff5500';
     return;
   }
-  out.textContent = 'Вход…';
+  out.textContent = t('sc.login_progress');
   out.style.color = 'var(--muted)';
   try {
     const r = await fetch('/api/soundcloud/login', {
@@ -950,7 +950,7 @@ async function scSignIn() {
     });
     const d = await r.json();
     if (d && d.ok) {
-      out.textContent = `✓ Вход выполнен — OAuth-токен сохранён (${d.token_length} симв.)`;
+      out.textContent = `${t('sc2.login_ok')} (${d.token_length} ${t('ui.chars')})`;
       out.style.color = '#3ecfaa';
       try {
         const c = await fetch('/api/config').then(x => x.json());
@@ -965,15 +965,15 @@ async function scSignIn() {
       // a cookie OAuth token — that's enough, no further action needed.
       const existing = (document.getElementById('s-sc-oauth')?.value || '').trim();
       if (d.removed_api && existing.length >= 20) {
-        out.innerHTML = `✓ Email-вход SC отключён, но <b>OAuth-токен уже сохранён</b> ниже — он рабочий.<br><span style="font-size:10px;color:var(--muted2)">Жми «🔑 Проверить» рядом с полем OAuth чтобы подтвердить.</span>`;
+        out.innerHTML = t('sc2.email_dead_html');
         out.style.color = 'var(--green)';
       } else {
-        out.textContent = '✗ ' + (d.error || 'Ошибка входа');
+        out.textContent = '✗ ' + (d.error || t('sc2.login_err'));
         out.style.color = '#ff5500';
       }
     }
   } catch (e) {
-    out.textContent = '✗ Сеть: ' + e.message;
+    out.textContent = t('au.net_pfx') + e.message;
     out.style.color = '#ff5500';
   }
 }

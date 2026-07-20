@@ -17,7 +17,7 @@
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/css/main.css?v=67"/>
+<link rel="stylesheet" href="/static/css/main.css?v=70"/>
 </head>
 <body>
 <div id="net-progress"></div>
@@ -212,13 +212,13 @@
     <div id="detail-panel" style="position:absolute;top:0;right:0;bottom:0;width:min(780px,100vw);background:var(--bg);display:flex;flex-direction:column;box-shadow:-16px 0 60px rgba(0,0,0,.85)">
       <!-- Sticky header bar -->
       <div style="position:sticky;top:0;background:var(--player-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;padding:10px 16px;flex-shrink:0;z-index:2">
-        <button id="detail-back-btn" onclick="detailGoBack()" title="Назад" style="display:none;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.08);color:var(--muted);border:none;cursor:pointer;font-size:16px;flex-shrink:0;transition:background .15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background='rgba(255,255,255,.16)'" onmouseout="this.style.background='rgba(255,255,255,.08)'">←</button>
-        <button onclick="closeDetail()" title="Закрыть" style="width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.08);color:var(--muted);border:none;cursor:pointer;font-size:15px;flex-shrink:0;transition:background .15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background='rgba(255,255,255,.16)'" onmouseout="this.style.background='rgba(255,255,255,.08)'">✕</button>
+        <button id="detail-back-btn" onclick="detailGoBack()" data-i18n-title="pp.back" title="Назад" style="display:none;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.08);color:var(--muted);border:none;cursor:pointer;font-size:16px;flex-shrink:0;transition:background .15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background='rgba(255,255,255,.16)'" onmouseout="this.style.background='rgba(255,255,255,.08)'">←</button>
+        <button onclick="closeDetail()" data-i18n-title="pp.close" title="Закрыть" style="width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.08);color:var(--muted);border:none;cursor:pointer;font-size:15px;flex-shrink:0;transition:background .15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background='rgba(255,255,255,.16)'" onmouseout="this.style.background='rgba(255,255,255,.08)'">✕</button>
         <span id="detail-breadcrumb" style="font-size:12px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
       </div>
       <!-- Scrollable content -->
       <div id="detail-content" style="flex:1;overflow-y:auto;padding:20px 20px 120px">
-        <div style="text-align:center;padding:80px 0;color:var(--muted)">Загрузка…</div>
+        <div style="text-align:center;padding:80px 0;color:var(--muted)" data-i18n="ui.loading">Загрузка…</div>
       </div>
     </div>
   </div>
@@ -236,14 +236,14 @@
         <!-- Controls column -->
         <div style="flex:1;min-width:0">
           <div id="pp-title-big" style="font-size:18px;font-weight:700;font-family:var(--display);letter-spacing:-.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">—</div>
-          <div id="pp-artist-big" style="font-size:13px;color:var(--muted);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Предпрослушка</div>
+          <div id="pp-artist-big" data-i18n="pp.preview" style="font-size:13px;color:var(--muted);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Предпрослушка</div>
           <!-- Playback controls row -->
           <div style="display:flex;align-items:center;gap:14px;margin-top:18px">
-            <button onclick="previewPrev()" title="Предыдущий" style="width:36px;height:36px;border-radius:50%;background:transparent;color:var(--muted);border:1px solid var(--border2);cursor:pointer;font-size:15px;padding:0;flex-shrink:0;transition:color .12s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">⏮</button>
+            <button onclick="previewPrev()" data-i18n-title="pp.prev" title="Предыдущий" style="width:36px;height:36px;border-radius:50%;background:transparent;color:var(--muted);border:1px solid var(--border2);cursor:pointer;font-size:15px;padding:0;flex-shrink:0;transition:color .12s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">⏮</button>
             <button id="pp-play-big" onclick="previewToggle()" style="width:48px;height:48px;border-radius:50%;background:var(--red);color:#fff;border:none;cursor:pointer;font-size:20px;padding:0;flex-shrink:0;transition:transform .1s" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform=''">▶</button>
-            <button onclick="previewNext()" title="Следующий" style="width:36px;height:36px;border-radius:50%;background:transparent;color:var(--muted);border:1px solid var(--border2);cursor:pointer;font-size:15px;padding:0;flex-shrink:0;transition:color .12s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">⏭</button>
+            <button onclick="previewNext()" data-i18n-title="pp.next" title="Следующий" style="width:36px;height:36px;border-radius:50%;background:transparent;color:var(--muted);border:1px solid var(--border2);cursor:pointer;font-size:15px;padding:0;flex-shrink:0;transition:color .12s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">⏭</button>
             <div style="flex:1"></div>
-            <button id="pp-mute-big" onclick="previewMute()" title="Звук" style="width:30px;height:30px;border-radius:50%;background:transparent;color:var(--muted);border:none;cursor:pointer;font-size:15px;padding:0;flex-shrink:0">🔊</button>
+            <button id="pp-mute-big" onclick="previewMute()" data-i18n-title="pp.sound" title="Звук" style="width:30px;height:30px;border-radius:50%;background:transparent;color:var(--muted);border:none;cursor:pointer;font-size:15px;padding:0;flex-shrink:0">🔊</button>
             <input id="pp-vol-big" type="range" min="0" max="1" step="0.05" value="1" oninput="previewVolume(this.value)" style="width:80px;flex-shrink:0;cursor:pointer"/>
           </div>
           <!-- Seek bar -->
@@ -260,7 +260,7 @@
       <!-- Chapters (YouTube-style) — shown only when the mix has timecodes -->
       <div id="pp-chapters-wrap" style="display:none;max-width:900px;margin:16px auto 0;border-top:1px solid rgba(255,255,255,.07);padding-top:12px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
-          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px">Трек-лист по времени</div>
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px" data-i18n="pp.tracklist_time">Трек-лист по времени</div>
           <div id="pp-chapter-count" style="font-size:10px;color:var(--muted2);font-family:var(--mono)"></div>
         </div>
         <div id="pp-chapters" style="max-height:208px;overflow-y:auto;display:flex;flex-direction:column"></div>
@@ -268,7 +268,7 @@
     </div>
 
     <!-- ══ Full-width seek strip — spans the whole dock (top of the mini bar) ══ -->
-    <div id="pp-progress" onclick="previewSeek(event)" title="Перемотка"
+    <div id="pp-progress" onclick="previewSeek(event)" data-i18n-title="pp.seek" title="Перемотка"
       style="height:12px;background:rgba(255,255,255,.1);cursor:pointer;position:relative;overflow:hidden">
       <div id="pp-buffered" style="position:absolute;top:0;left:0;height:100%;width:0%;background:rgba(255,255,255,.22);pointer-events:none;z-index:0"></div>
       <div id="pp-fill" style="position:absolute;top:0;left:0;height:100%;background:var(--red);width:0%;pointer-events:none;z-index:1"></div>
@@ -277,12 +277,17 @@
     <!-- ══ Single-row controls — three groups (Spotify/Deezer) ══ -->
     <div id="pp-bar" style="display:flex;align-items:center;gap:12px;padding:0 14px;height:58px;box-sizing:border-box">
 
+      <!-- Mini visualizer — always-visible strip (was fullscreen-only, which
+           nobody opens). Bars tint to the playing track's service color. -->
+      <canvas id="pp-viz" aria-hidden="true"
+        style="width:56px;height:38px;flex-shrink:0;border-radius:6px;opacity:0;transition:opacity .3s ease"></canvas>
+
       <!-- ── LEFT: cover + meta ── -->
       <div class="pp-zone pp-zone-left" style="display:flex;align-items:center;gap:11px;flex:1 1 0;min-width:0;max-width:320px">
-        <div id="pp-art" onclick="togglePlayerExpanded()" title="Развернуть плеер" style="width:42px;height:42px;border-radius:8px;background:rgba(192,132,160,.12);color:var(--red);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;overflow:hidden;cursor:pointer">♪</div>
-        <div id="pp-mini-meta" onclick="togglePlayerExpanded()" title="Развернуть плеер" style="min-width:0;line-height:1.3;cursor:pointer">
+        <div id="pp-art" onclick="togglePlayerExpanded()" data-i18n-title="pp.expand_player" title="Развернуть плеер" style="width:42px;height:42px;border-radius:8px;background:rgba(192,132,160,.12);color:var(--red);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;overflow:hidden;cursor:pointer">♪</div>
+        <div id="pp-mini-meta" onclick="togglePlayerExpanded()" data-i18n-title="pp.expand_player" title="Развернуть плеер" style="min-width:0;line-height:1.3;cursor:pointer">
           <div id="pp-title"  style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">—</div>
-          <div id="pp-artist" style="font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Предпрослушка</div>
+          <div id="pp-artist" data-i18n="pp.preview" style="font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Предпрослушка</div>
         </div>
       </div>
 
@@ -292,29 +297,29 @@
         <span class="pp-time-box pp-time-big">
           <span id="pp-cur" class="pp-time-cur">0:00.000</span><span class="pp-time-sep">/</span><span id="pp-dur" class="pp-time-dur">0:00</span>
         </span>
-        <button id="pp-prev" onclick="previewPrev()" title="Предыдущий (или перемотать в начало)" class="pp-transport">⏮</button>
-        <button id="pp-play" onclick="previewToggle()" title="Воспроизведение / Пауза" style="width:42px;height:42px;border-radius:50%;background:var(--red);color:#fff;border:none;cursor:pointer;font-size:17px;flex-shrink:0;padding:0">▶</button>
-        <button id="pp-next" onclick="previewNext()" title="Следующий трек" class="pp-transport">⏭</button>
+        <button id="pp-prev" onclick="previewPrev()" data-i18n-title="pp.prev_hint" data-i18n-title="pp.prev_hint" title="Предыдущий (или перемотать в начало)" class="pp-transport">⏮</button>
+        <button id="pp-play" onclick="previewToggle()" data-i18n-title="pp.play_pause" data-i18n-title="pp.play_pause" title="Воспроизведение / Пауза" style="width:42px;height:42px;border-radius:50%;background:var(--red);color:#fff;border:none;cursor:pointer;font-size:17px;flex-shrink:0;padding:0">▶</button>
+        <button id="pp-next" onclick="previewNext()" data-i18n-title="pp.next_track" data-i18n-title="pp.next_track" title="Следующий трек" class="pp-transport">⏭</button>
       </div>
 
       <!-- ── RIGHT: quality + volume + extras ── -->
       <div class="pp-zone pp-zone-right" style="display:flex;align-items:center;gap:8px;flex:1 1 0;min-width:0;justify-content:flex-end">
         <!-- Quality pill -->
         <div id="pp-quality" style="position:relative;flex-shrink:0">
-          <button id="pp-quality-btn" onclick="toggleQualityMenu(event)" title="Качество стрима" style="height:26px;padding:0 10px;border-radius:13px;background:rgba(255,255,255,.06);color:var(--muted);border:1px solid var(--border);cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px;white-space:nowrap"><span id="pp-quality-label">MP3</span><span style="font-size:8px;opacity:.7">▾</span></button>
+          <button id="pp-quality-btn" onclick="toggleQualityMenu(event)" data-i18n-title="pp.stream_quality" data-i18n-title="pp.stream_quality" title="Качество стрима" style="height:26px;padding:0 10px;border-radius:13px;background:var(--pp-tile);color:var(--text);border:1px solid var(--border);cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px;white-space:nowrap"><span id="pp-quality-label">MP3</span><span style="font-size:8px;opacity:.7">▾</span></button>
           <div id="pp-quality-menu" style="display:none;position:absolute;bottom:34px;right:0;background:var(--player-bg);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--border);border-radius:10px;padding:5px;min-width:170px;box-shadow:0 8px 28px rgba(0,0,0,.55);z-index:9600"></div>
         </div>
         <!-- Volume: mute icon + inline horizontal slider (flat, centred, consistent with the rest of the bar) -->
         <div id="pp-vol-wrap" style="display:flex;align-items:center;gap:7px;flex-shrink:0">
-          <button id="pp-mute" onclick="previewMute()" title="Без звука" style="width:28px;height:28px;border-radius:50%;background:transparent;color:var(--muted);border:none;cursor:pointer;font-size:14px;padding:0">🔊</button>
-          <input id="pp-vol" type="range" min="0" max="1" step="0.05" value="1" oninput="previewVolume(this.value)" title="Громкость" aria-label="Громкость"/>
+          <button id="pp-mute" onclick="previewMute()" data-i18n-title="pp.mute" data-i18n-title="pp.mute" title="Без звука" style="width:28px;height:28px;border-radius:50%;background:transparent;color:var(--text);border:none;cursor:pointer;font-size:14px;padding:0">🔊</button>
+          <input id="pp-vol" type="range" min="0" max="1" step="0.05" value="1" oninput="previewVolume(this.value)" data-i18n-title="pp.volume" title="Громкость" aria-label="Громкость"/>
         </div>
         <!-- extras — tight Win10-tile cluster -->
         <div style="display:flex;align-items:center;gap:3px;flex-shrink:0">
-          <button onclick="togglePlayerExpanded()" id="pp-expand-btn" title="Развернуть / Свернуть" class="pp-extra">⌃</button>
-          <button onclick="floatPlayer()" id="pp-float-btn" title="Открыть в плавающем окне (работает даже когда браузер свернут)" class="pp-extra">⧉</button>
-          <button onclick="document.getElementById('pp-local-input').click()" title="Слушать локальный файл" class="pp-extra">📂</button>
-          <button onclick="closePreview()" title="Закрыть плеер" class="pp-extra">✕</button>
+          <button onclick="togglePlayerExpanded()" id="pp-expand-btn" data-i18n-title="pp.expand_collapse" data-i18n-title="pp.expand_collapse" title="Развернуть / Свернуть" class="pp-extra">⌃</button>
+          <button onclick="floatPlayer()" id="pp-float-btn" data-i18n-title="pp.float_hint" data-i18n-title="pp.float_hint" title="Открыть в плавающем окне (работает даже когда браузер свернут)" class="pp-extra">⧉</button>
+          <button onclick="document.getElementById('pp-local-input').click()" data-i18n-title="pp.local_file" data-i18n-title="pp.local_file" title="Слушать локальный файл" class="pp-extra">📂</button>
+          <button onclick="closePreview()" data-i18n-title="pp.close_player" data-i18n-title="pp.close_player" title="Закрыть плеер" class="pp-extra">✕</button>
         </div>
         <input type="file" id="pp-local-input" accept="audio/*" style="display:none" onchange="playLocalFile(this.files[0]);this.value=''"/>
         <audio id="pp-audio" preload="none" style="display:none"></audio>
@@ -333,9 +338,9 @@
 
     <!-- Top bar -->
     <div class="fp-top">
-      <button class="fp-icon-btn" onclick="fpClose()" title="Свернуть в док" aria-label="Свернуть">⌄</button>
-      <div class="fp-top-label" id="fp-source">Сейчас играет</div>
-      <button class="fp-icon-btn" onclick="fpMenu(event)" title="Меню" aria-label="Меню">⋯</button>
+      <button class="fp-icon-btn" onclick="fpClose()" data-i18n-title="fp.dock" title="Свернуть в док" aria-label="Свернуть">⌄</button>
+      <div class="fp-top-label" id="fp-source" data-i18n="fp.now_playing">Сейчас играет</div>
+      <button class="fp-icon-btn" onclick="fpMenu(event)" data-i18n-title="fp.menu" title="Меню" aria-label="Меню">⋯</button>
     </div>
 
     <!-- Cover -->
@@ -364,24 +369,24 @@
 
     <!-- Big controls -->
     <div class="fp-controls">
-      <button class="fp-ctrl" onclick="previewPrev()" title="Предыдущий" aria-label="Предыдущий">⏮</button>
+      <button class="fp-ctrl" onclick="previewPrev()" data-i18n-title="pp.prev" title="Предыдущий" aria-label="Предыдущий">⏮</button>
       <button id="fp-play" class="fp-ctrl fp-play" onclick="previewToggle()" aria-label="Воспроизведение/Пауза">▶</button>
-      <button class="fp-ctrl" onclick="previewNext()" title="Следующий" aria-label="Следующий">⏭</button>
+      <button class="fp-ctrl" onclick="previewNext()" data-i18n-title="pp.next" title="Следующий" aria-label="Следующий">⏭</button>
     </div>
 
     <!-- Extra row: speed / sleep / queue -->
     <div class="fp-extra">
-      <button id="fp-speed-btn" class="fp-pill" onclick="fpCycleSpeed()" title="Скорость воспроизведения">
+      <button id="fp-speed-btn" class="fp-pill" onclick="fpCycleSpeed()" data-i18n-title="fp.speed" data-i18n-title="fp.speed" title="Скорость воспроизведения">
         <span id="fp-speed-val">1×</span>
       </button>
-      <button id="fp-sleep-btn" class="fp-pill" onclick="fpToggleSleepMenu(event)" title="Таймер сна">
-        <span>⏲</span> <span id="fp-sleep-val">Сон</span>
+      <button id="fp-sleep-btn" class="fp-pill" onclick="fpToggleSleepMenu(event)" data-i18n-title="fp.sleep_timer" data-i18n-title="fp.sleep_timer" title="Таймер сна">
+        <span>⏲</span> <span id="fp-sleep-val" data-i18n="fp.sleep">Сон</span>
       </button>
-      <button id="fp-lyrics-btn" class="fp-pill" onclick="fpToggleLyrics()" title="Текст песни">
-        <span>📝</span> <span>Текст</span>
+      <button id="fp-lyrics-btn" class="fp-pill" onclick="fpToggleLyrics()" data-i18n-title="fp.lyrics_title" data-i18n-title="fp.lyrics_title" title="Текст песни">
+        <span>📝</span> <span data-i18n="fp.lyrics">Текст</span>
       </button>
-      <button class="fp-pill" onclick="fpShare()" title="Поделиться ссылкой">
-        <span>⇪</span> <span>Ссылка</span>
+      <button class="fp-pill" onclick="fpShare()" data-i18n-title="fp.share_title" data-i18n-title="fp.share_title" title="Поделиться ссылкой">
+        <span>⇪</span> <span data-i18n="fp.link">Ссылка</span>
       </button>
     </div>
     <!-- Lyrics panel — slides up from bottom over the visualizer/cover -->
@@ -391,7 +396,7 @@
       transition:transform .3s cubic-bezier(.22,1.18,.36,1);transform:translateY(100%)">
       <div style="position:sticky;top:0;display:flex;align-items:center;gap:8px;margin-bottom:10px">
         <button onclick="fpToggleLyrics()" class="fp-icon-btn" style="width:32px;height:32px;font-size:14px">⌄</button>
-        <div id="fp-lyrics-status" style="font-size:11px;color:rgba(255,255,255,.55);flex:1">Загрузка…</div>
+        <div id="fp-lyrics-status" data-i18n="ui.loading" style="font-size:11px;color:rgba(255,255,255,.55);flex:1">Загрузка…</div>
       </div>
       <div id="fp-lyrics-body" style="font-size:15px;line-height:1.65;color:rgba(255,255,255,.6);text-align:center;font-weight:500"></div>
     </div>
@@ -413,34 +418,34 @@
   <button type="button" onclick="closeLightbox()" style="position:absolute;top:16px;right:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:none;cursor:pointer;font-size:16px;backdrop-filter:blur(4px)">✕</button>
 </div>
 
-<script src="/static/js/i18n.js?v=10050"></script>
-<script src="/static/js/views.js?v=10052"></script>
-<script src="/static/js/app.js?v=10102"></script>
-<script src="/static/js/wrapper.js?v=5"></script>
+<script src="/static/js/i18n.js?v=10056"></script>
+<script src="/static/js/views.js?v=10053"></script>
+<script src="/static/js/app.js?v=10104"></script>
+<script src="/static/js/wrapper.js?v=6"></script>
 <script src="/static/js/coder.js?v=5"></script>
 <script src="/static/js/guest.js?v=1"></script>
 <script src="/static/js/setup_ui.js?v=5"></script>
 <script src="/static/js/selfupdate_ui.js?v=5"></script>
 <script src="/static/js/search.js?v=1"></script>
 <script src="/static/js/console_ui.js?v=4"></script>
-<script src="/static/js/stats_ui.js?v=1"></script>
+<script src="/static/js/stats_ui.js?v=2"></script>
 <script src="/static/js/orpheus_ui.js?v=5"></script>
-<script src="/static/js/sc_tab.js?v=3"></script>
-<script src="/static/js/cookies_ui.js?v=8"></script>
-<script src="/static/js/lightbox.js?v=3"></script>
-<script src="/static/js/urlbar_detect.js?v=3"></script>
-<script src="/static/js/auth_ui.js?v=3"></script>
-<script src="/static/js/player_lib.js?v=2"></script>
+<script src="/static/js/sc_tab.js?v=8"></script>
+<script src="/static/js/cookies_ui.js?v=11"></script>
+<script src="/static/js/lightbox.js?v=4"></script>
+<script src="/static/js/urlbar_detect.js?v=4"></script>
+<script src="/static/js/auth_ui.js?v=5"></script>
+<script src="/static/js/player_lib.js?v=3"></script>
 <script src="/static/js/remote_ui.js?v=3"></script>
-<script src="/static/js/service_colors_ui.js?v=6"></script>
+<script src="/static/js/service_colors_ui.js?v=7"></script>
 <script src="/static/js/deps_ui.js?v=1"></script>
 <script src="/static/js/tokens_ui.js?v=1"></script>
 <script src="/static/js/config_yaml_ui.js?v=1"></script>
-<script src="/static/js/player.js?v=10031"></script>
+<script src="/static/js/player.js?v=10033"></script>
 <script src="/static/js/player_fps.js?v=11"></script>
 <script src="/static/js/bbc.js?v=10007"></script>
-<script src="/static/js/sc.js?v=10015"></script>
-<script src="/static/js/fx_ui.js?v=4"></script>
+<script src="/static/js/sc.js?v=10016"></script>
+<script src="/static/js/fx_ui.js?v=5"></script>
 
 <!-- Mobile sidebar drawer overlay -->
 <div id="drawer-overlay" class="drawer-overlay" onclick="closeMobileDrawer()"></div>
@@ -460,7 +465,7 @@
     <span class="mt-icon">◷</span><span data-i18n="nav.history">История</span>
   </button>
   <button class="mobile-tab" onclick="toggleMobileDrawer()">
-    <span class="mt-icon">☰</span><span>Меню</span>
+    <span class="mt-icon">☰</span><span data-i18n="fp.menu">Меню</span>
   </button>
 </nav>
 

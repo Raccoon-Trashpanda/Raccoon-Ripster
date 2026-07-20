@@ -29,21 +29,21 @@ async function loadStats(period) {
   } catch (_) { d = null; }
 
   if (httpStatus === 401 || (d && d.error === 'unauthorized')) {
-    note('🔒 Сессия не авторизована — обнови страницу (Ctrl+F5) и войди заново.');
+    note(window.t('st.unauth'));
     return;
   }
   if (!d || d.error) {
-    note(`Статистика недоступна${d && d.error ? ': ' + esc(d.error) : ''}`);
+    note(`${window.t('st.unavail')}${d && d.error ? ': ' + esc(d.error) : ''}`);
     return;
   }
   const t = d.totals || {};
 
   // ── Hero cards ──
   const hero = [
-    { icon: '⬇',  label: 'Загрузок',     val: t.downloads,       color: 'var(--green)'  },
-    { icon: '♪',  label: 'Треков',        val: t.tracks,          color: 'var(--blue)'   },
-    { icon: '🎧', label: 'Прослушиваний', val: t.stream_sessions, color: 'var(--red)'    },
-    { icon: '👤', label: 'Гостей',        val: t.guests,          color: 'var(--purple)' },
+    { icon: '⬇',  label: window.t('st.h_downloads'),     val: t.downloads,       color: 'var(--green)'  },
+    { icon: '♪',  label: window.t('st.h_tracks'),        val: t.tracks,          color: 'var(--blue)'   },
+    { icon: '🎧', label: window.t('st.h_streams'), val: t.stream_sessions, color: 'var(--red)'    },
+    { icon: '👤', label: window.t('st.h_guests'),        val: t.guests,          color: 'var(--purple)' },
   ];
   set('stats-hero', hero.map(c => `
     <div class="card" style="padding:14px 16px;display:flex;align-items:center;gap:12px">
@@ -62,7 +62,7 @@ async function loadStats(period) {
     const color    = opts.color    || 'var(--green)';
     const lw       = opts.labelWidth || 120;
     if (!items || !items.length)
-      return '<div style="color:var(--muted);font-size:11px;padding:3px 0">Нет данных</div>';
+      return '<div style="color:var(--muted);font-size:11px;padding:3px 0">' + window.t('st.no_data') + '</div>';
     const max = opts.max || Math.max(...items.map(r => r[countKey] || 0), 1);
     return items.map(r => {
       const pct  = Math.round((r[countKey] || 0) / max * 100);
@@ -81,11 +81,11 @@ async function loadStats(period) {
   }
 
   const STREAM_COLOR = { qobuz:'#1870f5', tidal:'#00d4b3', deezer:'#a238ff', bbc:'#e4003b', generic:'var(--muted2)' };
-  const STREAM_LABEL = { qobuz:'Qobuz', tidal:'Tidal', deezer:'Deezer', bbc:'BBC', generic:'Другое' };
+  const STREAM_LABEL = { qobuz:'Qobuz', tidal:'Tidal', deezer:'Deezer', bbc:'BBC', generic:window.t('st.other') };
 
   // ── Listening: split tiles ──
   const splitTiles = [
-    { label: 'Превью треков', val: t.preview_sessions || 0, color: 'var(--green)' },
+    { label: window.t('st.previews'), val: t.preview_sessions || 0, color: 'var(--green)' },
     { label: 'BBC Sounds',    val: t.bbc_sessions || 0,     color: '#e4003b'      },
   ].map(c => `
     <div style="background:var(--surface2);border-radius:9px;padding:10px 12px">
@@ -102,7 +102,7 @@ async function loadStats(period) {
   // ── Listening: top played ──
   const topL = d.top_streams || [];
   set('stats-listen-top', topL.length
-    ? '<div style="font-size:11px;color:var(--muted);margin-bottom:7px">Топ прослушанного</div>' +
+    ? '<div style="font-size:11px;color:var(--muted);margin-bottom:7px">' + window.t('st.top_played') + '</div>' +
       bars(topL, {
         color: r => STREAM_COLOR[r.stream_type] || 'var(--green)',
         badge: r => {
@@ -111,12 +111,12 @@ async function loadStats(period) {
           return `<div style="font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:${c};background:${c}22;border-radius:4px;padding:2px 6px;flex-shrink:0">${STREAM_LABEL[st] || esc(st)}</div>`;
         },
       })
-    : '<div style="color:var(--muted);font-size:11px">Пока ничего не слушали</div>');
+    : '<div style="color:var(--muted);font-size:11px">' + window.t('st.nothing_played') + '</div>');
 
   // ── Listening history — recent plays, newest first ──
   const recent = d.recent_listens || [];
   set('stats-listen-recent', recent.length
-    ? '<div style="font-size:11px;color:var(--muted);margin-bottom:7px">История прослушки</div>' +
+    ? '<div style="font-size:11px;color:var(--muted);margin-bottom:7px">' + window.t('st.listen_history') + '</div>' +
       recent.slice(0, 40).map(e => {
         const st  = e.type || 'generic';
         const c   = STREAM_COLOR[st] || 'var(--muted2)';
@@ -147,7 +147,7 @@ async function loadStats(period) {
         const pct = Math.max(Math.round((r.count || 0) / tlMax * 100), 2);
         return `<div title="${esc(r.date || '')}: ${_fmt(r.count || 0)}" style="flex:1;min-width:11px;max-width:30px;background:var(--green);border-radius:3px 3px 0 0;height:${pct}%;min-height:2px;opacity:.85"></div>`;
       }).join('')
-    : '<div style="color:var(--muted);font-size:11px">Нет данных</div>');
+    : '<div style="color:var(--muted);font-size:11px">' + window.t('st.no_data') + '</div>');
   const tlStep = days.length > 30 ? Math.ceil(days.length / 10) : (days.length > 14 ? 3 : 1);
   set('stats-tl-labels', days.map((r, i) =>
     `<div style="flex:1;min-width:11px;max-width:30px;text-align:center;overflow:hidden">${i % tlStep === 0 ? (r.date || '').slice(5) : ''}</div>`).join(''));
@@ -175,14 +175,14 @@ async function loadStats(period) {
   set('stats-guests', `
     <div style="display:flex;gap:28px;flex-wrap:wrap">
       <div><span style="font-size:20px;font-weight:800;color:var(--purple);font-family:var(--mono)">${_fmt(t.guests || 0)}</span>
-        <span style="font-size:12px;color:var(--muted);margin-left:6px">уникальных гостей</span></div>
+        <span style="font-size:12px;color:var(--muted);margin-left:6px">${window.t('st.uniq_guests')}</span></div>
       <div><span style="font-size:20px;font-weight:800;color:var(--orange);font-family:var(--mono)">${_fmt(Math.round(t.guest_minutes || 0))}</span>
-        <span style="font-size:12px;color:var(--muted);margin-left:6px">минут онлайн</span></div>
+        <span style="font-size:12px;color:var(--muted);margin-left:6px">${window.t('st.min_online')}</span></div>
     </div>`);
 
   const footEl = document.getElementById('stats-footer');
-  if (footEl) footEl.textContent = 'Данные за: ' +
-    ({ day:'24 часа', week:'7 дней', month:'30 дней', year:'365 дней', all:'всё время' }[_statsPeriod] || _statsPeriod);
+  if (footEl) footEl.textContent = window.t('st.data_for') +
+    ({ day:window.t('st.p_day'), week:window.t('st.p_week'), month:window.t('st.p_month'), year:window.t('st.p_year'), all:window.t('st.p_all') }[_statsPeriod] || _statsPeriod);
 }
 
 function _fmt(n) {

@@ -8,19 +8,12 @@
   'use strict';
 
   // ── 1. Top network loading bar ──────────────────────────────────────────
-  let inflight = 0, val = 0, timer = null, startT = null, shown = false, bar = null;
+  let inflight = 0, startT = null, shown = false, bar = null;
   function el() { if (!bar) bar = document.getElementById('net-progress'); return bar; }
-  function paint() { const b = el(); if (b) { b.style.transform = 'scaleX(' + val + ')'; b.style.opacity = '1'; } }
-  function trickle() {
-    clearTimeout(timer);
-    if (inflight <= 0) return;
-    val = Math.min(val + (1 - val) * 0.12, 0.9);
-    paint();
-    timer = setTimeout(trickle, 300);
-  }
   function show() {            // only fires if loading is STILL going after the delay
     if (shown || inflight <= 0) return;
-    shown = true; val = 0.08; paint(); trickle();
+    shown = true;
+    const b = el(); if (b) b.classList.add('running');
   }
   function begin() {
     inflight++;
@@ -31,20 +24,11 @@
   function end() {
     inflight = Math.max(0, inflight - 1);
     if (inflight !== 0) return;
-    clearTimeout(startT); clearTimeout(timer);
+    clearTimeout(startT);
     if (!shown) return;       // fast poll finished before the bar ever appeared
-    val = 1; paint();
     const b = el();
-    setTimeout(() => {
-      if (!b) { shown = false; return; }
-      b.style.opacity = '0';
-      setTimeout(() => {
-        b.style.transition = 'none';
-        b.style.transform = 'scaleX(0)';
-        requestAnimationFrame(() => { b.style.transition = ''; });
-        shown = false;
-      }, 280);
-    }, 150);
+    if (b) b.classList.remove('running');
+    shown = false;
   }
   // Background status/queue polls run every few seconds — they must NOT flash
   // the bar. Only genuine content/navigation loads drive it.

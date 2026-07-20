@@ -249,14 +249,14 @@ function showWrapper2FAModal() {
   modal.id = 'wrapper-2fa-modal';
   modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.75);backdrop-filter:blur(4px)';
   modal.innerHTML = `<div style="background:var(--surface,#1c1c1e);border:1px solid rgba(255,255,255,.1);border-radius:16px;padding:24px;width:340px;max-width:90vw">
-    <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:6px">🔐 Apple ID — двухфакторный код</div>
-    <div style="font-size:12px;color:var(--muted,#888);margin-bottom:16px">Введи 6-значный код из SMS или приложения «Пароли». У тебя есть ~60 секунд.</div>
+    <div style="font-size:15px;font-weight:700;color:var(--text);margin-bottom:6px">${t('wr.2fa_title')}</div>
+    <div style="font-size:12px;color:var(--muted,#888);margin-bottom:16px">${t('wr.2fa_sub')}</div>
     <input id="wrapper-2fa-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000"
       style="width:100%;padding:10px 12px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.15);border-radius:9px;color:var(--text);font-size:22px;font-family:var(--mono,monospace);text-align:center;letter-spacing:6px;box-sizing:border-box;outline:none"
       onkeydown="if(event.key==='Enter') submitWrapper2FA()">
     <div style="display:flex;gap:8px;margin-top:14px">
-      <button onclick="submitWrapper2FA()" style="flex:1;padding:10px;background:#0a84ff;border:none;border-radius:9px;cursor:pointer;color:#fff;font-weight:600;font-size:13px;font-family:var(--font)">Подтвердить</button>
-      <button onclick="document.getElementById('wrapper-2fa-modal').remove()" style="padding:10px 16px;background:transparent;border:1px solid rgba(255,255,255,.1);border-radius:9px;cursor:pointer;font-size:13px;color:var(--muted,#888);font-family:var(--font)">Отмена</button>
+      <button onclick="submitWrapper2FA()" style="flex:1;padding:10px;background:#0a84ff;border:none;border-radius:9px;cursor:pointer;color:#fff;font-weight:600;font-size:13px;font-family:var(--font)">${t('wr.confirm')}</button>
+      <button onclick="document.getElementById('wrapper-2fa-modal').remove()" style="padding:10px 16px;background:transparent;border:1px solid rgba(255,255,255,.1);border-radius:9px;cursor:pointer;font-size:13px;color:var(--muted,#888);font-family:var(--font)">${t('btn.cancel')}</button>
     </div>
   </div>`;
   document.body.appendChild(modal);
@@ -291,13 +291,13 @@ function wrapperPull() {
   const logTxt = document.getElementById('wb-log-text');
   if(logEl)  logEl.style.display = '';
   if(mode === 'docker-local') {
-    if(logTxt) logTxt.textContent = 'Собираю local образ…\n';
+    if(logTxt) logTxt.textContent = t('wr.build_local') + '\n';
     toast('Building local image…', 'var(--blue)');
     fetch('/api/wrapper/build', {method:'POST'});
   } else if(mode === 'non-docker') {
     toast(t('w.nondocker'), 'var(--muted)');
   } else {
-    if(logTxt) logTxt.textContent = 'Скачиваю Docker образ…\n';
+    if(logTxt) logTxt.textContent = t('wr.pull_image') + '\n';
     toast(t('w.pulling'), 'var(--blue)');
     fetch('/api/wrapper/pull', {method:'POST'});
   }
@@ -324,8 +324,8 @@ async function onWrapperModeChange(mode) {
 async function wrapperBuild() {
   const btn    = document.getElementById('btn-wrapper-build');
   const status = document.getElementById('wrapper-build-status');
-  if(btn) { btn.disabled = true; btn.textContent = '⏳ Собираю…'; }
-  if(status) status.textContent = 'Смотри баннер…';
+  if(btn) { btn.disabled = true; btn.textContent = t('wr.building'); }
+  if(status) status.textContent = t('wr.see_banner');
   const cNav = document.querySelector('.nav-item[data-view="console"]');
   if(cNav) showView('console', cNav);
   fetch('/api/wrapper/build', {method:'POST'});
@@ -343,7 +343,7 @@ function toggleWrapperBanner() {
   if(!detail) return;
   const open = detail.style.display !== 'none';
   detail.style.display = open ? 'none' : '';
-  if(lbl) lbl.textContent = open ? 'инструкция ▼' : 'инструкция ▲';
+  if(lbl) lbl.textContent = open ? t('wr.instr_open') : t('wr.instr_close');
 }
 
 async function toggleWrapperLogs() {
@@ -352,16 +352,16 @@ async function toggleWrapperLogs() {
   if(!area) return;
   if(area.style.display !== 'none') { area.style.display='none'; return; }
   area.style.display='';
-  if(txt) txt.textContent='Загружаю…';
+  if(txt) txt.textContent=t('b.loading');
   try {
     const d = await (await fetch('/api/wrapper/logs')).json();
     if(!txt) return;
-    txt.textContent = d.logs || '(нет вывода)';
+    txt.textContent = d.logs || t('wr.no_output');
     txt.scrollTop = txt.scrollHeight;
     const bad = /incorrect|unauthorized|error|failed|wrong/i.test(d.logs||'');
     const ok  = /login|authenticated|success|started/i.test(d.logs||'');
     txt.style.color = bad ? 'var(--orange)' : ok ? 'var(--green)' : 'var(--muted)';
-  } catch(e) { if(txt) txt.textContent='Ошибка: '+e.message; }
+  } catch(e) { if(txt) txt.textContent=t('ui.err_pfx')+e.message; }
 }
 
 function dismissWrapperBanner() {

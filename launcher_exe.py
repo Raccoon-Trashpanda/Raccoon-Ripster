@@ -284,6 +284,59 @@ def _watch_show_flag(window, win_open) -> None:
         time.sleep(0.7)
 
 
+def _loading_html(url: str) -> str:
+    """Self-polling splash shown WHILE the server boots, instead of pointing the
+    window straight at the server URL. A cold start (first run: antivirus
+    scanning the freshly-unpacked python.exe, a slow disk, first-time imports)
+    can easily take longer than any fixed wait we'd do server-side — users hit
+    the raw browser "127.0.0.1 refused to connect" page and assume Ripster is
+    broken. This polls /api/ping itself and navigates over once it's up, no
+    matter how long that takes; only gives up (with an actionable message,
+    not a dead end) after several minutes."""
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<style>
+  html,body{{height:100%;margin:0;background:#0a0a0c;color:#f0f0f4;
+    font-family:-apple-system,Segoe UI,sans-serif;display:flex;
+    align-items:center;justify-content:center}}
+  .wrap{{text-align:center;max-width:420px;padding:20px}}
+  .dot{{width:10px;height:10px;border-radius:50%;background:#c084a0;
+    display:inline-block;margin:0 3px;animation:pulse 1.2s ease-in-out infinite}}
+  .dot:nth-child(2){{animation-delay:.2s}} .dot:nth-child(3){{animation-delay:.4s}}
+  @keyframes pulse{{0%,80%,100%{{opacity:.25;transform:scale(.8)}}40%{{opacity:1;transform:scale(1)}}}}
+  h3{{font-weight:600;margin:18px 0 6px}}
+  p{{color:#9a9aa4;font-size:12px;line-height:1.6;margin:4px 0}}
+  code{{background:#1a1a20;padding:1px 5px;border-radius:4px}}
+</style></head>
+<body><div class="wrap">
+  <div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
+  <h3 id="msg">Запускаю Ripster…</h3>
+  <p id="detail">Первый запуск может занять минуту — антивирус проверяет файлы.</p>
+</div>
+<script>
+  let tries = 0;
+  async function poll() {{
+    tries++;
+    try {{
+      const r = await fetch('{url}/api/ping', {{cache:'no-store'}});
+      if (r.ok) {{ location.href = '{url}/'; return; }}
+    }} catch (e) {{}}
+    if (tries === 15) {{
+      document.getElementById('detail').textContent =
+        'Всё ещё запускается — это нормально на первом старте.';
+    }}
+    if (tries > 180) {{
+      document.getElementById('msg').textContent = 'Сервер не отвечает';
+      document.getElementById('detail').innerHTML =
+        'Проверь <code>logs\\\\launcher.log</code> и <code>logs\\\\console.log</code> в папке установки.<br>' +
+        'Частая причина — антивирус блокирует <code>python\\\\python.exe</code>.';
+      return;
+    }}
+    setTimeout(poll, 1000);
+  }}
+  poll();
+</script></body></html>"""
+
+
 def open_window(url: str, port: int, win_open, title: str = "Ripster"):
     """Native pywebview window with tray + minimize-to-tray; browser fallback.
     Returns ('webview', state) | ('browser', None). `state['quit']` is True only
@@ -294,7 +347,7 @@ def open_window(url: str, port: int, win_open, title: str = "Ripster"):
         _log(f"[launcher] opening webview window -> {url}")
         geo = _load_win_state()
         window = webview.create_window(
-            title, url,
+            title, html=_loading_html(url),
             width=geo.get("width", 1280), height=geo.get("height", 860),
             x=geo.get("x"), y=geo.get("y"))
         state = {"quit": False, "tray": None, "notified": False}

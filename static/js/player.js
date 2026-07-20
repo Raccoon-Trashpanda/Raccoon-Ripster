@@ -9,6 +9,25 @@ const Preview = { queue: [], idx: -1, _bound: false, mode: 'spotify' };
 // _Pre.idx is the queue index whose URL is ready in _Pre.url.
 const _Pre = { idx: -1, url: '', resolving: false };
 
+// Spotify items carry _streamService/_streamId — the ISRC-matched Deezer/Qobuz
+// copy the backend resolved, since Spotify has no /api/stream proxy of its own.
+// ALL stream-URL construction must go through these two, never item.service/
+// item.id directly — display (label/badge) code keeps using item.service so
+// the player never reveals the real source.
+function _effSvc(item) { return item._streamService || item.service; }
+function _effId(item)  { return item._streamId != null ? item._streamId : item.id; }
+
+const _HLS_JS_CDN = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js';
+async function _ensureHlsJs() {
+  if (window.Hls) return true;
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = _HLS_JS_CDN; s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  }).catch(() => {});
+  return !!(window.Hls && Hls.isSupported());
+}
+
 // ── Web Audio gapless engine (optional, sample-accurate) ──────────────────
 // When `player-gapless` setting is on, playback bypasses <audio> and uses
 // pre-decoded AudioBuffers fed into a BufferSource. Adjacent tracks share
@@ -455,17 +474,71 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
   }
 }
 
+// Plain (unencrypted) HLS — SC serves this for most non-DRM tracks/mixes.
+// Safari's <audio> parses .m3u8 natively (canPlayType handles that below), but
+// Chrome/Firefox/Edge have NO native HLS support in <audio> — silently no
+// sound if you just set audio.src to an .m3u8 URL, which is exactly what the
+// generic fallback path did before this existed. No DRM/EME setup needed here
+// (unlike drm-hls-ctr) since the manifest carries no #EXT-X-KEY.
+async function _playPlainHls(audioEl, item, playBtn, playBtnB) {
+  if (!(await _ensureHlsJs())) {
+    // No HLS.js (blocked/offline CDN) — last resort: let <audio> try natively,
+    // which works on Safari and silently fails elsewhere (no worse than before).
+    audioEl.src = item.url;
+    return;
+  }
+  if (Preview._hls) { Preview._hls.destroy(); Preview._hls = null; }
+  let hls;
+  try {
+    hls = new Hls({});
+  } catch (e) {
+    console.error('[HLS] init failed:', e);
+    audioEl.src = item.url;
+    return;
+  }
+  Preview._hls = hls;
+  hls.on(Hls.Events.ERROR, (_, data) => {
+    if (!data.fatal) return;
+    console.warn('[HLS] fatal error', data.type, data.details);
+    hls.destroy(); Preview._hls = null;
+    _scDrmSkip(ti('p.sc_net', {d: data.details || data.type || '?'}));
+  });
+  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    if (_WA.ctx && _WA.ctx.state === 'suspended') _WA.ctx.resume().catch(() => {});
+    const p = audioEl.play();
+    if (p) p.catch(e => {
+      console.warn('[HLS] autoplay blocked:', e.message);
+      if (playBtn)  playBtn.textContent  = '▶';
+      if (playBtnB) playBtnB.textContent = '▶';
+    });
+  });
+  try {
+    hls.loadSource(item.url);
+    hls.attachMedia(audioEl);
+  } catch (e) {
+    console.error('[HLS] loadSource/attachMedia failed:', e);
+    hls.destroy(); Preview._hls = null;
+    audioEl.src = item.url;
+  }
+}
+
+// Safari parses .m3u8 in a plain <audio> element; everyone else needs HLS.js.
+function _audioHasNativeHls(audioEl) {
+  return !!audioEl.canPlayType && !!audioEl.canPlayType('application/vnd.apple.mpegurl');
+}
+
 function _waCanPlay(item) {
   if (!item) return false;
+  const _svc = _effSvc(item);
   // SC streams are large (mixes 1-2h) — buffer-decode-before-play takes forever.
   // <audio> path via same-origin /api/proxy still gets EQ + visualizer.
-  if (item.service === 'soundcloud') return false;
+  if (_svc === 'soundcloud') return false;
   if ((item.posKey || '').startsWith('soundcloud:')) return false;
   // Deezer too: the Web Audio buffer path must download AND decode the WHOLE
   // track before a single sample plays — many seconds of "hang" on long DJ-mix
   // tracks, and arbitrary track jumps re-decode from scratch. Stream it via
   // <audio> instead: instant start, Range-seek, gapless-enough auto-advance.
-  if (item.service === 'deezer') return false;
+  if (_svc === 'deezer') return false;
   if (!item.url) return true;       // lazy resolve → will hit our same-origin /api/stream/<svc>
   try {
     const u = new URL(item.url, location.origin);
@@ -559,56 +632,73 @@ function resetEQ() {
 
 // ── Visualiser (FFT frequency bars on fullscreen-player background) ─────
 let _vizRAF = null;
+// Two canvases share one draw loop: #fp-viz (big, behind the fullscreen panel)
+// and #pp-viz (small, always-visible strip in the compact mini-bar). The mini
+// one used to be the ONLY way most people would ever see this feature was by
+// opening fullscreen — which nobody does — so it's no longer gated on
+// _FP.open; it runs for as long as audio is actually playing.
+const _VIZ_CANVAS_IDS = ['fp-viz', 'pp-viz'];
 function _vizStart() {
   if (!(S.config?.['player-viz']) || !_WA.analyser) return;
-  const canvas = document.getElementById('fp-viz');
-  if (!canvas) return;
-  canvas.style.opacity = '0.55';
-  const ctx2d = canvas.getContext('2d');
+  const canvases = _VIZ_CANVAS_IDS.map(id => document.getElementById(id)).filter(Boolean);
+  if (!canvases.length) return;
+  const ctx2ds = canvases.map(c => c.getContext('2d'));
+  canvases.forEach(c => { c.style.opacity = c.id === 'fp-viz' ? '0.55' : '1'; });
   const N = _WA.analyser.frequencyBinCount;
   const data = new Uint8Array(N);
   // Re-size canvas DPI-aware on each tick (cheap, handles rotation)
   const draw = () => {
-    if (!_FP?.open) { _vizStop(); return; }
-    const dpr = window.devicePixelRatio || 1;
-    if (canvas.width !== canvas.clientWidth * dpr) {
-      canvas.width  = canvas.clientWidth  * dpr;
-      canvas.height = canvas.clientHeight * dpr;
-    }
+    const audio = document.getElementById('pp-audio');
+    if (!audio || audio.paused) { _vizStop(); return; }
     _WA.analyser.getByteFrequencyData(data);
-    const w = canvas.width, h = canvas.height;
-    ctx2d.clearRect(0, 0, w, h);
-    // Pick the dominant service-brand color from current track (fallback pink).
-    const item  = Preview.queue[Preview.idx];
-    const tint  = (typeof _svcColor === 'function' && item?.service)
-                    ? _svcColor(item.service) : '#c084a0';
-    const grad  = ctx2d.createLinearGradient(0, h, 0, 0);
-    grad.addColorStop(0, tint);
-    grad.addColorStop(1, tint + '00');
-    ctx2d.fillStyle = grad;
-    const bars = Math.min(N, 48);
-    const step = Math.floor(N / bars);
-    const bw   = w / bars;
-    for (let i = 0; i < bars; i++) {
-      const v = data[i * step] / 255;
-      const bh = v * h;
-      ctx2d.fillRect(i * bw + bw * 0.15, h - bh, bw * 0.7, bh);
-    }
+    // Pick the dominant service-brand color from current track (fallback pink)
+    // — same tint the "Live"/service badges use elsewhere, so the bars read
+    // as "this is Deezer/Spotify/Qobuz playing", not just decoration.
+    const item = Preview.queue[Preview.idx];
+    const tint = (typeof _svcColor === 'function' && item?.service)
+                   ? _svcColor(item.service) : '#c084a0';
+    canvases.forEach((canvas, ci) => {
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== canvas.clientWidth * dpr) {
+        canvas.width  = canvas.clientWidth  * dpr;
+        canvas.height = canvas.clientHeight * dpr;
+      }
+      const ctx2d = ctx2ds[ci];
+      const w = canvas.width, h = canvas.height;
+      ctx2d.clearRect(0, 0, w, h);
+      const grad = ctx2d.createLinearGradient(0, h, 0, 0);
+      grad.addColorStop(0, tint);
+      grad.addColorStop(1, tint + '00');
+      ctx2d.fillStyle = grad;
+      // The mini bar is ~60px wide — fewer, chunkier bars read better there
+      // than the 48 thin ones the big fullscreen canvas uses.
+      const bars = Math.min(N, canvas.id === 'pp-viz' ? 16 : 48);
+      const step = Math.floor(N / bars);
+      const bw   = w / bars;
+      for (let i = 0; i < bars; i++) {
+        const v = data[i * step] / 255;
+        const bh = Math.max(v * h, h * 0.06);   // tiny idle nub, never fully flat
+        ctx2d.fillRect(i * bw + bw * 0.15, h - bh, bw * 0.7, bh);
+      }
+    });
     _vizRAF = requestAnimationFrame(draw);
   };
   _vizRAF = requestAnimationFrame(draw);
 }
 function _vizStop() {
   if (_vizRAF) { cancelAnimationFrame(_vizRAF); _vizRAF = null; }
-  const canvas = document.getElementById('fp-viz');
-  if (canvas) {
-    canvas.style.opacity = '0';
-    canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
-  }
+  _VIZ_CANVAS_IDS.forEach(id => {
+    const canvas = document.getElementById(id);
+    if (canvas) {
+      canvas.style.opacity = '0';
+      canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  });
 }
 // Toggle (called by Settings):
 function _vizConfigChanged() {
-  if (S.config?.['player-viz'] && _FP?.open) _vizStart();
+  const audio = document.getElementById('pp-audio');
+  if (S.config?.['player-viz'] && audio && !audio.paused) _vizStart();
   else _vizStop();
 }
 async function _waLoadBuffer(url) {
@@ -761,22 +851,23 @@ document.addEventListener('click', (e) => {
 // Returns {url, status} so caller can distinguish 451 DRM from other failures.
 async function _waResolveUrl(item) {
   if (item.url) return {url: item.url, status: 200};
-  if (!item.service || !item.id) return {url: null, status: 0};
-  const qp = _streamQp(item.service);
+  const svc = _effSvc(item), id = _effId(item);
+  if (!svc || !id) return {url: null, status: 0};
+  const qp = _streamQp(svc);
   // Deezer streams raw audio bytes from our same-origin proxy and the URL is
   // deterministic, so build it directly — DON'T pre-fetch. The old code fetched
   // the whole (decrypted) track here just to read resp.url, then _waLoadBuffer
   // downloaded it a SECOND time to decode: double the server work + a multi-second
   // stall on track switch/seek for long mixes.
-  if (item.service === 'deezer') {
-    item.url = `/api/stream/deezer/${item.id}` +
+  if (svc === 'deezer') {
+    item.url = `/api/stream/deezer/${id}` +
       `?name=${encodeURIComponent(item.title || '')}` +
       `&artist=${encodeURIComponent(item.artist || '')}` +
       (qp ? `&${qp}` : '');
     return {url: item.url, status: 200};
   }
   const resp = await fetch(
-    `/api/stream/${item.service}/${item.id}` +
+    `/api/stream/${svc}/${id}` +
     `?name=${encodeURIComponent(item.title || '')}` +
     `&artist=${encodeURIComponent(item.artist || '')}` +
     (qp ? `&${qp}` : ''));
@@ -1156,12 +1247,13 @@ async function _preloadNext() {
     _Pre.idx = nextIdx; _Pre.url = item.url; return;
   }
   // Lazy item ({service, id}) — ask backend for the stream URL.
-  if (!item.service || !item.id) return;
+  const _pSvc = _effSvc(item), _pId = _effId(item);
+  if (!_pSvc || !_pId) return;
   _Pre.resolving = true;
   try {
-    const _pqp = _streamQp(item.service);
+    const _pqp = _streamQp(_pSvc);
     const resp = await fetch(
-      `/api/stream/${item.service}/${item.id}` +
+      `/api/stream/${_pSvc}/${_pId}` +
       `?name=${encodeURIComponent(item.title || '')}` +
       `&artist=${encodeURIComponent(item.artist || '')}` +
       (_pqp ? `&${_pqp}` : ''),
@@ -1317,10 +1409,13 @@ function _setupAudioEvents() {
   }
   audio.addEventListener('play',  () => {
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    try { _vizStart?.(); } catch {}
   });
   audio.addEventListener('pause', () => {
     if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    try { _vizStop?.(); } catch {}
   });
+  audio.addEventListener('ended', () => { try { _vizStop?.(); } catch {} });
   audio.addEventListener('timeupdate', () => {
     if (audio.duration && audio.duration - audio.currentTime < 15) {
       _preloadNext();
@@ -1574,20 +1669,20 @@ async function _playPreviewAt(idx) {
     // Deezer: build the same-origin proxy URL directly and let <audio> stream it.
     // No resolve-fetch (which would download the whole track just to read resp.url,
     // then the browser fetches it AGAIN for playback — a double download + stall).
-    if (item.service === 'deezer') {
+    if (_effSvc(item) === 'deezer') {
       const _dqp = _streamQp('deezer');
-      item.url = `/api/stream/deezer/${item.id}` +
+      item.url = `/api/stream/deezer/${_effId(item)}` +
         `?name=${encodeURIComponent(item.title || '')}` +
         `&artist=${encodeURIComponent(item.artist || '')}` +
         (_dqp ? `&${_dqp}` : '');
       item.format = 'mp3';
     }
   }
-  if (!item.url && item.service && item.id) {
+  if (!item.url && _effSvc(item) && _effId(item)) {
     try {
-      const _qp = _streamQp(item.service);
+      const _qp = _streamQp(_effSvc(item));
       const resp = await fetch(
-        `/api/stream/${item.service}/${item.id}` +
+        `/api/stream/${_effSvc(item)}/${_effId(item)}` +
         `?name=${encodeURIComponent(item.title || '')}` +
         `&artist=${encodeURIComponent(item.artist || '')}` +
         (_qp ? `&${_qp}` : ''),
@@ -1645,6 +1740,8 @@ async function _playPreviewAt(idx) {
 
   if (item.format === 'drm-hls-cbc' || item.format === 'drm-hls-ctr') {
     _scDrmHls(audio, item, playBtn, playBtnB);
+  } else if (item.format === 'hls' && !_audioHasNativeHls(audio)) {
+    await _playPlainHls(audio, item, playBtn, playBtnB);
   } else {
     audio.src = _proxyAudioUrl(item.url);
     // Auto-resume from a saved position ONLY for long mixes (>10 min). Clicking a

@@ -178,7 +178,7 @@ function showStab(id, btn) {
 // back from the server — only a "set" flag — and a blank secret field leaves the
 // stored value untouched.
 async function loadBotConfig(){
-  const setSet = (elId, on) => { const e=document.getElementById(elId); if(e){ e.textContent = on ? '✓ задан' : '— не задан'; e.style.color = on ? 'var(--green)' : 'var(--muted)'; } };
+  const setSet = (elId, on) => { const e=document.getElementById(elId); if(e){ e.textContent = on ? t('prot.set') : t('prot.not_set'); e.style.color = on ? 'var(--green)' : 'var(--muted)'; } };
   try {
     const c = await api('GET','/api/admin/bot-config');
     setVal('b-owner-id',        c['owner_id'] ?? '');
@@ -221,8 +221,8 @@ async function saveBotConfig(){
   try {
     const r = await api('POST','/api/admin/bot-config', body);
     const n = (r.changed||[]).length;
-    let msg = n ? `✓ Сохранено (${n})` : '✓ Без изменений';
-    if(r.restart_required) msg += ' — нужен рестарт бота';
+    let msg = n ? `${t('prot.saved')} (${n})` : t('prot.no_changes');
+    if(r.restart_required) msg += t('prot.bot_restart');
     if(s){ s.textContent=msg; s.style.color = r.restart_required ? 'var(--orange)' : 'var(--green)'; }
     try { toast(msg, r.restart_required ? 'var(--orange)' : 'var(--green)'); } catch {}
     loadBotConfig();
@@ -241,16 +241,16 @@ async function loadAuthStatus(){
     const r = await fetch('/api/auth-status');
     const d = await r.json();
     if(d.enabled) {
-      if(st) { st.innerHTML = '🔒 Защита <strong style="color:var(--green)">включена</strong>'; st.style.background = 'rgba(62,207,170,.08)'; }
+      if(st) { st.innerHTML = t('prot.on_html'); st.style.background = 'rgba(62,207,170,.08)'; }
       if(curWrap) curWrap.style.display = '';
       if(logoutBtn) logoutBtn.style.display = '';
     } else {
-      if(st) { st.innerHTML = '🔓 Защита <strong style="color:var(--muted)">отключена</strong> — доступ только с этого компьютера'; st.style.background = 'rgba(255,255,255,.04)'; }
+      if(st) { st.innerHTML = t('prot.off_html'); st.style.background = 'rgba(255,255,255,.04)'; }
       if(curWrap) curWrap.style.display = 'none';
       if(logoutBtn) logoutBtn.style.display = 'none';
     }
   } catch(e) {
-    if(st) st.textContent = 'Ошибка: '+e.message;
+    if(st) st.textContent = t('ui.err_pfx')+e.message;
   }
 }
 
@@ -258,7 +258,7 @@ async function saveAppPassword(){
   const newPw = document.getElementById('sec-new')?.value || '';
   const curPw = document.getElementById('sec-current')?.value || '';
   const msgEl = document.getElementById('sec-msg');
-  if(msgEl) { msgEl.textContent = 'Сохраняю…'; msgEl.style.color = 'var(--muted)'; }
+  if(msgEl) { msgEl.textContent = t('prot.saving'); msgEl.style.color = 'var(--muted)'; }
   try {
     const r = await fetch('/api/set-password', {
       method: 'POST',
@@ -267,19 +267,19 @@ async function saveAppPassword(){
     });
     const d = await r.json().catch(()=>({}));
     if(!r.ok) {
-      if(msgEl) { msgEl.textContent = d.detail || 'Ошибка: '+r.status; msgEl.style.color = 'var(--red)'; }
+      if(msgEl) { msgEl.textContent = d.detail || t('ui.err_pfx')+r.status; msgEl.style.color = 'var(--red)'; }
       if(r.status === 401) {
         const curWrap = document.getElementById('sec-current-wrap');
         if(curWrap) curWrap.style.display = '';
       }
       return;
     }
-    if(msgEl) { msgEl.textContent = d.auth_enabled ? '✓ Пароль установлен. Если открыт с другого устройства — потребуется вход.' : '✓ Защита отключена.'; msgEl.style.color = 'var(--green)'; }
+    if(msgEl) { msgEl.textContent = d.auth_enabled ? t('prot.pw_set') : t('prot.off_done'); msgEl.style.color = 'var(--green)'; }
     document.getElementById('sec-new').value = '';
     document.getElementById('sec-current').value = '';
     loadAuthStatus();
   } catch(e) {
-    if(msgEl) { msgEl.textContent = 'Ошибка сети: '+e.message; msgEl.style.color = 'var(--red)'; }
+    if(msgEl) { msgEl.textContent = t('ui.net_err_pfx')+e.message; msgEl.style.color = 'var(--red)'; }
   }
 }
 

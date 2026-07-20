@@ -9,7 +9,7 @@
 ;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\ripster.iss
 
 #define AppName "Ripster"
-#define AppVersion "3.0.29"
+#define AppVersion "3.0.30"
 #define AppPublisher "Raccoon-Trashpanda"
 #define AppURL "https://github.com/Raccoon-Trashpanda/Raccoon-Ripster"
 #define SrcDir ".."

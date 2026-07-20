@@ -159,9 +159,9 @@ function _relDateLabel(d) {
   const diff = Math.round((today - dt) / 86400000);
   if (diff === 0) return t('rl.today');
   if (diff === 1) return t('rl.yesterday');
-  const full = dt.toLocaleDateString('ru', { day:'numeric', month:'long', year:'numeric' });
+  const full = dt.toLocaleDateString(_dateLoc(), { day:'numeric', month:'long', year:'numeric' });
   if (diff > 1 && diff < 7) {
-    const wd = dt.toLocaleDateString('ru', { weekday:'long' });
+    const wd = dt.toLocaleDateString(_dateLoc(), { weekday:'long' });
     return wd.charAt(0).toUpperCase() + wd.slice(1) + ', ' + full;
   }
   return full;
@@ -283,6 +283,7 @@ function _applyRelFilter(resetPage) {
   const grouped = (sort === 'date_desc' || sort === 'date_asc');
   grid.innerHTML = grouped ? _renderRelGroups(visible) : _renderRelFlat(visible);
   _relUpdateLoadMore(data.length);
+  _relHydrateQualitySelects();
 }
 
 function _relUpdateLoadMore(total) {
@@ -445,7 +446,7 @@ function _jwtExpired(token) {
 
 
 function renderReleaseCard(rel) {
-  const dt = rel.date ? new Date(rel.date + 'T00:00:00').toLocaleDateString('ru', {day:'numeric',month:'short',year:'numeric'}) : '';
+  const dt = rel.date ? new Date(rel.date + 'T00:00:00').toLocaleDateString(_dateLoc(), {day:'numeric',month:'short',year:'numeric'}) : '';
   const svcColors = {spotify:'#1db954', qobuz:'#1870f5', tidal:'#00d4b3', apple:'var(--red)', deezer:'#a238ff'};
   const svcClr  = svcColors[rel.service] || 'var(--muted)';
   const typeMap = {album:'ALBUM', single:'SINGLE', ep:'EP', compilation:t('rl.comp_badge'), appears_on:t('rl.appears_badge'), live:'LIVE'};
@@ -455,8 +456,16 @@ function renderReleaseCard(rel) {
   const uid   = _relUID(rel);
   const isNew = _relIsNew(rel);
   const isFav = _relIsFav(rel);
+  const isLive = !!rel.live;   // caught by the instant queryWhatsNewFeed hook, not the per-artist crawl
   const baseBorder = isNew ? 'rgba(62,207,170,.55)' : 'var(--border)';
-  return `<div style="background:var(--surface);border:1px solid ${baseBorder};border-radius:10px;overflow:hidden;transition:border-color .15s" onmouseover="this.style.borderColor='${svcClr}'" onmouseout="this.style.borderColor='${baseBorder}'">
+  const isSpotify = rel.service === 'spotify';
+  const qualSelect = isSpotify ? '' : `
+        <select class="rel-q-select" data-svc="${esc(rel.service)}" title="${t('rl.quality_label')}"
+          onclick="event.stopPropagation()" onchange="event.stopPropagation();_relSetQuality(this)"
+          style="width:100%;margin-top:6px;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted);cursor:pointer;outline:none">
+          <option value="${esc(resolveQuality(rel.service))}">${esc(resolveQuality(rel.service))}</option>
+        </select>`;
+  return `<div class="rel-card${isNew ? ' rel-card-new' : ''}" style="background:var(--surface);border:1px solid ${baseBorder};border-radius:10px;overflow:hidden;transition:border-color .15s" onmouseover="this.style.borderColor='${svcClr}'" onmouseout="this.style.borderColor='${baseBorder}'">
     <div style="position:relative">
       ${rel.cover
         ? `<img src="${esc(rel.cover)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy"/>`
@@ -465,35 +474,82 @@ function renderReleaseCard(rel) {
         style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:54px;height:54px;border-radius:50%;background:rgba(0,0,0,.5);border:2px solid rgba(255,255,255,.85);color:#fff;font-size:21px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding-left:4px;backdrop-filter:blur(3px);transition:transform .12s,background .12s;z-index:2" onmouseover="this.style.transform='translate(-50%,-50%) scale(1.12)';this.style.background='rgba(0,0,0,.7)'" onmouseout="this.style.transform='translate(-50%,-50%)';this.style.background='rgba(0,0,0,.5)'">▶</button>
       <div style="position:absolute;top:6px;left:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${svcClr};font-weight:700;backdrop-filter:blur(4px)">${(rel.service||'?').toUpperCase()}</span></div>
       <div style="position:absolute;top:6px;right:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${typeClr};font-weight:700;backdrop-filter:blur(4px)">${typeTag}</span></div>
-      ${isNew ? `<div style="position:absolute;bottom:6px;left:6px"><span style="font-size:8px;padding:2px 6px;border-radius:4px;background:var(--green);color:#06281f;font-weight:800;letter-spacing:.4px">NEW</span></div>` : ''}
+      ${isNew ? `<div style="position:absolute;bottom:6px;left:6px"><span style="font-size:8px;padding:2px 6px;border-radius:4px;background:var(--green);color:#06281f;font-weight:800;letter-spacing:.4px">${t('rl.new_badge')}</span></div>` : ''}
+      ${isLive ? `<div style="position:absolute;bottom:6px;right:6px" title="${t('rl.live_title')}"><span class="rel-live-badge"><span class="rel-live-dot"></span>${t('rl.live_badge')}</span></div>` : ''}
     </div>
     <div style="padding:8px 10px">
       <div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(rel.title)}">${esc(rel.title)}${hiresBadge}</div>
       <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(rel.artist)}">${esc(rel.artist)}</div>
       ${rel.label ? `<div style="font-size:10px;color:var(--muted);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7" title="${esc(rel.label)}">${esc(rel.label)}</div>` : ''}
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${dt}${rel.tracks ? ' · ' + rel.tracks + ' ' + t('p.trk_abbr') : ''}</div>
+      ${qualSelect}
       <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
-        <button onclick="downloadRelease('${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}')"
+        <button onclick="downloadRelease(this,'${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}')"
           style="flex:1 1 100%;padding:5px 0;background:rgba(192,132,160,.12);border:1px solid rgba(192,132,160,.2);border-radius:7px;font-size:10px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--font)">${t('btn.download')}</button>
         <button onclick="smartDownloadRelease(this,'${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}')"
           style="padding:5px 8px;background:transparent;border:1px solid rgba(255,214,10,.35);border-radius:7px;font-size:11px;color:#ffd60a;cursor:pointer;font-family:var(--font)" title="${t('rl.auto_src')}">⚡</button>
-        <button onclick="toggleRelFav('${escJ(uid)}')" style="padding:5px 8px;background:transparent;border:1px solid ${isFav?'var(--orange)':'var(--border)'};border-radius:7px;font-size:11px;color:${isFav?'var(--orange)':'var(--muted)'};cursor:pointer;font-family:var(--font)" title="${isFav?'Убрать из избранного':'В избранное'}">${isFav?'★':'☆'}</button>
-        <button onclick="navigator.clipboard.writeText('${escJ(rel.url)}');toast(t('toast.link_copied'))" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font)" title="Скопировать ссылку">⎘</button>
-        <a href="${esc(rel.url)}" target="_blank" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);text-decoration:none;display:flex;align-items:center" title="Открыть на ${rel.service}">↗</a>
+        <button onclick="toggleRelFav('${escJ(uid)}')" style="padding:5px 8px;background:transparent;border:1px solid ${isFav?'var(--orange)':'var(--border)'};border-radius:7px;font-size:11px;color:${isFav?'var(--orange)':'var(--muted)'};cursor:pointer;font-family:var(--font)" title="${isFav?t('sc2.unfav'):t('sc2.fav')}">${isFav?'★':'☆'}</button>
+        <button onclick="navigator.clipboard.writeText('${escJ(rel.url)}');toast(t('toast.link_copied'))" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font)" title="${t('ck.copy_link')}">⎘</button>
+        <a href="${esc(rel.url)}" target="_blank" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);text-decoration:none;display:flex;align-items:center" title="${t('ck.open_on')} ${rel.service}">↗</a>
       </div>
     </div>
   </div>`;
 }
 
-async function downloadRelease(service, url, title, artist) {
+async function downloadRelease(btn, service, url, title, artist) {
   if(service === 'spotify') {
     _showSpotifyChoiceToast(url, S.config['quality'] || 'alac');
     return;
   }
-  const quality = resolveQuality(service);
+  const card    = btn && btn.closest ? btn.closest('.rel-card') : null;
+  const sel     = card ? card.querySelector('.rel-q-select') : null;
+  const quality = (sel && sel.value) ? sel.value : resolveQuality(service);
   const r = await api('POST', '/api/queue/add', {url, quality, title, artist});
   if(r.ok) toast('+ '+title+' → '+t('q.queue_word'));
   else     toast(t('t.error_c') + (r.detail || '?'), 'var(--red)');
+}
+
+// Per-card quality picker → writes straight to the same global per-service
+// quality setting Settings/Queue/etc use, so "remembering" a choice here is
+// just the ordinary saveSetting() persistence — one source of truth, no
+// shadow radar-only state to keep in sync.
+function _relSetQuality(sel) {
+  const svc = sel.dataset.svc;
+  const keyMap = {
+    qobuz: 'qobuz-quality', tidal: 'tidal-quality', deezer: 'deezer-quality',
+    beatport: 'beatport-quality', yandex: 'yandex-quality', amazon: 'amazon-quality',
+    apple: 'quality',
+  };
+  saveSetting(keyMap[svc] || 'quality', sel.value);
+}
+
+// Selects render with just the currently-resolved quality as a single option
+// (cheap, synchronous, no per-card network call) — this upgrades them to the
+// full per-service option list once, using the same cached _qualitiesForEngine
+// the rest of the app already warms (Settings/Queue).
+async function _relHydrateQualitySelects() {
+  const selects = document.querySelectorAll('#releases-grid .rel-q-select');
+  if (!selects.length) return;
+  const bySvc = {};
+  selects.forEach(sel => {
+    const svc = sel.dataset.svc;
+    if (!bySvc[svc]) bySvc[svc] = [];
+    bySvc[svc].push(sel);
+  });
+  for (const svc of Object.keys(bySvc)) {
+    let list;
+    try { list = await _qualitiesForEngine(svc); } catch (e) { continue; }
+    if (!Array.isArray(list) || !list.length) continue;
+    const cur = resolveQuality(svc);
+    const optsHtml = list.map(q =>
+      `<option value="${esc(q.id)}" ${q.id === cur ? 'selected' : ''}>${esc(q.badge || q.label || q.id)}</option>`
+    ).join('');
+    bySvc[svc].forEach(sel => {
+      const wasFocused = document.activeElement === sel;
+      sel.innerHTML = optsHtml;
+      if (wasFocused) sel.focus();
+    });
+  }
 }
 
 // Release Radar → авто-скачка с лучшего источника по ISRC.
@@ -540,10 +596,32 @@ async function playRelease(service, url, title, artist, cover) {
       toast(t('sc.no_tracks'), 'var(--red)');
       return;
     }
+    let tracks = d.tracks;
+    // Spotify has no /api/stream proxy of its own (streaming its audio through
+    // our backend would risk the account's token) — the backend already
+    // resolved each track by ISRC to a Deezer/Qobuz copy that CAN actually be
+    // streamed. Drop tracks without a match; the player still shows "Spotify",
+    // never the real source, per the whole point of this workaround.
+    if (service === 'spotify') {
+      const total = tracks.length;
+      tracks = tracks.filter(tr => tr.playable_service && tr.playable_id != null);
+      if (!tracks.length) {
+        // Not a fetch failure — the release itself just isn't on Deezer under
+        // this UPC (small/regional label, Spotify-exclusive, etc). Say so,
+        // rather than the generic "could not fetch tracks".
+        toast(t('rl.no_preview_match'), 'var(--orange)', '', 5000);
+        return;
+      }
+      if (tracks.length < total) {
+        toast(ti('rl.preview_partial', {n: tracks.length, total}), 'var(--muted)', '', 3000);
+      }
+    }
     _setupAudioEvents();
-    Preview.queue = d.tracks.map(tr => ({
-      service:   service,
-      id:        String(tr.id),
+    Preview.queue = tracks.map(tr => ({
+      service:        service,
+      id:             String(tr.id),
+      _streamService: tr.playable_service || service,
+      _streamId:      tr.playable_id != null ? String(tr.playable_id) : String(tr.id),
       title:     tr.title,
       artist:    tr.artist || artist,
       cover:     tr.artwork || cover || '',
@@ -553,7 +631,7 @@ async function playRelease(service, url, title, artist, cover) {
       posKey:    `${service}:${tr.id}`,
     }));
     Preview.idx = 0;
-    toast(`▶ ${title}: ${d.tracks.length} ${t('p.trk_abbr')}`, 'var(--green)', '', 2500);
+    toast(`▶ ${title}: ${tracks.length} ${t('p.trk_abbr')}`, 'var(--green)', '', 2500);
     await _playPreviewAt(0);
   } catch (e) {
     console.error('[playRelease]', e);

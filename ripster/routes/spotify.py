@@ -64,6 +64,10 @@ _sp_crawler_started: bool = False        # background crawler loop guard
 _SP_FOLLOWED_TTL = 6 * 3600              # refresh the followed-artist list every 6h
 _SP_CRAWL_EVERY  = 6 * 3600              # OPTIONAL bg refresh wakes every 6h (smart, paced)
 _SP_ARTIST_REFRESH = 6 * 3600            # re-check a given artist at most every 6h
+# 2026-07-20: queryWhatsNewFeed is ONE request regardless of follow-list size —
+# safe to poll far more often than the heavy per-artist crawl. Closes the "wait
+# up to 6h for the next crawl pass" gap without adding any per-artist load.
+_SP_WHATSNEW_POLL_EVERY = 15 * 60
 _SP_STATE_WINDOW_DAYS = 400              # how much release history to keep per artist
 _SP_CRAWL_INTERVAL = 0.8                 # min seconds between album requests (paced)
 # On 429 we WAIT Retry-After and continue (like spotify-release-list) instead of
@@ -437,6 +441,14 @@ async def _sp_dc_get_token() -> str | None:
 # ходит сюда: queryArtistDiscographyAll = вся дискография артиста одним запросом.
 _SP_GQL_URL = "https://api-partner.spotify.com/pathfinder/v1/query"
 _SP_GQL_DISCO_HASH = "5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564fc56599"
+# 2026-07-20: queryWhatsNewFeed — та же персонализированная лента "новые релизы
+# для тебя", которую в самом Spotify-клиенте открывает колокольчик. Одним
+# запросом отдаёт свежак по подпискам без перебора артистов — сигнал БЫСТРЕЕ
+# полного краула, используется КАК ДОПОЛНЕНИЕ (краул остаётся сеткой полноты).
+# operationName+hash вытащены из web-player бандла (dwp-whats-new-feed чанк),
+# variables — как шлёт сам клиент. Хэш может ротироваться Spotify без
+# предупреждения (как и _SP_GQL_DISCO_HASH) — тогда просто перевытащить.
+_SP_GQL_WHATSNEW_HASH = "d889c8c936ab192af8ced595427f5ba2acdf63478fdc0a181c8d477f8322630e"
 _SP_CT_URL = "https://clienttoken.spotify.com/v1/clienttoken"
 _SP_WEB_CLIENT_ID = "d8a5ed958d274c2e8ee717e6a4b0971d"
 
@@ -519,6 +531,110 @@ def _sp_gql_to_rel(item: dict, artist: dict) -> dict | None:
         }
     except Exception:
         return None
+
+
+def _sp_whatsnew_to_rel(item: dict) -> tuple[dict | None, list]:
+    """queryWhatsNewFeed item → (rel, artists). `rel` is store-format like
+    _sp_gql_to_rel; `artists` is every credited artist (id, name) on the release
+    so it fans out into each of their store entries — matches how the per-artist
+    discography crawl stores a collab under both artists' entries. Only album/
+    single releases are handled (podcast/episode items in the feed are skipped)."""
+    try:
+        content = item.get("content") or {}
+        if content.get("__typename") != "AlbumResponseWrapper":
+            return None, []
+        alb = content.get("data") or {}
+        rid = (alb.get("uri") or "").split(":")[-1]
+        artist_items = ((alb.get("artists") or {}).get("items") or [])
+        artists = [
+            {"id": (a.get("uri") or "").split(":")[-1],
+             "name": (a.get("profile") or {}).get("name", "")}
+            for a in artist_items if a.get("uri")
+        ]
+        if not rid or not artists:
+            return None, []
+        atype = (alb.get("albumType") or "ALBUM").lower()
+        date_iso = ((alb.get("date") or {}).get("isoString") or "")[:10]
+        covers = ((alb.get("coverArt") or {}).get("sources") or [{}])
+        cover = max(covers, key=lambda s: s.get("width") or 0).get("url", "")
+        rel = {
+            "id":        rid,
+            "title":     alb.get("name", ""),
+            "artist":    artists[0]["name"],
+            "artist_id": artists[0]["id"],
+            "type":      atype,
+            "group":     atype,
+            "date":      date_iso,
+            "year":      date_iso[:4],
+            "tracks":    None,
+            "cover":     cover,
+            "url":       f"https://open.spotify.com/album/{rid}",
+            "service":   "spotify",
+        }
+        return rel, artists
+    except Exception:
+        return None, []
+
+
+async def _gql_whatsnew(gc) -> list:
+    """One request = the same personalized "new releases for you" feed the app's
+    own bell icon reads. No per-artist loop — catches fresh drops the instant
+    Spotify's backend has computed them for this account."""
+    params = {
+        "operationName": "queryWhatsNewFeed",
+        "variables": json.dumps({
+            "offset": 0, "limit": 50, "onlyUnPlayedItems": False,
+            "includedContentTypes": [], "includeEpisodeContentRatingsV2": False,
+        }),
+        "extensions": json.dumps({"persistedQuery": {
+            "version": 1, "sha256Hash": _SP_GQL_WHATSNEW_HASH}}),
+    }
+    try:
+        r = await gc.get(_SP_GQL_URL, params=params)
+    except Exception as e:
+        print(f"[spotify] what's-new fetch error: {e}", flush=True)
+        return []
+    if r.status_code == 401:
+        fresh_b = _sp_minted_bearer()
+        if fresh_b:
+            gc.headers["Authorization"] = f"Bearer {fresh_b}"
+        ct2 = await _sp_client_token()
+        if ct2:
+            gc.headers["client-token"] = ct2
+        try:
+            r = await gc.get(_SP_GQL_URL, params=params)
+        except Exception:
+            return []
+    if r.status_code != 200:
+        print(f"[spotify] what's-new: HTTP {r.status_code}", flush=True)
+        return []
+    try:
+        return ((r.json().get("data") or {}).get("whatsNewFeedItems") or {}).get("items") or []
+    except Exception:
+        return []
+
+
+def _sp_merge_whatsnew(items: list) -> int:
+    """Merge queryWhatsNewFeed items into the durable per-artist store. Only
+    fans out to artists already in the followed set — _build_feed only ever
+    reads entries for followed artist ids, so anything else would be dead
+    weight. Returns how many genuinely new releases were added."""
+    followed_ids = {a.get("id") for a in _sp_followed_cache.get("artists", []) if a.get("id")}
+    added = 0
+    for it in items:
+        rel, artists = _sp_whatsnew_to_rel(it)
+        if not rel:
+            continue
+        for wa in artists:
+            waid = wa.get("id")
+            if not waid or waid not in followed_ids:
+                continue
+            st = _sp_artist_state.setdefault(waid, {"name": wa.get("name", ""), "releases": [], "ts": 0})
+            if not any(r.get("id") == rel["id"] for r in st["releases"]):
+                st["releases"].append({**rel, "artist": wa.get("name", rel["artist"]),
+                                        "artist_id": waid, "live": True})
+                added += 1
+    return added
 
 
 def _sp_minted_bearer() -> str | None:
@@ -955,6 +1071,17 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
         gql_429s = 0
         async with httpx.AsyncClient(timeout=20, headers=gql_headers, limits=limits,
                                      **_sp_httpx_kwargs()) as gql:
+            # Cheap instant signal FIRST — one request, catches drops that just
+            # appeared even if every followed artist is still "fresh" and the
+            # per-artist loop below would skip them all.
+            if not gql_dead:
+                wn_items = await _gql_whatsnew(gql)
+                wn_new   = _sp_merge_whatsnew(wn_items)
+                if wn_items:
+                    print(f"[spotify] what's-new: {len(wn_items)} in feed, {wn_new} new stored",
+                          flush=True)
+                    if wn_new:
+                        _save_artist_state()
             for idx, artist in enumerate(artists):
                 if gql_dead:
                     break
@@ -992,6 +1119,17 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
                         items, status = await _gql_disco(gql, aid, offset=50)
                         if not items:
                             break
+                    # A release already flagged "live" (caught by the instant
+                    # queryWhatsNewFeed hook) keeps that badge even after this
+                    # full re-crawl replaces the artist's release list — it's a
+                    # historical fact about how it was first spotted, not a
+                    # live/current status that should be overwritten.
+                    old_live_ids = {r["id"] for r in (_sp_artist_state.get(aid) or {}).get("releases", [])
+                                     if r.get("live")}
+                    if old_live_ids:
+                        for r in rels:
+                            if r["id"] in old_live_ids:
+                                r["live"] = True
                     _sp_artist_state[aid] = {"name": name, "releases": rels, "ts": now_ts}
                     fetched   += 1
                     completed += 1
@@ -1103,7 +1241,8 @@ def _ensure_crawler() -> None:
         return
     _sp_crawler_started = True
     asyncio.ensure_future(_sp_background_crawler())
-    print("[spotify] background crawler started (user-enabled, paced)", flush=True)
+    asyncio.ensure_future(_sp_whatsnew_poller())
+    print("[spotify] background crawler + what's-new poller started (user-enabled, paced)", flush=True)
 
 
 async def _sp_background_crawler() -> None:
@@ -1140,6 +1279,48 @@ async def _sp_background_crawler() -> None:
         if ban_left > 0:
             nap = min(max(int(ban_left) + 10, 60), 3600)
         await asyncio.sleep(nap)
+
+
+async def _sp_whatsnew_poller() -> None:
+    """Independent, much cheaper loop than _sp_background_crawler — one
+    queryWhatsNewFeed request per wake (not one per artist), so it's safe to
+    poll every _SP_WHATSNEW_POLL_EVERY instead of waiting for the next 6h
+    crawl pass. Broadcasts a live update the instant something new lands."""
+    global _sp_scan_running
+    import asyncio
+    await asyncio.sleep(20)   # let startup + the main crawler's own sleep(5) settle
+    while True:
+        if not bool(_cfg.get("spotify-bg-scan")):
+            return   # main crawler already flips _sp_crawler_started off; we just exit
+        try:
+            banned = datetime.now().timestamp() < _sp_banned_until
+            bearer = _sp_minted_bearer()
+            if bearer and not banned and not _sp_scan_running:
+                ct = await _sp_client_token()
+                headers = {
+                    "Authorization": f"Bearer {bearer}", "client-token": ct or "",
+                    "User-Agent": _SP_WEB_UA, "Origin": "https://open.spotify.com",
+                    "Referer": "https://open.spotify.com/",
+                }
+                async with httpx.AsyncClient(timeout=20, headers=headers,
+                                             **_sp_httpx_kwargs()) as gc:
+                    items = await _gql_whatsnew(gc)
+                added = _sp_merge_whatsnew(items)
+                if added:
+                    _save_artist_state()
+                    print(f"[spotify] what's-new poll: +{added} new release(s)", flush=True)
+                    if _broadcast:
+                        feed = _build_feed(3650, "album,single,compilation")
+                        await _broadcast({
+                            "type":            "releases_scan_done",
+                            "artists_checked": feed["artists_checked"],
+                            "releases_count":  len(feed["releases"]),
+                            "releases":        feed["releases"],
+                            "partial":         feed["ban_left"] > 0,
+                        })
+        except Exception as e:
+            print(f"[spotify] what's-new poll error: {e}", flush=True)
+        await asyncio.sleep(_SP_WHATSNEW_POLL_EVERY)
 
 
 @router.get("/api/spotify/scan-status")

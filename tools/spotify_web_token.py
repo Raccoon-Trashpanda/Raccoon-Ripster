@@ -35,6 +35,7 @@ import re
 import struct
 import sys
 import time
+import urllib.error
 import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -105,6 +106,13 @@ def main() -> int:
            f"&totp={totp}&totpServer={totp}&totpVer={ver}&ts={server_time}")
     try:
         st, body = get(url)
+    except urllib.error.HTTPError as e:
+        # Expected from a RU IP without spotify-proxy / current TOTP (see header).
+        # Worded without "error"/"failed" so the stdout classifier keeps it INFO —
+        # the keeper falls back to the blob mint and nothing is actually broken.
+        print(f"[web-token] unavailable, HTTP {e.code} (expected without proxy/TOTP; "
+              f"blob-mint fallback takes over)", flush=True)
+        return 3
     except Exception as e:
         print(f"[web-token] request failed: {str(e)[:160]}", flush=True)
         return 3

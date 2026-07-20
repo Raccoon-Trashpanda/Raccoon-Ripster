@@ -20,6 +20,11 @@ const t = key => {
 // the dict for the key first (see case 'log').
 const ti = (key, params) => { let s = t(key); if (params) for (const k in params) s = s.replaceAll('{'+k+'}', params[k]); return s; };
 
+// BCP-47 tag for Date#toLocaleDateString — was hardcoded 'ru' at every call
+// site, so date labels stayed Russian even after switching the UI language.
+const _DATE_LOCALE = {ru:'ru', en:'en', hi:'hi-IN', ja:'ja', zh:'zh-CN'};
+function _dateLoc() { return _DATE_LOCALE[S.lang] || 'en'; }
+
 function setLang(lang) {
   if(!LANG[lang]) return;
   S.lang = lang;
@@ -1660,6 +1665,39 @@ async function artistReleaseDownload(service, releaseId, title, artist) {
   } catch(e) {
     toast(t('err.generic') + ': ' + e.message, 'var(--red)');
   }
+}
+
+// Queue every release currently shown on the artist page (respects the active
+// type filter). Works for any service: each release resolves to a real URL —
+// from r.url when present, else a one-off /api/album lookup — then goes into the
+// queue at that service's configured quality. Sequential so a huge discography
+// doesn't fire 100 parallel lookups; progress is reported via toasts.
+async function downloadArtistDiscography(){
+  const A = (typeof Detail !== 'undefined') ? Detail.currentArtist : null;
+  if(!A){ return; }
+  const items = (A.filter && A.filter !== 'all')
+    ? (A.releases || []).filter(r => r.type === A.filter)
+    : (A.releases || []);
+  if(!items.length){ toast(t('ck.cat_empty'), 'var(--muted)'); return; }
+  const name = (A.artist && A.artist.name) || '';
+  if(!confirm(ti('ck.dl_all_confirm', {n: items.length, name}))) return;
+  toast(ti('ck.dl_all_start', {n: items.length}), 'var(--muted)', '', 3000);
+  let ok = 0, fail = 0;
+  for(const r of items){
+    try{
+      let url = r.url;
+      if(!url){
+        const rr = await fetch(`/api/album/${r.service}/${encodeURIComponent(r.id)}`);
+        const dd = await rr.json();
+        url = dd.album?.url;
+      }
+      if(!url){ fail++; continue; }
+      const res = await api('POST', '/api/queue/add',
+        {url, quality: resolveQuality(r.service), title: r.title, artist: name});
+      if(res && res.ok) ok++; else fail++;
+    }catch(e){ fail++; }
+  }
+  toast(ti('ck.dl_all_done', {ok, fail}), ok ? 'var(--green)' : 'var(--red)', '', 5000);
 }
 
 async function albumAddTrack(urlOrId, title, artist){

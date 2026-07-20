@@ -129,7 +129,7 @@ async function showGuestServiceInfo() {
   let status = {};
   try { status = await (await fetch('/api/services/status')).json(); } catch(e){}
   const names = {apple:'Apple Music',qobuz:'Qobuz',deezer:'Deezer',tidal:'Tidal',
-                 spotify:'Spotify',soundcloud:'SoundCloud',beatport:'Beatport',yandex:'Яндекс.Музыка'};
+                 spotify:'Spotify',soundcloud:'SoundCloud',beatport:'Beatport',yandex:t('svc.yandex')};
   const avail = Object.keys(names).filter(k => status[k]);
   const q = ((S.config && S.config.quality) || '—');
   const badges = avail.map(k => `<span style="font-size:11px;padding:3px 9px;border-radius:20px;background:${_svcColor(k)}22;color:${_svcColor(k)};border:1px solid ${_svcColor(k)}55">${esc(names[k])}</span>`).join(' ');
@@ -139,11 +139,11 @@ async function showGuestServiceInfo() {
   ov.onclick = () => ov.remove();
   ov.innerHTML = `<div onclick="event.stopPropagation()" style="max-width:420px;width:100%;background:var(--surface,#15151a);border:1px solid var(--border);border-radius:14px;padding:22px 24px;box-shadow:0 20px 60px rgba(0,0,0,.55)">
       <div style="font-family:var(--display);font-size:20px;font-weight:800;margin-bottom:10px">Raccoon <span style="color:var(--red)">Ripster</span></div>
-      <div style="font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:14px">Загрузчик музыки в высоком качестве (вплоть до Hi-Res FLAC и Dolby Atmos). Ищи треки и альбомы, ставь в очередь, скачивай — готовое доступно прямо во встроенном плеере.</div>
-      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Доступные сервисы</div>
+      <div style="font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:14px">${t('au.guest_intro')}</div>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${t('au.svc_avail')}</div>
       <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${badges || '<span style="color:var(--muted)">—</span>'}</div>
-      <div style="font-size:12px;color:var(--muted)">Качество по умолчанию: <span style="color:var(--text);font-weight:600">${esc(String(q).toUpperCase())}</span></div>
-      <button onclick="document.getElementById('guest-info-overlay').remove()" style="margin-top:16px;width:100%;padding:9px;background:var(--red);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font)">Понятно</button>
+      <div style="font-size:12px;color:var(--muted)">${t('au.default_quality')} <span style="color:var(--text);font-weight:600">${esc(String(q).toUpperCase())}</span></div>
+      <button onclick="document.getElementById('guest-info-overlay').remove()" style="margin-top:16px;width:100%;padding:9px;background:var(--red);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font)">${t('au.got_it')}</button>
     </div>`;
   document.body.appendChild(ov);
 }
@@ -151,12 +151,26 @@ async function showGuestServiceInfo() {
 // ── Token probe: show live auth status for Qobuz/Tidal/Deezer ─────────────
 async function testAuth(service){
   const out = document.getElementById('test-auth-' + service);
+  // Tidal's real "is it connected" signal belongs in the prominent Quick Login
+  // box (#tidal-tok-expiry), not just the collapsed "manual tokens" fallback
+  // that most people using device-flow login never open — mirror the same
+  // result into both.
+  const liveOut = service === 'tidal' ? document.getElementById('tidal-tok-expiry') : null;
   if(out){ out.textContent = t('s.checking'); out.style.color = 'var(--muted)'; }
+  if(liveOut){ liveOut.textContent = t('s.checking'); liveOut.style.color = 'var(--muted)'; }
   try {
     const r = await fetch('/api/test-auth/' + service, {method: 'POST'});
     const d = await r.json().catch(()=>({ok:false,error:t('s.bad_response')}));
     if(d.ok) {
       const u = d.user || {};
+      // Tidal's country is auto-detected live from the account — no reason to
+      // make the user type it in by hand; keep the field (and config) in sync.
+      if(service === 'tidal' && u.country) {
+        const cc = String(u.country).toUpperCase();
+        const ccInput = document.getElementById('s-tidal-country');
+        if(ccInput && ccInput.value !== cc) ccInput.value = cc;
+        if(S.config && S.config['tidal-country'] !== cc) saveSetting('tidal-country', cc);
+      }
       const parts = [];
       if(u.country) parts.push(`<span style="font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,.08);color:var(--muted);letter-spacing:.5px;vertical-align:middle">${esc(u.country)}</span>`);
       if(u.hires === true)         parts.push('<span style="color:#ffd60a;font-weight:700">Hi-Res ✓</span>');
@@ -173,12 +187,18 @@ async function testAuth(service){
       if(u.note) parts.push(`<span style="color:var(--muted)">${esc(u.note)}</span>`);
       const tag = parts.length ? ' &nbsp;' + parts.join(' · ') : '';
       const _lbl = (typeof _svcLabel === 'function' ? _svcLabel(service) : service);
-      if(out){ out.innerHTML = `<span style="color:var(--green);font-weight:700">✓ ${esc(_lbl)} ${t('s.works')}</span>` + tag; }
+      const html = `<span style="color:var(--green);font-weight:700">✓ ${esc(_lbl)} ${t('s.works')}</span>` + tag;
+      if(out){ out.innerHTML = html; }
+      if(liveOut){ liveOut.innerHTML = html; }
     } else {
-      if(out){ out.innerHTML = '<span style="color:var(--red)">✗ ' + esc(d.error || t('s.unknown_error')) + '</span>'; }
+      const html = '<span style="color:var(--red)">✗ ' + esc(d.error || t('s.unknown_error')) + '</span>';
+      if(out){ out.innerHTML = html; }
+      if(liveOut){ liveOut.innerHTML = html; }
     }
   } catch(e) {
-    if(out){ out.innerHTML = '<span style="color:var(--red)">✗ ' + t('s.net_error') + ': ' + esc(e.message) + '</span>'; }
+    const html = '<span style="color:var(--red)">✗ ' + t('s.net_error') + ': ' + esc(e.message) + '</span>';
+    if(out){ out.innerHTML = html; }
+    if(liveOut){ liveOut.innerHTML = html; }
   }
 }
 
@@ -194,7 +214,15 @@ function autoValidateServices() {
   const jobs = [];
   if(c['deezer-arl'])                                        jobs.push('deezer');
   if(c['qobuz-auth-token'] || (c['qobuz-email'] && c['qobuz-password'])) jobs.push('qobuz');
-  if(c['tidal-token'])                                       jobs.push('tidal');
+  if(c['tidal-token']) {
+    jobs.push('tidal');
+  } else {
+    // No token at all yet (fresh install / never logged in) — the box says
+    // "checking session…" by default, which is misleading when nothing is
+    // actually happening. Say plainly there's nothing to check.
+    const liveOut = document.getElementById('tidal-tok-expiry');
+    if(liveOut) liveOut.innerHTML = `<span style="color:var(--muted)">⚠ ${esc(t('s.tidal_not_connected'))}</span>`;
+  }
   if(c['media-user-token'] && c['authorization-token'])      jobs.push('apple');
   if(c['soundcloud-oauth-token'])                            jobs.push('soundcloud');
   if(c['beatport-username'] && c['beatport-password'])       jobs.push('beatport');
@@ -208,27 +236,27 @@ async function qobuzPasswordLogin() {
   const email = (document.getElementById('s-qobuz-email')?.value || '').trim();
   const pw    = document.getElementById('s-qobuz-pass')?.value || '';
   if (!email || !pw) {
-    if (out) out.innerHTML = '<span style="color:var(--danger)">Заполни email и пароль</span>';
+    if (out) out.innerHTML = '<span style="color:var(--danger)">' + t('au.fill_email') + '</span>';
     return;
   }
-  if (out) { out.textContent = 'Вход в Qobuz…'; out.style.color = 'var(--muted)'; }
+  if (out) { out.textContent = t('au.qobuz_login'); out.style.color = 'var(--muted)'; }
   // Persist creds first — the server-side probe reads them from config.
   await saveSetting('qobuz-email', email);
   await saveSetting('qobuz-password', pw);
   try {
     const r = await fetch('/api/test-auth/qobuz', {method:'POST'});
-    const d = await r.json().catch(() => ({ok:false, error:'Неверный ответ сервера'}));
+    const d = await r.json().catch(() => ({ok:false, error:t('au.bad_response')}));
     if (d.ok) {
       const u = d.user || {};
       const tier = u.hires ? 'Hi-Res' : (u.lossless ? 'Lossless' : (u.subscription || ''));
-      if (out) out.innerHTML = '<span style="color:var(--green)">✓ Вход выполнен'
-        + (tier ? ' · ' + esc(tier) : '') + ' — user-id и токен сохранены</span>';
+      if (out) out.innerHTML = '<span style="color:var(--green)">' + t('au.login_ok')
+        + (tier ? ' · ' + esc(tier) : '') + t('au.saved_uid_token') + '</span>';
       loadTokensToUI();   // probe auto-promoted email/pass → token; refresh fields
     } else {
-      if (out) out.innerHTML = '<span style="color:var(--danger)">✗ ' + esc(d.error || 'Ошибка') + '</span>';
+      if (out) out.innerHTML = '<span style="color:var(--danger)">✗ ' + esc(d.error || t('err.generic')) + '</span>';
     }
   } catch(e) {
-    if (out) out.innerHTML = '<span style="color:var(--danger)">✗ Сеть: ' + esc(e.message) + '</span>';
+    if (out) out.innerHTML = '<span style="color:var(--danger)">' + t('au.net_pfx') + esc(e.message) + '</span>';
   }
 }
 
@@ -308,10 +336,10 @@ async function importTidalToken(){
   const msg = document.getElementById('tidal-import-msg');
   const raw = (ta?.value || '').trim();
   if(!raw) {
-    if(msg){ msg.innerHTML = '<span style="color:var(--red)">Пустое поле</span>'; }
+    if(msg){ msg.innerHTML = '<span style="color:var(--red)">' + t('au.empty_field') + '</span>'; }
     return;
   }
-  if(msg){ msg.innerHTML = '<span style="color:var(--muted)">Импортирую…</span>'; }
+  if(msg){ msg.innerHTML = '<span style="color:var(--muted)">' + t('au.importing') + '</span>'; }
   try {
     const r = await fetch('/api/import-token/tidal', {
       method: 'POST',
@@ -338,7 +366,7 @@ async function importTidalToken(){
       const parts = [];
       if(imp.user_id) parts.push('user_id=' + esc(imp.user_id));
       if(imp.country) parts.push('country=' + esc(imp.country));
-      msg.innerHTML = '<span style="color:var(--green)">✓ Импортировано</span>' + (parts.length ? ' · ' + parts.join(' · ') : '');
+      msg.innerHTML = '<span style="color:var(--green)">' + t('au.imported') + '</span>' + (parts.length ? ' · ' + parts.join(' · ') : '');
     }
     // Auto-test after 500ms so user sees it works
     setTimeout(() => testAuth('tidal'), 500);

@@ -188,9 +188,9 @@ function onSearchSvcChange() {
       typeEl.innerHTML = `<option value="tracks">${t('ck.opt_tracks')}</option><option value="releases">${t('ck.opt_releases')}</option>`;
     } else {
       typeEl.innerHTML = `
-        <option value="album" data-i18n="search.type_album">Альбомы</option>
-        <option value="track" data-i18n="search.type_track">Треки</option>
-        <option value="artist" data-i18n="search.type_artist">Артисты</option>
+        <option value="album" data-i18n="search.type_album">${t('search.type_album')}</option>
+        <option value="track" data-i18n="search.type_track">${t('search.type_track')}</option>
+        <option value="artist" data-i18n="search.type_artist">${t('search.type_artist')}</option>
         ${svc === 'apple' ? '<option value="video">'+t('ck.opt_video')+'</option>' : ''}`;
     }
   }
@@ -360,7 +360,7 @@ function _renderSearchCard(item, svc) {
 
     const dateStr = item.date || '';
     const dateFmt = dateStr.length >= 10
-      ? new Date(dateStr + 'T00:00:00').toLocaleDateString('ru', {day:'numeric', month:'short', year:'numeric'})
+      ? new Date(dateStr + 'T00:00:00').toLocaleDateString(_dateLoc(), {day:'numeric', month:'short', year:'numeric'})
       : (item.year || '');
     const hiresBadge = item.hires ? `<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(255,214,10,.15);color:#ffd60a;font-weight:700;margin-left:3px">HI-RES</span>` : '';
 
@@ -379,7 +379,7 @@ function _renderSearchCard(item, svc) {
       if(item.type === 'track' && item.service === 'beatport') {
         const previewUrl = item.previewUrl || item.preview || '';
         const previewBtn = previewUrl
-          ? `<button onclick="event.stopPropagation();playPreview('${escJ(previewUrl)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.cover||item.artworkUrl||'')}')" style="padding:4px 7px;background:rgba(1,244,156,.15);color:#01f49c;border:1px solid rgba(1,244,156,.4);border-radius:6px;font-size:11px;cursor:pointer" title="Слушать">▶</button>`
+          ? `<button onclick="event.stopPropagation();playPreview('${escJ(previewUrl)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.cover||item.artworkUrl||'')}')" style="padding:4px 7px;background:rgba(1,244,156,.15);color:#01f49c;border:1px solid rgba(1,244,156,.4);border-radius:6px;font-size:11px;cursor:pointer" title="${t('ck.listen')}">▶</button>`
           : '';
         const bpmLabel = item.bpm ? `<span style="font-size:9px;color:var(--muted2)">${item.bpm} BPM</span>` : '';
         const genreLabel = item.genre ? `<span style="font-size:9px;background:rgba(1,244,156,.12);color:#01f49c;padding:1px 5px;border-radius:3px;flex-shrink:0">${esc(item.genre)}</span>` : '';
@@ -439,7 +439,7 @@ function _renderSearchCard(item, svc) {
               <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escJ(item.title)}">${item.title||'—'}</div>
               <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:7px">${item.artist||''}</div>
               <div style="display:flex;gap:5px">
-                <button onclick="openArtistPage('${item.service}','${escJ(item.id)}')" style="flex:1;padding:5px 0;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)">→ Дискография</button>
+                <button onclick="openArtistPage('${item.service}','${escJ(item.id)}')" style="flex:1;padding:5px 0;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)">→ ${t('ck.discography')}</button>
                 ${linkBtn}${copyBtn}
               </div>
             </div>
@@ -453,7 +453,7 @@ function _renderSearchCard(item, svc) {
         const labelRow = item.label ? `<div style="font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px" title="${escJ(item.label)}">${esc(item.label)}</div>` : '';
         const canStream = (item.service === 'qobuz' || item.service === 'tidal' || item.service === 'deezer');
         const playOverlay = canStream
-          ? `<div style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer;backdrop-filter:blur(6px);transition:transform .12s,background .12s" onclick="event.stopPropagation();playAlbumById('${item.service}','${escJ(item.id)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.artworkUrl||item.cover||'')}')" onmouseover="this.style.transform='scale(1.08)';this.style.background='var(--red)'" onmouseout="this.style.transform='';this.style.background='rgba(0,0,0,.72)'" title="Слушать альбом">▶</div>`
+          ? `<div style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer;backdrop-filter:blur(6px);transition:transform .12s,background .12s" onclick="event.stopPropagation();playAlbumById('${item.service}','${escJ(item.id)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.artworkUrl||item.cover||'')}')" onmouseover="this.style.transform='scale(1.08)';this.style.background='var(--red)'" onmouseout="this.style.transform='';this.style.background='rgba(0,0,0,.72)'" title="${t('ck.listen_album')}">▶</div>`
           : '';
         return `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s;position:relative" onmouseover="this.style.borderColor='var(--red)'" onmouseout="this.style.borderColor='var(--border)'">
@@ -469,7 +469,7 @@ function _renderSearchCard(item, svc) {
               </div>
               <div style="display:flex;gap:4px">
                 <button onclick="searchAddToQueue('${escJ(item.url)}','${escJ(item.title)}','${escJ(item.artist)}')" style="flex:1;padding:5px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
-                <button onclick="openAlbumPage('${item.service}','${escJ(item.id)}')" style="padding:5px 8px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="Треки">≡</button>
+                <button onclick="openAlbumPage('${item.service}','${escJ(item.id)}')" style="padding:5px 8px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('btn.tracks')}">≡</button>
                 ${linkBtn}${copyBtn}
               </div>
             </div>
@@ -481,10 +481,10 @@ function _renderSearchCard(item, svc) {
       const svcLabel = (item.service || '').toUpperCase();
       const canStream = (item.service === 'qobuz' || item.service === 'tidal' || item.service === 'deezer');
       const playFull = canStream && item.id
-        ? `<button onclick="event.stopPropagation();playStreamTrack('${item.service}','${item.id}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.artworkUrl||item.cover||'')}')" style="padding:4px 7px;background:rgba(${item.service==='qobuz'?'24,112,245':item.service==='tidal'?'0,212,179':'162,56,255'},.12);color:${svcColor};border:1px solid rgba(${item.service==='qobuz'?'24,112,245':item.service==='tidal'?'0,212,179':'162,56,255'},.25);border-radius:6px;font-size:11px;cursor:pointer" title="Полный трек">▶</button>`
+        ? `<button onclick="event.stopPropagation();playStreamTrack('${item.service}','${item.id}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.artworkUrl||item.cover||'')}')" style="padding:4px 7px;background:rgba(${item.service==='qobuz'?'24,112,245':item.service==='tidal'?'0,212,179':'162,56,255'},.12);color:${svcColor};border:1px solid rgba(${item.service==='qobuz'?'24,112,245':item.service==='tidal'?'0,212,179':'162,56,255'},.25);border-radius:6px;font-size:11px;cursor:pointer" title="${t('ck.full_play')}">▶</button>`
         : '';
       const previewBtn = item.preview
-        ? `<button onclick="event.stopPropagation();playPreview('${escJ(item.preview)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.cover||item.artworkUrl||'')}')" style="padding:4px 7px;background:rgba(255,255,255,.08);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer" title="30 сек">▶30</button>`
+        ? `<button onclick="event.stopPropagation();playPreview('${escJ(item.preview)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.cover||item.artworkUrl||'')}')" style="padding:4px 7px;background:rgba(255,255,255,.08);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer" title="${t('ck.sec30')}">▶30</button>`
         : '';
       return `
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s;position:relative" onmouseover="this.style.borderColor='${svcColor}'" onmouseout="this.style.borderColor='var(--border)'">
@@ -641,6 +641,13 @@ function renderArtistPage(){
       ${pill('compilation', t('ck.f_comps'))}
       ${pill('live', t('ck.f_live'))}
       ${pill('appears_on', t('ck.f_appears'))}
+    </div>
+    <div style="margin-bottom:18px">
+      <button onclick="downloadArtistDiscography()"
+        style="padding:8px 16px;border-radius:9px;background:var(--red);color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font);display:inline-flex;align-items:center;gap:7px">
+        ⬇ ${filter==='all' ? t('ck.dl_all') : t('ck.dl_filtered')}
+        <span style="opacity:.75;font-weight:600">${filtered.length}</span>
+      </button>
     </div>`;
 
   const grid = filtered.length === 0
@@ -658,7 +665,7 @@ function renderArtistPage(){
               ${r.label ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.label)}">${esc(r.label)}</div>` : ''}
               <div style="display:flex;gap:5px">
                 <button onclick="artistReleaseDownload('${r.service}','${esc(r.id)}','${escJ(r.title)}','${escJ(artist.name)}')" style="flex:1;padding:5px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
-                <button onclick="openAlbumPage('${r.service}','${esc(r.id)}')" style="padding:5px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="Треки">≡</button>
+                <button onclick="openAlbumPage('${r.service}','${esc(r.id)}')" style="padding:5px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('btn.tracks')}">≡</button>
               </div>
             </div>
           </div>`).join('')}
@@ -749,7 +756,7 @@ function renderAlbumPage(){
         <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
           <button onclick="albumAddAll()" style="padding:8px 16px;background:var(--red);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">${t('btn.download_album')}</button>
           ${canStream ? `<button onclick="playAlbumAll()" style="padding:8px 16px;background:rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.16);color:${streamColor};border:1px solid rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.4);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">${t('btn.play_album')}</button>` : ''}
-          ${album.url ? `<a href="${album.url}" target="_blank" style="padding:8px 14px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;font-family:var(--font)">↗ Открыть на ${album.service}</a>` : ''}
+          ${album.url ? `<a href="${album.url}" target="_blank" style="padding:8px 14px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;font-family:var(--font)">↗ ${t('ck.open_on')} ${album.service}</a>` : ''}
         </div>
       </div>
     </div>`;

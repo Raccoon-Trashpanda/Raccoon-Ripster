@@ -35,7 +35,7 @@ async function loadLibrary(refresh = false) {
   const btn     = document.getElementById('lib-refresh-btn');
   const rootsEl = document.getElementById('lib-roots');
   const empty   = document.getElementById('lib-empty');
-  if (status) { status.textContent = '⟳ Сканирую…'; status.style.display = 'block'; }
+  if (status) { status.textContent = '⟳ ' + t('lib.scanning'); status.style.display = 'block'; }
   if (btn) btn.disabled = true;
   _LIB.loading = true;
   try {
@@ -86,7 +86,7 @@ function _libApplyFilter() {
   list.innerHTML = slice.map(_libRow).join('');
   if (items.length > 500) {
     list.insertAdjacentHTML('beforeend',
-      `<div style="padding:14px;text-align:center;color:var(--muted);font-size:11px">+${items.length - 500} ещё — уточни поиск</div>`);
+      `<div style="padding:14px;text-align:center;color:var(--muted);font-size:11px">+${items.length - 500} ${t('lib.more_refine')}</div>`);
   }
 }
 
@@ -103,7 +103,7 @@ function _libRow(it) {
     </div>
     <div style="font-size:11px;color:var(--muted2);font-family:var(--mono);flex-shrink:0">${dur}</div>
     ${extBadge}
-    <button onclick="event.stopPropagation();_libCopyPath('${escJ(it.path)}')" style="padding:3px 7px;background:transparent;border:1px solid var(--border);border-radius:5px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font);flex-shrink:0" title="Скопировать путь">⎘</button>
+    <button onclick="event.stopPropagation();_libCopyPath('${escJ(it.path)}')" style="padding:3px 7px;background:transparent;border:1px solid var(--border);border-radius:5px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font);flex-shrink:0" title="${t('lib.copy_path')}">⎘</button>
   </div>`;
 }
 
@@ -122,7 +122,7 @@ function playLibraryTrack(cid) {
     artist: it.artist,
     cover:  it.has_cover ? `/api/library/cover/${it.id}` : '',
     full:   true,
-    label:  `Библиотека · ${it.album || ''}`.trim(),
+    label:  `${t('nav.library')} · ${it.album || ''}`.trim(),
     posKey: 'lib:' + it.id,
   }];
   Preview.idx = 0;
@@ -155,12 +155,12 @@ async function playAlbumById(service, albumId, fallbackTitle, fallbackArtist, fa
         artist:  t.artist || album.artist || fallbackArtist || '',
         cover,
         full:    true,
-        label:   `${_svcLabel(service)} · ${album.title || fallbackTitle || 'альбом'}`,
+        label:   `${_svcLabel(service)} · ${album.title || fallbackTitle || t('card.album')}`,
         posKey:  `${service}:${t.id}`,
       }));
     if (!Preview.queue.length) { toast(t('toast.no_tracks'), 'var(--orange)'); return; }
     Preview.idx = 0;
-    toast(`▶ ${album.title || fallbackTitle}: ${Preview.queue.length} тр.`,
+    toast(`▶ ${album.title || fallbackTitle}: ${Preview.queue.length} ${t('p.trk_abbr')}`,
           'var(--green)', '', 2500);
     _playPreviewAt(0);
   } catch (e) {
@@ -185,7 +185,7 @@ function _buildAlbumStreamQueue() {
       artist:  t.artist || album.artist || '',
       cover:   album.cover || '',
       full:    true,
-      label:   `${_svcLabel(service)} · ${album.title || 'альбом'}`,
+      label:   `${_svcLabel(service)} · ${album.title || t('card.album')}`,
       posKey:  `${service}:${t.id}`,
     }));
 }
@@ -211,7 +211,7 @@ function playAlbumAll() {
   }
   const q = _buildAlbumStreamQueue();
   if (!q.length) { toast(t('toast.no_tracks'), 'var(--orange)'); return; }
-  toast(`▶ ${album.title}: ${q.length} тр.`, 'var(--green)', '', 2500);
+  toast(`▶ ${album.title}: ${q.length} ${t('p.trk_abbr')}`, 'var(--green)', '', 2500);
   playAlbumStreamTrack(0);
 }
 
@@ -284,7 +284,7 @@ async function specAnalyzePath() {
       body: JSON.stringify({path: p})
     });
     const d = await r.json();
-    if (!r.ok || d.detail || d.error) throw new Error(d.detail || d.error || 'Ошибка');
+    if (!r.ok || d.detail || d.error) throw new Error(d.detail || d.error || t('err.generic'));
     specShowResult(d);
   } catch(e) {
     specShowError(e.message);
@@ -300,7 +300,7 @@ async function specAnalyzeFile(file) {
     fd.append('file', file);
     const r = await fetch('/api/spectrogram/upload', {method:'POST', body: fd});
     const d = await r.json();
-    if (!r.ok || d.detail || d.error) throw new Error(d.detail || d.error || 'Ошибка');
+    if (!r.ok || d.detail || d.error) throw new Error(d.detail || d.error || t('err.generic'));
     specShowResult(d);
   } catch(e) {
     specShowError(e.message);
@@ -324,9 +324,9 @@ function specShowResult(d) {
   // Info bar
   const info = document.getElementById('spec-info');
   const fields = [
-    ['Формат', d.format], ['Кодек', d.codec], ['Битрейт', d.bitrate],
-    ['Частота', d.sample_rate], ['Глубина', d.bit_depth],
-    ['Каналы', d.channels], ['Длительность', d.duration],
+    [t('lib.format'), d.format], [t('lib.codec'), d.codec], [t('lib.bitrate'), d.bitrate],
+    [t('lib.samplerate'), d.sample_rate], [t('lib.bitdepth'), d.bit_depth],
+    [t('lib.channels'), d.channels], [t('lib.duration'), d.duration],
   ].filter(f => f[1]);
   info.innerHTML = fields.map(([k,v]) =>
     `<span><span style="color:var(--muted)">${k}:</span> <b>${v}</b></span>`
@@ -339,7 +339,7 @@ function specShowResult(d) {
   vd.style.background = ok ? 'rgba(62,207,170,.12)' : warn ? 'rgba(239,159,39,.12)' : 'rgba(255,69,58,.12)';
   vd.style.border = `1px solid ${ok ? 'rgba(62,207,170,.3)' : warn ? 'rgba(239,159,39,.3)' : 'rgba(255,69,58,.3)'}`;
   vd.style.color  = ok ? 'var(--green)' : warn ? 'var(--orange)' : '#ff453a';
-  vd.textContent  = d.verdict_text || (ok ? '✓ Настоящий lossless — полный спектр до Nyquist' : '✗ Lossy-источник (срез частот)');
+  vd.textContent  = d.verdict_text || (ok ? t('lib.true_lossless') : t('lib.lossy_src'));
 }
 
 // BBC module extracted to /static/js/bbc.js
@@ -398,7 +398,7 @@ async function mobileGuestSubmit() {
       const qt = document.getElementById('mgt-queue');
       if (qt) qt.click();
     } else {
-      toast(r.detail || r.msg || 'Ошибка', 'var(--red)');
+      toast(r.detail || r.msg || t('err.generic'), 'var(--red)');
     }
   } catch(e) {
     toast(t('err.generic') + ': ' + e.message, 'var(--red)');
@@ -445,17 +445,17 @@ async function isrcUpgrade(taskId) {
 
   // Remove old results panel if reopening
   const old = bar.querySelector('.isrc-results');
-  if (old) { old.remove(); if (btn) { btn.textContent = '🎯 Найти лучше'; btn.disabled = false; } return; }
+  if (old) { old.remove(); if (btn) { btn.textContent = t('lib.find_better'); btn.disabled = false; } return; }
 
   const task = (S.queue || []).find(t => t.id === taskId);
   const title  = task?.meta?.title  || task?.title  || '';
   const artist = task?.meta?.artist || task?.artist || '';
   const url    = task?.url || '';
 
-  if (btn) { btn.textContent = '⏳ Ищу…'; btn.disabled = true; }
+  if (btn) { btn.textContent = t('lib.searching'); btn.disabled = true; }
   try {
     const d = await api('POST', '/api/isrc-upgrade', {url, title, artist});
-    if (btn) { btn.textContent = '🎯 Найти лучше'; btn.disabled = false; }
+    if (btn) { btn.textContent = t('lib.find_better'); btn.disabled = false; }
 
     const SVC = {apple:'🍎',deezer:'🎧',qobuz:'🎵',tidal:'🌊'};
     const QC  = {apple:'#c084a0',deezer:'#3ecfaa',qobuz:'#ffd60a',tidal:'#00d4b3'};
@@ -464,7 +464,7 @@ async function isrcUpgrade(taskId) {
     panel.style.cssText = 'margin-top:6px;display:flex;flex-direction:column;gap:4px';
 
     if (!d.results?.length) {
-      panel.innerHTML = `<div style="font-size:11px;color:var(--muted);padding:4px 0">Не найдено на Deezer / Apple Music / Qobuz</div>`;
+      panel.innerHTML = `<div style="font-size:11px;color:var(--muted);padding:4px 0">${t('lib.not_found_on')}</div>`;
     } else {
       if (d.isrc) {
         const isrcLine = document.createElement('div');
@@ -480,8 +480,8 @@ async function isrcUpgrade(taskId) {
           <span style="flex-shrink:0;font-size:14px">${SVC[r.service]||'🎶'}</span>
           <span style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.title)} — ${esc(r.artist)}">${esc(r.title)}${r.artist?' · <span style="color:var(--muted)">'+esc(r.artist)+'</span>':''}</span>
           <span style="color:${svcColor};font-size:10px;font-weight:700;flex-shrink:0">${esc(r.quality)}</span>
-          ${r.match==='exact'?'<span style="color:#22c55e;font-size:10px;flex-shrink:0" title="Точное совпадение по ISRC">✓ISRC</span>':''}
-          <button class="isrc-add-btn" style="padding:3px 8px;background:var(--red);color:#fff;border:none;border-radius:5px;font-size:10px;font-weight:700;cursor:pointer;flex-shrink:0">⬇ В очередь</button>
+          ${r.match==='exact'?'<span style="color:#22c55e;font-size:10px;flex-shrink:0" title="' + t('lib.isrc_exact') + '">✓ISRC</span>':''}
+          <button class="isrc-add-btn" style="padding:3px 8px;background:var(--red);color:#fff;border:none;border-radius:5px;font-size:10px;font-weight:700;cursor:pointer;flex-shrink:0">${t('lib.to_queue')}</button>
         `;
         const addBtn = row.querySelector('.isrc-add-btn');
         const _url = r.url, _title = r.title, _artist = r.artist, _svc = r.service;
@@ -491,7 +491,7 @@ async function isrcUpgrade(taskId) {
     }
     bar.appendChild(panel);
   } catch(e) {
-    if (btn) { btn.textContent = '🎯 Найти лучше'; btn.disabled = false; }
+    if (btn) { btn.textContent = t('lib.find_better'); btn.disabled = false; }
     toast('Ошибка поиска: ' + e.message, 'var(--red)');
   }
 }
@@ -500,7 +500,7 @@ async function isrcUpgradeAdd(url, title, artist, service, btn) {
   if (!url) { toast('Нет URL', 'var(--red)'); return; }
   if (btn) { btn.textContent = '…'; btn.disabled = true; }
   const r = await api('POST', '/api/queue/add', {url, title, artist});
-  if (r.ok) toast(`+ ${title} [${service}] → очередь`);
+  if (r.ok) toast(`+ ${title} [${service}] ${t('lib.queued')}`);
   else toast('Ошибка: ' + (r.detail || r.msg || '?'), 'var(--red)');
   if (btn) { btn.textContent = '✓'; }
 }
@@ -543,11 +543,11 @@ async function uploadToCloud(taskId, btn) {
       setTimeout(() => { bar.style.display = 'none'; }, 18000);
     } else {
       if (btn) { btn.textContent = '☁'; btn.disabled = false; }
-      alert('Ошибка загрузки: ' + (res.detail || res.error || JSON.stringify(res)));
+      alert(t('lib.upload_error') + (res.detail || res.error || JSON.stringify(res)));
     }
   } catch(e) {
     if (btn) { btn.textContent = '☁'; btn.disabled = false; }
-    alert('Ошибка: ' + e);
+    alert(t('ui.err_pfx') + e);
   }
 }
 

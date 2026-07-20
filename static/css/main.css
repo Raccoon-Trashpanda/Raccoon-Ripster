@@ -30,8 +30,10 @@
   --sidebar-bg:#111318;
   --console-bg:rgba(0,0,0,.35);
   --player-bg:rgba(14,14,18,.97);
-  --pp-tile:rgba(255,255,255,.06);       /* Win10-Start-style square player tile (dark) */
-  --pp-tile-hover:rgba(255,255,255,.11);
+  --pp-tile:rgba(0,0,0,.30);             /* Win10-Start-style square player tile (dark) —
+                                            solid-dark so tiles stay visible on the
+                                            service-tinted played band of the mini dock */
+  --pp-tile-hover:rgba(0,0,0,.45);
   --panel:#1c1e2a;                    /* raised card/panel bg (telemetry, modals) — theme-aware */
   --pp-cache:rgba(255,255,255,.14);   /* seek-bar cache shading — light tint shows on dark dock */
   --pp-track:rgba(255,255,255,.06);   /* seek-bar empty-rail base */
@@ -79,8 +81,9 @@ html.light{
   --player-bg:rgba(244,244,248,.97);
   --shadow:0 10px 40px rgba(0,0,0,.12);
   --panel:#ffffff;              /* raised card/panel bg (telemetry, modals) — light */
-  --pp-tile:rgba(0,0,0,.05);             /* Win10-Start-style square player tile (light) */
-  --pp-tile-hover:rgba(0,0,0,.09);
+  --pp-tile:rgba(255,255,255,.55);       /* Win10-Start-style square player tile (light) —
+                                            frosted-light so tiles read on the tinted band */
+  --pp-tile-hover:rgba(255,255,255,.75);
   --pp-cache:rgba(0,0,0,.08);   /* seek-bar cache shading — dark tint shows on light dock */
   --pp-track:rgba(0,0,0,.02);   /* seek-bar empty-rail base — barely-there so the dock
                                    itself doesn't read as "darkened" (only the cache band shows) */
@@ -115,6 +118,12 @@ body{height:100%;margin:0}
 @keyframes pulse-g{0%,100%{box-shadow:0 0 0 0 rgba(62,207,170,.5)}50%{box-shadow:0 0 0 4px rgba(62,207,170,0)}}
 
 /* (.tb-status — defined in layout section above) */
+
+/* Ripster Radar — "new" glow + "live" (instant queryWhatsNewFeed hit) badge */
+.rel-card-new{box-shadow:0 0 0 1px rgba(62,207,170,.22),0 4px 18px rgba(62,207,170,.14)}
+.rel-live-badge{display:inline-flex;align-items:center;gap:4px;font-size:8px;padding:2px 6px;border-radius:4px;background:rgba(0,0,0,.72);color:#c4b5fd;font-weight:800;letter-spacing:.3px;backdrop-filter:blur(4px)}
+.rel-live-dot{width:5px;height:5px;border-radius:50%;background:#a78bfa;animation:pulse-live 1.8s infinite}
+@keyframes pulse-live{0%,100%{box-shadow:0 0 0 0 rgba(167,139,250,.55)}50%{box-shadow:0 0 0 4px rgba(167,139,250,0)}}
 
 /* ── SIDEBAR NAV ── */
 .nav-section{font-size:9px;font-weight:700;color:var(--muted2);text-transform:uppercase;letter-spacing:1px;padding:10px 8px 4px;font-family:var(--display)}
@@ -612,7 +621,7 @@ img[data-cover].loaded{
    (--pp-svc). No border-radius — flat square tiles like the Win10 Start grid. */
 .pp-transport{
   width:36px; height:36px; border-radius:2px;
-  background:var(--pp-tile); color:var(--muted); border:none; cursor:pointer;
+  background:var(--pp-tile); color:var(--text); border:none; cursor:pointer;
   font-size:16px; flex-shrink:0; padding:0;
   transition:color .15s ease, background-color .15s ease, transform .1s ease;
 }
@@ -620,7 +629,7 @@ img[data-cover].loaded{
 .pp-transport:active{ transform:scale(.94); }
 .pp-extra{
   width:34px; height:34px; border-radius:2px;
-  background:var(--pp-tile); color:var(--muted); border:none;
+  background:var(--pp-tile); color:var(--text); border:none;
   cursor:pointer; font-size:13px; flex-shrink:0; padding:0;
   display:flex; align-items:center; justify-content:center;
   transition:color .15s ease, background-color .15s ease, transform .1s ease;
@@ -653,13 +662,22 @@ img[data-cover].loaded{
 .pp-time-sep{ color:var(--muted2); font-size:11px; }
 .pp-time-dur{ font-size:11px; color:var(--muted2); font-variant-numeric:tabular-nums; }
 
-/* ══ Top network-loading bar (NProgress-style, driven by a fetch() wrapper) ══ */
+/* ══ Top network-loading bar — indeterminate "runner" sweep, not a fill ══
+   A determinate 0→90% fill that resets every few seconds (frequent short
+   requests) reads as flickery/broken. A looping sweep reads as "still
+   working" without ever looking like it stalled or restarted. */
 #net-progress{
-  position:fixed; top:0; left:0; right:0; height:3px; z-index:99999;
-  transform:scaleX(0); transform-origin:0 50%; opacity:0;
+  position:fixed; top:0; left:-30%; width:30%; height:3px; z-index:99999;
+  opacity:0; pointer-events:none;
   background:linear-gradient(90deg, var(--red), #d8a4bf);
   box-shadow:0 0 10px var(--red), 0 0 4px var(--red);
-  transition:transform .2s ease, opacity .3s ease; pointer-events:none;
+  border-radius:0 3px 3px 0;
+  transition:opacity .25s ease;
+}
+#net-progress.running{ opacity:1; animation:net-progress-run 1.1s ease-in-out infinite; }
+@keyframes net-progress-run{
+  0%   { left:-30%; }
+  100% { left:100%; }
 }
 /* ══ Cursor-following soft glow on buttons (tracks the mouse via --mx/--my) ══ */
 .fx-glow{ position:relative; }
@@ -1129,6 +1147,18 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
       transform: none !important; flex: 0 0 auto !important;
       display: flex !important; flex-direction: row !important;
       align-items: center !important; gap: 8px !important;
+    }
+    /* …but on roomy desktops the side zones are never equal-width (left art+title
+       vs right pill+volume+4 tiles), so in-flow always parks the transport left of
+       the dock's real middle («кнопки не по середине» report). Pin the group to
+       #pp-bar's true midpoint ONLY where there is guaranteed spare width — ≥860px
+       keeps phones/tablets on the safe in-flow layout above. */
+    @media (min-width: 860px){
+      .pp-zone-center {
+        position: absolute !important;
+        left: 50% !important; top: 50% !important;
+        transform: translate(-50%, -50%) !important;
+      }
     }
     /* BIG time readout on the LEFT of the transport buttons — sized like the Play
        button so the seconds are clearly readable. Flat (no chip). Fixed width so

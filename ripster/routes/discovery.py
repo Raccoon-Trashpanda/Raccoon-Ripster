@@ -582,7 +582,57 @@ async def api_release_expand(service: str, url: str):
         raise HTTPException(502, "Bad engine response")
     if d.get("error"):
         raise HTTPException(502, d["error"])
+    if service == "spotify":
+        await _attach_playable_sources(d.get("tracks") or [], (d.get("album") or {}).get("upc", ""))
     return {"ok": True, **d}
+
+
+async def _attach_playable_sources(tracks: list, upc: str) -> None:
+    """Spotify has no /api/stream proxy — streaming its own audio through our
+    backend would risk the account's token getting rate-limited/banned. Resolve
+    each track to the EXACT same physical copy on Deezer via the album's UPC
+    (barcode) — not fuzzy title/artist matching. Per-track ISRC would be the
+    usual cross-service key, but Spotify's /v1/tracks batch endpoint 403s for
+    this app's credentials; the album UPC is already in hand from the album
+    fetch (no extra request) and is just as exact: same barcode = same
+    physical release, so matching by (disc, track_no) inside that release is
+    deterministic — never "similar", only the same track. Mutates each track
+    dict in place with playable_service/playable_id when a match is found; the
+    frontend keeps showing "Spotify" — it never surfaces the real source."""
+    upc = "".join(ch for ch in (upc or "") if ch.isdigit())
+    if not upc or not tracks:
+        return
+    try:
+        async with _HTTP.ashared() as c:
+            # Deezer stores 12-digit UPC-A; Spotify's external_ids.upc is often
+            # a 13-digit EAN-13 with a leading zero pad — strip it and retry.
+            candidates = [upc] if len(upc) <= 12 else [upc.lstrip("0") or upc, upc]
+            alb = None
+            for cand in dict.fromkeys(candidates):
+                r = await c.get(f"https://api.deezer.com/album/upc:{cand}")
+                if r.status_code == 200:
+                    j = r.json()
+                    if not j.get("error") and j.get("id"):
+                        alb = j
+                        break
+            if not alb:
+                return
+            tr = await c.get(f"https://api.deezer.com/album/{alb['id']}/tracks", params={"limit": 200})
+            if tr.status_code != 200:
+                return
+            dz_tracks = (tr.json() or {}).get("data") or []
+    except Exception:
+        return
+
+    by_pos = {(t.get("disk_number") or 1, t.get("track_position")): t
+              for t in dz_tracks if t.get("track_position") and t.get("id")}
+    for t in tracks:
+        if not isinstance(t, dict):
+            continue
+        hit = by_pos.get((t.get("disc") or 1, t.get("track_no")))
+        if hit:
+            t["playable_service"] = "deezer"
+            t["playable_id"] = str(hit["id"])
 
 # ── Tidal (authenticated API — needs tidal-token in config) ──────────────
 
