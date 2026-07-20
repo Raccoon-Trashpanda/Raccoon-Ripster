@@ -284,15 +284,16 @@ def _watch_show_flag(window, win_open) -> None:
         time.sleep(0.7)
 
 
-def _loading_html(url: str) -> str:
-    """Self-polling splash shown WHILE the server boots, instead of pointing the
-    window straight at the server URL. A cold start (first run: antivirus
-    scanning the freshly-unpacked python.exe, a slow disk, first-time imports)
-    can easily take longer than any fixed wait we'd do server-side — users hit
-    the raw browser "127.0.0.1 refused to connect" page and assume Ripster is
-    broken. This polls /api/ping itself and navigates over once it's up, no
-    matter how long that takes; only gives up (with an actionable message,
-    not a dead end) after several minutes."""
+def _splash_html(msg: str, detail: str) -> str:
+    """Static splash shell (pulsing dots + message), no network calls of its
+    own. A page loaded via webview's html= gets a null/opaque origin, and a
+    fetch() from there to 127.0.0.1 gets blocked outright by Chromium (CORS
+    AND no-cors both fail — this isn't a CORS-allowlist problem, something
+    more fundamental blocks private-network fetches from an opaque origin).
+    So readiness is polled from PYTHON (open_window's background thread,
+    plain urlopen — no browser involved) which calls window.load_url()/
+    load_html() once it knows the answer, instead of asking the page to
+    figure it out itself."""
     return f"""<!doctype html><html><head><meta charset="utf-8">
 <style>
   html,body{{height:100%;margin:0;background:#0a0a0c;color:#f0f0f4;
@@ -309,47 +310,84 @@ def _loading_html(url: str) -> str:
 </style></head>
 <body><div class="wrap">
   <div><span class="dot"></span><span class="dot"></span><span class="dot"></span></div>
-  <h3 id="msg">Запускаю Ripster…</h3>
-  <p id="detail">Первый запуск может занять минуту — антивирус проверяет файлы.</p>
-</div>
-<script>
-  let tries = 0;
-  async function poll() {{
-    tries++;
-    try {{
-      const r = await fetch('{url}/api/ping', {{cache:'no-store'}});
-      if (r.ok) {{ location.href = '{url}/'; return; }}
-    }} catch (e) {{}}
-    if (tries === 15) {{
-      document.getElementById('detail').textContent =
-        'Всё ещё запускается — это нормально на первом старте.';
-    }}
-    if (tries > 180) {{
-      document.getElementById('msg').textContent = 'Сервер не отвечает';
-      document.getElementById('detail').innerHTML =
-        'Проверь <code>logs\\\\launcher.log</code> и <code>logs\\\\console.log</code> в папке установки.<br>' +
-        'Частая причина — антивирус блокирует <code>python\\\\python.exe</code>.';
-      return;
-    }}
-    setTimeout(poll, 1000);
-  }}
-  poll();
-</script></body></html>"""
+  <h3>{msg}</h3>
+  <p>{detail}</p>
+</div></body></html>"""
 
 
-def open_window(url: str, port: int, win_open, title: str = "Ripster"):
+def _starting_html() -> str:
+    return _splash_html("Запускаю Ripster…",
+                         "Первый запуск может занять минуту — антивирус проверяет файлы.")
+
+
+def _still_starting_html() -> str:
+    return _splash_html("Запускаю Ripster…",
+                         "Всё ещё запускается — это нормально на первом старте.")
+
+
+def _not_responding_html() -> str:
+    return _splash_html(
+        "Сервер не отвечает",
+        "Проверь <code>logs\\\\launcher.log</code> и <code>logs\\\\console.log</code> в папке установки.<br>"
+        "Частая причина — антивирус блокирует <code>python\\\\python.exe</code>.")
+
+
+def _poll_until_ready(window, url: str, port: int) -> None:
+    """Background thread: keep checking readiness with a plain Python HTTP
+    call (ripster_alive — no browser, no CORS/origin issues) and drive the
+    ALREADY-OPEN window over to the real URL once it answers, updating the
+    splash message if it's taking a while. Runs only when open_window()
+    couldn't confirm readiness before creating the window."""
+    import time as _t
+    start = _t.time()
+    told_slow = False
+    while _t.time() - start < 180:
+        if ripster_alive(port):
+            try:
+                window.load_url(url)
+            except Exception as e:
+                _log(f"[launcher] load_url after late-ready failed: {type(e).__name__}: {e}")
+            return
+        if not told_slow and _t.time() - start > 15:
+            told_slow = True
+            try:
+                window.load_html(_still_starting_html())
+            except Exception:
+                pass
+        _t.sleep(1.0)
+    try:
+        window.load_html(_not_responding_html())
+    except Exception:
+        pass
+    _log(f"[launcher] server never answered on 127.0.0.1:{port} within the extended splash window")
+
+
+def open_window(url: str, port: int, win_open, title: str = "Ripster", ready: bool = False):
     """Native pywebview window with tray + minimize-to-tray; browser fallback.
     Returns ('webview', state) | ('browser', None). `state['quit']` is True only
-    when the user really chose Выход (so main() tears the server down)."""
+    when the user really chose Выход (so main() tears the server down).
+
+    `ready`: caller already confirmed (via wait_for_ripster, a plain Python
+    HTTP check) that the server answers — the common case, since it binds in
+    a few seconds. Then we point the window straight at the real URL, same
+    as before the splash existed. Only when the server hasn't answered yet
+    (a genuine cold start) do we show a static splash and hand off to a
+    background Python thread that polls and navigates the window once ready
+    — see _poll_until_ready. A client-side fetch() from the splash can't do
+    this reliably: it runs from a null/opaque origin and browsers block its
+    requests to 127.0.0.1 outright, independent of the server's own CORS
+    config (learned the hard way — v3.0.30/31 shipped that broken)."""
     try:
         import threading
         import webview
-        _log(f"[launcher] opening webview window -> {url}")
+        _log(f"[launcher] opening webview window -> {url} (ready={ready})")
         geo = _load_win_state()
         window = webview.create_window(
-            title, html=_loading_html(url),
+            title, **({"url": url} if ready else {"html": _starting_html()}),
             width=geo.get("width", 1280), height=geo.get("height", 860),
             x=geo.get("x"), y=geo.get("y"))
+        if not ready:
+            threading.Thread(target=_poll_until_ready, args=(window, url, port), daemon=True).start()
         state = {"quit": False, "tray": None, "notified": False}
         use_tray = tray_enabled()
 
@@ -547,6 +585,7 @@ def main() -> None:
     if ripster_alive(desired):
         # OUR Ripster is already running here (e.g. user relaunched) → just attach.
         port = desired
+        ready = True
         _log(f"[launcher] Ripster already live on {port} — attaching")
     else:
         # Free port at/after the desired one — auto-skips a busy 7799 so a clean
@@ -555,8 +594,9 @@ def main() -> None:
         if port != desired:
             _log(f"[launcher] port {desired} busy → using {port}")
         box[0] = start_server(port)
-        if not wait_for_ripster(port):
-            _log(f"[launcher] server did not come up on 127.0.0.1:{port}")
+        ready = wait_for_ripster(port)
+        if not ready:
+            _log(f"[launcher] server did not come up on 127.0.0.1:{port} within the initial wait — showing splash")
 
     # Supervise ONLY a server we started (not one we merely attached to).
     win_open = threading.Event()
@@ -565,7 +605,7 @@ def main() -> None:
         threading.Thread(target=_supervise, args=(box, port, win_open), daemon=True).start()
 
     url = f"http://127.0.0.1:{port}"
-    mode, _state = open_window(url, port, win_open)  # blocks until real quit
+    mode, _state = open_window(url, port, win_open, ready=ready)  # blocks until real quit
 
     # Window destroyed (user chose Выход) → stop supervising FIRST (so it doesn't
     # respawn), then stop the server we own. Browser fallback leaves it running
