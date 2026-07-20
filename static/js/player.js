@@ -665,19 +665,24 @@ function _vizStart() {
       }
       const ctx2d = ctx2ds[ci];
       const w = canvas.width, h = canvas.height;
+      const isMini = canvas.id === 'pp-viz';
       ctx2d.clearRect(0, 0, w, h);
       const grad = ctx2d.createLinearGradient(0, h, 0, 0);
+      // The mini strip is tiny and sits on a near-black bar — a gradient that
+      // fades to transparent at the top read as "barely there". Keep it near
+      // full-strength most of the way up so the bars are actually visible.
       grad.addColorStop(0, tint);
-      grad.addColorStop(1, tint + '00');
+      grad.addColorStop(isMini ? 0.85 : 1, tint);
+      grad.addColorStop(1, tint + (isMini ? 'aa' : '00'));
       ctx2d.fillStyle = grad;
       // The mini bar is ~60px wide — fewer, chunkier bars read better there
       // than the 48 thin ones the big fullscreen canvas uses.
-      const bars = Math.min(N, canvas.id === 'pp-viz' ? 16 : 48);
+      const bars = Math.min(N, isMini ? 16 : 48);
       const step = Math.floor(N / bars);
       const bw   = w / bars;
       for (let i = 0; i < bars; i++) {
         const v = data[i * step] / 255;
-        const bh = Math.max(v * h, h * 0.06);   // tiny idle nub, never fully flat
+        const bh = Math.max(v * h, h * (isMini ? 0.1 : 0.06));   // tiny idle nub, never fully flat
         ctx2d.fillRect(i * bw + bw * 0.15, h - bh, bw * 0.7, bh);
       }
     });
