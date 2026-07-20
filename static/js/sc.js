@@ -3,6 +3,7 @@
 
 // ── SoundCloud tab ─────────────────────────────────────────────────────────
 let _scResults = [];
+let _scPrevSearch = null;   // {q, kind, results} saved when browsing into a channel
 
 // ── SC stream URL cache (instant play like YT/SC) ─────────────────────────
 // Stream URLs expire in ~30 min on SC's CDN. We evict after 25 min to stay safe.
@@ -325,7 +326,8 @@ function renderScTile(it) {
     <div style="padding:8px 10px">
       <div onclick="_scOpenMix('${it.id}')" style="cursor:pointer" title="${t('sc2.open_mix')}">
         <div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.title)}</div>
-        <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(it.artist)}</div>
+        <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap${it.user_permalink ? ';cursor:pointer' : ''}"
+          ${it.user_permalink ? `onclick="event.stopPropagation();scBrowseUser('${escJ(it.user_permalink)}','${escJ(it.artist)}')" title="${t('sc.open_channel')}" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"` : ''}>${esc(it.artist)}</div>
         ${it.date ? `<div style="font-size:10px;color:var(--muted2);margin-top:3px">${esc(it.date)}</div>` : ''}
       </div>
       <div style="display:flex;gap:5px;margin-top:7px">
@@ -343,6 +345,8 @@ async function scSearch() {
   const grid   = document.getElementById('sc-grid');
   const status = document.getElementById('sc-status');
   const empty  = document.getElementById('sc-empty');
+  _scPrevSearch = null;
+  _scHideChannelBar();
   if (!q) {
     if (empty) { empty.textContent = t('sc.empty_query'); empty.style.display = ''; }
     if (grid)  grid.innerHTML = '';
@@ -367,6 +371,79 @@ async function scSearch() {
     if (empty) { empty.textContent = t('sc.not_found'); empty.style.display = ''; }
     return;
   }
+  _scRender();
+}
+
+function _scHideChannelBar() {
+  const bar = document.getElementById('sc-channel-bar');
+  if (bar) bar.style.display = 'none';
+}
+
+// Browse a channel's own uploads (newest first) — the reliable path when
+// free-text search can't find a track (a permalink slug shares no words with
+// the real title, or SC's search index hasn't caught up on a fresh upload).
+async function scBrowseUser(permalink, displayName) {
+  if (!permalink) return;
+  const grid   = document.getElementById('sc-grid');
+  const status = document.getElementById('sc-status');
+  const empty  = document.getElementById('sc-empty');
+  const bar    = document.getElementById('sc-channel-bar');
+  const nameEl = document.getElementById('sc-channel-name');
+  const avEl   = document.getElementById('sc-channel-avatar');
+
+  // Only remember the search we came FROM — browsing channel A → channel B
+  // must still return to the original search, not to channel A.
+  if (!_scPrevSearch) {
+    _scPrevSearch = {
+      q: document.getElementById('sc-q')?.value || '',
+      results: _scResults.slice(),
+    };
+  }
+
+  if (empty)  empty.style.display = 'none';
+  if (grid)   grid.innerHTML = '';
+  if (status) { status.textContent = t('sc.searching'); status.style.display = ''; }
+  if (bar)    bar.style.display = 'flex';
+  if (nameEl) nameEl.textContent = displayName || permalink;
+  if (avEl)   avEl.style.display = 'none';
+
+  let d = null;
+  try {
+    d = await api('GET', `/api/soundcloud/user/${encodeURIComponent(permalink)}/tracks`);
+  } catch (e) { d = null; }
+  if (status) status.style.display = 'none';
+
+  if (!d || !d.ok) {
+    if (empty) { empty.textContent = (d && d.error) || t('sc.search_error'); empty.style.display = ''; }
+    return;
+  }
+  if (d.channel) {
+    if (nameEl) nameEl.textContent = d.channel.username || displayName || permalink;
+    if (avEl && d.channel.avatar) { avEl.src = d.channel.avatar; avEl.style.display = ''; }
+  }
+  _scResults = d.results || [];
+  const sortSel = document.getElementById('sc-sort');
+  if (sortSel) sortSel.value = 'new';   // channel browse = newest-first by default
+  if (!_scResults.length) {
+    if (empty) { empty.textContent = t('sc.not_found'); empty.style.display = ''; }
+    return;
+  }
+  _scRender();
+}
+
+function scBackFromChannel() {
+  if (!_scPrevSearch) { _scHideChannelBar(); return; }
+  const q = document.getElementById('sc-q');
+  if (q) q.value = _scPrevSearch.q;
+  _scResults = _scPrevSearch.results;
+  _scPrevSearch = null;
+  _scHideChannelBar();
+  const empty = document.getElementById('sc-empty');
+  if (!_scResults.length) {
+    if (empty) { empty.textContent = t('sc.empty_query'); empty.style.display = ''; }
+    return;
+  }
+  if (empty) empty.style.display = 'none';
   _scRender();
 }
 

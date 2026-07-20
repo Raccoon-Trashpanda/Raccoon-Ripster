@@ -11,6 +11,7 @@ Install: soundcloud.install(app, ctx)
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 import urllib.parse as _urlparse
@@ -124,6 +125,7 @@ def _norm_track(t: dict) -> dict:
         "kind":       "track",
         "title":      t.get("title", ""),
         "artist":     user.get("username", ""),
+        "user_permalink": user.get("permalink", ""),   # → click-through to the channel
         "artwork":    _artwork(art, "original"),    # best available
         "artwork_sm": _artwork(art, "t500x500"),    # reliable fallback
         "duration": round((t.get("duration") or 0) / 1000),
@@ -149,6 +151,7 @@ def _norm_playlist(p: dict) -> dict:
         "set_type":   set_type,
         "title":      p.get("title", ""),
         "artist":     user.get("username", ""),
+        "user_permalink": user.get("permalink", ""),
         "artwork":    _artwork(art, "original"),
         "artwork_sm": _artwork(art, "t500x500"),
         "duration": round((p.get("duration") or 0) / 1000),
@@ -233,6 +236,78 @@ async def sc_search(q: str = Query(""), kind: str = Query("all"),
             results.append(_norm_playlist(item))
 
     return {"ok": True, "query": q, "results": results}
+
+
+@router.get("/api/soundcloud/user/{permalink}/tracks")
+async def sc_user_tracks(permalink: str, kind: str = Query("all"), limit: int = Query(30)):
+    """A channel's own uploads, newest first — the reliable way to find a track
+    that SC's free-text search doesn't surface (e.g. a slug like 'boaexp26' that
+    shares no words with the real title). Resolves the permalink to a user id via
+    SC's public /resolve, then paginates /users/{id}/tracks (already newest-first)."""
+    permalink = (permalink or "").strip().strip("/")
+    if not permalink:
+        return {"ok": False, "error": "Пустой юзернейм", "results": []}
+
+    cid = await _get_client_id()
+    if not cid:
+        return {"ok": False, "error": "Не удалось получить client_id SoundCloud — попробуй позже.",
+                "results": []}
+
+    limit = max(1, min(limit, 50))
+    user_url = f"https://soundcloud.com/{permalink}"
+
+    async def _resolve(client_id: str):
+        async with _HTTP.ashared() as c:
+            return await c.get(f"{_API}/resolve", params={"url": user_url, "client_id": client_id})
+
+    async def _tracks(user_id: int, client_id: str):
+        async with _HTTP.ashared() as c:
+            return await c.get(f"{_API}/users/{user_id}/tracks",
+                               params={"client_id": client_id, "limit": limit,
+                                       "linked_partitioning": 1})
+
+    last_err = ""
+    for attempt in range(3):
+        try:
+            r = await _resolve(cid)
+        except Exception as e:
+            last_err = f"Сеть: {e}"
+            await asyncio.sleep(0.6)
+            continue
+        if r.status_code in (401, 403):
+            cid = await _get_client_id(force=True)
+            if not cid:
+                break
+            continue
+        if r.status_code == 404:
+            return {"ok": False, "error": f"Канал '{permalink}' не найден", "results": []}
+        if r.status_code != 200:
+            last_err = f"SoundCloud API {r.status_code}"
+            await asyncio.sleep(0.5)
+            continue
+        user = r.json() or {}
+        if (user.get("kind") or "") != "user":
+            return {"ok": False, "error": f"'{permalink}' — не канал/юзер", "results": []}
+        user_id = user.get("id")
+        if not user_id:
+            return {"ok": False, "error": "Не удалось определить id канала", "results": []}
+        try:
+            tr = await _tracks(user_id, cid)
+        except Exception as e:
+            return {"ok": False, "error": f"Сеть: {e}", "results": []}
+        if tr.status_code != 200:
+            return {"ok": False, "error": f"SoundCloud API {tr.status_code}", "results": []}
+        data = tr.json() or {}
+        results = [_norm_track(item) for item in (data.get("collection") or [])
+                   if item.get("kind") == "track" or "duration" in item]
+        if kind == "tracks":
+            pass  # already tracks-only
+        return {"ok": True, "query": permalink, "results": results,
+                "channel": {"username": user.get("username", ""),
+                            "avatar": user.get("avatar_url", ""),
+                            "permalink": permalink,
+                            "followers": user.get("followers_count")}}
+    return {"ok": False, "error": last_err or "Не удалось получить ответ", "results": []}
 
 
 # ── Tracklist from the track's own description ───────────────────────────────────
@@ -616,6 +691,12 @@ async def sc_stream(track_id: str, request: Request, name: str = "", artist: str
     # Artwork for the player — returned so lazy-resolved queue items can show a cover.
     _art_raw = track_json.get("artwork_url") or (track_json.get("user") or {}).get("avatar_url", "")
     artwork = _artwork(_art_raw, "t500x500") if _art_raw else ""
+    try:
+        from ripster import stats_collector as _sc
+        disp = " — ".join(p for p in (artist.strip(), name.strip()) if p) or f"track/{track_id}"
+        _sc.record_stream("soundcloud", disp, stream_url)
+    except Exception:
+        pass
     # For progressive MP3 — proxy through our backend so the browser sees a
     # same-origin response (unlocks Web Audio API gapless / equaliser / etc).
     # HLS is left as-is (HLS.js handles the manifest separately).

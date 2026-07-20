@@ -6,7 +6,7 @@ const _VIEW_FILES = [
 async function _loadAllViews() {
   const results = await Promise.all(
     _VIEW_FILES.map(n =>
-      fetch(`/static/views/${n}.html?v=72`)
+      fetch(`/static/views/${n}.html?v=73`)
         .then(r => { if (!r.ok) throw new Error(`views/${n}.html ${r.status}`); return r.text(); })
     )
   );

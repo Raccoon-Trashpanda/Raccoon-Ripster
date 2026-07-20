@@ -27,6 +27,11 @@
           </div>
         </div>
         <div id="sc-status" data-i18n="sc.status" style="font-size:12px;color:var(--muted);padding:10px 0;display:none">Ищу…</div>
+        <div id="sc-channel-bar" style="display:none;align-items:center;gap:10px;margin-bottom:12px;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:10px">
+          <button onclick="scBackFromChannel()" style="padding:5px 10px;background:transparent;border:1px solid var(--border2);border-radius:7px;font-size:12px;color:var(--text);cursor:pointer;font-family:var(--font)" data-i18n="sc.back">← Назад</button>
+          <img id="sc-channel-avatar" src="" style="width:28px;height:28px;border-radius:50%;object-fit:cover;display:none"/>
+          <span id="sc-channel-name" style="font-size:13px;font-weight:600;color:var(--text)"></span>
+        </div>
         <div id="sc-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px"></div>
         <div id="sc-empty" data-i18n-html="sc.empty" style="text-align:center;padding:40px;font-size:13px;color:var(--muted)">
           Введи запрос — например <b>anjunadeep</b> — и нажми поиск.
