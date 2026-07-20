@@ -33,6 +33,7 @@ ALLOWED_HOSTS: frozenset[str] = frozenset({
     "music.amazon.com", "music.amazon.co.uk", "music.amazon.de", "music.amazon.co.jp",
     "music.amazon.in", "music.amazon.fr", "music.amazon.es", "music.amazon.it",
     "music.amazon.ca", "music.amazon.com.au", "music.amazon.com.br", "music.amazon.com.mx",
+    "bbc.co.uk", "www.bbc.co.uk",
 })
 
 
@@ -58,6 +59,7 @@ def detect_service(url: str) -> str:
     if "beatport.com"    in u: return "beatport"
     if "music.yandex."   in u: return "yandex"
     if "music.amazon."   in u: return "amazon"
+    if "bbc.co.uk"       in u: return "bbc"
     return "unknown"
 
 
@@ -85,6 +87,7 @@ def default_quality(svc: str) -> str:
         "beatport":   _config.get("beatport-quality", "hifi"),
         "yandex":     _config.get("yandex-quality", "flac"),
         "amazon":     _config.get("amazon-quality", "High"),
+        "bbc":        "mp3",
     }.get(svc, "alac")
 
 
@@ -114,4 +117,5 @@ def engine_for_svc(svc: str) -> str:
         "soundcloud": "soundcloud",
         "yandex":     "yandex",
         "amazon":     "amazon",
+        "bbc":        "bbc",
     }.get(svc, _config.get("engine", "zhaarey"))

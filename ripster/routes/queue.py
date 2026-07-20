@@ -114,7 +114,7 @@ async def add_to_queue(body: dict, request: Request):
     if _validate_url and not _validate_url(url):
         raise HTTPException(400,
             "URL not from a supported service. Supported: Apple Music, "
-            "Deezer, Qobuz, Tidal, Spotify, SoundCloud, Beatport, Yandex Music")
+            "Deezer, Qobuz, Tidal, Spotify, SoundCloud, Beatport, Yandex Music, BBC Sounds")
 
     svc     = _detect_service(url) if _detect_service else "apple"
 

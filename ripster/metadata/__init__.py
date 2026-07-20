@@ -20,6 +20,7 @@ from .deezer  import fetch_meta_deezer
 from .qobuz   import fetch_meta_qobuz, install as _install_qobuz
 from .spotify import fetch_meta_spotify, install as _install_spotify
 from .mixesdb import search_mixesdb, fetch_mix_detail
+from .bbc     import fetch_meta_bbc
 
 
 _detect_service:  Callable[[str], str] = lambda url: "unknown"
@@ -111,6 +112,8 @@ async def fetch_meta_any(url: str, service: str = "") -> Optional[dict]:
         meta = await fetch_meta_soundcloud(url)
     elif svc == "beatport":
         meta = await fetch_meta_beatport(url)
+    elif svc == "bbc":
+        meta = await fetch_meta_bbc(url)
     elif svc == "orpheus_spotify":
         return None   # no metadata API — return None so enrich_meta merges instead of overwrites
 

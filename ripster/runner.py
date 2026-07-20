@@ -1072,6 +1072,81 @@ async def _soundcloud_preflight(task: dict) -> bool:
     return True
 
 
+_RE_BBC_PID = _re.compile(r'/sounds/play/([a-zA-Z0-9]+)')
+
+
+async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
+    """Resolve a BBC Sounds page URL to a fresh, playable HLS stream URL —
+    MediaSelector tokens are short-lived, so this MUST run right before the
+    download, not at enqueue time (a task can sit queued behind others for a
+    while). Also stashes title/artist/pid onto `task` so build_cmd (which only
+    gets url/quality/config) can name the output file — same pattern as the
+    `_sc_cover_override` stash used for SoundCloud's cover picker.
+
+    Returns the HLS URL on success, or None (task → ERROR, already logged)."""
+    tid = task.get("id", "")
+    m = _RE_BBC_PID.search(page_url or "")
+    if not m:
+        await _log(f"✗ BBC: не удалось разобрать pid из ссылки: {page_url}", "error", tid)
+        _try_advance_task(task, TaskStatus.ERROR)
+        return None
+    pid = m.group(1)
+    import httpx as _httpx
+    try:
+        async with _httpx.AsyncClient(timeout=20) as c:
+            pr = await c.get(f"https://www.bbc.co.uk/programmes/{pid}.json")
+            if pr.status_code != 200:
+                await _log(f"✗ BBC: programmes API {pr.status_code} для {pid}", "error", tid)
+                _try_advance_task(task, TaskStatus.ERROR)
+                return None
+            prog = (pr.json() or {}).get("programme") or {}
+            versions = prog.get("versions") or []
+            if not versions:
+                await _log(f"✗ BBC: нет доступных версий для {pid}", "error", tid)
+                _try_advance_task(task, TaskStatus.ERROR)
+                return None
+            vpid     = versions[0]["pid"]
+            duration = int(versions[0].get("duration") or 0)
+            title = prog.get("title") or (prog.get("display_title") or {}).get("title") or pid
+            artist = (((prog.get("parent") or {}).get("programme") or {}).get("title")
+                      or ((prog.get("ownership") or {}).get("service") or {}).get("title")
+                      or "BBC Radio")
+
+            msel = (f"https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/"
+                    f"mediaset/iptv-all/vpid/{vpid}/format/json")
+            mr = await c.get(msel)
+            if mr.status_code != 200:
+                await _log(f"✗ BBC: MediaSelector {mr.status_code} для {vpid}", "error", tid)
+                _try_advance_task(task, TaskStatus.ERROR)
+                return None
+            best_cf = best_ak = None
+            for media in (mr.json() or {}).get("media", []):
+                for conn in media.get("connection", []):
+                    href = conn.get("href", "")
+                    if conn.get("protocol") != "https" or ".m3u8" not in href:
+                        continue
+                    sup = conn.get("supplier", "")
+                    if "cloudfront" in sup and not best_cf:
+                        best_cf = href
+                    elif "akamai" in sup and not best_ak:
+                        best_ak = href
+            hls = best_cf or best_ak
+            if not hls:
+                await _log(f"✗ BBC: не нашёл HLS-поток для {vpid}", "error", tid)
+                _try_advance_task(task, TaskStatus.ERROR)
+                return None
+    except Exception as e:
+        await _log(f"✗ BBC: ошибка резолва потока: {e}", "error", tid)
+        _try_advance_task(task, TaskStatus.ERROR)
+        return None
+
+    task["_bbc_title"]    = title
+    task["_bbc_artist"]   = artist
+    task["_bbc_pid"]      = pid
+    task["_bbc_duration"] = duration
+    return hls
+
+
 # Quality folders produced ONLY by Apple's Go downloaders (zhaarey/AMD). These are
 # unambiguous — no other service emits them — so a bare-root copy can be re-homed
 # under apple/ without guessing the source service. (AAC 256 is intentionally NOT
@@ -1312,6 +1387,13 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             _add_to_history(task)
             return
 
+    if engine_name == "bbc":
+        resolved = await _bbc_preflight(task, url)
+        if not resolved:
+            _add_to_history(task)
+            return
+        url = resolved   # HLS stream URL — build_cmd never sees the page URL
+
     # ── Wrapper pool: Apple-local parallelism. Acquired below for zhaarey,
     # released in the finally. ANY failure here → default single-wrapper cwd, so
     # a download is NEVER broken by the pool. Defined out here so finally sees them.
@@ -1349,6 +1431,13 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         _cov_override = (task.get("meta") or {}).get("coverUrl")
         if _cov_override and task.get("service") == "soundcloud":
             _cfg_view["_sc_cover_override"] = _cov_override
+        # BBC: title/artist/pid resolved in _bbc_preflight (build_cmd needs them
+        # to name the output file — it only gets url/quality/config, not task).
+        if task.get("service") == "bbc":
+            _cfg_view["_bbc_title"]    = task.get("_bbc_title", "")
+            _cfg_view["_bbc_artist"]   = task.get("_bbc_artist", "")
+            _cfg_view["_bbc_pid"]      = task.get("_bbc_pid", "")
+            _cfg_view["_bbc_duration"] = task.get("_bbc_duration", 0)
         cmd = eng.build_cmd(url, quality, _cfg_view)
         task["log"].append(f"▶ {' '.join(cmd)}")
         await _broadcast(_i18n.log_event("console.cmd_start", level="info", task_id=tid, cmd=' '.join(cmd[:3])))
@@ -1381,6 +1470,13 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # default 300 s. The watchdog then kills OrpheusDL mid-download and
             # only cover.jpg lands. Give it SoundCloud-style headroom; each
             # finished track prints a newline that resets the watchdog.
+            line_timeout = 1200.0
+        elif engine_name == "bbc":
+            # Same class of bug: yt-dlp's `--downloader ffmpeg` reports progress
+            # via ffmpeg's own `-stats` line, which updates in place with \r (no
+            # \n) for the ENTIRE download — a 2-hour Essential Mix can run silent
+            # (by readline()'s definition) well past 300s. Give it the same
+            # headroom as Tidal/SC; a real hang still fails eventually.
             line_timeout = 1200.0
         else:
             line_timeout = 300.0
