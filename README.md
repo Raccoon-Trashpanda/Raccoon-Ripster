@@ -48,7 +48,9 @@ is no account with *us*, no cloud, and your files never leave your computer.
   sheet.
 - 📊 **Spectrogram** view to confirm a file is really lossless (and not an
   upscaled fake).
-- 🎧 Built-in **gapless player** with a visualizer.
+- 🎧 Built-in **gapless player** with a visualizer, and a **timed tracklist**
+  for DJ mixes / radio shows (SoundCloud) — click through to any track inside
+  a 2-hour set instead of scrubbing blind.
 - 🌍 **5-language interface** — English, Russian, Hindi, Japanese, Chinese.
 - 🖥 Opens in a **real desktop window** (no browser tab needed).
 
@@ -59,6 +61,10 @@ is no account with *us*, no cloud, and your files never leave your computer.
 | Ripster Radar | Search | Settings |
 |---|---|---|
 | [![Ripster Radar](screenshots/01_release_radar.png)](screenshots/01_release_radar.png) | [![Search](screenshots/02_search.png)](screenshots/02_search.png) | [![Settings](screenshots/03_settings.png)](screenshots/03_settings.png) |
+
+| Timed tracklist (SoundCloud mixes) |
+|---|
+| [![Timed tracklist](screenshots/04_sc_tracklist.png)](screenshots/04_sc_tracklist.png) |
 
 ---
 
