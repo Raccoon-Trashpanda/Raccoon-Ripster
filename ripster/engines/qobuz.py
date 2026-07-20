@@ -449,9 +449,10 @@ class QobuzEngine(StreamripMixin, EngineBase):
                 full_date = (item.get("release_date_original")
                              or _alb.get("release_date_original") or "")
                 img = item.get("image") or _alb.get("image") or {}
-                artist = ((item.get("artist") or {}).get("name")
-                          or (item.get("performer") or {}).get("name")
-                          or (_alb.get("artist") or {}).get("name") or "")
+                artist_obj = ((item.get("artist") if isinstance(item.get("artist"), dict) else None)
+                              or (item.get("performer") if isinstance(item.get("performer"), dict) else None)
+                              or (_alb.get("artist") if isinstance(_alb.get("artist"), dict) else None) or {})
+                artist = artist_obj.get("name", "")
                 url = item.get("url") or (
                     f"https://www.qobuz.com/track/{item.get('id', '')}" if is_track
                     else f"https://www.qobuz.com/album/{item.get('id', '')}")
@@ -459,6 +460,7 @@ class QobuzEngine(StreamripMixin, EngineBase):
                     "id":      str(item.get("id", "")),
                     "title":   item.get("title") or item.get("name", ""),
                     "artist":  artist,
+                    "artist_id": str(artist_obj.get("id", "")),
                     "type":    search_type,
                     "url":     url,
                     "cover":   (img.get("small") or img.get("large", "")) if isinstance(img, dict) else "",

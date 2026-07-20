@@ -305,6 +305,7 @@ class DeezerEngine(EngineBase):
                         "id":      aid,
                         "title":   item.get("title", ""),
                         "artist":  (item.get("artist") or {}).get("name", ""),
+                        "artist_id": str((item.get("artist") or {}).get("id", "")),
                         "type":    search_type,
                         "url":     item.get("link", ""),
                         # Small cover for the search grid — faster + far less
@@ -325,6 +326,7 @@ class DeezerEngine(EngineBase):
                         "id":      str(item.get("id", "")),
                         "title":   item.get("title", ""),
                         "artist":  (item.get("artist") or {}).get("name", ""),
+                        "artist_id": str((item.get("artist") or {}).get("id", "")),
                         "type":    search_type,
                         "url":     item.get("link", ""),
                         "cover":   (alb.get("cover_medium") or alb.get("cover_big")

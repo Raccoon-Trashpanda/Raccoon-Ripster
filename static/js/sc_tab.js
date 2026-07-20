@@ -479,7 +479,8 @@ function renderReleaseCard(rel) {
     </div>
     <div style="padding:8px 10px">
       <div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(rel.title)}">${esc(rel.title)}${hiresBadge}</div>
-      <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(rel.artist)}">${esc(rel.artist)}</div>
+      <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap${rel.artist_id ? ';cursor:pointer' : ''}" title="${esc(rel.artist)}"
+        ${rel.artist_id ? `onclick="event.stopPropagation();openArtistPage('${esc(rel.service)}','${escJ(rel.artist_id)}')" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"` : ''}>${esc(rel.artist)}</div>
       ${rel.label ? `<div style="font-size:10px;color:var(--muted);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7" title="${esc(rel.label)}">${esc(rel.label)}</div>` : ''}
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${dt}${rel.tracks ? ' · ' + rel.tracks + ' ' + t('p.trk_abbr') : ''}</div>
       ${qualSelect}

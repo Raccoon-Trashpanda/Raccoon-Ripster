@@ -193,7 +193,8 @@ async def _search_apple_ampapi(q: str, ent: str, limit: int, country: str) -> di
     try:
         r = await _HTTP.aclient().get(
             f"https://amp-api.music.apple.com/v1/catalog/{sf}/search",
-            params={"term": q, "types": type_key, "limit": min(max(limit, 1), 25)},
+            params={"term": q, "types": type_key, "limit": min(max(limit, 1), 25),
+                    "include[albums]": "artists", "include[songs]": "artists"},
             headers=headers,
         )
         if r.status_code != 200:
@@ -206,10 +207,13 @@ async def _search_apple_ampapi(q: str, ent: str, limit: int, country: str) -> di
         a = it.get("attributes") or {}
         full_date = (a.get("releaseDate") or "")[:10]
         previews  = a.get("previews") or []
+        artist_rel = (((it.get("relationships") or {}).get("artists") or {}).get("data") or [])
+        artist_id  = str(artist_rel[0].get("id", "")) if artist_rel else ""
         out.append({
             "id":      str(it.get("id", "")),
             "title":   a.get("name", ""),
             "artist":  a.get("artistName", ""),
+            "artist_id": artist_id,
             "album":   a.get("albumName", "") if is_track else "",
             "type":    ent,
             "url":     a.get("url", ""),
@@ -270,6 +274,7 @@ async def _search_apple_itunes(q: str, ent: str, limit: int, country: str) -> di
             "id":       _id,
             "title":    _title,
             "artist":   item.get("artistName",""),
+            "artist_id": str(item.get("artistId","")),
             "album":    item.get("collectionName","") if _is_track else "",
             "type":     ent,
             "url":      _url,
@@ -386,6 +391,7 @@ async def _search_deezer(q: str, ent: str, limit: int) -> dict:
                     "id":     str(item.get("id","")),
                     "title":  item.get("title",""),
                     "artist": (item.get("artist") or {}).get("name",""),
+                    "artist_id": str((item.get("artist") or {}).get("id","")),
                     "type":   ent,
                     "url":    item.get("link",""),
                     "cover":  item.get("cover_medium","") or item.get("cover_big","") or item.get("cover",""),
@@ -400,6 +406,7 @@ async def _search_deezer(q: str, ent: str, limit: int) -> dict:
                     "id":     str(item.get("id","")),
                     "title":  item.get("title",""),
                     "artist": (item.get("artist") or {}).get("name",""),
+                    "artist_id": str((item.get("artist") or {}).get("id","")),
                     "type":   ent,
                     "url":    item.get("link",""),
                     "cover":  (item.get("album") or {}).get("cover_medium","") or (item.get("album") or {}).get("cover_small","") or (item.get("album") or {}).get("cover",""),
@@ -456,13 +463,15 @@ async def _search_qobuz(q: str, ent: str, limit: int) -> dict:
                 img_obj = alb_img if isinstance(alb_img, dict) else {}
             cover_url = img_obj.get("large", "") or img_obj.get("small", "")
             _alb = item.get("album") if isinstance(item.get("album"), dict) else {}
+            _artist_obj = (item.get("artist") if isinstance(item.get("artist"), dict) else None) \
+                or (item.get("performer") if isinstance(item.get("performer"), dict) else None) \
+                or (_alb.get("artist") if isinstance(_alb.get("artist"), dict) else None) or {}
             results.append({
                 "id":     str(item.get("id","")),
                 "title":  item.get("title") or item.get("name",""),
                 # tracks carry the artist in `performer`, not `artist`
-                "artist": ((item.get("artist") or {}).get("name")
-                           or (item.get("performer") or {}).get("name")
-                           or (_alb.get("artist") or {}).get("name") or ""),
+                "artist": _artist_obj.get("name",""),
+                "artist_id": str(_artist_obj.get("id","")),
                 "type":   ent,
                 "url":    item.get("url","") or f"https://www.qobuz.com/album/{item.get('id','')}",
                 "cover":  cover_url,
@@ -679,6 +688,7 @@ async def _search_tidal(q: str, ent: str, limit: int) -> dict:
                     "id":      alb_id,
                     "title":   item.get("title", ""),
                     "artist":  (item.get("artist") or {}).get("name", ""),
+                    "artist_id": str((item.get("artist") or {}).get("id", "")),
                     "type":    ent,
                     "url":     f"https://listen.tidal.com/album/{alb_id}",
                     "cover":   _tidal_cover(item.get("cover", "")),
@@ -692,6 +702,7 @@ async def _search_tidal(q: str, ent: str, limit: int) -> dict:
                     "id":      tr_id,
                     "title":   item.get("title", ""),
                     "artist":  (item.get("artist") or {}).get("name", ""),
+                    "artist_id": str((item.get("artist") or {}).get("id", "")),
                     "type":    ent,
                     "url":     f"https://listen.tidal.com/track/{tr_id}",
                     "cover":   _tidal_cover((item.get("album") or {}).get("cover", "")),

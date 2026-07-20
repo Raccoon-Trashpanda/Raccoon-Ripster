@@ -461,7 +461,8 @@ function _renderSearchCard(item, svc) {
             <div style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,.65);color:rgba(255,255,255,.65);font-size:8px;font-weight:700;padding:2px 5px;border-radius:3px;letter-spacing:.4px">${typeTag}</div>
             <div style="padding:8px 9px">
               <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escJ(item.title)}">${item.title||'—'}${hiresBadge}</div>
-              <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px">${item.artist||''}</div>
+              <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px${item.artist_id ? ';cursor:pointer' : ''}"
+                ${item.artist_id ? `onclick="event.stopPropagation();openArtistPage('${esc(item.service)}','${escJ(item.artist_id)}')" title="${t('ck.discography')}" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"` : ''}>${item.artist||''}</div>
               ${labelRow}
               <div style="display:flex;align-items:center;gap:4px;margin-top:2px;margin-bottom:7px">
                 <div style="font-size:10px;color:var(--muted2);flex:1">${dateFmt}</div>
@@ -494,7 +495,9 @@ function _renderSearchCard(item, svc) {
           </div>
           <div style="padding:8px 9px">
             <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer" onclick="searchAddToQueue('${escJ(item.url)}','${escJ(item.title)}','${escJ(item.artist)}')" title="${escJ(item.title)}">${item.title||'—'}</div>
-            <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:6px">${item.artist||''}${dateFmt ? ' · '+dateFmt : ''}</div>
+            <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:6px">${item.artist_id
+              ? `<span style="cursor:pointer" onclick="event.stopPropagation();openArtistPage('${esc(item.service)}','${escJ(item.artist_id)}')" title="${t('ck.discography')}" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${item.artist||''}</span>`
+              : (item.artist||'')}${dateFmt ? ' · '+dateFmt : ''}</div>
             <div style="display:flex;gap:4px">
               <button onclick="searchAddToQueue('${escJ(item.url)}','${escJ(item.title)}','${escJ(item.artist)}')" style="flex:1;padding:4px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
               ${playFull}${previewBtn}${linkBtn}${copyBtn}
