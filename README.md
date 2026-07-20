@@ -37,8 +37,13 @@ is no account with *us*, no cloud, and your files never leave your computer.
   Beatport, Yandex Music, and Spotify link conversion.
 - 🔁 **Download queue** with parallel downloads, automatic retry, and recovery of
   partially-finished albums.
-- 🔍 **Search** across services, a **New Releases** feed, a **watchlist**, and a
-  full **download history**.
+- 🔍 **Search** across services, plus a **watchlist** and a full **download
+  history**.
+- 🦝 **Ripster Radar** — a release-tracking feed for the artists you follow on
+  Spotify. It's not just a periodic re-scan: it also hooks the same
+  personalized "new for you" signal Spotify's own app uses, so a fresh drop
+  can show up within minutes instead of the next scheduled pass — flagged
+  with its own **⚡ Live** badge on the card.
 - 🎛 **DJ Coder** — stitch a multi-track release into one gapless mix with a CUE
   sheet.
 - 📊 **Spectrogram** view to confirm a file is really lossless (and not an
@@ -46,6 +51,14 @@ is no account with *us*, no cloud, and your files never leave your computer.
 - 🎧 Built-in **gapless player** with a visualizer.
 - 🌍 **5-language interface** — English, Russian, Hindi, Japanese, Chinese.
 - 🖥 Opens in a **real desktop window** (no browser tab needed).
+
+---
+
+## Screenshots
+
+| Ripster Radar | Search | Settings |
+|---|---|---|
+| [![Ripster Radar](screenshots/01_release_radar.png)](screenshots/01_release_radar.png) | [![Search](screenshots/02_search.png)](screenshots/02_search.png) | [![Settings](screenshots/03_settings.png)](screenshots/03_settings.png) |
 
 ---
 
@@ -221,9 +234,12 @@ grab that when reporting an issue.
 
 ## Running from source (advanced)
 
+**Windows only** — the packaged installer and the tooling Ripster automates
+(the Apple decrypt wrapper, WebView2, etc.) are Windows-specific. There is no
+macOS or Linux build.
+
 You need **Python 3.12** (3.11+ should work) and **ffmpeg** on your `PATH`.
 
-### Windows
 ```bat
 git clone https://github.com/Raccoon-Trashpanda/Raccoon-Ripster.git
 cd Raccoon-Ripster
@@ -231,19 +247,6 @@ run.bat
 ```
 `run.bat` creates a virtual environment, installs dependencies, copies
 `config.example.yaml` → `config.yaml` on first run, and launches the app.
-
-### macOS / Linux
-```bash
-git clone https://github.com/Raccoon-Trashpanda/Raccoon-Ripster.git
-cd Raccoon-Ripster
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp config.example.yaml config.yaml
-python ripster_launcher.py     # native window; or: python app.py for a headless server
-```
-
-Then open **http://127.0.0.1:7799** if you ran the headless server.
 
 **Pinned dependencies (don't loosen):** `streamrip==2.0.5` (2.1.x has Tidal/login
 regressions) and `protobuf==6.33.4` (required by the Apple wrapper and the
