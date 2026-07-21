@@ -30,7 +30,22 @@ _broadcast       = None
 
 _RMS      = "https://rms.api.bbc.co.uk/v2"
 _PROG_API = "https://www.bbc.co.uk/programmes"
-_MSEL     = "https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/mediaset/iptv-all/vpid/{vpid}/format/json"
+# mediaset "iptv-all" only ever exposes ONE HLS rendition (51 kbps HE-AAC,
+# mp4a.40.5) for every show/episode tested (Essential Mix, Radio 1 Dance,
+# Pete Tong) — MediaSelector's own "bitrate": 320 field is a nominal quality-
+# tier label, not the real encoded rate, so downstream MP3-320K re-encodes
+# were just inflating file size around an already-narrow-band ~16.5 kHz-
+# lowpassed source (confirmed via ffprobe + spectrogram — this is what a
+# tester's spectrum screenshot flagged). mediaset "pc" exposes the SAME
+# 51k variant plus a real 102 kbps HE-AAC one in its master playlist
+# (verified across 3 different shows) — yt-dlp picks the highest-BANDWIDTH
+# HLS variant by default, so this alone doubles real delivered fidelity
+# with no other code change. Still well under a genuine 320 kbps source —
+# every other mediaset id tried (iptv-uk/iptv-nonuk/apple-ipad-hls/pc-tablet/
+# podcast-*/audio-syndication-*) returned "selectionunavailable" from this
+# vantage point, so 102 kbps HE-AAC appears to be BBC's real ceiling for
+# on-demand Sounds audio reachable without a UK-residential IP.
+_MSEL     = "https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/mediaset/pc/vpid/{vpid}/format/json"
 _T        = httpx.Timeout(connect=10, read=20, write=10, pool=5)
 
 BRANDS = [
