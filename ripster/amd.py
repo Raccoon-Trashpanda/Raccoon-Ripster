@@ -418,6 +418,28 @@ async def patch_amd_for_headless(amd_dir: Path) -> None:
                 mp4_py.write_text(patched, encoding="utf-8")
                 await _setup.ilog("  ✓ Patched src/mp4.py (m3u8 segment_map KeyError:0 fix)", "success")
 
+    # Crash-instead-of-clean-fail: when a track has no Hi-Res/Atmos master on
+    # Apple's side, raw_metadata.attributes.extendedAssetUrls IS None (AMD's
+    # own _get_m3u8_url() already handles this — logs "Audio does not exist"
+    # and returns None). But the very next codecAlternative/AAC_LEGACY check
+    # in rip() re-touches .extendedAssetUrls.enhancedHls WITHOUT the same
+    # None-guard, so it crashes with "'NoneType' object has no attribute
+    # 'enhancedHls'" instead of falling through to the clean "Lossless audio
+    # does not exist" failure a few lines down. A tester's log showed exactly
+    # this double error for a track with no Hi-Res master — ripster's own
+    # retry/classification logic then had nothing sane to key off. Idempotent.
+    rip_py = amd_dir / "src" / "rip.py"
+    if rip_py.exists():
+        src = rip_py.read_text(encoding="utf-8", errors="replace")
+        OLD = ("it(Config).download.codecAlternative and not raw_metadata.attributes."
+               "extendedAssetUrls.enhancedHls and Codec.AAC_LEGACY in it(")
+        NEW = ("it(Config).download.codecAlternative and raw_metadata.attributes."
+               "extendedAssetUrls and not raw_metadata.attributes."
+               "extendedAssetUrls.enhancedHls and Codec.AAC_LEGACY in it(")
+        if OLD in src:
+            rip_py.write_text(src.replace(OLD, NEW, 1), encoding="utf-8")
+            await _setup.ilog("  ✓ Patched src/rip.py (extendedAssetUrls None-guard crash fix)", "success")
+
 
 async def install_amd_deps() -> bool:
     """Install AMD v2 Python dependencies via pip (no poetry needed)."""
