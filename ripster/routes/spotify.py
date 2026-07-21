@@ -1593,20 +1593,47 @@ async def api_convert_spotify(body: dict):
     if "spotify.com" not in sp_url:
         return {"ok": False, "error": "Not a Spotify URL"}
 
-    try:
-        async with httpx.AsyncClient(timeout=8) as c:
-            oe   = await c.get("https://open.spotify.com/oembed", params={"url": sp_url})
-            meta = oe.json()
-    except Exception as e:
-        return {"ok": False, "error": f"Spotify oEmbed failed: {e}"}
+    # Real Spotify Web API metadata (title/artist + isrc for tracks, upc for
+    # albums) when we have a token — falls back to the no-auth oEmbed (title
+    # string only, no isrc/upc) internally if not. Previously this route used
+    # RAW oEmbed directly and skipped straight to a fuzzy text search, which
+    # (see below) had no correctness check at all — a plain "Title Artist"
+    # query can rank a same-word unrelated release first on Deezer/Apple,
+    # silently handing the user the wrong track/album (reported live via the
+    # release radar → Deezer path).
+    from ripster.metadata.spotify import fetch_meta_spotify
+    meta = await fetch_meta_spotify(sp_url)
+    if not meta:
+        return {"ok": False, "error": "Spotify metadata lookup failed"}
 
-    title = meta.get("title", "")
-    parts = title.rsplit(" - ", 1)
-    track_name  = parts[0].strip() if len(parts) == 2 else title
-    artist_name = parts[1].strip() if len(parts) == 2 else ""
-    query = f"{track_name} {artist_name}".strip()
+    title  = meta.get("title", "")
+    artist = meta.get("artist", "")
+    isrc   = (meta.get("isrc") or "").strip()
+    upc    = (meta.get("upc") or "").strip()
+    if not artist:
+        # oEmbed fallback only gives a combined "Track - Artist" title string.
+        parts = title.rsplit(" - ", 1)
+        if len(parts) == 2:
+            title, artist = parts[0].strip(), parts[1].strip()
+    query = f"{title} {artist}".strip()
 
     sp_type = "album" if "/album/" in sp_url else "track" if "/track/" in sp_url else "album"
+
+    # Exact match first (ISRC for tracks, UPC for albums) — only for Deezer,
+    # which exposes free no-auth lookup-by-code endpoints. No fuzzy-search
+    # ambiguity possible: either it's the exact release or nothing.
+    if service == "deezer":
+        from ripster.routes.isrc import _deezer_search_isrc, _deezer_search_upc
+        exact = None
+        if sp_type == "track" and isrc:
+            exact = await _deezer_search_isrc(isrc)
+        elif sp_type == "album" and upc:
+            exact = await _deezer_search_upc(upc)
+        if exact:
+            return {
+                "ok": True, "source": {"url": sp_url, "title": title},
+                "target": exact, "query": query, "service": service,
+            }
 
     if service == "apple":
         res = await _disc._search_apple(query, sp_type, 5, "")
@@ -1619,7 +1646,14 @@ async def api_convert_spotify(body: dict):
     if not results:
         return {"ok": False, "error": f"Not found on {service}: {query}", "query": query}
 
-    best = results[0]
+    # Fuzzy fallback (no ISRC/UPC available, or the exact lookup found
+    # nothing) — verify title+artist actually overlap before accepting a
+    # result instead of trusting whatever the search ranked first.
+    from ripster.routes.isrc import verified_match
+    best = verified_match(results, title, artist)
+    if not best:
+        return {"ok": False, "error": f"No confident match on {service} for: {query}", "query": query}
+
     return {
         "ok":      True,
         "source":  {"url": sp_url, "title": title},

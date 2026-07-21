@@ -151,6 +151,34 @@ async def _deezer_search_isrc(isrc: str) -> Optional[dict]:
     return None
 
 
+async def _deezer_search_upc(upc: str) -> Optional[dict]:
+    """Deezer public UPC endpoint (album-level exact match) — no auth required."""
+    upc = (upc or "").strip()
+    if not upc:
+        return None
+    try:
+        async with _HTTP.ashared() as c:
+            r = await c.get(f"{_DEEZER_API}/album/upc:{upc}")
+            if r.status_code != 200:
+                return None
+            alb = r.json()
+            if alb.get("error") or not alb.get("id"):
+                return None
+            alb_id = str(alb.get("id", ""))
+            return {
+                "service":   "deezer",
+                "album_id":  alb_id,
+                "url":       alb.get("link") or f"https://www.deezer.com/album/{alb_id}",
+                "title":     alb.get("title", ""),
+                "artist":    (alb.get("artist") or {}).get("name", ""),
+                "album":     alb.get("title", ""),
+                "cover":     alb.get("cover_medium") or alb.get("cover") or "",
+            }
+    except Exception:
+        pass
+    return None
+
+
 # ── Endpoint ──────────────────────────────────────────────────────────────────
 
 @router.post("/api/isrc/resolve")
@@ -200,6 +228,28 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
 
 
+def verified_match(results: list[dict], title: str, artist: str) -> Optional[dict]:
+    """Return the first *results* item whose normalized title+artist actually
+    overlaps *title*/*artist*, or None if nothing passes. A plain text search
+    (no ISRC/UPC available) can rank a same-word-different-release result
+    first for common titles/artists — accepting result[0] unconditionally
+    served flatly wrong releases (e.g. a Spotify→Deezer conversion picking an
+    unrelated track that merely shares a word). Same title-overlap +
+    optional-artist-overlap heuristic used for Apple's multi-region match."""
+    tnorm, anorm = _norm(title), _norm(artist)
+    if not tnorm:
+        return None
+    for it in results:
+        it_t, it_a = _norm(it.get("title", "")), _norm(it.get("artist", ""))
+        t_ok = tnorm and (tnorm in it_t or it_t in tnorm or
+                          len(set(tnorm.split()) & set(it_t.split())) >= max(1, len(tnorm.split()) // 2))
+        a_ok = (not anorm) or (anorm in it_a or it_a in anorm or
+                               bool(set(anorm.split()) & set(it_a.split())))
+        if t_ok and a_ok:
+            return it
+    return None
+
+
 async def _apple_match(title: str, artist: str):
     """Find the release on Apple via the multi-region search (account region +
     NZ), so pre-releases out in NZ before the account region are caught. Returns
@@ -212,18 +262,7 @@ async def _apple_match(title: str, artist: str):
         res = (await _search_apple(q, "album", 8, "")).get("results") or []
     except Exception:
         return None
-    tnorm, anorm = _norm(title), _norm(artist)
-    best = None
-    for it in res:
-        it_t, it_a = _norm(it.get("title", "")), _norm(it.get("artist", ""))
-        # title overlap + artist overlap (artist optional)
-        t_ok = tnorm and (tnorm in it_t or it_t in tnorm or
-                          len(set(tnorm.split()) & set(it_t.split())) >= max(1, len(tnorm.split()) // 2))
-        a_ok = (not anorm) or (anorm in it_a or it_a in anorm or
-                               bool(set(anorm.split()) & set(it_a.split())))
-        if t_ok and a_ok:
-            best = it
-            break
+    best = verified_match(res, title, artist)
     if not best:
         return None
     return {

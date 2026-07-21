@@ -107,6 +107,7 @@ async def _request_meta(client, kind: str, item_id: str, token: str) -> tuple[Op
             return None, r.status_code
         d = r.json()
         images = d.get("images") or []
+        ext = d.get("external_ids") or {}
         return {
             "title":       d.get("name", ""),
             "artist":      ", ".join(a["name"] for a in d.get("artists", [])),
@@ -119,6 +120,7 @@ async def _request_meta(client, kind: str, item_id: str, token: str) -> tuple[Op
             "label":       d.get("label", ""),
             "type":        d.get("album_type", "album"),
             "service":     "spotify",
+            "upc":         ext.get("upc", ""),
         }, 200
 
     elif kind == "playlist":
