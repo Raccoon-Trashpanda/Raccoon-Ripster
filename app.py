@@ -143,8 +143,9 @@ import uvicorn
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import JSONResponse, Response
+from urllib.parse import urlparse
+from starlette.datastructures import Headers
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.staticfiles import StaticFiles
 
 # Ensure the script directory is on sys.path so ``ripster`` resolves
@@ -673,17 +674,61 @@ app.add_middleware(
 )
 # Defense in depth against DNS-rebinding for side-effect GETs that don't go
 # through the CORS/CSRF Origin check (that check only guards mutations and
-# cross-site response reads). Wildcards cover the tunnel providers guest.py
-# actually uses (serveo's default/custom subdomain, cloudflared quick
-# tunnels) — the exact subdomain varies per install/restart, so we allow the
-# provider domain rather than hardcoding one instance's current subdomain.
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=[
-        "127.0.0.1", "localhost",
-        "*.serveousercontent.com", "*.serveo.net", "*.trycloudflare.com",
-    ],
+# cross-site response reads). A plain Starlette TrustedHostMiddleware can't
+# fully cover this: besides serveo/cloudflared (static wildcard suffixes
+# below), the owner build also supports ngrok (ripster/ngrok_service.py —
+# NOT shipped in this mirror, same as ripster/routes/guest.py) whose paid
+# `--domain` mode points at an arbitrary owner-chosen hostname read from
+# config["public-url"] at runtime — no static suffix can match that. So this
+# checks the static list first, then falls back to comparing Host against
+# the CURRENT public-url's hostname, read live from config on every request
+# (cheap — no I/O) so it tracks tunnel restarts/reconfiguration without an
+# app restart. Kept identical to the owner build for maintainability even
+# though the ngrok path itself is inert here.
+_TRUSTED_HOST_STATIC   = {"127.0.0.1", "localhost"}
+_TRUSTED_HOST_SUFFIXES = (
+    "serveousercontent.com", "serveo.net", "trycloudflare.com",
+    "ngrok-free.app", "ngrok.app", "ngrok.io",
 )
+
+def _host_is_trusted(host: str) -> bool:
+    host = (host or "").split(":")[0].lower()   # strip port, same as TrustedHostMiddleware
+    if not host:
+        return False
+    if host in _TRUSTED_HOST_STATIC:
+        return True
+    if any(host == s or host.endswith("." + s) for s in _TRUSTED_HOST_SUFFIXES):
+        return True
+    pub = (config.get("public-url") or "").strip()
+    if pub:
+        pub_host = urlparse(pub if "://" in pub else f"https://{pub}").hostname
+        if pub_host and host == pub_host.lower():
+            return True
+    return False
+
+class _TrustedHostASGIMiddleware:
+    """Raw ASGI (not BaseHTTPMiddleware) so it covers "websocket" scope too —
+    BaseHTTPMiddleware only intercepts "http", which would leave /ws
+    completely unchecked. Mirrors starlette.middleware.trustedhost's own
+    scope-type handling, just with a dynamic host check instead of a fixed list."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        if _host_is_trusted(headers.get("host", "")):
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+        else:
+            response = Response("Invalid host header", status_code=400)
+            await response(scope, receive, send)
+
+app.add_middleware(_TrustedHostASGIMiddleware)
 if _STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
