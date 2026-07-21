@@ -23,7 +23,8 @@ from fastapi import APIRouter, HTTPException, Request
 
 
 def _make_task(url: str, quality: str, engine: str, svc: str,
-               source: str = "manual", session_id: str = "") -> dict:
+               source: str = "manual", session_id: str = "",
+               lyrics: bool | None = None) -> dict:
     """Single factory so add_to_queue and queue_batch always produce identical shapes."""
     return {
         "id":         str(uuid.uuid4())[:8],
@@ -38,6 +39,9 @@ def _make_task(url: str, quality: str, engine: str, svc: str,
         "added":      datetime.now().strftime("%H:%M:%S"),
         "source":     source,
         "session_id": session_id,   # "" = owner, non-empty = guest session
+        # None = use the global save-lrc-file/embed-lrc default; True/False =
+        # per-release checkbox override (see release-card lyrics toggle).
+        "lyrics":     lyrics,
     }
 
 router = APIRouter()
@@ -197,6 +201,10 @@ async def add_to_queue(body: dict, request: Request):
     # Caller-supplied metadata (SoundCloud tiles, release radar, etc. already
     # have cover/title/duration) — merge so the queue card shows it instantly.
     pre_meta = body.get("meta") if isinstance(body.get("meta"), dict) else None
+    # Per-release lyrics checkbox override (Apple/Deezer — see release-card UI).
+    # Omitted/null means "use the global save-lrc-file/embed-lrc setting".
+    _lyrics_raw = body.get("lyrics")
+    lyrics_override = bool(_lyrics_raw) if isinstance(_lyrics_raw, bool) else None
 
     def _enqueue_one(turl: str, tmeta: dict | None, mark_enriched: bool):
         """Create + append one task. Returns the task, or None if it's an exact dupe."""
@@ -207,7 +215,7 @@ async def add_to_queue(body: dict, request: Request):
                and (t.get("engine")  or "") == (engine  or "")
                and t["status"] in ("queued", "running") for t in _queue):
             return None
-        t = _make_task(turl, quality, engine, svc, source, session_id=sid)
+        t = _make_task(turl, quality, engine, svc, source, session_id=sid, lyrics=lyrics_override)
         if _route_note:
             t.setdefault("meta", {})["route_note"] = _route_note
         if tmeta:

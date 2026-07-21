@@ -208,6 +208,10 @@ function handleMessage(msg) {
       S.running = msg.running || false;
       S.paused  = msg.paused  || false;
       if(typeof STEP_DEFS_GAMDL!=='undefined') STEP_DEFS = (S.config['engine']==='gamdl') ? STEP_DEFS_GAMDL : STEP_DEFS_ZHAAREY;
+      // Re-merge guest-local prefs (player-spin etc.) every time — this 'init'
+      // message fires on every WS reconnect, not just first load, and would
+      // otherwise silently drop guest-only prefs (see _applyPlayerPrefsToUI).
+      try { _applyPlayerPrefsToUI?.(); } catch {}
       applyConfig(); renderQueue(); updateTransport(); updatePills(); renderQualityGrid(); renderConfig(); _syncReleasesSettingsTab();
       if(typeof _maybeAskTelemetryName!=='undefined') setTimeout(_maybeAskTelemetryName, 2500);  // first-run consent ask (owner/tester builds only — public mirror doesn't ship telemetry_ui.js)
       setTimeout(autoValidateServices, 1500);   // probe all configured tokens on startup — no need to open each tab
@@ -1543,19 +1547,20 @@ function setFont(key) {
   if(prev) prev.style.fontFamily = f.css;
 }
 
-function applyStoredPrefs() {
-  const t = localStorage.getItem('amd-theme') || 'dark';
-  const f = localStorage.getItem('amd-font')  || 'system';
-  setTheme(t);
-  setFont(f);
-  // Player preferences land from S.config (which is loaded a bit later).
-  // Apply them once config is available, plus mirror to the UI inputs.
-  const tryApply = () => {
-    if (!S.config) { setTimeout(tryApply, 100); return; }
-    // For guests — pull their browser-stored prefs into S.config first.
-    try { _guestPrefsApplyAll?.(); } catch {}
-    const spin = S.config['player-spin'] !== false;   // default true
-    document.body.classList.toggle('no-spin', !spin);
+// Re-merge guest-local prefs (localStorage) into S.config and re-mirror them
+// into the player/settings UI. Must run not just on first boot but every time
+// S.config gets wholesale-replaced — the 'init' WS message (sent on EVERY
+// reconnect, not just first load) overwrites S.config from the server, which
+// never carries guest-only prefs like player-spin. Without re-applying here,
+// a guest's "spin off" choice silently reverts on the next reconnect — which
+// on mobile (screen lock / app background / network switch) happens often,
+// making the toggle look like it "keeps turning itself back on".
+function _applyPlayerPrefsToUI() {
+  if (!S.config) return;
+  // For guests — pull their browser-stored prefs into S.config first.
+  try { _guestPrefsApplyAll?.(); } catch {}
+  const spin = S.config['player-spin'] !== false;   // default true
+  document.body.classList.toggle('no-spin', !spin);
     const vol = S.config['player-volume'];
     if (typeof vol === 'number') {
       const a = document.getElementById('pp-audio'); if (a) a.volume = vol;
@@ -1582,6 +1587,18 @@ function applyStoredPrefs() {
       const lb = document.getElementById('s-eq-'+b+'-val');
       if (lb) lb.textContent = v > 0 ? `+${v}` : String(v);
     });
+}
+
+function applyStoredPrefs() {
+  const t = localStorage.getItem('amd-theme') || 'dark';
+  const f = localStorage.getItem('amd-font')  || 'system';
+  setTheme(t);
+  setFont(f);
+  // Player preferences land from S.config (which is loaded a bit later on
+  // first boot) — poll until it's available, then apply.
+  const tryApply = () => {
+    if (!S.config) { setTimeout(tryApply, 100); return; }
+    _applyPlayerPrefsToUI();
   };
   tryApply();
 }

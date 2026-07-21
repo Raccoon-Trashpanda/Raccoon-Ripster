@@ -127,8 +127,12 @@ def get_amd_dir() -> Path:
     return _base_dir / "AppleMusicDecrypt"
 
 
-def write_amd_config(amd_dir: Path, codec: str = "alac") -> None:
-    """Write config.toml for AMD v2 from current settings."""
+def write_amd_config(amd_dir: Path, codec: str = "alac", lyrics_override: Optional[bool] = None) -> None:
+    """Write config.toml for AMD v2 from current settings.
+
+    ``lyrics_override``, when not None, wins over the global save-lrc-file/
+    amd-save-lyrics setting for THIS write only — lets a single task (e.g. a
+    per-release checkbox) opt in/out of lyrics without touching global config."""
     cfg        = _cfg
     # Resolve save-path to an ABSOLUTE dir anchored to the app's install dir — NOT
     # AMD's OWN cwd (the AppleMusicDecrypt folder). A relative/empty save-path here
@@ -156,7 +160,8 @@ def write_amd_config(amd_dir: Path, codec: str = "alac") -> None:
     # `amd-save-lyrics` is a legacy orphan key with NO UI control (defaults True),
     # so reading it alone meant AMD kept writing .lrc files even with the toggle
     # OFF. Honour the global toggle as the authority, fall back to the legacy key.
-    save_lrc   = str(bool(cfg.get("save-lrc-file", cfg.get("amd-save-lyrics", True)))).lower()
+    save_lrc   = str(bool(cfg.get("save-lrc-file", cfg.get("amd-save-lyrics", True)))
+                     if lyrics_override is None else bool(lyrics_override)).lower()
     lrc_fmt    = cfg.get("lrc-format", cfg.get("amd-lyrics-format", "lrc"))
     save_cov   = str(cfg.get("save-cover-to-folder", True)).lower()
     cov_fmt    = cfg.get("cover-format", "jpg")

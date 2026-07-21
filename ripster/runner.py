@@ -999,7 +999,7 @@ async def _amd_preflight(task: dict, quality: str) -> bool:
     from ripster.engines.amd import _CODEC_MAP as _AMD_CODEC_MAP
     codec = _AMD_CODEC_MAP.get(quality, "alac")
     await _amd_mod.patch_amd_for_headless(amd_dir)
-    _amd_mod.write_amd_config(amd_dir, codec=codec)
+    _amd_mod.write_amd_config(amd_dir, codec=codec, lyrics_override=task.get("lyrics"))
     await _log(f"📄 config.toml записан в {amd_dir} (codec={codec})", "info", tid)
 
     instance = _config.get("amd-instance-url", "wm.wol.moe")
@@ -1438,6 +1438,8 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             _cfg_view["_bbc_artist"]   = task.get("_bbc_artist", "")
             _cfg_view["_bbc_pid"]      = task.get("_bbc_pid", "")
             _cfg_view["_bbc_duration"] = task.get("_bbc_duration", 0)
+        # Per-release lyrics checkbox override (None = use global config).
+        _cfg_view["_lyrics_override"] = task.get("lyrics")
         cmd = eng.build_cmd(url, quality, _cfg_view)
         task["log"].append(f"▶ {' '.join(cmd)}")
         await _broadcast(_i18n.log_event("console.cmd_start", level="info", task_id=tid, cmd=' '.join(cmd[:3])))

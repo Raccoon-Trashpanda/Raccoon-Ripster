@@ -71,9 +71,13 @@ class ZhaereyEngine(EngineBase):
             base = [str(bin_path)]
         else:
             base = [gobin, "run", main]
+        # Per-release lyrics checkbox (None = leave config.yaml's embed-lrc/
+        # save-lrc-file alone; True/False = this run only, nothing persisted).
+        lyrics_ov = config.get("_lyrics_override")
+        lyrics_flag = ["--lyrics=" + ("on" if lyrics_ov else "off")] if lyrics_ov is not None else []
         # --json makes Go print a JSON array of saved tracks at the end so we
         # can extract the exact output directory without guessing.
-        return base + ([flag] if flag else []) + ["--json", url]
+        return base + ([flag] if flag else []) + lyrics_flag + ["--json", url]
 
     @staticmethod
     def _json_tracks(line: str) -> Optional[list]:

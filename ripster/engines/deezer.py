@@ -59,12 +59,16 @@ def _write_arl(arl: str) -> Path:
     return arl_file
 
 
-def _write_deemix_config() -> None:
+def _write_deemix_config(lyrics: bool | None = None, synced_lyrics: bool | None = None) -> None:
     """Pin deemix's EMBEDDED (in-audio) cover to 1000 px — uniform tag artwork
     across all services by request. deemix defaults to embeddedArtworkSize 800.
     The SAVED external cover stays large (localArtworkSize 1400) so the on-disk
     original is unaffected. Merges into the existing config.json so no other
-    deemix setting is clobbered; deemix creates the file on first run otherwise."""
+    deemix setting is clobbered; deemix creates the file on first run otherwise.
+
+    ``lyrics``/``synced_lyrics`` map to deemix's own ``lyrics`` (embed) and
+    ``syncedLyrics`` (save .lrc) settings — None leaves whatever's already in
+    deemix's config.json untouched (deemix ships both False by default)."""
     import json
     cfg_dir = _deemix_config_dir()
     cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -80,6 +84,10 @@ def _write_deemix_config() -> None:
     # Keep the saved cover.jpg high-res (only set a default if unset, so a
     # user-customised value survives).
     data.setdefault("localArtworkSize", 1400)
+    if lyrics is not None:
+        data["lyrics"] = bool(lyrics)
+    if synced_lyrics is not None:
+        data["syncedLyrics"] = bool(synced_lyrics)
     try:
         cfg_file.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception as e:
@@ -148,8 +156,13 @@ class DeezerEngine(EngineBase):
         except Exception:
             pass
 
-        # Pin embedded cover to 1000 px (uniform across services).
-        _write_deemix_config()
+        # Pin embedded cover to 1000 px (uniform across services). Per-release
+        # lyrics checkbox override (None = leave deemix's own config alone —
+        # both settings stay whatever they already were, i.e. off by default).
+        lyrics_ov = config.get("_lyrics_override")
+        _write_deemix_config(
+            lyrics=lyrics_ov, synced_lyrics=lyrics_ov,
+        )
         # Heal the deemix subprocess against the empty-MEDIA IndexError (issue #23).
         _ensure_media_patch()
 

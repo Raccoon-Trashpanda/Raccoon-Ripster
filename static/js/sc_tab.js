@@ -465,6 +465,22 @@ function renderReleaseCard(rel) {
           style="width:100%;margin-top:6px;padding:3px 6px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:10px;color:var(--muted);cursor:pointer;outline:none">
           <option value="${esc(resolveQuality(rel.service))}">${esc(resolveQuality(rel.service))}</option>
         </select>`;
+  // Lyrics only wire up where an engine actually fetches them: Apple
+  // (zhaarey/amd, embed-lrc/save-lrc-file) and Deezer (deemix's own
+  // lyrics/syncedLyrics). Qobuz/Tidal (streamrip) have no real lyrics-fetch
+  // path yet — no point showing a checkbox that silently does nothing.
+  const _lyricsSvcs = {apple: true, deezer: true};
+  // Apple defaults to the existing global embed-lrc/save-lrc-file setting;
+  // Deezer has no such global toggle (deemix ships lyrics off) — default off.
+  const lyricsDefault = rel.service === 'apple'
+    ? (S.config['embed-lrc'] !== false || !!S.config['save-lrc-file'])
+    : false;
+  const lyricsToggle = _lyricsSvcs[rel.service] ? `
+        <label class="rel-lyrics-toggle" onclick="event.stopPropagation()"
+          style="display:flex;align-items:center;gap:5px;margin-top:6px;font-size:10px;color:var(--muted);cursor:pointer;user-select:none">
+          <input type="checkbox" class="rel-lyrics-chk" ${lyricsDefault ? 'checked' : ''}
+            style="width:13px;height:13px;accent-color:var(--red);cursor:pointer"/>${esc(t('rl.lyrics_toggle'))}
+        </label>` : '';
   return `<div class="rel-card${isNew ? ' rel-card-new' : ''}" style="background:var(--surface);border:1px solid ${baseBorder};border-radius:10px;overflow:hidden;transition:border-color .15s" onmouseover="this.style.borderColor='${svcClr}'" onmouseout="this.style.borderColor='${baseBorder}'">
     <div style="position:relative">
       ${rel.cover
@@ -484,6 +500,7 @@ function renderReleaseCard(rel) {
       ${rel.label ? `<div style="font-size:10px;color:var(--muted);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7" title="${esc(rel.label)}">${esc(rel.label)}</div>` : ''}
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${dt}${rel.tracks ? ' · ' + rel.tracks + ' ' + t('p.trk_abbr') : ''}</div>
       ${qualSelect}
+      ${lyricsToggle}
       <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
         <button onclick="downloadRelease(this,'${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}')"
           style="flex:1 1 100%;padding:5px 0;background:rgba(192,132,160,.12);border:1px solid rgba(192,132,160,.2);border-radius:7px;font-size:10px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--font)">${t('btn.download')}</button>
@@ -505,7 +522,10 @@ async function downloadRelease(btn, service, url, title, artist) {
   const card    = btn && btn.closest ? btn.closest('.rel-card') : null;
   const sel     = card ? card.querySelector('.rel-q-select') : null;
   const quality = (sel && sel.value) ? sel.value : resolveQuality(service);
-  const r = await api('POST', '/api/queue/add', {url, quality, title, artist});
+  const lyricsChk = card ? card.querySelector('.rel-lyrics-chk') : null;
+  const body = {url, quality, title, artist};
+  if (lyricsChk) body.lyrics = lyricsChk.checked;
+  const r = await api('POST', '/api/queue/add', body);
   if(r.ok) toast('+ '+title+' → '+t('q.queue_word'));
   else     toast(t('t.error_c') + (r.detail || '?'), 'var(--red)');
 }
