@@ -33,6 +33,46 @@ _PATTERNS: list[tuple[str, "re.Pattern[str]", str]] = [
 ]
 
 
+_RE_TRACEBACK_HDR = re.compile(r"^Traceback \(most recent call last\):\s*$", re.M)
+
+
+def extract_traceback_summary(log_text: str) -> str | None:
+    """When *log_text* contains a real Python traceback (an unhandled exception
+    in a CLI subprocess, e.g. the ``amz``/AppleMusicDecrypt/etc. tools), return
+    the actual ``ExceptionType: message`` tail line instead of the useless
+    generic header.
+
+    Bug this fixes: engines that pick "the last line matching an error-ish
+    regex, searching backwards" can land on the traceback HEADER line
+    ("Traceback (most recent call last):") instead of the real exception
+    line beneath it — the header contains the word "traceback" (matches a
+    generic error regex) but the actual exception line often does NOT match
+    (e.g. "ValueError: ..." has no `\\berror\\b` word boundary — "Error" is
+    glued to "Value" with no separator, and doesn't contain "exception" as a
+    literal substring either). Confirmed live: a guest's Amazon Music
+    download crashed with an unhandled exception and the ONLY text that
+    reached them was "Traceback (most recent call last):" — worse than no
+    message at all, since it looks like a message but says nothing.
+
+    Traceback frame lines ("File "...", line N, in <func>" and the source
+    line under it) are indented; the actual exception line is the last
+    NON-indented, non-empty line after the header — take that.
+    """
+    if not log_text:
+        return None
+    last_hdr = None
+    for m in _RE_TRACEBACK_HDR.finditer(log_text):
+        last_hdr = m
+    if not last_hdr:
+        return None
+    tail = log_text[last_hdr.end():]
+    exc_line = None
+    for line in tail.splitlines():
+        if line and not line[0].isspace():
+            exc_line = line.strip()
+    return exc_line[:300] if exc_line else None
+
+
 def classify_download_error(log_text: str) -> tuple[str, str] | None:
     """Return ``(category, user_message)`` for a recognized cross-service failure,
     or ``None`` if nothing matched. Categories: ``'region'`` | ``'gone'``.

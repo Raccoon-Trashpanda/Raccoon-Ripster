@@ -104,7 +104,19 @@ class AmazonEngine(EngineBase):
             # marks a shortfall; here we just declare success when the process
             # exited cleanly (and didn't hit an auth/error line above).
             return EngineResult(True, tracks_ok=ok)
-        # Non-zero exit → surface the last error line.
+        # Non-zero exit → surface the last error line. Check for a real Python
+        # traceback FIRST (the `amz` CLI unhandled-exception case — e.g. a
+        # subscription-tier restriction it doesn't catch cleanly): a naive
+        # reversed search for anything matching _RE_ERR tends to land on the
+        # traceback HEADER ("Traceback (most recent call last):", which
+        # contains "traceback") instead of the actual exception line below it
+        # (an exception class name doesn't always contain "error"/"exception"
+        # as a matchable substring) — confirmed live, a guest's failed
+        # download forwarded exactly that useless header as the whole reason.
+        from .errors import extract_traceback_summary
+        tb = extract_traceback_summary(log_text)
+        if tb:
+            return EngineResult(False, error=f"Amazon: {tb}")
         last_err = ""
         for line in reversed(log_text.splitlines()):
             if _RE_ERR.search(line):
