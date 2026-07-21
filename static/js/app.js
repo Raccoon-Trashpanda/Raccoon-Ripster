@@ -1392,6 +1392,48 @@ function setStatus(text, color) {
 
 
 
+// ── Contextual field help ("?" icon + tap/click popover) ──────────────────
+// helpQ('i18n.key') returns markup for an inline "?" icon; clicking it opens
+// a small popover with t('i18n.key') as HTML (data-i18n-html semantics —
+// content can use <b>/<code>/<a> same as the rest of the i18n system).
+// Works via click (not hover-only), so it's usable on touch devices, unlike
+// the native title="" tooltips this replaces on the Setup checklist.
+function helpQ(key){
+  return `<span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'${key}')" role="button" tabindex="0">?</span>`;
+}
+
+let _helpPopEl = null, _helpPopKey = null;
+function showHelpPop(anchor, key){
+  // second click on the SAME icon while its popover is open → close (toggle)
+  if(_helpPopEl && _helpPopKey === key){ closeHelpPop(); return; }
+  closeHelpPop();
+  const html = t(key);
+  if(!html) return;
+  const pop = document.createElement('div');
+  pop.className = 'help-pop';
+  pop.innerHTML = html;
+  document.body.appendChild(pop);
+  const r = anchor.getBoundingClientRect();
+  const pw = pop.offsetWidth, ph = pop.offsetHeight;
+  let left = Math.min(Math.max(8, r.left), window.innerWidth - pw - 8);
+  let top  = r.bottom + 8;
+  if(top + ph > window.innerHeight - 8) top = Math.max(8, r.top - ph - 8);  // flip above if no room below
+  pop.style.left = left + 'px';
+  pop.style.top  = top + 'px';
+  _helpPopEl = pop; _helpPopKey = key;
+  setTimeout(() => {  // next tick so the opening click doesn't immediately close it
+    document.addEventListener('click', _onHelpPopOutsideClick);
+    document.addEventListener('keydown', _onHelpPopEscape);
+  }, 0);
+}
+function closeHelpPop(){
+  if(_helpPopEl){ _helpPopEl.remove(); _helpPopEl = null; _helpPopKey = null; }
+  document.removeEventListener('click', _onHelpPopOutsideClick);
+  document.removeEventListener('keydown', _onHelpPopEscape);
+}
+function _onHelpPopOutsideClick(e){ if(_helpPopEl && !_helpPopEl.contains(e.target)) closeHelpPop(); }
+function _onHelpPopEscape(e){ if(e.key === 'Escape') closeHelpPop(); }
+
 // ── Notification stack ──────────────────────────────────────────
 let toastTimer; // kept for legacy compat
 const _notifTimers = new Map();

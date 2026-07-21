@@ -100,14 +100,17 @@ function renderChecklist() {
       : c.wizard   ? ('🧙 ' + t('setup.btn_wizard'))
       : s.installed ? ('↻ ' + t('setup.btn_reinstall'))
       : ('⚡ ' + t('setup.btn_install'));
-    // Compact single-row card: [☐] icon label tag … status [install]. The full
-    // description moved to a hover tooltip + the detailed guide below, so the list
-    // is several times shorter. Progress is a thin line along the bottom edge.
+    // Compact single-row card: [☐] icon label tag [?] … status [install]. The
+    // full description is behind a tap/click "?" (works on touch, unlike the
+    // hover-only title="" this used to rely on exclusively) + the detailed
+    // guide below, so the list stays several times shorter than showing it
+    // inline. Progress is a thin line along the bottom edge.
     return `<div title="${esc(t('setup.'+c.key+'.desc'))}"
       style="background:var(--surface);border:1px solid ${c.color}28;border-radius:8px;padding:5px 10px;margin-bottom:5px;position:relative;overflow:hidden;display:flex;align-items:center;gap:8px">
       <input type="checkbox" ${s.checked?'checked':''} onchange="setupToggle('${c.key}',this.checked)" style="width:auto;margin:0;flex-shrink:0;cursor:pointer"/>
       <span style="font-size:13px;flex-shrink:0">${c.icon}</span>
       <span style="font-size:12px;font-weight:800;color:${c.color};font-family:var(--display);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0">${c.label}</span>
+      ${helpQ('setup.'+c.key+'.desc')}
       ${tag}
       <span style="margin-left:auto;flex-shrink:0">${badge}</span>
       <button class="btn-ghost btn-sm" style="padding:2px 9px;font-size:10px;border-color:${c.color}55;color:${c.color};flex-shrink:0;white-space:nowrap"

@@ -723,7 +723,7 @@
 
           <!-- Wrapper source selector -->
           <div style="margin-bottom:12px;padding:10px 14px;background:rgba(255,255,255,.04);border:1px solid var(--border);border-radius:9px">
-            <div style="font-size:11px;font-weight:700;margin-bottom:8px" data-i18n="s.wrapper_source">Источник враппера</div>
+            <div style="font-size:11px;font-weight:700;margin-bottom:8px"><span data-i18n="s.wrapper_source">Источник враппера</span><span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'s.help.wrapper_mode')" role="button" tabindex="0">?</span></div>
             <div style="display:flex;flex-direction:column;gap:7px">
               <label style="display:flex;align-items:flex-start;justify-content:flex-start;text-align:left;gap:9px;cursor:pointer;font-size:12.5px;padding:8px 10px;border:1px solid var(--border2);border-radius:8px">
                 <input type="radio" name="wrapper-mode" value="docker-remote" id="wm-remote"
@@ -757,7 +757,7 @@
 
           <!-- Apple ID login — required for ALAC/Atmos -->
           <div style="background:rgba(10,132,255,.08);border:1px solid rgba(10,132,255,.2);border-radius:9px;padding:12px 14px;margin-bottom:12px">
-            <div style="font-size:11px;font-weight:700;color:var(--blue);margin-bottom:10px" data-i18n="s.apple_id_required">🔐 Apple ID — нужен для ALAC / Atmos</div>
+            <div style="font-size:11px;font-weight:700;color:var(--blue);margin-bottom:10px"><span data-i18n="s.apple_id_required">🔐 Apple ID — нужен для ALAC / Atmos</span><span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'s.help.wrapper_apple_id')" role="button" tabindex="0">?</span></div>
             <div class="settings-grid">
               <div class="field-group">
                 <label class="lbl">Apple ID (email)</label>
@@ -784,19 +784,19 @@
 
           <div class="settings-grid">
             <div class="field-group">
-              <label class="lbl">Decrypt port (wrapper -D)</label>
+              <label class="lbl">Decrypt port (wrapper -D)<span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'s.help.decrypt_port')" role="button" tabindex="0">?</span></label>
               <input id="s-dport" placeholder="127.0.0.1:10020" oninput="saveSetting('decrypt-port',this.value)"/>
             </div>
             <div class="field-group">
-              <label class="lbl">M3U8 port (wrapper -M)</label>
+              <label class="lbl">M3U8 port (wrapper -M)<span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'s.help.m3u8_port')" role="button" tabindex="0">?</span></label>
               <input id="s-mport" placeholder="127.0.0.1:20020" oninput="saveSetting('m3u8-port',this.value)"/>
             </div>
             <div class="field-group">
-              <label class="lbl">Max memory (MB)</label>
+              <label class="lbl">Max memory (MB)<span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'s.help.max_memory')" role="button" tabindex="0">?</span></label>
               <input id="s-mem" type="number" min="64" max="4096" oninput="saveSetting('max-memory',parseInt(this.value))"/>
             </div>
             <div class="field-group">
-              <label class="lbl">Atmos max bitrate (kbps)</label>
+              <label class="lbl">Atmos max bitrate (kbps)<span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'s.help.atmos_bitrate')" role="button" tabindex="0">?</span></label>
               <select id="s-atmosmax" onchange="saveSetting('atmos-max',parseInt(this.value))">
                 <option value="2448">2448 kbps</option>
                 <option value="2768">2768 kbps</option>
@@ -1040,7 +1040,7 @@
         </div>
 
         <div class="block mt12" style="background:rgba(0,0,0,.3)">
-            <div class="block-title">🐳 Docker Wrapper</div>
+            <div class="block-title">🐳 Docker Wrapper<span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'s.help.docker_session')" role="button" tabindex="0">?</span></div>
 
             <!-- Session status -->
             <div id="wrapper-session-bar" style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 12px;border-radius:8px;font-size:11px;background:rgba(255,255,255,.04);border:1px solid var(--border)">
