@@ -300,6 +300,22 @@ except Exception as e:
 diag("PATCH", "Patching Ripper for per-song tracking…", "STEP")
 try:
     from src.rip import Ripper as _Ripper
+    from src.task import Task as _Task, Status as _Status
+
+    # rip_song() (src/rip.py) catches essentially every failure internally
+    # (bad m3u8, integrity check, decrypt error, ...) and just calls
+    # task.update_status(Status.FAILED) — it does NOT raise (only
+    # asyncio.CancelledError re-propagates). So catching an exception around
+    # rip_song can never see those failures; it always falls into the success
+    # branch and logs a false "SAVED". Hook Task.update_status instead — every
+    # terminal code path in rip_song/_rip_song_legacy calls it — and key the
+    # last real status by adamId so _diag_rip_song can check the truth.
+    _LAST_SONG_STATUS = {}
+    _orig_update_status = _Task.update_status
+    def _tracked_update_status(self, status):
+        _LAST_SONG_STATUS[self.adamId] = status
+        return _orig_update_status(self, status)
+    _Task.update_status = _tracked_update_status
 
     # Use *args/**kw so the wrapper is robust to the real rip_song/rip_album
     # signature (it takes more positional args than just url/codec/flags — a
@@ -312,7 +328,10 @@ try:
         t = time.time()
         try:
             result = await _orig_rip_song(self, *args, **kw)
-            diag("SONG", f"SAVED id={song_id} in {time.time()-t:.1f}s", "OK")
+            if _LAST_SONG_STATUS.get(song_id) == _Status.FAILED:
+                diag("SONG", f"FAILED id={song_id} in {time.time()-t:.1f}s (caught internally by rip_song, no exception raised)", "ERROR")
+            else:
+                diag("SONG", f"SAVED id={song_id} in {time.time()-t:.1f}s", "OK")
             return result
         except Exception as e:
             diag("SONG", f"FAILED id={song_id}: {type(e).__name__}: {e}", "ERROR")

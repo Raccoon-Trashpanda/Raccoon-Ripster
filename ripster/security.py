@@ -54,6 +54,8 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "minimize-to-tray",
     "minimize-to",      # where a plain minimize goes: taskbar (default) / tray
     "wrapper-apple-id", "wrapper-password", "wrapper-mode", "apple-wrapper",
+    "wrapper-accounts",   # multi-account Apple wrapper pool — list of {id,password,label}
+    "apple-pool", "apple-pool-size",
     "decrypt-port", "m3u8-port",
     "url-quality", "album-folder", "single-disc",
     "show-", "auto-", "_last_svc",

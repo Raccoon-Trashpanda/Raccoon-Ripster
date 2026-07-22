@@ -79,7 +79,7 @@ async function loadSpotifyTokenStatus() {
     if (logEl) {
       const log = r.log || [];
       logEl.innerHTML = log.length
-        ? log.map(e => `${e.time||''} ${e.status||''}${e.detail ? (' · ' + e.detail) : ''}`).join('<br>')
+        ? log.map(e => `${esc(e.time||'')} ${esc(e.status||'')}${e.detail ? (' · ' + esc(e.detail)) : ''}`).join('<br>')
         : t('op.no_pushes');
     }
   } catch (e) {

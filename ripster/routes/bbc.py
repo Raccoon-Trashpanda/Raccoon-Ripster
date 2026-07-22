@@ -187,15 +187,25 @@ async def get_episodes(
 
 @router.get("/search")
 async def search_bbc(q: str = Query(..., min_length=1)):
-    url = f"{_RMS}/experience/inline/search?q={q}"
+    url = f"{_RMS}/experience/inline/search"
     async with _HTTP.ashared() as c:
-        r = await c.get(url, headers={"Accept": "application/json"})
+        r = await c.get(url, params={"q": q}, headers={"Accept": "application/json"})
     if r.status_code != 200:
         raise HTTPException(502, f"BBC search {r.status_code}")
     data = r.json()
     items = []
+    # The response groups hits into blocks — a "Shows" block of container_item
+    # (brands/rubrics, e.g. "Radio 1's Essential Mix" the show) and an
+    # "Episodes" block of playable_item (actual downloadable episodes). Only
+    # the latter has a real vpid/urn:...:episode:... pid that _bbc_preflight
+    # can resolve to a stream — a container_item's "pid" is a BRAND id, which
+    # has no `versions` and always fails preflight ("нет доступных версий").
+    # The "Shows" block sorts first and alone fills the caller's top-N slice,
+    # so without this filter real episodes never surface in search results.
     for block in data.get("data", []):
         for ep in block.get("data", []):
+            if ep.get("type") != "playable_item":
+                continue
             items.append(_parse_ep(ep))
     return {"items": items}
 

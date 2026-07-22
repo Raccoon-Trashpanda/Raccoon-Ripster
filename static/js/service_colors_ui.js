@@ -11,7 +11,7 @@ function renderSvcColorGrid() {
   if (!grid) return;
   const cfg = (S.config && S.config['service-colors']) || {};
   grid.innerHTML = _SVC_PICKER_LIST.map(svc => {
-    const val = cfg[svc] || SVC_BRAND[svc] || '#888888';
+    const val = escapeHtml(cfg[svc] || SVC_BRAND[svc] || '#888888');
     return `
       <label style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;cursor:pointer">
         <input type="color" value="${val}" onchange="saveSvcColor('${svc}',this.value)"
@@ -180,7 +180,7 @@ function showUrlServiceModal(url, quality, detectedSvc) {
   };
 
   const svcInfo = SVC_INFO[detectedSvc] || {label:detectedSvc,color:'var(--muted)',engines:[t('q.auto_word')]};
-  const shortUrl = url.length > 60 ? url.slice(0,57)+'…' : url;
+  const shortUrl = escapeHtml(url.length > 60 ? url.slice(0,57)+'…' : url);
 
   const modal = document.createElement('div');
   modal.id = 'url-svc-modal';
@@ -193,7 +193,7 @@ function showUrlServiceModal(url, quality, detectedSvc) {
 
   const targetBtns = targetOptions.map(sk => {
     const si = SVC_INFO[sk]||{label:sk,color:'var(--muted)'};
-    return `<button onclick="chooseUrlSvc(${JSON.stringify(url)},${JSON.stringify(quality)},${JSON.stringify(detectedSvc)},${JSON.stringify(sk)})"
+    return `<button onclick="chooseUrlSvc(${escapeHtml(JSON.stringify(url))},${escapeHtml(JSON.stringify(quality))},${escapeHtml(JSON.stringify(detectedSvc))},${escapeHtml(JSON.stringify(sk))})"
       style="flex:1;padding:10px 14px;background:rgba(255,255,255,.06);border:1px solid rgba(255,255,255,.12);border-radius:9px;cursor:pointer;font-family:var(--font);transition:.15s;text-align:center"
       onmouseover="this.style.borderColor='${si.color}'" onmouseout="this.style.borderColor='rgba(255,255,255,.12)'">
       <div style="font-size:13px;font-weight:700;color:${si.color}">${si.label}</div>
@@ -575,16 +575,16 @@ async function coderMix(taskId) {
 
   const warn = p.lossless ? '' :
     `<div style="margin:8px 0;padding:8px 10px;background:rgba(255,85,0,.12);border:1px solid rgba(255,85,0,.35);border-radius:8px;font-size:11px;color:#ff7a3d;line-height:1.4">
-      ${ti('cd.lossy_warn',{codec:(p.codec||p.source_ext||'?')})}</div>`;
+      ${ti('cd.lossy_warn',{codec:escapeHtml(p.codec||p.source_ext||'?')})}</div>`;
 
   const ov = document.createElement('div');
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center';
   ov.innerHTML = `
     <div style="background:var(--panel,#1a1a1f);border:1px solid #ffffff18;border-radius:14px;padding:18px 20px;width:min(440px,92vw);box-shadow:0 20px 60px #000a">
       <div style="font-size:15px;font-weight:700;color:#c9a0ff;margin-bottom:2px">🎚 Ripster Coder</div>
-      <div style="font-size:11px;color:#888;margin-bottom:12px">${ti('cd.mix_desc',{n:p.count})} → <code>${p.out_dir}</code></div>
+      <div style="font-size:11px;color:#888;margin-bottom:12px">${ti('cd.mix_desc',{n:p.count})} → <code>${escapeHtml(p.out_dir)}</code></div>
       <label style="font-size:11px;color:#aaa">${t('cd.out_name')}</label>
-      <input id="coder-name" value="${(p.name||'').replace(/"/g,'&quot;')}" style="width:100%;margin:4px 0 10px;padding:8px 10px;border-radius:8px;border:1px solid #ffffff22;background:#0e0e12;color:#eee;font-size:13px">
+      <input id="coder-name" value="${escapeHtml(p.name||'')}" style="width:100%;margin:4px 0 10px;padding:8px 10px;border-radius:8px;border:1px solid #ffffff22;background:#0e0e12;color:#eee;font-size:13px">
       ${warn}
       <label style="font-size:11px;color:#aaa">${t('cd.mix_fmt')}</label>
       <select id="coder-fmt" style="width:100%;margin:4px 0 14px;padding:8px 10px;border-radius:8px;border:1px solid #ffffff22;background:#0e0e12;color:#eee;font-size:13px">

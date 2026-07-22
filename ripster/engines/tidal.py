@@ -163,9 +163,18 @@ _RE_PERCENT     = re.compile(r'(\d{1,3})%\|')
 # Session/auth problems. EOFError appears when OrpheusDL hits an interactive
 # login prompt (no/invalid session) with no stdin — we guard against that in
 # build_cmd, but classify it too so the user gets a clear message.
+# TidalAuthError / "token has expired" — found 2026-07-22: the pasted
+# `tidal-token` (config key, ~16h lifetime, NOT auto-refreshed — see
+# _orpheus_access_token's own docstring) expiring raised exactly this
+# traceback, but neither this regex nor classify_download_error recognized
+# it, so it fell all the way through to the generic "трек не докачался
+# (DASH/сеть прервалась)" message — actively misleading the user toward
+# retrying/switching VPN nodes, which can never fix an expired token. 3 auto-
+# retries burned (15s/45s/120s backoff) before finally erroring, every time.
 _RE_AUTH_FAIL   = re.compile(
     r'TIDAL_NOT_AUTHED|no saved session|relogin|invalid.*session|unauthorized|'
-    r'\b401\b|\b403\b|EOFError|Choose a login method',
+    r'\b401\b|\b403\b|EOFError|Choose a login method|'
+    r'TidalAuthError|token has expired|token.*expired',
     re.I,
 )
 
@@ -250,12 +259,15 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict, atmos: 
         covers["embed_cover"]         = True
         # Embedded (in-audio) cover is pinned to 1000×1000 across ALL services
         # by request — uniform tag artwork. Sources natively smaller (e.g.
-        # SoundCloud 500) just deliver their max. The EXTERNAL cover file stays
-        # high-res (1400) so the on-disk original is unaffected.
+        # SoundCloud 500) just deliver their max.
         covers["main_resolution"]     = 1000
-        covers["save_external"]       = True
-        covers["external_format"]     = "jpg"
-        covers["external_resolution"] = 1400
+        # No per-track external cover file — it duplicated the SAME album art
+        # once per track (~230MB of pure waste on a 14-track album) since
+        # OrpheusDL writes it next to every track, not once per album. The
+        # embedded cover + the one folder-level cover.jpg (written unconditionally
+        # by OrpheusDL's _download_album_files, unaffected by this flag) already
+        # cover both use cases. By request 2026-07-22.
+        covers["save_external"]       = False
 
         # Atmos via AC-4 needs prefer_ac4; only request it on the top tier so
         # normal FLAC downloads stay stereo. (Mobile-Atmos session required for

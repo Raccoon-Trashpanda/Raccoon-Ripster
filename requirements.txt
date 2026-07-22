@@ -7,6 +7,9 @@ httpx>=0.27
 # Required by FastAPI for Form/multipart endpoints (uploads). Without it the app
 # crashes at startup: 'Form data requires "python-multipart" to be installed'.
 python-multipart>=0.0.9
+# Spectral-fingerprint analysis for the spectrogram endpoint (cutoff frequency,
+# brickwall/rolloff detection) — /api/spectrogram, ripster/routes/spectrogram.py.
+numpy>=1.26
 
 # CRITICAL — do NOT loosen. The AMD/public-wrapper engine ships protobuf-
 # generated _pb2 modules built against the protobuf 6.31.x runtime (grpcio-tools

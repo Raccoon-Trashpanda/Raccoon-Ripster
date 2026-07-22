@@ -16,18 +16,18 @@ async function loadDeps() {
       const pin = p.pinned ? ' <span title="закреплён — обновление ломает сборку">📌</span>' : '';
       const col = p.pinned ? '#ffb84d' : 'var(--text)';
       return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #ffffff11">
-        <span style="color:${col};min-width:0;overflow:hidden;text-overflow:ellipsis">${p.name}${pin}
-          <span style="color:var(--muted)">${p.version} → ${p.latest}</span></span>
-        <button onclick="updateDep('${p.name}',${p.pinned?'true':'false'})"
+        <span style="color:${col};min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}${pin}
+          <span style="color:var(--muted)">${esc(p.version)} → ${esc(p.latest)}</span></span>
+        <button onclick="updateDep('${esc(p.name)}',${p.pinned?'true':'false'})"
           style="flex-shrink:0;padding:4px 10px;border-radius:7px;border:1px solid var(--red);background:transparent;color:var(--text);cursor:pointer;font-size:12px">⬆</button>
       </div>`;
     }).join('');
-  } catch (e) { box.innerHTML = '⛔ ' + (e.message || e); }
+  } catch (e) { box.innerHTML = '⛔ ' + esc(e.message || e); }
 }
 async function updateDep(pkg, pinned) {
   if (pinned && !confirm(pkg + ' закреплён — обновление может сломать сборку (Qobuz/AMD/Widevine). Точно обновить?')) return;
   const box = document.getElementById('deps-list');
-  if (box) box.innerHTML = '⏳ Обновляю ' + pkg + '… (до 10 мин)';
+  if (box) box.innerHTML = '⏳ Обновляю ' + esc(pkg) + '… (до 10 мин)';
   try {
     const r = await api('POST', '/api/admin/deps/update', { package: pkg, force: !!pinned });
     if (r.pinned) { alert(r.msg); loadDeps(); return; }

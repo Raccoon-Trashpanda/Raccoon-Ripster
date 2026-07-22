@@ -63,9 +63,15 @@ async def _probe_yandex(overlay: dict | None = None) -> dict:
 
 async def _probe_amazon(overlay: dict | None = None) -> dict:
     """Amazon Music: download goes through the `amz` CLI with a saved token.
-    There's no cheap account-status endpoint, so we verify (1) the token is
-    configured and (2) the `amz` executable is resolvable — that's what a
-    real download needs at minimum."""
+
+    Previously this only checked "is a token string present" + "is the `amz`
+    package importable" — it never actually asked Amazon whether the token
+    still works. That made the Setup/services status page show a green
+    checkmark for a long-expired token, so guests would pick Amazon, try to
+    download, and fail — misleading everyone (found 2026-07-22). Now makes a
+    real, cheap `GET /account` call (`amz.api.API.get_account_info`) and
+    treats an expired/invalid/banned token as a genuine failure, same as the
+    Apple decrypt-path health check."""
     token = (_view(overlay).get("amazon-token") or "").strip()
     if not token:
         return {"ok": False, "error": "Токен не задан — Settings → 🅰️ Amazon (amz.dezalty.com/login)."}
@@ -87,12 +93,44 @@ async def _probe_amazon(overlay: dict | None = None) -> dict:
             return {"ok": False,
                     "error": "CLI `amz` не найден — pip install amazon-music "
                              "(или задай amazon-cli-path)."}
+
+        # Real token check — cheap single GET, same client the actual downloader uses.
+        try:
+            from amz.api import API as _AmzAPI
+            from amz.errors import InvalidAccessToken, UserBanned, RateLimitExceeded, ApiConnectionError
+            api_url = (_cfg.get("amazon-api-url") or "https://amz.dezalty.com").strip()
+            info = _AmzAPI(api_url, token).get_account_info()
+        except InvalidAccessToken:
+            return {"ok": False, "error": "Токен Amazon протух — обнови в Settings → 🅰️ Amazon "
+                                          "(amz.dezalty.com/login)."}
+        except UserBanned:
+            return {"ok": False, "error": "Amazon-аккаунт заблокирован/забанен — токен не поможет, нужен другой."}
+        except RateLimitExceeded:
+            # A real, transient rate-limit (429) — the account/token themselves are
+            # fine, just throttled right now. Don't flip the whole service red.
+            return {"ok": True, "user": {
+                "login": "token ✓", "lossless": True, "hq": True,
+                "note": "Токен задан, но проверка сейчас rate-limited (429) — не про токен.",
+            }}
+        except ApiConnectionError as e:
+            # amz.fetch() raises this for BOTH real network drops AND a bad HTTP
+            # response from amz.dezalty.com (5xx / non-JSON) — either way the
+            # third-party wrapper itself is down/unreachable right now, which
+            # means a real download will fail too regardless of token validity.
+            # Reporting this as green (as the old presence-only check did) was
+            # exactly what misled everyone into trying and failing — say so
+            # honestly instead (found 2026-07-22, amz.dezalty.com was returning
+            # a Heroku "Application Error" page at the time).
+            return {"ok": False, "error": f"amz.dezalty.com сейчас недоступен ({e}) — "
+                                          f"не проблема токена, сторонний сервис лежит, попробуй позже."}
+        except Exception as e:
+            return {"ok": False, "error": f"Не удалось проверить токен: {type(e).__name__}: {e}"}
+
         return {"ok": True, "user": {
-            "login":    "token ✓",
+            "login":    (info.get("email") or info.get("username") or "token ✓"),
             "lossless": True,         # Master/HD при наличии Unlimited
             "hq":       True,
-            "note":     f"Токен задан, CLI: {detail} ✓ "
-                        f"(аккаунт проверяется при первой загрузке)",
+            "note":     f"Токен проверен вживую, CLI: {detail} ✓",
         }}
 
     try:
@@ -688,14 +726,58 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
 
     data  = r.json().get("data", [{}])[0]
     sf_id = (data.get("id") or storefront).upper()
+
+    # A valid media-user-token/bearer only proves METADATA access (search,
+    # catalog lookups) — it says nothing about whether either decrypt path
+    # can actually deliver a download right now. Without this check the probe
+    # (and therefore the bot's svc_unavailable gate) reports Apple "ok" while
+    # every real download dies downstream — exactly what happened 2026-07-22
+    # while the local wrapper was stuck on Apple's own device-limit lease
+    # error. Check both decrypt paths the router can pick between; either one
+    # being healthy is enough (zhaarey uses the local docker wrapper, AMD
+    # uses the public wm.wol.moe-style wrapper).
+    decrypt_ok, decrypt_note = await _apple_decrypt_path_ok()
+    if not decrypt_ok:
+        return {"ok": False,
+                "error": f"Метаданные доступны, но расшифровка недоступна: {decrypt_note}"}
+
     return {
         "ok": True,
         "user": {
             "country": sf_id,
             "lossless": True,
             "hires":    True,
+            "note": decrypt_note,
         },
     }
+
+
+async def _apple_decrypt_path_ok() -> tuple[bool, str]:
+    """True if AT LEAST ONE Apple decrypt path (local zhaarey wrapper OR the
+    public AMD wrapper) looks usable right now. Best-effort — any internal
+    error here counts as "can't confirm", not a hard failure of the probe
+    itself, so a broken health-check never masks otherwise-working tokens."""
+    local_ok = False
+    try:
+        from ripster.amd import check_wrapper_running
+        local_ok = await check_wrapper_running()
+    except Exception:
+        pass
+    if local_ok:
+        return True, "локальный wrapper готов"
+
+    try:
+        from ripster.amd import amd_wrapper_status
+        instance = _cfg.get("amd-instance-url", "wm.wol.moe")
+        secure   = _cfg.get("amd-instance-secure", True)
+        r = await amd_wrapper_status(instance, secure)
+        if r.get("ready"):
+            return True, f"публичный AMD-wrapper готов ({r.get('client_count', 0)} клиентов)"
+        if "error" in r:
+            return False, f"локальный wrapper не отвечает, публичный: {r['error']}"
+        return False, "локальный wrapper не отвечает, публичный не готов (0 клиентов/регионов)"
+    except Exception as e:
+        return False, f"локальный wrapper не отвечает, публичный не проверить: {type(e).__name__}"
 
 
 async def _probe_beatport(overlay: dict | None = None) -> dict:

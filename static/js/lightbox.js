@@ -136,10 +136,10 @@ async function loadHistory() {
     const col = SVC_COLOR[h.service] || '#888';
     const lbl = SVC_LABEL[h.service] || '?';
     const ts  = h.ts ? new Date(h.ts).toLocaleString('ru') : '';
-    const title = h.title || _titleFromUrl(h.url);
-    const artist = h.artist || '';
+    const title = esc(h.title || _titleFromUrl(h.url));
+    const artist = esc(h.artist || '');
     const tracksInfo = h.tracks > 1 ? ' · '+ti('q.n_tracks',{n:h.tracks}) : '';
-    const art = h.artworkUrl ? `<img src="${h.artworkUrl}" style="width:100%;height:100%;object-fit:cover;border-radius:6px" loading="lazy"/>` : lbl;
+    const art = h.artworkUrl ? `<img src="${esc(h.artworkUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:6px" loading="lazy"/>` : lbl;
     return `
     <div class="hist-row" style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px">
       <div style="width:40px;height:40px;border-radius:7px;background:${col};color:#fff;font-size:13px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden">${art}</div>
@@ -191,7 +191,7 @@ async function loadWatchlist() {
   list.innerHTML = items.map(w => `
     <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:7px">
       <div style="flex:1;min-width:0">
-        <div style="font-size:13px;font-weight:600;color:var(--text)">${w.name||w.url}</div>
+        <div style="font-size:13px;font-weight:600;color:var(--text)">${esc(w.name||w.url)}</div>
         <div style="font-size:11px;color:var(--muted);margin-top:2px">
           ${w.service||'apple'} · ${w.auto_download?t('wl.auto_dl'):t('wl.notify_only')}
           ${w.last_check?' · '+t('wl.checked_at')+' '+new Date(w.last_check).toLocaleString('ru'):''}

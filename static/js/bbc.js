@@ -28,7 +28,7 @@ function _bbcDlRender() {
     <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 12px;margin-bottom:6px">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
         <span style="font-size:11px;color:var(--muted)">⬇</span>
-        <span style="font-size:12px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${d.title}</span>
+        <span style="font-size:12px;font-weight:600;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(d.title)}</span>
         <span style="font-size:11px;font-family:var(--mono);color:var(--muted);flex-shrink:0">${d.pct}%</span>
       </div>
       <div style="height:4px;background:rgba(255,255,255,.06);border-radius:2px;overflow:hidden">
@@ -73,12 +73,12 @@ async function bbcLoadBrands() {
   const el = document.getElementById('bbc-brands');
   if (!el) return;
   el.innerHTML = BBC.brands.map(b =>
-    `<span onclick="bbcSelectBrand('${b.id}',this)" data-brand="${b.id}"
+    `<span onclick="bbcSelectBrand('${_esc(b.id)}',this)" data-brand="${esc(b.id)}"
       style="padding:4px 10px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;
              border:1px solid ${b.id===BBC.activeBrand?'var(--red)':'var(--border)'};
              color:${b.id===BBC.activeBrand?'var(--red)':'var(--muted)'};
              background:${b.id===BBC.activeBrand?'rgba(192,132,160,.12)':'var(--surface)'}">
-      ${b.label}
+      ${esc(b.label)}
     </span>`
   ).join('');
 }
@@ -172,12 +172,12 @@ function bbcCard(ep) {
   const pid   = ep.pid  || '';
   const vpid  = ep.vpid || '';
   const brandLabel = (BBC.brands.find(b => b.id === BBC.activeBrand) || {}).label || '';
-  const imgAttr = img ? `src="${img}"` : '';
+  const imgAttr = img ? `src="${esc(img)}"` : '';
   return `
   <div id="bbccard-${pid}" data-bbc-pid="${pid}" data-bbc-title="${_esc(title)}" data-bbc-artist="${_esc(sub)}" data-bbc-img="${_esc(img)}" data-bbc-vpid="${_esc(vpid)}" data-bbc-brand="${_esc(brandLabel)}"
     style="background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:border-color .15s"
     onmouseenter="this.style.borderColor='var(--border2)'" onmouseleave="this.style.borderColor='var(--border)'">
-    <div style="position:relative;cursor:pointer" onclick="_bbcOpenMix('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}',${ep.duration||0},'${date}')" title="${t('b.open_mix')}">
+    <div style="position:relative;cursor:pointer" onclick="_bbcOpenMix('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}',${ep.duration||0},'${_esc(date)}')" title="${t('b.open_mix')}">
       <img id="bbccard-img-${pid}" ${imgAttr} loading="lazy"
         style="width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--surface2)"
         onerror="this.removeAttribute('src')"/>
@@ -187,9 +187,9 @@ function bbcCard(ep) {
         onclick="event.stopPropagation();_bbcMdbTracklist('${pid}')" title="${t('b.tl_mdb')}">🗄 MixesDB</div>
     </div>
     <div style="padding:8px 9px 9px">
-      <div style="font-size:11.5px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${title}</div>
-      ${sub ? `<div style="font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${sub}</div>` : ''}
-      ${date ? `<div style="font-size:10px;color:var(--muted2);margin-top:3px">${date}</div>` : ''}
+      <div style="font-size:11.5px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(title)}</div>
+      ${sub ? `<div style="font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${esc(sub)}</div>` : ''}
+      ${date ? `<div style="font-size:10px;color:var(--muted2);margin-top:3px">${esc(date)}</div>` : ''}
       <div id="bbcmdb-tl-${pid}" style="display:none;margin-top:6px;max-height:120px;overflow-y:auto;font-size:10px;color:var(--muted);line-height:1.5;border-top:1px solid var(--border);padding-top:5px"></div>
       <div style="display:flex;gap:5px;margin-top:7px">
         <button onclick="bbcDownloadSmart('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}')"

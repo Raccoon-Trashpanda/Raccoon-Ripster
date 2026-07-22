@@ -150,7 +150,7 @@ async function loadStats(period) {
     : '<div style="color:var(--muted);font-size:11px">' + window.t('st.no_data') + '</div>');
   const tlStep = days.length > 30 ? Math.ceil(days.length / 10) : (days.length > 14 ? 3 : 1);
   set('stats-tl-labels', days.map((r, i) =>
-    `<div style="flex:1;min-width:11px;max-width:30px;text-align:center;overflow:hidden">${i % tlStep === 0 ? (r.date || '').slice(5) : ''}</div>`).join(''));
+    `<div style="flex:1;min-width:11px;max-width:30px;text-align:center;overflow:hidden">${i % tlStep === 0 ? esc((r.date || '').slice(5)) : ''}</div>`).join(''));
 
   // ── By hour ──
   const hours = Array.isArray(d.by_hour) ? d.by_hour : [];
