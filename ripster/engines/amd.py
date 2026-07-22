@@ -24,6 +24,10 @@ _CODEC_MAP = {
 }
 
 _RE_CONN_FAIL   = re.compile(r"Unable to connect|UNAVAILABLE|connection refused", re.I)
+# The gRPC channel to wm.wol.moe opens fine but the pool has nobody connected —
+# a volunteer-hosted-instance problem, distinct from _RE_CONN_FAIL (which means
+# we couldn't even reach the server). See apple_router.mark_public_wrapper_unhealthy.
+_RE_NO_INSTANCES = re.compile(r"no healthy and ready instances available", re.I)
 _RE_DONE        = re.compile(r"All done|Finished", re.I)
 _RE_PROGRESS    = re.compile(r"Track\s+(\d+)[/ ]+(\d+)|(\d+)[/ ]+(\d+)\s+tracks?", re.I)
 # AMD log format: "[809978] 2026-05-29 11:17:29.573 | SONG | <title> | INFO - Start ripping..."
@@ -63,6 +67,7 @@ class AMDEngine(EngineBase):
 
     def __init__(self):
         self._conn_hint_shown = False
+        self._no_instances_hint_shown = False
         self._song_started = 0
         self._song_saved = 0
         self._song_total = 0     # real album track count (from amd_runner tracklist)
@@ -110,6 +115,23 @@ class AMDEngine(EngineBase):
             m = _RE_DL_PCT.search(clean)
             if m:
                 yield Event(kind=EventKind.PROGRESS, current=int(float(m.group(1))), total=100)
+            return
+
+        # Pool has zero ready instances right now — flag it unhealthy so the
+        # router stops routing here for a while instead of every task eating
+        # a ~28s guaranteed-fail retry loop. Show the hint once per task run
+        # (the retry itself logs this line many times per attempt).
+        if _RE_NO_INSTANCES.search(clean):
+            if not self._no_instances_hint_shown:
+                self._no_instances_hint_shown = True
+                from ripster.apple_router import mark_public_wrapper_unhealthy
+                mark_public_wrapper_unhealthy()
+                yield Event(kind=EventKind.LINE,
+                            message="⚠ Публичный wrapper-manager: сейчас нет ни одного "
+                                    "живого инстанса в пуле (не наша поломка, сторонний "
+                                    "сервис) — временно исключён из роутинга",
+                            level=LineLevel.WARN,
+                            extra={"msg_key": "console.amd_no_instances"})
             return
 
         # Connection failure — show hint once per task run

@@ -62,6 +62,7 @@ FALLBACK: dict[str, str] = {
     # ── AMD engine (amd.py) ───────────────────────────────────────────────────
     "console.amd_segments":     "⬦ AMD: {n} сегм. [{elapsed}]",
     "console.amd_instance_hint": "  💡 Убедись что instance = wm.wol.moe",
+    "console.amd_no_instances": "⚠ Публичный wrapper-manager: сейчас нет ни одного живого инстанса в пуле (не наша поломка, сторонний сервис) — временно исключён из роутинга",
 }
 
 

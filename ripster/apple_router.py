@@ -144,6 +144,10 @@ def _cached(key: str, fn) -> bool:
 
 
 def _public_wrapper_ok(config: dict) -> bool:
+    # Honour the pool health gate first — the server can answer HTTP fine while
+    # its instance pool has nobody connected (see public_wrapper_healthy below).
+    if not public_wrapper_healthy():
+        return False
     host = (config.get("amd-instance-url") or "").strip()
     if not host:
         return False
@@ -172,6 +176,31 @@ def mark_local_wrapper_unhealthy(ttl: float = 900.0) -> None:
 def local_wrapper_healthy() -> bool:
     """False while the local wrapper is in its post-CKC-failure cooldown."""
     return time.time() >= _local_unhealthy_until
+
+
+# ── Public wrapper-manager pool health gate ───────────────────────────────────
+# The plain HTTP reachability check (``_public_wrapper_ok``) only proves the
+# wm.wol.moe server itself answers — it says nothing about whether the POOL
+# behind it has any actual wrapper instance online. Confirmed 2026-07-22: the
+# gRPC channel opens fine, but every real request fails with
+# "WrapperManagerException: no healthy and ready instances available" — a
+# volunteer-hosted pool with zero connected instances at that moment. The AMD
+# engine calls ``mark_public_wrapper_unhealthy()`` on that exact error so the
+# router stops sending traffic into a ~28s guaranteed-fail retry loop until
+# the cooldown expires and it's worth probing again.
+_public_unhealthy_until: float = 0.0
+
+
+def mark_public_wrapper_unhealthy(ttl: float = 300.0) -> None:
+    """Flag the public wm.wol.moe pool as having no ready instances for ``ttl``
+    seconds — the router treats it as down meanwhile instead of retrying blind."""
+    global _public_unhealthy_until
+    _public_unhealthy_until = time.time() + ttl
+
+
+def public_wrapper_healthy() -> bool:
+    """False while the public pool is in its post-failure cooldown."""
+    return time.time() >= _public_unhealthy_until
 
 
 def _local_wrapper_ok(config: dict) -> bool:

@@ -546,6 +546,7 @@ var LANG = {
     'console.orpheus_retry':'⟳ OrpheusDL: новые настройки — автоматический повтор…',
     'console.amd_segments':'⬦ AMD: {n} сегм. [{elapsed}]',
     'console.amd_instance_hint':'  💡 Убедись что instance = wm.wol.moe',
+    'console.amd_no_instances':'⚠ Публичный wrapper-manager: сейчас нет ни одного живого инстанса в пуле (не наша поломка, сторонний сервис) — временно исключён из роутинга',
     // ── Wrapper dynamic statuses (app.js) ──
     's.wrapper_connected':'подключён','s.wrapper_not_running':'не запущен',
     's.docker_not_found':'не найден','s.docker_status':'(Docker: {msg})',
@@ -1561,6 +1562,7 @@ var LANG = {
     'console.orpheus_retry':'⟳ OrpheusDL: new settings — automatic retry…',
     'console.amd_segments':'⬦ AMD: {n} seg. [{elapsed}]',
     'console.amd_instance_hint':'  💡 Make sure instance = wm.wol.moe',
+    'console.amd_no_instances':'⚠ Public wrapper-manager: no live instances in the pool right now (not our bug, third-party service) — temporarily excluded from routing',
     // ── Wrapper dynamic statuses (app.js) ──
     's.wrapper_connected':'connected','s.wrapper_not_running':'not running',
     's.docker_not_found':'not found','s.docker_status':'(Docker: {msg})',
@@ -2221,6 +2223,7 @@ var LANG = {
     'console.orpheus_retry':'⟳ OrpheusDL: नई सेटिंग्स — स्वतः पुनः प्रयास…',
     'console.amd_segments':'⬦ AMD: {n} सेग. [{elapsed}]',
     'console.amd_instance_hint':'  💡 सुनिश्चित करें कि instance = wm.wol.moe',
+    'console.amd_no_instances':'⚠ पब्लिक wrapper-manager: पूल में अभी कोई भी लाइव इंस्टेंस नहीं है (हमारी गलती नहीं, थर्ड-पार्टी सर्विस) — रूटिंग से अस्थायी रूप से हटाया गया',
   },
   ja: {
     'nav.s_main':'メイン','nav.queue':'キュー','nav.search':'検索',
@@ -2413,6 +2416,7 @@ var LANG = {
     'console.orpheus_retry':'⟳ OrpheusDL：新しい設定 — 自動再試行…',
     'console.amd_segments':'⬦ AMD: {n} セグ. [{elapsed}]',
     'console.amd_instance_hint':'  💡 instance = wm.wol.moe を確認してください',
+    'console.amd_no_instances':'⚠ パブリックwrapper-manager: プールに現在稼働中のインスタンスがありません(こちらの不具合ではなく外部サービスの問題)— 一時的にルーティングから除外されました',
   },
   zh: {
     'nav.s_main':'主界面','nav.queue':'队列','nav.search':'搜索',
@@ -2605,5 +2609,6 @@ var LANG = {
     'console.orpheus_retry':'⟳ OrpheusDL：新设置 — 自动重试…',
     'console.amd_segments':'⬦ AMD：{n} 段 [{elapsed}]',
     'console.amd_instance_hint':'  💡 请确认 instance = wm.wol.moe',
+    'console.amd_no_instances':'⚠ 公共 wrapper-manager:池中当前没有任何在线实例(不是我们的问题,是第三方服务)— 已临时从路由中排除',
   }
 };
