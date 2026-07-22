@@ -106,6 +106,7 @@ function showStab(id, btn) {
   if(id==='deezer')  {
     _setSecret('s-deezer-arl', c['deezer-arl']); setVal('s-deezer-qual',c['deezer-quality']||'flac'); setVal('s-deezer-path',c['deezer-save-path']||'');
     if(c['deezer-arl']) testAuth('deezer');
+    try { loadDeezerAccounts?.(); } catch {}
   }
   if(id==='qobuz')   {
     setVal('s-qobuz-userid',c['qobuz-user-id']||''); _setSecret('s-qobuz-authtok',c['qobuz-auth-token']); setVal('s-qobuz-email',c['qobuz-email']||''); _setSecret('s-qobuz-pass',c['qobuz-password']); setVal('s-qobuz-appid',c['qobuz-app-id']||''); setVal('s-qobuz-secrets',c['qobuz-secrets']||''); setVal('s-qobuz-qual',c['qobuz-quality']||'7'); setVal('s-qobuz-path',c['qobuz-save-path']||'');

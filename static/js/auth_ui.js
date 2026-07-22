@@ -494,3 +494,48 @@ async function autoExtractSpDc() {
   }
 }
 
+// ── Deezer multi-account pool (load-balanced ARLs) ──────────────────────────
+async function loadDeezerAccounts() {
+  const list = document.getElementById('deezer-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/deezer/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = accs.map(a => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        ${a.primary ? '' : `<button onclick="removeDeezerAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`).join('');
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addDeezerAccount() {
+  const arlEl   = document.getElementById('s-deezer-pool-arl');
+  const labelEl = document.getElementById('s-deezer-pool-label');
+  const arl   = (arlEl?.value || '').trim();
+  const label = (labelEl?.value || '').trim();
+  if(!arl) { toast(t('t.error'), 'var(--red)'); return; }
+  try {
+    const r = await api('POST', '/api/deezer/accounts/add', {arl, label});
+    if(r.ok) {
+      toast(r.msg || 'Добавлено', 'var(--green)');
+      if(arlEl) arlEl.value = '';
+      if(labelEl) labelEl.value = '';
+      loadDeezerAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeDeezerAccount(slot) {
+  if(!confirm('Убрать этот аккаунт из пула?')) return;
+  try {
+    const r = await api('POST', `/api/deezer/accounts/${slot}/remove`);
+    toast(r.msg || (r.ok ? 'Убрано' : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadDeezerAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+

@@ -37,8 +37,13 @@ _RE_PERCENT    = re.compile(r"Download\s+at\s+(\d+)\s*%", re.I)
 _RE_TRACK_DONE = re.compile(r"Completed\s+download\s+of", re.I)
 
 
-def _deemix_config_dir() -> Path:
-    """Return the default deemix config folder for the current OS."""
+def _deemix_config_dir(override: str = "") -> Path:
+    """Return the deemix config folder for the current OS — or, for a
+    multi-account pool slot, an isolated per-slot directory (see
+    ripster/deezer_pool.py) so two ARLs don't clobber the same .arl file when
+    downloading concurrently."""
+    if override:
+        return Path(override) / "deemix"
     system = platform.system()
     if system == "Windows":
         base = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
@@ -50,16 +55,17 @@ def _deemix_config_dir() -> Path:
     return Path(xdg) / "deemix"
 
 
-def _write_arl(arl: str) -> Path:
+def _write_arl(arl: str, override: str = "") -> Path:
     """Persist the ARL token where deemix expects to read it."""
-    cfg = _deemix_config_dir()
+    cfg = _deemix_config_dir(override)
     cfg.mkdir(parents=True, exist_ok=True)
     arl_file = cfg / ".arl"
     arl_file.write_text(arl.strip(), encoding="utf-8")
     return arl_file
 
 
-def _write_deemix_config(lyrics: bool | None = None, synced_lyrics: bool | None = None) -> None:
+def _write_deemix_config(lyrics: bool | None = None, synced_lyrics: bool | None = None,
+                         override: str = "") -> None:
     """Pin deemix's EMBEDDED (in-audio) cover to 1000 px — uniform tag artwork
     across all services by request. deemix defaults to embeddedArtworkSize 800.
     The SAVED external cover stays large (localArtworkSize 1400) so the on-disk
@@ -70,7 +76,7 @@ def _write_deemix_config(lyrics: bool | None = None, synced_lyrics: bool | None 
     ``syncedLyrics`` (save .lrc) settings — None leaves whatever's already in
     deemix's config.json untouched (deemix ships both False by default)."""
     import json
-    cfg_dir = _deemix_config_dir()
+    cfg_dir = _deemix_config_dir(override)
     cfg_dir.mkdir(parents=True, exist_ok=True)
     cfg_file = cfg_dir / "config.json"
     data: dict = {}
@@ -137,7 +143,13 @@ class DeezerEngine(EngineBase):
         return [{**q, "engine": self.name} for q in _QUALITIES]
 
     def build_cmd(self, url: str, quality: str, config: dict) -> list[str]:
+        # `deezer-arl` and `_deezer_cfg_dir` may be overridden per-task by the
+        # multi-account pool dispatch (ripster/runner.py, ripster/deezer_pool.py)
+        # to route this download to a specific account's isolated config dir —
+        # a plain single-account setup never sets `_deezer_cfg_dir`, so this is
+        # a no-op (behaves exactly as before the pool existed).
         arl      = (config.get("deezer-arl") or "").strip()
+        cfg_override = config.get("_deezer_cfg_dir") or ""
         out_path = config.get("deezer-save-path") or config.get("save-path", "downloads")
         bitrate  = _BITRATE.get(quality, "3")
         # ALWAYS run deemix as a module on the SAME interpreter — never the
@@ -161,7 +173,7 @@ class DeezerEngine(EngineBase):
         # both settings stay whatever they already were, i.e. off by default).
         lyrics_ov = config.get("_lyrics_override")
         _write_deemix_config(
-            lyrics=lyrics_ov, synced_lyrics=lyrics_ov,
+            lyrics=lyrics_ov, synced_lyrics=lyrics_ov, override=cfg_override,
         )
         # Heal the deemix subprocess against the empty-MEDIA IndexError (issue #23).
         _ensure_media_patch()
@@ -169,7 +181,7 @@ class DeezerEngine(EngineBase):
         # Write ARL to the location deemix reads from. deemix CLI has NO --arl flag.
         if arl:
             try:
-                _write_arl(arl)
+                _write_arl(arl, override=cfg_override)
             except Exception as e:
                 # Fall through — deemix will fail with a clear "login required" message
                 # and is_finished() will map that to a user-visible error.

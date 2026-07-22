@@ -44,10 +44,22 @@ def _client():
 
 
 class WrapperPool:
-    def __init__(self, apple_id: str, password: str, size: int = 5):
-        self.apple_id = apple_id
-        self.password = password
-        self.size = max(1, int(size))
+    def __init__(self, accounts: list[dict], size: int | None = None):
+        """accounts: [{"id": str, "password": str, "label": str}, ...] — ONE
+        DISTINCT Apple account per slot. accounts[0] is the primary
+        (wrapper-apple-id/wrapper-password), accounts[1:] come from the
+        wrapper-accounts config list.
+
+        A single account cannot sustain 2+ concurrent wrapper sessions —
+        Apple's own device-lease limit (see the ripster-apple-wrapper skill's
+        "#1 killer"), so `size` is capped at len(accounts): there is no
+        elastic "spin up more instances of the same account" mode any more.
+        That elastic behavior was the pool's original design but was never
+        actually safe — confirmed 2026-07-22 when even a FRESH device
+        identity under the same account would have re-collided with itself.
+        """
+        self.accounts = accounts
+        self.size = max(1, min(int(size or len(accounts)), len(accounts)))
         self._lock = threading.Lock()
         # slot -> {"busy": bool, "last_used": ts}
         self._slots: dict[int, dict] = {}
@@ -61,6 +73,28 @@ class WrapperPool:
         # never recreate/rebind it. New instances are rip-wrapper-1..N.
         return "amd-wrapper" if i == 0 else f"{NAME_PREFIX}{i}"
 
+    def _data_dir(self, i: int) -> str:
+        """Per-slot PERSISTENT Apple device-identity directory.
+
+        `ripster-wrapper:premium` ships a BAKED-IN device identity (adi.pb +
+        account/cookie sqlite DBs) — every container from the stock image
+        presents the SAME Apple "device" to Apple's servers regardless of
+        which -L account logs in through it. Reusing that shared identity
+        (or one slot's identity for another slot) collides with Apple's
+        per-device concurrent-session limit ("device limit", lease 3062) —
+        found 2026-07-22 when two DIFFERENT accounts both hit that error
+        identically through the unmodified image (see
+        project_service_gating_2026-07-22 memory). Each slot gets its own
+        directory, generated fresh on first boot and then reused (not wiped)
+        on restart so the wrapper doesn't have to burn a fresh device lease
+        every time it restarts."""
+        from pathlib import Path as _P
+        import os as _os
+        base = _P(_os.environ.get("RIPSTER_BASE_DIR") or _P(__file__).resolve().parent.parent)
+        d = base / "dist" / "docker" / "rootfs_pool" / f"acct{i}" / "data"
+        d.mkdir(parents=True, exist_ok=True)
+        return str(d)
+
     def _running(self, c, i: int) -> bool:
         try:
             ct = c.containers.get(self._name(i))
@@ -71,7 +105,9 @@ class WrapperPool:
 
     def _start(self, c, i: int) -> tuple[int, int]:
         """Ensure instance i is up; return its (decrypt, m3u8) host ports.
-        Slot 0 (amd-wrapper) is only ever started if stopped — never recreated."""
+        Slot 0 (amd-wrapper) is only ever started if stopped — never recreated
+        (it already runs with its own proven-working fresh identity mount,
+        set up manually 2026-07-22 at dist/docker/rootfs_working/data)."""
         dec, m3u = self._ports(i)
         name = self._name(i)
         try:
@@ -84,10 +120,14 @@ class WrapperPool:
             if i == 0:
                 # amd-wrapper must already exist; don't synthesize slot 0.
                 raise RuntimeError("slot 0 (amd-wrapper) container not found")
+            if i >= len(self.accounts):
+                raise RuntimeError(f"no account configured for slot {i}")
+            acct = self.accounts[i]
             c.containers.run(
                 IMAGE, detach=True, name=name,
-                environment={"args": f"-H 0.0.0.0 -L {self.apple_id}:{self.password}"},
+                environment={"args": f"-H 0.0.0.0 -L {acct['id']}:{acct['password']}"},
                 ports={"10020/tcp": ("127.0.0.1", dec), "20020/tcp": ("127.0.0.1", m3u)},
+                volumes={self._data_dir(i): {"bind": "/app/rootfs/data", "mode": "rw"}},
                 restart_policy={"Name": "unless-stopped"},
             )
         return dec, m3u
@@ -195,27 +235,40 @@ _POOL: "WrapperPool | None" = None
 _POOL_LOCK = threading.Lock()
 _REAPER_STARTED = False
 
-DEFAULT_POOL_SIZE = 3   # user has 32GB; 1 Apple account across N sessions — keep modest
+DEFAULT_POOL_SIZE = 3   # capped at len(accounts) regardless — see WrapperPool.__init__
+
+
+def _configured_accounts(config: dict) -> list[dict]:
+    """accounts[0] = the primary wrapper-apple-id/wrapper-password (same keys
+    the single-wrapper UI/API already write). accounts[1:] = the
+    wrapper-accounts list (added via Settings → Apple → "+ add account").
+    Each entry needs its own real Apple ID — see WrapperPool's docstring for
+    why one account can't be split across multiple slots."""
+    accounts: list[dict] = []
+    aid, pw = config.get("wrapper-apple-id"), config.get("wrapper-password")
+    if aid and pw:
+        accounts.append({"id": aid, "password": pw, "label": config.get("wrapper-apple-id", "")})
+    for extra in (config.get("wrapper-accounts") or []):
+        if isinstance(extra, dict) and extra.get("id") and extra.get("password"):
+            accounts.append({"id": extra["id"], "password": extra["password"],
+                             "label": extra.get("label") or extra["id"]})
+    return accounts
 
 
 def pool_enabled(config: dict) -> bool:
     """The pool only governs the LOCAL premium wrapper path. Disabled when the
-    docker SDK is missing, when Apple is forced to the public wrapper, or when
-    no wrapper credentials are configured."""
+    docker SDK is missing, when Apple is forced to the public wrapper, when no
+    wrapper credentials are configured, or when fewer than 2 DISTINCT accounts
+    are configured (a single account gains nothing from "pool mode" — see
+    WrapperPool's docstring for why 1 account can't run 2+ sessions)."""
     if docker is None:
         return False
-    # A SINGLE Apple account cannot sustain multiple concurrent wrapper
-    # sessions: every extra container does a fresh `-L` login and Apple trips
-    # "maximum concurrent playing devices" (lease code 3062), which breaks ALL
-    # Apple downloads until the leases expire. So the pool is strictly OPT-IN —
-    # it only runs when `apple-pool` is explicitly turned on (multi-account /
-    # advanced users). Absent or falsey → disabled.
     if config.get("apple-pool") not in (True, "on", "1", 1):
         return False
     mode = (config.get("apple-wrapper") or "auto").strip().lower()
     if mode == "public":
         return False
-    return bool(config.get("wrapper-apple-id") and config.get("wrapper-password"))
+    return len(_configured_accounts(config)) >= 2
 
 
 def get_pool(config: dict) -> "WrapperPool | None":
@@ -225,12 +278,12 @@ def get_pool(config: dict) -> "WrapperPool | None":
         return None
     with _POOL_LOCK:
         if _POOL is None:
+            accounts = _configured_accounts(config)
             try:
                 size = int(config.get("apple-pool-size", DEFAULT_POOL_SIZE) or DEFAULT_POOL_SIZE)
             except Exception:
                 size = DEFAULT_POOL_SIZE
-            _POOL = WrapperPool(config["wrapper-apple-id"], config["wrapper-password"],
-                                size=max(1, min(5, size)))
+            _POOL = WrapperPool(accounts, size=size)
         if not _REAPER_STARTED:
             _REAPER_STARTED = True
             threading.Thread(target=_reaper_loop, args=(_POOL,),

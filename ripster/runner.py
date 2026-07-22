@@ -1112,8 +1112,13 @@ async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
                       or ((prog.get("ownership") or {}).get("service") or {}).get("title")
                       or "BBC Radio")
 
+            # mediaset "pc" (not "iptv-all") — iptv-all only ever exposes a single
+            # 51 kbps HE-AAC rendition; pc exposes that SAME variant plus a real
+            # 102 kbps one, and yt-dlp/ffmpeg pick the highest-bandwidth HLS variant
+            # by default. See ripster/routes/bbc.py's _MSEL for the full investigation
+            # (2026-07-21) — that fix only landed in the web tab's route, not here.
             msel = (f"https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/"
-                    f"mediaset/iptv-all/vpid/{vpid}/format/json")
+                    f"mediaset/pc/vpid/{vpid}/format/json")
             mr = await c.get(msel)
             if mr.status_code != 200:
                 await _log(f"✗ BBC: MediaSelector {mr.status_code} для {vpid}", "error", tid)
@@ -1400,6 +1405,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
     _pool = None
     _pool_slot = None
     _task_cwd = None
+    # Deezer multi-account pool — same shape as the Apple pool above, no Docker
+    # (just a per-slot ARL + isolated deemix config dir). Acquired below,
+    # released in the finally.
+    _dz_pool = None
+    _dz_slot = None
 
     try:
         # Build a per-task config view so the quality-subfolder is visible to
@@ -1440,6 +1450,30 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             _cfg_view["_bbc_duration"] = task.get("_bbc_duration", 0)
         # Per-release lyrics checkbox override (None = use global config).
         _cfg_view["_lyrics_override"] = task.get("lyrics")
+        # Deezer multi-account pool: route this task to a free ARL slot with
+        # its own isolated deemix config dir. ANY failure here → _cfg_view
+        # simply never gets deezer-arl/_deezer_cfg_dir overridden, so build_cmd
+        # falls back to the single primary-account behavior it always had.
+        if engine_name == "deezer":
+            try:
+                from ripster import deezer_pool as _dzp
+                _dz_pool = _dzp.get_pool(_config)
+                if _dz_pool is not None:
+                    _dz_acq = await asyncio.to_thread(_dz_pool.acquire)
+                    if _dz_acq:
+                        _dz_slot, _dz_arl, _dz_cfg_dir = _dz_acq
+                        _cfg_view["deezer-arl"] = _dz_arl
+                        if _dz_cfg_dir is not None:
+                            _cfg_view["_deezer_cfg_dir"] = str(_dz_cfg_dir)
+                        task["log"].append(f"🎧 deezer-pool: slot {_dz_slot}")
+                        try:
+                            await _broadcast({"type": "deezer_pool_update", "pool": _dzp.live_status(_config)})
+                        except Exception:
+                            pass
+            except Exception as _dze:
+                _dz_pool = None
+                _dz_slot = None
+                print(f"[deezer-pool] acquire failed → single-account fallback: {_dze}", flush=True)
         cmd = eng.build_cmd(url, quality, _cfg_view)
         task["log"].append(f"▶ {' '.join(cmd)}")
         await _broadcast(_i18n.log_event("console.cmd_start", level="info", task_id=tid, cmd=' '.join(cmd[:3])))
@@ -1497,6 +1531,16 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             extra_env = {"PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python", "PYTHONIOENCODING": "utf-8"}
         else:
             extra_env = {"PYTHONIOENCODING": "utf-8"}
+        if engine_name == "deezer" and _cfg_view.get("_deezer_cfg_dir"):
+            # Multi-account pool slot (>0): point the deemix SUBPROCESS itself
+            # at the same isolated config dir _write_arl()/_write_deemix_config()
+            # just wrote to (build_cmd only touches OUR process's env; deemix's
+            # own platformdirs lookup inside the subprocess needs its own copy).
+            _dz_dir = _cfg_view["_deezer_cfg_dir"]
+            if _IS_WINDOWS:
+                extra_env["APPDATA"] = _dz_dir
+            else:
+                extra_env["XDG_CONFIG_HOME"] = _dz_dir
         # Apple-local pool: give this zhaarey task its OWN wrapper container so
         # several Apple releases download in parallel. Slot 0 reuses the always-on
         # amd-wrapper, so a single download spins up nothing new and behaves
@@ -2113,6 +2157,16 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             try:
                 from ripster import wrapper_pool as _wp_rel
                 await _broadcast({"type": "pool_update", "pool": _wp_rel.live_status()})
+            except Exception:
+                pass
+        if _dz_pool is not None and _dz_slot is not None:
+            try:
+                _dz_pool.release(_dz_slot)
+            except Exception:
+                pass
+            try:
+                from ripster import deezer_pool as _dzp_rel
+                await _broadcast({"type": "deezer_pool_update", "pool": _dzp_rel.live_status(_config)})
             except Exception:
                 pass
         # Skip history when the task was reset in-place for auto-retry —

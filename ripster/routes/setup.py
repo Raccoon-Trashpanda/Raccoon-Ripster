@@ -11,6 +11,12 @@ Setup, tools, wrapper and AMD management routes.
   POST /api/wrapper/stop        — stop wrapper container
   POST /api/wrapper/pull        — pull wrapper image
   POST /api/wrapper/2fa         — submit 2FA code to wrapper
+  GET  /api/wrapper/accounts        — list Apple accounts in the wrapper pool
+  POST /api/wrapper/accounts/add    — add an account, start its wrapper slot
+  POST /api/wrapper/accounts/{slot}/remove — remove an added account (not slot 0)
+  GET  /api/deezer/accounts         — list Deezer ARL accounts in the load-balance pool
+  POST /api/deezer/accounts/add     — add an ARL account
+  POST /api/deezer/accounts/{slot}/remove — remove an added account (not slot 0)
   GET  /api/orpheus/status      — OrpheusDL-Spotify install/auth status
   POST /api/orpheus/login-start — start PKCE OAuth flow, returns Spotify auth URL
   DELETE /api/orpheus/login-cancel — cancel in-progress OAuth
@@ -44,13 +50,15 @@ router = APIRouter()
 _cfg:        dict = {}
 _broadcast         = None
 _base_dir:   Path = Path(".")
+_save_config       = None
 
 
 def install(app, ctx) -> None:
-    global _cfg, _broadcast, _base_dir
-    _cfg       = ctx.config
-    _broadcast = ctx.broadcast
-    _base_dir  = ctx.base_dir
+    global _cfg, _broadcast, _base_dir, _save_config
+    _cfg         = ctx.config
+    _broadcast   = ctx.broadcast
+    _base_dir    = ctx.base_dir
+    _save_config = ctx.save_config
     app.include_router(router)
 
 
@@ -364,6 +372,156 @@ async def wrapper_2fa(body: dict):
     # Deliver to the interactive login process's STDIN (primary) + files (fallback).
     fed = await _amd.submit_2fa(code)
     return {"ok": True, "fed_stdin": fed}
+
+
+# ── Multi-account Apple wrapper pool ────────────────────────────────────────
+# Each account gets its OWN wrapper container + its OWN fresh device identity
+# (ripster/wrapper_pool.py) — one account cannot sustain 2+ concurrent
+# sessions, and reusing another slot's device identity collides the same way
+# (found 2026-07-22, project_service_gating_2026-07-22 memory). Slot 0 is
+# always the primary wrapper-apple-id/wrapper-password account (the existing
+# single-wrapper Settings UI); slots 1+ come from here.
+
+@router.get("/api/wrapper/accounts")
+async def wrapper_accounts_list():
+    from ripster import wrapper_pool as _pool
+    accounts = _pool._configured_accounts(_cfg)
+    pool = _pool.get_pool(_cfg)
+    status_by_slot = {s["slot"]: s for s in pool.status()} if pool else {}
+    # Slot 0 (the primary wrapper) runs independently of "pool mode" — it's
+    # the same always-on amd-wrapper the single-account UI already manages,
+    # so its real status is available even with < 2 accounts configured
+    # (when the pool object itself doesn't exist yet).
+    if 0 not in status_by_slot:
+        status_by_slot[0] = {"running": await _amd.check_wrapper_running(), "busy": False}
+    return {
+        "pool_enabled": _pool.pool_enabled(_cfg),
+        "accounts": [
+            {"slot": i, "label": a["label"], "primary": i == 0,
+             **status_by_slot.get(i, {"running": False, "busy": False})}
+            for i, a in enumerate(accounts)
+        ],
+    }
+
+
+@router.post("/api/wrapper/accounts/add")
+async def wrapper_accounts_add(body: dict):
+    """Add an additional Apple account to the pool and start its wrapper.
+    Does NOT touch the primary wrapper-apple-id/wrapper-password (slot 0)."""
+    apple_id = (body.get("id") or "").strip()
+    password = (body.get("password") or "").strip()
+    label    = (body.get("label") or "").strip() or apple_id
+    if not apple_id or not password:
+        return {"ok": False, "msg": "Нужны id и password"}
+
+    existing = list(_cfg.get("wrapper-accounts") or [])
+    if any(a.get("id") == apple_id for a in existing):
+        return {"ok": False, "msg": "Этот аккаунт уже добавлен"}
+    existing.append({"id": apple_id, "password": password, "label": label})
+    _cfg["wrapper-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+
+    from ripster import wrapper_pool as _pool
+    if not _pool.pool_enabled(_cfg):
+        return {"ok": True, "msg": "Аккаунт сохранён. Включи apple-pool, чтобы поднять враппер под него.",
+                "started": False}
+
+    def _do():
+        try:
+            p = _pool.get_pool(_cfg)
+            slot = len(_pool._configured_accounts(_cfg)) - 1
+            p.ensure(slot + 1)
+        except Exception as e:
+            print(f"[wrapper-pool] failed to start slot for new account: {e}", flush=True)
+    asyncio.create_task(asyncio.to_thread(_do))
+    return {"ok": True, "msg": f"Аккаунт добавлен, запускаю враппер…", "started": True}
+
+
+@router.post("/api/wrapper/accounts/{slot}/remove")
+async def wrapper_accounts_remove(slot: int):
+    """Remove an additional account (slot >= 1 only — slot 0 is the primary
+    account, managed via the regular wrapper-apple-id/wrapper-password UI)."""
+    if slot < 1:
+        return {"ok": False, "msg": "Слот 0 — основной аккаунт, убирается через обычные настройки Apple"}
+    existing = list(_cfg.get("wrapper-accounts") or [])
+    idx = slot - 1
+    if idx < 0 or idx >= len(existing):
+        return {"ok": False, "msg": "Нет такого аккаунта"}
+    removed = existing.pop(idx)
+    _cfg["wrapper-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+
+    def _stop():
+        try:
+            from ripster.wrapper_pool import _client, NAME_PREFIX
+            c = _client()
+            c.containers.get(f"{NAME_PREFIX}{slot}").remove(force=True)
+        except Exception:
+            pass
+    await asyncio.to_thread(_stop)
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+
+
+# ── Deezer multi-account pool (load-balanced, no Docker) ───────────────────────
+#   GET  /api/deezer/accounts        — list ARL accounts in the pool
+#   POST /api/deezer/accounts/add    — add an ARL account
+#   POST /api/deezer/accounts/{slot}/remove — remove an added account (not slot 0)
+
+@router.get("/api/deezer/accounts")
+async def deezer_accounts_list():
+    from ripster import deezer_pool as _dzp
+    return _dzp.live_status(_cfg)
+
+
+@router.post("/api/deezer/accounts/add")
+async def deezer_accounts_add(body: dict):
+    """Add an additional Deezer ARL to the pool. Does NOT touch the primary
+    deezer-arl (slot 0) — takes effect on the NEXT queued Deezer download that
+    goes through the pool dispatch (ripster/runner.py), no restart needed."""
+    arl   = (body.get("arl") or "").strip()
+    label = (body.get("label") or "").strip() or "account"
+    if not arl:
+        return {"ok": False, "msg": "Нужен ARL"}
+
+    existing = list(_cfg.get("deezer-accounts") or [])
+    if any(a.get("arl") == arl for a in existing):
+        return {"ok": False, "msg": "Этот ARL уже добавлен"}
+    existing.append({"arl": arl, "label": label})
+    _cfg["deezer-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "msg": f"ARL добавлен как «{label}»"}
+
+
+@router.post("/api/deezer/accounts/{slot}/remove")
+async def deezer_accounts_remove(slot: int):
+    """Remove an additional account (slot >= 1 only — slot 0 is the primary
+    ARL, managed via the regular deezer-arl field in Settings → Deezer)."""
+    if slot < 1:
+        return {"ok": False, "msg": "Слот 0 — основной ARL, убирается через обычные настройки Deezer"}
+    existing = list(_cfg.get("deezer-accounts") or [])
+    idx = slot - 1
+    if idx < 0 or idx >= len(existing):
+        return {"ok": False, "msg": "Нет такого аккаунта"}
+    removed = existing.pop(idx)
+    _cfg["deezer-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
 
 
 # ── OrpheusDL-Spotify ─────────────────────────────────────────────────────────
