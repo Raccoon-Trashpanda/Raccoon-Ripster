@@ -782,6 +782,26 @@
             </div>
           </div>
 
+          <!-- Multi-account pool: several Apple ID's, downloads load-balanced across them
+               (each gets its own Docker wrapper slot with its own device identity —
+               see the ripster-apple-wrapper skill for why one account can't share a slot) -->
+          <div style="background:rgba(10,132,255,.08);border:1px solid rgba(10,132,255,.2);border-radius:9px;padding:12px 14px;margin-bottom:12px">
+            <div style="font-size:11px;font-weight:700;color:var(--blue);margin-bottom:8px">➕ Доп. аккаунты (балансировка загрузок)</div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+              Добавь ещё Apple ID — параллельные ALAC/Atmos-загрузки (режим «Локальный») будут распределяться между аккаунтами вместо очереди на одном. Каждый получает свой Docker-контейнер.
+            </div>
+            <div id="apple-accounts-list" style="margin-bottom:8px"></div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              <input id="s-apple-pool-email" type="email" placeholder="Apple ID второго аккаунта…"
+                style="font-size:11px;flex:1;min-width:140px"/>
+              <input id="s-apple-pool-pass" type="password" placeholder="Пароль…"
+                style="font-size:11px;flex:1;min-width:100px"/>
+              <input id="s-apple-pool-label" type="text" placeholder="Метка"
+                style="font-size:11px;flex:1;min-width:80px"/>
+              <button class="btn-sm" onclick="addAppleAccount()" style="padding:6px 12px;background:rgba(10,132,255,.18);color:var(--blue);border:1px solid rgba(10,132,255,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">+ Добавить</button>
+            </div>
+          </div>
+
           <div class="settings-grid">
             <div class="field-group">
               <label class="lbl">Decrypt port (wrapper -D)<span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'s.help.decrypt_port')" role="button" tabindex="0">?</span></label>

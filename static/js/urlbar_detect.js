@@ -131,6 +131,7 @@ function showStab(id, btn) {
     refreshAppleAuthStatus();
     loadWrapperSessionStatus();
     if(c['media-user-token'] && c['authorization-token']) testAuth('apple');
+    try { loadAppleAccounts?.(); } catch {}
   }
   if(id==='soundcloud') { setVal('s-sc-path', c['soundcloud-save-path']||''); setVal('s-sc-oauth', c['soundcloud-oauth-token']||''); setVal('s-sc-wvd-wrapper', c['sc-widevine-wrapper-url']||''); setChk('s-sc-isrc-fallback', !!c['sc-isrc-fallback']); if(c['soundcloud-oauth-token']) testAuth('soundcloud'); scEngineCheck(); try { _scCheckWvd?.(); _scCheckWvdWrapper?.(); } catch {} }
   if(id==='beatport') {
