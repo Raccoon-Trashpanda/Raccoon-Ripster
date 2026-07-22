@@ -95,8 +95,6 @@ var LANG = {
     'sc2.login_err':'Ошибка входа',
 
     // ── retro-i18n wave 2026-07-19 ──
-
-    // ── retro-i18n wave 2026-07-19 ──
     'con.filter_task_title':'Консоль задачи',
     'con.all_tasks':'Все задачи',
     'con.filter_svc_title':'Консоль по сервису',
@@ -533,6 +531,7 @@ var LANG = {
     'console.timeout':'✗ Таймаут: процесс завис и был завершён',
     'console.done_tracks':'✓ Done ({n} tracks)',
     'console.queue_finished':'✓ Queue finished!',
+    'console.reused_existing':'⏭ Уже скачано ранее ({n} треков) — файлы переиспользованы, повторная загрузка пропущена',
     'console.topup_missing':'⚠ {got}/{expected} — добираю {miss} недостающих автоматически (попытка {attempt}/{max})…',
     'console.partial_permanent':'⚠ Готово ЧАСТИЧНО: {got}/{expected} — {miss} трек(ов) недоступны через этот движок (AAC без wrapper не расшифровывает часть треков). Скачай альбом как ALAC, чтобы добрать остаток через wrapper.',
     'console.partial_region':'⚠ Готово ЧАСТИЧНО: {got}/{expected} треков — {miss} не догрузилось (недоступны в регионе или сбой постобработки). Повтори задачу — уже скачанное пропустится, доберутся только недостающие.',
@@ -1111,8 +1110,6 @@ var LANG = {
     'sc2.login_err':'Login failed',
 
     // ── retro-i18n wave 2026-07-19 ──
-
-    // ── retro-i18n wave 2026-07-19 ──
     'con.filter_task_title':'Task console',
     'con.all_tasks':'All tasks',
     'con.filter_svc_title':'Filter by service',
@@ -1549,6 +1546,7 @@ var LANG = {
     'console.timeout':'✗ Timeout: the process hung and was terminated',
     'console.done_tracks':'✓ Done ({n} tracks)',
     'console.queue_finished':'✓ Queue finished!',
+    'console.reused_existing':'⏭ Already downloaded ({n} tracks) — reused existing files, skipped re-download',
     'console.topup_missing':'⚠ {got}/{expected} — fetching {miss} missing automatically (attempt {attempt}/{max})…',
     'console.partial_permanent':'⚠ PARTIALLY done: {got}/{expected} — {miss} track(s) unavailable via this engine (AAC without wrapper cannot decrypt some tracks). Download the album as ALAC to get the rest via wrapper.',
     'console.partial_region':'⚠ PARTIALLY done: {got}/{expected} tracks — {miss} did not download (unavailable in region or post-processing failure). Retry the task — already downloaded tracks are skipped, only the missing ones are fetched.',
@@ -2208,6 +2206,7 @@ var LANG = {
     'console.timeout':'✗ टाइमआउट: प्रक्रिया अटक गई और समाप्त कर दी गई',
     'console.done_tracks':'✓ Done ({n} tracks)',
     'console.queue_finished':'✓ Queue finished!',
+    'console.reused_existing':'⏭ पहले से डाउनलोड किया गया ({n} ट्रैक) — मौजूदा फ़ाइलों का पुन: उपयोग किया गया, दोबारा डाउनलोड नहीं किया',
     'console.topup_missing':'⚠ {got}/{expected} — {miss} छूटे हुए स्वतः जोड़े जा रहे हैं (प्रयास {attempt}/{max})…',
     'console.partial_permanent':'⚠ आंशिक रूप से पूर्ण: {got}/{expected} — {miss} ट्रैक इस इंजन से अनुपलब्ध (wrapper के बिना AAC कुछ ट्रैक डिक्रिप्ट नहीं करता)। बाकी को wrapper से पाने के लिए एल्बम को ALAC में डाउनलोड करें।',
     'console.partial_region':'⚠ आंशिक रूप से पूर्ण: {got}/{expected} ट्रैक — {miss} डाउनलोड नहीं हुए (क्षेत्र में अनुपलब्ध या पोस्ट-प्रोसेसिंग विफल)। कार्य दोहराएं — पहले से डाउनलोड किए गए छोड़ दिए जाएंगे, केवल छूटे हुए जोड़े जाएंगे।',
@@ -2399,6 +2398,7 @@ var LANG = {
     'console.timeout':'✗ タイムアウト：プロセスがハングし終了されました',
     'console.done_tracks':'✓ Done ({n} tracks)',
     'console.queue_finished':'✓ Queue finished!',
+    'console.reused_existing':'⏭ ダウンロード済み（{n}トラック）— 既存のファイルを再利用、再ダウンロードをスキップ',
     'console.topup_missing':'⚠ {got}/{expected} — 不足している {miss} 個を自動取得中（試行 {attempt}/{max}）…',
     'console.partial_permanent':'⚠ 部分的に完了：{got}/{expected} — {miss} トラックはこのエンジンでは利用不可（wrapperなしのAACは一部トラックを復号できません）。残りをwrapperで取得するにはアルバムをALACでダウンロードしてください。',
     'console.partial_region':'⚠ 部分的に完了：{got}/{expected} トラック — {miss} はダウンロードされませんでした（地域で利用不可または後処理失敗）。タスクを再実行してください — ダウンロード済みはスキップされ、不足分のみ取得されます。',
@@ -2590,6 +2590,7 @@ var LANG = {
     'console.timeout':'✗ 超时：进程卡住并已被终止',
     'console.done_tracks':'✓ Done ({n} tracks)',
     'console.queue_finished':'✓ Queue finished!',
+    'console.reused_existing':'⏭ 已下载过（{n}首曲目）— 复用现有文件，跳过重新下载',
     'console.topup_missing':'⚠ {got}/{expected} — 正在自动补齐 {miss} 个缺失（第 {attempt}/{max} 次尝试）…',
     'console.partial_permanent':'⚠ 部分完成：{got}/{expected} — {miss} 个曲目无法通过此引擎获取（无wrapper的AAC无法解密部分曲目）。请以ALAC下载专辑，通过wrapper补齐其余部分。',
     'console.partial_region':'⚠ 部分完成：{got}/{expected} 个曲目 — {miss} 个未下载（地区不可用或后处理失败）。请重试任务 — 已下载的将被跳过，仅补齐缺失部分。',

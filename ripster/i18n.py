@@ -44,6 +44,7 @@ FALLBACK: dict[str, str] = {
     "console.timeout":          "✗ Таймаут: процесс завис и был завершён",
     "console.done_tracks":      "✓ Done ({n} tracks)",
     "console.queue_finished":   "✓ Queue finished!",
+    "console.reused_existing":  "⏭ Уже скачано ранее ({n} треков) — файлы переиспользованы, повторная загрузка пропущена",
     # ── partial / retries ─────────────────────────────────────────────────────
     "console.topup_missing":    "⚠ {got}/{expected} — добираю {miss} недостающих автоматически (попытка {attempt}/{max})…",
     "console.partial_permanent": "⚠ Готово ЧАСТИЧНО: {got}/{expected} — {miss} трек(ов) недоступны через этот движок (AAC без wrapper не расшифровывает часть треков). Скачай альбом как ALAC, чтобы добрать остаток через wrapper.",

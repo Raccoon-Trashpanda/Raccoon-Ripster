@@ -654,6 +654,72 @@ def _add_to_history(task: dict) -> None:
         pass
 
 
+# ── Skip re-download for OrpheusDL-based engines (tidal / beatport) ──────────
+# OrpheusDL's own "already downloaded, skip" check matches its OWN filename
+# template — but Ripster's post-download rename pass (_apply_rename below)
+# renames files to match TAGS instead, which no longer matches what OrpheusDL
+# is looking for on the next run. Result: re-queuing an already-complete
+# release re-downloads everything and leaves orphaned duplicate files (found
+# + root-caused 2026-07-22, see skill ripster-tidal-orpheus). Rather than
+# touch OrpheusDL's vendored internals (risky, shared across tidal/beatport/
+# spotify) or stop renaming files to match tags (the owner explicitly wants
+# filenames = tags for every service), Ripster now does its OWN "already
+# complete?" check BEFORE ever invoking the engine at all.
+
+def _find_completed_duplicate(url: str, quality: str, engine_name: str) -> dict | None:
+    """A prior COMPLETE download of this exact url+quality+engine, whose
+    output folder still has at least as many audio files on disk as it
+    finished with. Returns the history entry, or None if no safe match."""
+    audio_exts = {".flac", ".m4a", ".mp3", ".alac", ".aac", ".ogg", ".opus", ".wav"}
+    for h in _download_history:
+        if not (h.get("url") == url and h.get("quality") == quality
+                and h.get("engine") == engine_name and h.get("status") == "done"
+                and not h.get("partial") and not h.get("missing")):
+            continue
+        save_dir = h.get("_save_dir") or ""
+        if not save_dir:
+            continue
+        d = Path(save_dir)
+        if not d.is_dir():
+            continue
+        try:
+            n_audio = sum(1 for p in d.rglob("*") if p.suffix.lower() in audio_exts)
+        except OSError:
+            continue
+        expected = h.get("got") or h.get("tracks") or 0
+        if n_audio and (not expected or n_audio >= expected):
+            return h
+    return None
+
+
+async def _reuse_completed_download(task: dict, tid: str, dup: dict) -> None:
+    """Mark `task` instantly complete by reusing `dup`'s already-finished
+    output — no engine invocation, so no risk of the retry-duplicate bug.
+    Records a fresh manifest entry under THIS task's id (bot delivery/
+    /api/download-file look files up by task id, not by the original one)."""
+    d = Path(dup["_save_dir"])
+    from ripster.routes.download import _find_audio_files as _faf
+    audio = _faf(d)
+    task["_save_dir"] = str(d)
+    task["_files"] = [f.name for f in audio]
+    task["progress"] = 100
+    meta = task.setdefault("meta", {})
+    meta.setdefault("title", dup.get("title") or "")
+    meta.setdefault("artist", dup.get("artist") or "")
+    _try_advance_task(task, TaskStatus.DONE)
+    n = len(audio)
+    task.setdefault("log", []).append(
+        f"⏭ Уже скачано ранее ({n} треков) — файлы переиспользованы, повторная загрузка пропущена")
+    await _broadcast(_i18n.log_event("console.reused_existing", level="success",
+                                     task_id=tid, n=n))
+    try:
+        from ripster import download_manifest as _dm
+        _dm.record(tid, str(d), audio, task)
+        print(f"[manifest] {_dm.short_id(tid)} → {d.name} ({n} files, reused)", flush=True)
+    except Exception as _e:
+        print(f"[manifest] reuse record failed: {_e}", flush=True)
+
+
 # ── AMD runner ───────────────────────────────────────────────────────────────
 
 
@@ -1398,6 +1464,13 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             _add_to_history(task)
             return
         url = resolved   # HLS stream URL — build_cmd never sees the page URL
+
+    if engine_name in ("tidal", "orpheus_beatport"):
+        _dup = await asyncio.to_thread(_find_completed_duplicate, url, quality, engine_name)
+        if _dup:
+            await _reuse_completed_download(task, tid, _dup)
+            _add_to_history(task)
+            return
 
     # ── Wrapper pool: Apple-local parallelism. Acquired below for zhaarey,
     # released in the finally. ANY failure here → default single-wrapper cwd, so
