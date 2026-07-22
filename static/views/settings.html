@@ -1138,6 +1138,30 @@
             </div>
           </div>
 
+          <!-- Multi-account pool: several accounts, downloads load-balanced across them -->
+          <div style="background:rgba(27,104,211,.06);border:1px solid rgba(27,104,211,.15);border-radius:9px;padding:10px 12px;margin-bottom:10px">
+            <div style="font-size:11px;font-weight:700;color:#1b68d3;margin-bottom:8px">➕ Доп. аккаунты (балансировка загрузок)</div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+              Добавь ещё аккаунты (токен ИЛИ email+пароль) — параллельные Qobuz-загрузки будут распределяться между всеми вместо очереди на одном.
+            </div>
+            <div id="qobuz-accounts-list" style="margin-bottom:8px"></div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:5px">
+              <input id="s-qobuz-pool-userid" type="text" placeholder="user-id (токен-режим)…"
+                style="font-family:var(--mono);font-size:11px;flex:1;min-width:120px"/>
+              <input id="s-qobuz-pool-authtok" type="password" placeholder="user-auth-token…"
+                style="font-family:var(--mono);font-size:11px;flex:1;min-width:120px"/>
+            </div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              <input id="s-qobuz-pool-email" type="email" placeholder="или email…"
+                style="font-size:11px;flex:1;min-width:120px"/>
+              <input id="s-qobuz-pool-pass" type="password" placeholder="пароль…"
+                style="font-size:11px;flex:1;min-width:100px"/>
+              <input id="s-qobuz-pool-label" type="text" placeholder="Метка"
+                style="font-size:11px;flex:1;min-width:80px"/>
+              <button class="btn-sm" onclick="addQobuzAccount()" style="padding:6px 12px;background:rgba(27,104,211,.18);color:#1b68d3;border:1px solid rgba(27,104,211,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">+ Добавить</button>
+            </div>
+          </div>
+
           <!-- Optional app_id / secrets override -->
           <details style="margin-bottom:10px">
             <summary style="font-size:11px;color:var(--muted);cursor:pointer;padding:4px 0" data-i18n="s.qobuz_appid_summary">

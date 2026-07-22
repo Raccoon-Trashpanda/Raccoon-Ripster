@@ -1410,6 +1410,10 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
     # released in the finally.
     _dz_pool = None
     _dz_slot = None
+    # Qobuz multi-account pool — same shape, streamrip's --config-path even
+    # simpler (no subprocess env override needed).
+    _qz_pool = None
+    _qz_slot = None
 
     try:
         # Build a per-task config view so the quality-subfolder is visible to
@@ -1474,6 +1478,33 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 _dz_pool = None
                 _dz_slot = None
                 print(f"[deezer-pool] acquire failed → single-account fallback: {_dze}", flush=True)
+        # Qobuz multi-account pool: same idea, even simpler — streamrip's CLI
+        # takes an explicit --config-path, so no subprocess env override is
+        # needed at all (unlike deezer). ANY failure here → _cfg_view never
+        # gets the qobuz-*/_qobuz_cfg_dir overrides, single-account fallback.
+        if engine_name == "qobuz":
+            try:
+                from ripster import qobuz_pool as _qzp
+                _qz_pool = _qzp.get_pool(_config)
+                if _qz_pool is not None:
+                    _qz_acq = await asyncio.to_thread(_qz_pool.acquire)
+                    if _qz_acq:
+                        _qz_slot, _qz_acct, _qz_cfg_dir = _qz_acq
+                        _cfg_view["qobuz-user-id"]    = _qz_acct["qobuz-user-id"]
+                        _cfg_view["qobuz-auth-token"] = _qz_acct["qobuz-auth-token"]
+                        _cfg_view["qobuz-email"]      = _qz_acct["qobuz-email"]
+                        _cfg_view["qobuz-password"]   = _qz_acct["qobuz-password"]
+                        if _qz_cfg_dir is not None:
+                            _cfg_view["_qobuz_cfg_dir"] = str(_qz_cfg_dir)
+                        task["log"].append(f"💿 qobuz-pool: slot {_qz_slot}")
+                        try:
+                            await _broadcast({"type": "qobuz_pool_update", "pool": _qzp.live_status(_config)})
+                        except Exception:
+                            pass
+            except Exception as _qze:
+                _qz_pool = None
+                _qz_slot = None
+                print(f"[qobuz-pool] acquire failed → single-account fallback: {_qze}", flush=True)
         cmd = eng.build_cmd(url, quality, _cfg_view)
         task["log"].append(f"▶ {' '.join(cmd)}")
         await _broadcast(_i18n.log_event("console.cmd_start", level="info", task_id=tid, cmd=' '.join(cmd[:3])))
@@ -2167,6 +2198,16 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             try:
                 from ripster import deezer_pool as _dzp_rel
                 await _broadcast({"type": "deezer_pool_update", "pool": _dzp_rel.live_status(_config)})
+            except Exception:
+                pass
+        if _qz_pool is not None and _qz_slot is not None:
+            try:
+                _qz_pool.release(_qz_slot)
+            except Exception:
+                pass
+            try:
+                from ripster import qobuz_pool as _qzp_rel
+                await _broadcast({"type": "qobuz_pool_update", "pool": _qzp_rel.live_status(_config)})
             except Exception:
                 pass
         # Skip history when the task was reset in-place for auto-retry —

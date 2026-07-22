@@ -111,6 +111,7 @@ function showStab(id, btn) {
   if(id==='qobuz')   {
     setVal('s-qobuz-userid',c['qobuz-user-id']||''); _setSecret('s-qobuz-authtok',c['qobuz-auth-token']); setVal('s-qobuz-email',c['qobuz-email']||''); _setSecret('s-qobuz-pass',c['qobuz-password']); setVal('s-qobuz-appid',c['qobuz-app-id']||''); setVal('s-qobuz-secrets',c['qobuz-secrets']||''); setVal('s-qobuz-qual',c['qobuz-quality']||'7'); setVal('s-qobuz-path',c['qobuz-save-path']||'');
     if(c['qobuz-auth-token'] || (c['qobuz-email'] && c['qobuz-password'])) testAuth('qobuz');
+    try { loadQobuzAccounts?.(); } catch {}
   }
   if(id==='tidal')   {
     _setSecret('s-tidal-token',c['tidal-token']); _setSecret('s-tidal-refresh',c['tidal-refresh']); setVal('s-tidal-userid',c['tidal-user-id']||''); setVal('s-tidal-country',c['tidal-country']||'US'); setVal('s-tidal-expiry',c['tidal-token-expiry']||''); setVal('s-tidal-qual',c['tidal-quality']||'lossless'); setVal('s-tidal-path',c['tidal-save-path']||'');

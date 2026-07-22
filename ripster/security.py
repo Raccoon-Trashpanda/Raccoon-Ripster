@@ -35,6 +35,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "qobuz-user-id", "qobuz-auth-token",
     "qobuz-quality", "qobuz-save-path",
     "qobuz-max-connections", "qobuz-requests-per-minute",
+    "qobuz-accounts",   # multi-account Qobuz pool (load-balanced) — list of {user_id/auth_token or email/password, label}
     "deezer-arl", "deezer-quality", "deezer-save-path", "deezer-arl-label",
     "deezer-accounts",   # multi-account Deezer pool (load-balanced) — list of {arl,label}
     "tidal-token", "tidal-refresh",

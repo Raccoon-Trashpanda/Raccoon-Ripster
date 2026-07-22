@@ -539,3 +539,53 @@ async function removeDeezerAccount(slot) {
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
 }
 
+// ── Qobuz multi-account pool (load-balanced) ────────────────────────────────
+async function loadQobuzAccounts() {
+  const list = document.getElementById('qobuz-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/qobuz/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = accs.map(a => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        ${a.primary ? '' : `<button onclick="removeQobuzAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`).join('');
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addQobuzAccount() {
+  const uidEl   = document.getElementById('s-qobuz-pool-userid');
+  const tokEl   = document.getElementById('s-qobuz-pool-authtok');
+  const emailEl = document.getElementById('s-qobuz-pool-email');
+  const passEl  = document.getElementById('s-qobuz-pool-pass');
+  const labelEl = document.getElementById('s-qobuz-pool-label');
+  const user_id    = (uidEl?.value || '').trim();
+  const auth_token = (tokEl?.value || '').trim();
+  const email      = (emailEl?.value || '').trim();
+  const password   = (passEl?.value || '').trim();
+  const label      = (labelEl?.value || '').trim();
+  if(!((user_id && auth_token) || email)) { toast(t('t.error'), 'var(--red)'); return; }
+  try {
+    const r = await api('POST', '/api/qobuz/accounts/add', {user_id, auth_token, email, password, label});
+    if(r.ok) {
+      toast(r.msg || 'Добавлено', 'var(--green)');
+      [uidEl, tokEl, emailEl, passEl, labelEl].forEach(el => { if(el) el.value = ''; });
+      loadQobuzAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeQobuzAccount(slot) {
+  if(!confirm('Убрать этот аккаунт из пула?')) return;
+  try {
+    const r = await api('POST', `/api/qobuz/accounts/${slot}/remove`);
+    toast(r.msg || (r.ok ? 'Убрано' : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadQobuzAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+

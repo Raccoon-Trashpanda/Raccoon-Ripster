@@ -6,8 +6,13 @@ import sys
 from pathlib import Path
 
 
-def config_dir() -> Path:
-    """Streamrip config directory: %APPDATA%\\streamrip on Windows, ~/.config/streamrip elsewhere."""
+def config_dir(override: str = "") -> Path:
+    """Streamrip config directory: %APPDATA%\\streamrip on Windows,
+    ~/.config/streamrip elsewhere — or, for a multi-account pool slot
+    (ripster/qobuz_pool.py), an isolated per-slot directory so two accounts'
+    config.toml files don't clobber each other when downloading concurrently."""
+    if override:
+        return Path(override) / "streamrip"
     if sys.platform.startswith("win"):
         import os
         base = os.environ.get("APPDATA")
@@ -16,9 +21,9 @@ def config_dir() -> Path:
     return Path.home() / ".config" / "streamrip"
 
 
-def write_config(toml_text: str) -> Path:
+def write_config(toml_text: str, override: str = "") -> Path:
     """Write toml_text to streamrip's config.toml and return its path."""
-    d = config_dir()
+    d = config_dir(override)
     d.mkdir(parents=True, exist_ok=True)
     p = d / "config.toml"
     p.write_text(toml_text, encoding="utf-8")

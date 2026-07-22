@@ -17,6 +17,9 @@ Setup, tools, wrapper and AMD management routes.
   GET  /api/deezer/accounts         — list Deezer ARL accounts in the load-balance pool
   POST /api/deezer/accounts/add     — add an ARL account
   POST /api/deezer/accounts/{slot}/remove — remove an added account (not slot 0)
+  GET  /api/qobuz/accounts          — list Qobuz accounts in the load-balance pool
+  POST /api/qobuz/accounts/add      — add an account (token or email/password mode)
+  POST /api/qobuz/accounts/{slot}/remove — remove an added account (not slot 0)
   GET  /api/orpheus/status      — OrpheusDL-Spotify install/auth status
   POST /api/orpheus/login-start — start PKCE OAuth flow, returns Spotify auth URL
   DELETE /api/orpheus/login-cancel — cancel in-progress OAuth
@@ -516,6 +519,66 @@ async def deezer_accounts_remove(slot: int):
         return {"ok": False, "msg": "Нет такого аккаунта"}
     removed = existing.pop(idx)
     _cfg["deezer-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+
+
+# ── Qobuz multi-account pool (load-balanced, no Docker) ────────────────────────
+#   GET  /api/qobuz/accounts        — list accounts in the pool
+#   POST /api/qobuz/accounts/add    — add an account (token or email/password mode)
+#   POST /api/qobuz/accounts/{slot}/remove — remove an added account (not slot 0)
+
+@router.get("/api/qobuz/accounts")
+async def qobuz_accounts_list():
+    from ripster import qobuz_pool as _qzp
+    return _qzp.live_status(_cfg)
+
+
+@router.post("/api/qobuz/accounts/add")
+async def qobuz_accounts_add(body: dict):
+    """Add an additional Qobuz account to the pool — either token mode
+    (user_id+auth_token) or email mode (email+password). Does NOT touch the
+    primary qobuz-* config keys (slot 0). Takes effect on the NEXT queued
+    Qobuz download that goes through the pool dispatch, no restart needed."""
+    user_id    = (body.get("user_id") or "").strip()
+    auth_token = (body.get("auth_token") or "").strip()
+    email      = (body.get("email") or "").strip()
+    password   = (body.get("password") or "").strip()
+    label      = (body.get("label") or "").strip() or email or user_id or "account"
+    if not ((user_id and auth_token) or email):
+        return {"ok": False, "msg": "Нужны user_id+auth_token ИЛИ email+password"}
+
+    existing = list(_cfg.get("qobuz-accounts") or [])
+    if any((a.get("user_id") == user_id and user_id) or (a.get("email") == email and email)
+           for a in existing):
+        return {"ok": False, "msg": "Этот аккаунт уже добавлен"}
+    existing.append({"user_id": user_id, "auth_token": auth_token,
+                     "email": email, "password": password, "label": label})
+    _cfg["qobuz-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»"}
+
+
+@router.post("/api/qobuz/accounts/{slot}/remove")
+async def qobuz_accounts_remove(slot: int):
+    """Remove an additional account (slot >= 1 only — slot 0 is the primary
+    account, managed via the regular Settings → Qobuz fields)."""
+    if slot < 1:
+        return {"ok": False, "msg": "Слот 0 — основной аккаунт, убирается через обычные настройки Qobuz"}
+    existing = list(_cfg.get("qobuz-accounts") or [])
+    idx = slot - 1
+    if idx < 0 or idx >= len(existing):
+        return {"ok": False, "msg": "Нет такого аккаунта"}
+    removed = existing.pop(idx)
+    _cfg["qobuz-accounts"] = existing
     if _save_config:
         try:
             _save_config(_cfg)

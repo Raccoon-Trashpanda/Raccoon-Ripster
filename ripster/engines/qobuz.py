@@ -74,7 +74,7 @@ def _detect_actual_quality(log_text: str) -> str:
     return "6"
 
 
-def _write_config(user_cfg: dict, save_path: str) -> Path:
+def _write_config(user_cfg: dict, save_path: str, cfg_override: str = "") -> Path:
     """Write a minimal streamrip config.toml with the user's Qobuz creds."""
     user_id     = str(user_cfg.get("qobuz-user-id")    or "").strip()
     auth_token  = str(user_cfg.get("qobuz-auth-token") or "").strip()
@@ -170,7 +170,7 @@ def _write_config(user_cfg: dict, save_path: str) -> Path:
         'source = "qobuz"\n'
         'fallback_source = ""\n'
     )
-    return write_config(toml)
+    return write_config(toml, override=cfg_override)
 
 
 def _resolve_upc_to_album_id(upc: str, app_id: str, token: str = "") -> str | None:
@@ -263,7 +263,11 @@ class QobuzEngine(StreamripMixin, EngineBase):
 
         cfg_copy = dict(config)
         cfg_copy["quality"] = quality
-        cfg_path = _write_config(cfg_copy, save_path)
+        # `qobuz-*` fields and `_qobuz_cfg_dir` may be overridden per-task by the
+        # multi-account pool dispatch (ripster/runner.py, ripster/qobuz_pool.py) —
+        # a plain single-account setup never sets `_qobuz_cfg_dir`, so this is a
+        # no-op (behaves exactly as before the pool existed).
+        cfg_path = _write_config(cfg_copy, save_path, cfg_override=config.get("_qobuz_cfg_dir") or "")
         # Diagnostic: record the credential SHAPE (booleans only, no values) so a
         # 0-tracks failure can name the real cause via telemetry instead of guessing
         # — the #1 unknown was "did the tester set token correctly / a custom app_id".
