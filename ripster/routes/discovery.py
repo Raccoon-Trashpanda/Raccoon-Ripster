@@ -775,7 +775,15 @@ async def _search_spotify(q: str, ent: str, limit: int) -> dict:
         async with _HTTP.ashared() as c:
             r = await c.get("https://api.spotify.com/v1/search",
                             headers={"Authorization": f"Bearer {token}"},
-                            params={"q": q, "type": sp_type, "limit": limit})
+                            # Found 2026-07-22: this client_id/app returns a
+                            # flat 400 "Invalid limit" for any limit > 10 on
+                            # /v1/search — NOT the documented 1-50 range,
+                            # presumably a quota-tier restriction Spotify
+                            # applies to this app. Silently broke ALL Spotify
+                            # search results (empty array, no visible error)
+                            # since the caller's default limit=20 always hit
+                            # it. Clamp instead of trusting the docs.
+                            params={"q": q, "type": sp_type, "limit": min(max(limit, 1), 10)})
             if r.status_code == 401:
                 _sp_app_token["token"] = ""
                 return {"results": [], "error": "Spotify: токен истёк, попробуй снова"}
@@ -785,6 +793,12 @@ async def _search_spotify(q: str, ent: str, limit: int) -> dict:
             if not r.content:
                 return {"results": [], "error": f"Spotify API: HTTP {r.status_code}"}
             data = r.json()
+            # Any other non-2xx (e.g. the "Invalid limit" 400 above, before it was
+            # clamped) must surface as an error, not a silent empty result — that
+            # silence is exactly what let the limit bug above go unnoticed.
+            if r.status_code >= 300:
+                return {"results": [], "error": f"Spotify API: HTTP {r.status_code} — "
+                                                f"{(data.get('error') or {}).get('message', data)}"}
         results = []
         if sp_type == "album":
             for item in (data.get("albums") or {}).get("items") or []:
@@ -867,7 +881,8 @@ async def _artist_spotify(artist_id: str, types: str) -> dict:
             info = info_r.json()
             alb_r = await c.get(f"https://api.spotify.com/v1/artists/{artist_id}/albums",
                                 headers={"Authorization": f"Bearer {token}"},
-                                params={"limit": 50, "include_groups": "album,single,compilation"})
+                                # Same quota-tier limit>10 → 400 as /v1/search, see there.
+                                params={"limit": 10, "include_groups": "album,single,compilation"})
             if alb_r.status_code == 429:
                 _record_sp_rate_limit(int(alb_r.headers.get("Retry-After", 30)))
                 if cached: return cached
