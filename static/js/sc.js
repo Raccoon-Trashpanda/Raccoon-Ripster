@@ -1006,55 +1006,6 @@ async function playScPlaylist(plId, plTitle, plArtist, plCover) {
   }
 }
 
-// ── SoundCloud sign-in (email + password → oauth_token) ───────────────────
-async function scSignIn() {
-  const email = (document.getElementById('s-sc-email')?.value || '').trim();
-  const pass  = document.getElementById('s-sc-pass')?.value || '';
-  const out   = document.getElementById('sc-signin-status');
-  if (!out) return;
-  if (!email || !pass) {
-    out.textContent = t('sc2.enter_creds');
-    out.style.color = '#ff5500';
-    return;
-  }
-  out.textContent = t('sc.login_progress');
-  out.style.color = 'var(--muted)';
-  try {
-    const r = await fetch('/api/soundcloud/login', {
-      method:  'POST',
-      headers: {'Content-Type': 'application/json'},
-      body:    JSON.stringify({email, password: pass}),
-    });
-    const d = await r.json();
-    if (d && d.ok) {
-      out.textContent = `${t('sc2.login_ok')} (${d.token_length} ${t('ui.chars')})`;
-      out.style.color = '#3ecfaa';
-      try {
-        const c = await fetch('/api/config').then(x => x.json());
-        if (c['soundcloud-oauth-token']) {
-          const inp = document.getElementById('s-sc-oauth');
-          if (inp) inp.value = c['soundcloud-oauth-token'];
-        }
-      } catch {}
-      const pwd = document.getElementById('s-sc-pass'); if (pwd) pwd.value = '';
-    } else {
-      // Friendly path: SC killed the password API but the user already pasted
-      // a cookie OAuth token — that's enough, no further action needed.
-      const existing = (document.getElementById('s-sc-oauth')?.value || '').trim();
-      if (d.removed_api && existing.length >= 20) {
-        out.innerHTML = t('sc2.email_dead_html');
-        out.style.color = 'var(--green)';
-      } else {
-        out.textContent = '✗ ' + (d.error || t('sc2.login_err'));
-        out.style.color = '#ff5500';
-      }
-    }
-  } catch (e) {
-    out.textContent = t('au.net_pfx') + e.message;
-    out.style.color = '#ff5500';
-  }
-}
-
 // ── SoundCloud engine (Lucida) install ─────────────────────────────────────
 async function scEngineCheck() {
   const lbl = document.getElementById('sc-engine-status');

@@ -1424,36 +1424,6 @@
               <div id="sp-dc-auto-status" style="font-size:10px;color:var(--muted);margin-top:3px" data-i18n="sp.dc_status">Скан подписок идёт через веб-плеер — выше лимиты, не нужен Developer App. Живёт ~1 год.</div>
             </div>
 
-            <!-- Период / типы -->
-            <div class="settings-row">
-              <div class="field-group flex1">
-                <label class="lbl" data-i18n="s.sp_period">Период новых релизов</label>
-                <select id="s-sp-days" onchange="saveSetting('spotify-release-days',parseInt(this.value))">
-                  <option value="7" data-i18n="sp.days_7"><span data-i18n="s.days_7">7 дней</span></option>
-                  <option value="14" data-i18n="sp.days_14"><span data-i18n="s.days_14">14 дней</span></option>
-                  <option value="30" data-i18n="sp.days_30"><span data-i18n="s.days_30">30 дней</span></option>
-                  <option value="90" data-i18n="sp.days_90"><span data-i18n="s.months_3">3 месяца</span></option>
-                </select>
-              </div>
-              <div class="field-group flex1">
-                <label class="lbl" data-i18n="s.sp_types"><span data-i18n="s.rel_types">Типы релизов</span></label>
-                <select id="s-sp-types" onchange="saveSetting('spotify-release-types',this.value)">
-                  <option value="album,single" data-i18n="rel_type.album_single"><span data-i18n="s.rt_albsing">Альбомы + синглы</span></option>
-                  <option value="album" data-i18n="rel_type.album"><span data-i18n="s.rt_alb">Только альбомы</span></option>
-                  <option value="single" data-i18n="rel_type.single"><span data-i18n="s.rt_sing">Только синглы</span></option>
-                </select>
-              </div>
-            </div>
-
-            <div class="toggle-row mt4">
-              <div class="toggle-info">
-                <div class="toggle-label" data-i18n="s.sp_auto_label">Авто-конвертировать новые релизы</div>
-                <div class="toggle-sub" data-i18n="s.sp_auto_sub">Искать на Apple/Qobuz и добавлять в Watchlist</div>
-              </div>
-              <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-sp-auto"
-                onchange="saveSetting('spotify-auto-convert',this.checked)"><div class="toggle-slider"></div></label>
-            </div>
-
             <!-- Saved conversion target -->
             <div id="sp-saved-target-row" style="display:none;background:rgba(0,0,0,.15);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-top:10px">
               <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
@@ -1736,29 +1706,6 @@
               <div id="test-auth-soundcloud" style="font-size:11px;color:var(--muted);flex:1;min-width:180px"></div>
             </div>
           </div>
-
-          <!-- Email/password — dead since 2024, collapsed by default -->
-          <details style="margin-top:10px">
-            <summary style="font-size:11px;color:var(--muted2);cursor:pointer;user-select:none;list-style:none">
-              <span data-i18n="sc.pwlogin_summary">⚠ Вход по паролю</span> <span style="font-size:10px" data-i18n="sc.pwlogin_note">(API отключён SoundCloud — не работает)</span>
-            </summary>
-            <div style="margin-top:8px;padding:10px 12px;background:rgba(255,85,0,.03);border:1px solid rgba(255,85,0,.1);border-radius:8px;opacity:.6">
-              <div class="field-group">
-                <label class="lbl">Email</label>
-                <input id="s-sc-email" type="email" autocomplete="username" placeholder="name@example.com"
-                  style="font-family:var(--mono);font-size:11px"/>
-              </div>
-              <div class="field-group mt6">
-                <label class="lbl" data-i18n="s.qobuz_pass"><span data-i18n="s.password">Пароль</span></label>
-                <input id="s-sc-pass" type="password" autocomplete="current-password" placeholder="••••••••"
-                  style="font-family:var(--mono);font-size:11px"/>
-              </div>
-              <div style="display:flex;gap:8px;margin-top:8px">
-                <button class="btn-sm" onclick="scSignIn()" style="padding:6px 12px;background:rgba(255,85,0,.1);color:var(--muted);border:1px solid rgba(255,85,0,.2);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="sc.signin_dead">🔑 Войти (не работает)</button>
-                <div id="sc-signin-status" style="font-size:11px;color:var(--muted);flex:1"></div>
-              </div>
-            </div>
-          </details>
 
         </div>
         </div><!-- end stab-soundcloud -->

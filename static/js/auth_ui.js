@@ -291,19 +291,22 @@ async function saveServiceTab(service) {
     // Only the keys that have visible inputs in the Apple panel — never wipe
     // sibling keys (storefront, amd-instance-url, cookies path) the user set
     // elsewhere. Empty token fields are NOT persisted (keeps existing value).
+    // Found 2026-07-22 settings audit: these read the WRONG element ids
+    // (s-apple-storefront/s-apple-mut/s-apple-bearer/s-gamdl-cookies-path
+    // don't exist in the DOM — the real ids are t-sf/t-mut/t-bearer/
+    // s-cookies-path) so this button only ever actually saved amd-instance-url.
+    // Tokens still save fine via the separate, correct saveTokens() button.
     cfg = {};
-    const sf  = g('s-apple-storefront');   if(sf)  cfg['storefront'] = sf;
-    const mut = gs('s-apple-mut');         if(mut !== undefined) cfg['media-user-token'] = mut;
-    const bea = gs('s-apple-bearer');      if(bea !== undefined) cfg['authorization-token'] = bea;
-    const cp  = g('s-gamdl-cookies-path'); if(cp) cfg['gamdl-cookies-path'] = cp;
+    const sf  = g('t-sf');   if(sf)  cfg['storefront'] = sf;
+    const mut = gs('t-mut');         if(mut !== undefined) cfg['media-user-token'] = mut;
+    const bea = gs('t-bearer');      if(bea !== undefined) cfg['authorization-token'] = bea;
+    const cp  = g('s-cookies-path'); if(cp) cfg['gamdl-cookies-path'] = cp;
     const ai  = g('s-amd-instance');       if(ai) cfg['amd-instance-url'] = ai;
   } else if(service === 'spotify') {
     cfg = {};
     const cid = g('s-sp-cid');   if(cid) cfg['spotify-client-id'] = cid;
     const sec = gs('s-sp-csecret'); if(sec !== undefined) cfg['spotify-client-secret'] = sec;
     const dc  = gs('s-sp-dc');   if(dc  !== undefined) cfg['spotify-sp-dc'] = dc;
-    const dy  = g('s-sp-days');  if(dy)  cfg['spotify-release-days'] = parseInt(dy) || 7;
-    const tp  = g('s-sp-types'); if(tp)  cfg['spotify-release-types'] = tp;
     const oq  = g('s-orp-quality'); if(oq) cfg['orpheus-quality'] = oq;
   } else if(service === 'yandex') {
     cfg = {'yandex-quality':g('s-yandex-qual')};

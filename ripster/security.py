@@ -23,6 +23,9 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "gamdl-cover-size", "gamdl-cover-format",
     "gamdl-album-template", "gamdl-file-template",
     "gamdl-exclude-tags", "gamdl-truncate",
+    "gamdl-nm3u8dlre-path", "gamdl-ffmpeg-path",   # found unsaveable in the 2026-07-22 settings audit
+    "authorization-token",   # Apple bearer — found unsaveable via REST in the 2026-07-22 audit
+                              # (only ever landed via the WS token_update path in practice)
     "amd-dir", "amd-instance-url", "amd-instance-secure",
     "amd-parallel", "amd-save-lyrics", "amd-lyrics-format",
     "amd-codec-alt",
@@ -49,6 +52,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "orpheus-",   # orpheus-quality, orpheus-save-path, orpheus-convert-mp3, …
     "beatport-username", "beatport-password", "beatport-quality", "beatport-save-path",
     "soundcloud-save-path", "soundcloud-oauth-token", "soundcloud-hq",
+    "sc-isrc-fallback", "sc-widevine-wrapper-url",   # found unsaveable in the 2026-07-22 settings audit
     "yandex-token", "yandex-quality", "yandex-save-path",
     "amazon-token", "amazon-quality", "amazon-save-path", "amazon-cli-path",
     "releases-services", "releases-days", "releases-types",

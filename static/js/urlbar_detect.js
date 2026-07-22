@@ -118,7 +118,7 @@ function showStab(id, btn) {
     if(c['tidal-token']) testAuth('tidal');
     loadTokenExpiry('tidal');
   }
-  if(id==='spotify') { setVal('s-sp-cid',c['spotify-client-id']||''); setVal('s-sp-csecret',c['spotify-client-secret']||''); _setSecret('s-sp-dc',c['spotify-sp-dc']); setVal('s-sp-days',c['spotify-release-days']||30); setVal('s-sp-types',c['spotify-release-types']||'album,single'); setChk('s-sp-auto',c['spotify-auto-convert']!==false); setVal('s-orp-path',c['orpheus-save-path']||''); setChk('s-orp-mp3',c['orpheus-convert-mp3']===true); setVal('s-orp-quality',c['orpheus-quality']||'hifi'); _renderSpotifySavedTarget(); loadSpotifyStatus(); loadOrpheusStatus(); testAuth('spotify'); }
+  if(id==='spotify') { setVal('s-sp-cid',c['spotify-client-id']||''); setVal('s-sp-csecret',c['spotify-client-secret']||''); _setSecret('s-sp-dc',c['spotify-sp-dc']); setVal('s-orp-path',c['orpheus-save-path']||''); setChk('s-orp-mp3',c['orpheus-convert-mp3']===true); setVal('s-orp-quality',c['orpheus-quality']||'hifi'); _renderSpotifySavedTarget(); loadSpotifyStatus(); loadOrpheusStatus(); testAuth('spotify'); }
   if(id==='apple')   {
     updateEngineUI(c['engine']||'zhaarey');
     setVal('s-wrapper-email',c['wrapper-apple-id']||'');
