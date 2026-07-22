@@ -53,7 +53,9 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "beatport-username", "beatport-password", "beatport-quality", "beatport-save-path",
     "soundcloud-save-path", "soundcloud-oauth-token", "soundcloud-hq",
     "sc-isrc-fallback", "sc-widevine-wrapper-url",   # found unsaveable in the 2026-07-22 settings audit
+    "soundcloud-accounts",   # multi-account SoundCloud pool (load-balanced) — list of {token,label}
     "yandex-token", "yandex-quality", "yandex-save-path",
+    "yandex-accounts",   # multi-account Yandex pool (load-balanced) — list of {token,label}
     "amazon-token", "amazon-quality", "amazon-save-path", "amazon-cli-path",
     "releases-services", "releases-days", "releases-types",
     "queue-autostart", "max-parallel",

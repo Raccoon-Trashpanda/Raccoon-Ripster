@@ -20,6 +20,12 @@ Setup, tools, wrapper and AMD management routes.
   GET  /api/qobuz/accounts          — list Qobuz accounts in the load-balance pool
   POST /api/qobuz/accounts/add      — add an account (token or email/password mode)
   POST /api/qobuz/accounts/{slot}/remove — remove an added account (not slot 0)
+  GET  /api/soundcloud/accounts     — list SoundCloud accounts in the load-balance pool
+  POST /api/soundcloud/accounts/add — add a token
+  POST /api/soundcloud/accounts/{slot}/remove — remove an added account (not slot 0)
+  GET  /api/yandex/accounts         — list Yandex accounts in the load-balance pool
+  POST /api/yandex/accounts/add     — add a token
+  POST /api/yandex/accounts/{slot}/remove — remove an added account (not slot 0)
   GET  /api/orpheus/status      — OrpheusDL-Spotify install/auth status
   POST /api/orpheus/login-start — start PKCE OAuth flow, returns Spotify auth URL
   DELETE /api/orpheus/login-cancel — cancel in-progress OAuth
@@ -579,6 +585,102 @@ async def qobuz_accounts_remove(slot: int):
         return {"ok": False, "msg": "Нет такого аккаунта"}
     removed = existing.pop(idx)
     _cfg["qobuz-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+
+
+# ── SoundCloud multi-account pool (load-balanced, token is a plain CLI arg) ────
+#   GET  /api/soundcloud/accounts        — list accounts in the pool
+#   POST /api/soundcloud/accounts/add    — add a token
+#   POST /api/soundcloud/accounts/{slot}/remove — remove an added account (not slot 0)
+
+@router.get("/api/soundcloud/accounts")
+async def soundcloud_accounts_list():
+    from ripster import soundcloud_pool as _scp
+    return _scp.live_status(_cfg)
+
+
+@router.post("/api/soundcloud/accounts/add")
+async def soundcloud_accounts_add(body: dict):
+    token = (body.get("token") or "").strip()
+    label = (body.get("label") or "").strip() or "account"
+    if not token:
+        return {"ok": False, "msg": "Нужен токен"}
+    existing = list(_cfg.get("soundcloud-accounts") or [])
+    if any(a.get("token") == token for a in existing):
+        return {"ok": False, "msg": "Этот токен уже добавлен"}
+    existing.append({"token": token, "label": label})
+    _cfg["soundcloud-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»"}
+
+
+@router.post("/api/soundcloud/accounts/{slot}/remove")
+async def soundcloud_accounts_remove(slot: int):
+    if slot < 1:
+        return {"ok": False, "msg": "Слот 0 — основной токен, убирается через обычные настройки SoundCloud"}
+    existing = list(_cfg.get("soundcloud-accounts") or [])
+    idx = slot - 1
+    if idx < 0 or idx >= len(existing):
+        return {"ok": False, "msg": "Нет такого аккаунта"}
+    removed = existing.pop(idx)
+    _cfg["soundcloud-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+
+
+# ── Yandex Music multi-account pool (load-balanced, token is a plain CLI arg) ──
+#   GET  /api/yandex/accounts        — list accounts in the pool
+#   POST /api/yandex/accounts/add    — add a token
+#   POST /api/yandex/accounts/{slot}/remove — remove an added account (not slot 0)
+
+@router.get("/api/yandex/accounts")
+async def yandex_accounts_list():
+    from ripster import yandex_pool as _yxp
+    return _yxp.live_status(_cfg)
+
+
+@router.post("/api/yandex/accounts/add")
+async def yandex_accounts_add(body: dict):
+    token = (body.get("token") or "").strip()
+    label = (body.get("label") or "").strip() or "account"
+    if not token:
+        return {"ok": False, "msg": "Нужен токен"}
+    existing = list(_cfg.get("yandex-accounts") or [])
+    if any(a.get("token") == token for a in existing):
+        return {"ok": False, "msg": "Этот токен уже добавлен"}
+    existing.append({"token": token, "label": label})
+    _cfg["yandex-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»"}
+
+
+@router.post("/api/yandex/accounts/{slot}/remove")
+async def yandex_accounts_remove(slot: int):
+    if slot < 1:
+        return {"ok": False, "msg": "Слот 0 — основной токен, убирается через обычные настройки Yandex"}
+    existing = list(_cfg.get("yandex-accounts") or [])
+    idx = slot - 1
+    if idx < 0 or idx >= len(existing):
+        return {"ok": False, "msg": "Нет такого аккаунта"}
+    removed = existing.pop(idx)
+    _cfg["yandex-accounts"] = existing
     if _save_config:
         try:
             _save_config(_cfg)

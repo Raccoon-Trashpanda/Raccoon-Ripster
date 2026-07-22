@@ -1487,6 +1487,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
     # simpler (no subprocess env override needed).
     _qz_pool = None
     _qz_slot = None
+    # SoundCloud / Yandex pools — token-as-CLI-arg, simplest of all.
+    _sc_pool = None
+    _sc_slot = None
+    _yx_pool = None
+    _yx_slot = None
 
     try:
         # Build a per-task config view so the quality-subfolder is visible to
@@ -1578,6 +1583,46 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 _qz_pool = None
                 _qz_slot = None
                 print(f"[qobuz-pool] acquire failed → single-account fallback: {_qze}", flush=True)
+        # SoundCloud / Yandex multi-account pools: simplest of the bunch — both
+        # engines take the token as a plain CLI arg (no shared file at all), so
+        # a slot is just "which token to substitute", no config-dir isolation
+        # or subprocess env override needed.
+        if engine_name == "soundcloud":
+            try:
+                from ripster import soundcloud_pool as _scp
+                _sc_pool = _scp.get_pool(_config)
+                if _sc_pool is not None:
+                    _sc_acq = await asyncio.to_thread(_sc_pool.acquire)
+                    if _sc_acq:
+                        _sc_slot, _sc_token = _sc_acq
+                        _cfg_view["soundcloud-oauth-token"] = _sc_token
+                        task["log"].append(f"🟠 soundcloud-pool: slot {_sc_slot}")
+                        try:
+                            await _broadcast({"type": "soundcloud_pool_update", "pool": _scp.live_status(_config)})
+                        except Exception:
+                            pass
+            except Exception as _sce:
+                _sc_pool = None
+                _sc_slot = None
+                print(f"[soundcloud-pool] acquire failed → single-account fallback: {_sce}", flush=True)
+        if engine_name == "yandex":
+            try:
+                from ripster import yandex_pool as _yxp
+                _yx_pool = _yxp.get_pool(_config)
+                if _yx_pool is not None:
+                    _yx_acq = await asyncio.to_thread(_yx_pool.acquire)
+                    if _yx_acq:
+                        _yx_slot, _yx_token = _yx_acq
+                        _cfg_view["yandex-token"] = _yx_token
+                        task["log"].append(f"🟡 yandex-pool: slot {_yx_slot}")
+                        try:
+                            await _broadcast({"type": "yandex_pool_update", "pool": _yxp.live_status(_config)})
+                        except Exception:
+                            pass
+            except Exception as _yxe:
+                _yx_pool = None
+                _yx_slot = None
+                print(f"[yandex-pool] acquire failed → single-account fallback: {_yxe}", flush=True)
         cmd = eng.build_cmd(url, quality, _cfg_view)
         task["log"].append(f"▶ {' '.join(cmd)}")
         await _broadcast(_i18n.log_event("console.cmd_start", level="info", task_id=tid, cmd=' '.join(cmd[:3])))
@@ -2281,6 +2326,26 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             try:
                 from ripster import qobuz_pool as _qzp_rel
                 await _broadcast({"type": "qobuz_pool_update", "pool": _qzp_rel.live_status(_config)})
+            except Exception:
+                pass
+        if _sc_pool is not None and _sc_slot is not None:
+            try:
+                _sc_pool.release(_sc_slot)
+            except Exception:
+                pass
+            try:
+                from ripster import soundcloud_pool as _scp_rel
+                await _broadcast({"type": "soundcloud_pool_update", "pool": _scp_rel.live_status(_config)})
+            except Exception:
+                pass
+        if _yx_pool is not None and _yx_slot is not None:
+            try:
+                _yx_pool.release(_yx_slot)
+            except Exception:
+                pass
+            try:
+                from ripster import yandex_pool as _yxp_rel
+                await _broadcast({"type": "yandex_pool_update", "pool": _yxp_rel.live_status(_config)})
             except Exception:
                 pass
         # Skip history when the task was reset in-place for auto-retry —

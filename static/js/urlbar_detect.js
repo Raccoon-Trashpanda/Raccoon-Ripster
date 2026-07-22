@@ -133,7 +133,7 @@ function showStab(id, btn) {
     if(c['media-user-token'] && c['authorization-token']) testAuth('apple');
     try { loadAppleAccounts?.(); } catch {}
   }
-  if(id==='soundcloud') { setVal('s-sc-path', c['soundcloud-save-path']||''); setVal('s-sc-oauth', c['soundcloud-oauth-token']||''); setVal('s-sc-wvd-wrapper', c['sc-widevine-wrapper-url']||''); setChk('s-sc-isrc-fallback', !!c['sc-isrc-fallback']); if(c['soundcloud-oauth-token']) testAuth('soundcloud'); scEngineCheck(); try { _scCheckWvd?.(); _scCheckWvdWrapper?.(); } catch {} }
+  if(id==='soundcloud') { setVal('s-sc-path', c['soundcloud-save-path']||''); setVal('s-sc-oauth', c['soundcloud-oauth-token']||''); setVal('s-sc-wvd-wrapper', c['sc-widevine-wrapper-url']||''); setChk('s-sc-isrc-fallback', !!c['sc-isrc-fallback']); if(c['soundcloud-oauth-token']) testAuth('soundcloud'); scEngineCheck(); try { _scCheckWvd?.(); _scCheckWvdWrapper?.(); loadSoundcloudAccounts?.(); } catch {} }
   if(id==='beatport') {
     setVal('s-bp-user', c['beatport-username']||'');
     setVal('s-bp-pass', c['beatport-password']||'');
@@ -147,6 +147,7 @@ function showStab(id, btn) {
     _setSecret('s-yandex-token', c['yandex-token']);
     setVal('s-yandex-qual', c['yandex-quality']||'flac');
     setVal('s-yandex-path', c['yandex-save-path']||'');
+    try { loadYandexAccounts?.(); } catch {}
   }
   if(id==='amazon') {
     _setSecret('s-amazon-token', c['amazon-token']);

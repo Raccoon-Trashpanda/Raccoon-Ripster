@@ -643,3 +643,91 @@ async function removeAppleAccount(slot) {
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
 }
 
+// ── SoundCloud multi-account pool (load-balanced OAuth tokens) ─────────────
+async function loadSoundcloudAccounts() {
+  const list = document.getElementById('soundcloud-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/soundcloud/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = accs.map(a => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        ${a.primary ? '' : `<button onclick="removeSoundcloudAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`).join('');
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addSoundcloudAccount() {
+  const tokEl   = document.getElementById('s-sc-pool-token');
+  const labelEl = document.getElementById('s-sc-pool-label');
+  const token = (tokEl?.value || '').trim();
+  const label = (labelEl?.value || '').trim();
+  if(!token) { toast(t('t.error'), 'var(--red)'); return; }
+  try {
+    const r = await api('POST', '/api/soundcloud/accounts/add', {token, label});
+    if(r.ok) {
+      toast(r.msg || 'Добавлено', 'var(--green)');
+      [tokEl, labelEl].forEach(el => { if(el) el.value = ''; });
+      loadSoundcloudAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeSoundcloudAccount(slot) {
+  if(!confirm('Убрать этот аккаунт из пула?')) return;
+  try {
+    const r = await api('POST', `/api/soundcloud/accounts/${slot}/remove`);
+    toast(r.msg || (r.ok ? 'Убрано' : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadSoundcloudAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+// ── Yandex Music multi-account pool (load-balanced OAuth tokens) ───────────
+async function loadYandexAccounts() {
+  const list = document.getElementById('yandex-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/yandex/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = accs.map(a => `
+      <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        ${a.primary ? '' : `<button onclick="removeYandexAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`).join('');
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addYandexAccount() {
+  const tokEl   = document.getElementById('s-yandex-pool-token');
+  const labelEl = document.getElementById('s-yandex-pool-label');
+  const token = (tokEl?.value || '').trim();
+  const label = (labelEl?.value || '').trim();
+  if(!token) { toast(t('t.error'), 'var(--red)'); return; }
+  try {
+    const r = await api('POST', '/api/yandex/accounts/add', {token, label});
+    if(r.ok) {
+      toast(r.msg || 'Добавлено', 'var(--green)');
+      [tokEl, labelEl].forEach(el => { if(el) el.value = ''; });
+      loadYandexAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeYandexAccount(slot) {
+  if(!confirm('Убрать этот аккаунт из пула?')) return;
+  try {
+    const r = await api('POST', `/api/yandex/accounts/${slot}/remove`);
+    toast(r.msg || (r.ok ? 'Убрано' : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadYandexAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+

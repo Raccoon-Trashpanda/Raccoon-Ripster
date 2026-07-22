@@ -1675,6 +1675,22 @@
                 <button class="btn-ghost btn-sm btn-icon" onclick="const f=document.getElementById('s-sc-oauth');f.type=f.type==='password'?'text':'password'" data-i18n-title="s.show_hide" title="Показать/скрыть">👁</button>
               </div>
             </div>
+
+            <!-- Multi-account pool: several OAuth tokens, downloads load-balanced -->
+            <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,85,0,.15)">
+              <div style="font-size:11px;font-weight:700;color:#ff5500;margin-bottom:8px">➕ Доп. аккаунты (балансировка загрузок)</div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+                Добавь ещё OAuth-токены — параллельные SoundCloud-загрузки будут распределяться между аккаунтами вместо очереди на одном.
+              </div>
+              <div id="soundcloud-accounts-list" style="margin-bottom:8px"></div>
+              <div style="display:flex;gap:5px;flex-wrap:wrap">
+                <input id="s-sc-pool-token" type="password" placeholder="oauth_token второго аккаунта…"
+                  style="font-family:var(--mono);font-size:11px;flex:2;min-width:160px"/>
+                <input id="s-sc-pool-label" type="text" placeholder="Метка"
+                  style="font-size:11px;flex:1;min-width:80px"/>
+                <button class="btn-sm" onclick="addSoundcloudAccount()" style="padding:6px 12px;background:rgba(255,85,0,.18);color:#ff5500;border:1px solid rgba(255,85,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">+ Добавить</button>
+              </div>
+            </div>
             <!-- ── Widevine L3 CDM (для DRM треков, миксов и приватных ссылок) ── -->
             <div class="block" style="margin-top:10px;background:rgba(255,85,0,.04);border:1px solid rgba(255,85,0,.18)">
               <div class="block-title" style="color:#ff7a33;font-size:11px" data-i18n="sc.wvd_title">🔐 Widevine L3 CDM (опционально)</div>
@@ -1842,6 +1858,22 @@
               <input id="s-yandex-paste" placeholder="music.yandex.ru/#access_token=…  или  AQAA…"
                 style="font-family:var(--mono);font-size:11px"
                 oninput="yandexSaveToken(this.value)"/>
+            </div>
+          </div>
+
+          <!-- Multi-account pool: several OAuth tokens, downloads load-balanced -->
+          <div style="background:rgba(255,204,0,.06);border:1px solid rgba(255,204,0,.18);border-radius:9px;padding:10px 12px;margin-bottom:10px">
+            <div style="font-size:11px;font-weight:700;color:#ffcc00;margin-bottom:8px">➕ Доп. аккаунты (балансировка загрузок)</div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+              Добавь ещё OAuth-токены — параллельные Yandex-загрузки будут распределяться между аккаунтами вместо очереди на одном.
+            </div>
+            <div id="yandex-accounts-list" style="margin-bottom:8px"></div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              <input id="s-yandex-pool-token" type="password" placeholder="Токен второго аккаунта…"
+                style="font-family:var(--mono);font-size:11px;flex:2;min-width:160px"/>
+              <input id="s-yandex-pool-label" type="text" placeholder="Метка"
+                style="font-size:11px;flex:1;min-width:80px"/>
+              <button class="btn-sm" onclick="addYandexAccount()" style="padding:6px 12px;background:rgba(255,204,0,.18);color:#ffcc00;border:1px solid rgba(255,204,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">+ Добавить</button>
             </div>
           </div>
 
