@@ -541,9 +541,9 @@ function buildQueueItem(task) {
   const _showBar  = task.status==='running' || task.status==='queued';
   const _st       = _qiStatusChip(task);
   const _acts =
-    (task.service==='spotify' ? `<button class="dl-action-btn" onclick="isrcUpgrade('${task.id}')" title="🎯 ${t('q.isrc_upgrade')}" style="color:#c084f5;border-color:#c084f544">🎯</button>` : '') +
-    (task.status==='done' ? `<button class="dl-action-btn dl-cloud-btn" onclick="uploadToCloud('${task.id}',this)" title="${t('q.gofile')}" style="color:#f0a050;border-color:#f0a05044">🔗${(task._dl_gofile||0)>0?`<span class="dl-cnt">${task._dl_gofile}</span>`:''}</button>` : '') +
-    ((task.status==='error'||task.status==='cancelled'||_partial) ? `<button class="dl-action-btn" onclick="retryTask('${task.id}')" title="↺ ${t('q.retry_missing')}" style="color:#ffd60a;border-color:#ffd60a44">↺</button>` : '');
+    (task.service==='spotify' ? `<button class="dl-action-btn" onclick="isrcUpgrade('${task.id}')" title="🎯 ${t('q.isrc_upgrade')}" style="--c:#c084f5">🎯</button>` : '') +
+    (task.status==='done' ? `<button class="dl-action-btn dl-cloud-btn" onclick="uploadToCloud('${task.id}',this)" title="${t('q.gofile')}" style="--c:#f0a050">🔗${(task._dl_gofile||0)>0?`<span class="dl-cnt">${task._dl_gofile}</span>`:''}</button>` : '') +
+    ((task.status==='error'||task.status==='cancelled'||_partial) ? `<button class="dl-action-btn" onclick="retryTask('${task.id}')" title="↺ ${t('q.retry_missing')}" style="--c:#ffd60a">↺</button>` : '');
 
   el.innerHTML = `
     <div class="qi-art">${m?.artworkUrl?`<img src="${esc(m.artworkUrl)}" data-cover data-lightbox onload="this.classList.add('loaded')" style="cursor:zoom-in" loading="lazy"/>`:'🎵'}</div>

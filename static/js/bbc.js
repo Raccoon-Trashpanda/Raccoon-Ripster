@@ -340,7 +340,7 @@ async function bbcPlay(pid, vpid, title, artist, art) {
   const coverHtml = art ? `<img src="${esc(art)}" style="width:100%;height:100%;object-fit:cover"/>` : '📻';
   ['pp-art','pp-art-big'].forEach(id => { const el = document.getElementById(id); if(el) el.innerHTML = coverHtml; });
   ['pp-fill','pp-fill-big'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = '0%'; });
-  ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '0:00'; });
+  ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = (id==='pp-cur') ? '0:00.000' : '0:00'; });
   ['pp-dur','pp-dur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '0:00'; });
 
   const playBtn  = document.getElementById('pp-play');
@@ -438,7 +438,15 @@ function _bbcTimeUpdate() {
   const curStr = _bbcFmtDur(cur);
   const durStr = _bbcFmtDur(dur);
   ['pp-fill','pp-fill-big'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = pct; });
-  ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = curStr; });
+  // BBC plays through its own <audio id="bbc-audio">, deliberately NOT read by
+  // the shared rAF ms-loop (_ppMsLoop — see its comment), so #pp-cur is owned
+  // here instead. Match the M:SS.mmm format the loop uses elsewhere so pausing
+  // doesn't drop the fractional part and reflow the player controls.
+  const curMs = fmtDurMs(cur); const _i = curMs.lastIndexOf('.');
+  const curEl = document.getElementById('pp-cur');
+  if (curEl) curEl.innerHTML = _i>0 ? curMs.slice(0,_i)+'<span class="pp-ms">'+curMs.slice(_i)+'</span>' : curMs;
+  const curBigEl = document.getElementById('pp-cur-big');
+  if (curBigEl) curBigEl.textContent = curStr;
   ['pp-dur','pp-dur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = durStr; });
   _mixPosSave('bbc:' + (BBC.pid || ''), cur, dur);
   // 1001Tracklists chapters: highlight current track + draw ticks once duration known.

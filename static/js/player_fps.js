@@ -228,7 +228,10 @@ window._scDrmHls = async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
       const pct = (cur / dur * 100) + '%';
       const t = fmtDur(Math.floor(cur));
       ['pp-fill','pp-fill-big','fp-fill'].forEach(id => { const e = document.getElementById(id); if(e) e.style.width = pct; });
-      ['pp-cur','pp-cur-big','fp-cur'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = t; });
+      // #pp-cur excluded: the rAF ms-loop (_ppMsLoop, reads Preview._fpsEl) owns
+      // it exclusively so it always shows M:SS.mmm — see player.js's <audio>
+      // timeupdate fix for the full explanation.
+      ['pp-cur-big','fp-cur'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = t; });
       const thumb = document.getElementById('fp-thumb'); if (thumb) thumb.style.left = pct;
       try { _mixPosSave?.(item.posKey, cur, dur); } catch {}
       try { _lrcSyncTick?.(cur); } catch {}

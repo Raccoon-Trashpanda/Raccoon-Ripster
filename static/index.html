@@ -17,7 +17,7 @@
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/css/main.css?v=71"/>
+<link rel="stylesheet" href="/static/css/main.css?v=72"/>
 </head>
 <body>
 <div id="net-progress"></div>
@@ -88,16 +88,16 @@
       <span id="tb-details-dot" style="width:6px;height:6px;border-radius:50%;background:var(--muted);transition:background .2s"></span>
       <span data-i18n="tb.info">Инфо</span>
     </button>
-    <div class="lang-switcher" id="lang-switcher" title="Interface language">
-      <button class="lang-flag-btn" id="lang-current" onclick="toggleLangDropdown(event)">🇷🇺</button>
-      <div class="lang-dropdown" id="lang-dropdown" style="display:none">
-        <button onclick="setLang('ru');toggleLangDropdown()">🇷🇺 RU</button>
-        <button onclick="setLang('en');toggleLangDropdown()">🇬🇧 EN</button>
-        <button onclick="setLang('hi');toggleLangDropdown()">🇮🇳 HI</button>
-        <button onclick="setLang('ja');toggleLangDropdown()">🇯🇵 JA</button>
-        <button onclick="setLang('zh');toggleLangDropdown()">🇨🇳 ZH</button>
-      </div>
-    </div>
+    <button class="glob-btn" id="lang-switcher" onclick="cycleLang(event)" data-i18n-title="tb.lang_t" title="Следующий язык (клик по точке — выбрать конкретный)">
+      <span class="gi">🌐</span><span class="code" id="lang-code">RU</span>
+      <span class="dots" id="lang-dots">
+        <i data-lang="ru" onclick="setLang('ru');event.stopPropagation()"></i>
+        <i data-lang="en" onclick="setLang('en');event.stopPropagation()"></i>
+        <i data-lang="hi" onclick="setLang('hi');event.stopPropagation()"></i>
+        <i data-lang="ja" onclick="setLang('ja');event.stopPropagation()"></i>
+        <i data-lang="zh" onclick="setLang('zh');event.stopPropagation()"></i>
+      </span>
+    </button>
     <div class="tb-status" id="tb-status" title="WebSocket status">● Disconnected</div>
     <button class="tb-restart owner-only" id="tb-restart-btn" onclick="restartServer()" data-i18n-title="tb.restart_t" title="Перезапустить сервер" style="display:none">↺</button>
   </header>
@@ -419,9 +419,9 @@
   <button type="button" onclick="closeLightbox()" style="position:absolute;top:16px;right:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:none;cursor:pointer;font-size:16px;backdrop-filter:blur(4px)">✕</button>
 </div>
 
-<script src="/static/js/i18n.js?v=10060"></script>
+<script src="/static/js/i18n.js?v=10061"></script>
 <script src="/static/js/views.js?v=10055"></script>
-<script src="/static/js/app.js?v=10106"></script>
+<script src="/static/js/app.js?v=10109"></script>
 <script src="/static/js/wrapper.js?v=6"></script>
 <script src="/static/js/coder.js?v=5"></script>
 <script src="/static/js/guest.js?v=1"></script>
@@ -438,15 +438,15 @@
 <script src="/static/js/auth_ui.js?v=10"></script>
 <script src="/static/js/player_lib.js?v=3"></script>
 <script src="/static/js/remote_ui.js?v=3"></script>
-<script src="/static/js/service_colors_ui.js?v=8"></script>
+<script src="/static/js/service_colors_ui.js?v=9"></script>
 <script src="/static/js/deps_ui.js?v=2"></script>
 <script src="/static/js/tokens_ui.js?v=1"></script>
 <script src="/static/js/config_yaml_ui.js?v=1"></script>
-<script src="/static/js/player.js?v=10034"></script>
-<script src="/static/js/player_fps.js?v=11"></script>
-<script src="/static/js/bbc.js?v=10008"></script>
+<script src="/static/js/player.js?v=10035"></script>
+<script src="/static/js/player_fps.js?v=12"></script>
+<script src="/static/js/bbc.js?v=10009"></script>
 <script src="/static/js/sc.js?v=10018"></script>
-<script src="/static/js/fx_ui.js?v=5"></script>
+<script src="/static/js/fx_ui.js?v=6"></script>
 
 <!-- Mobile sidebar drawer overlay -->
 <div id="drawer-overlay" class="drawer-overlay" onclick="closeMobileDrawer()"></div>

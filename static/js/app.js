@@ -20,6 +20,28 @@ const t = key => {
 // the dict for the key first (see case 'log').
 const ti = (key, params) => { let s = t(key); if (params) for (const k in params) s = s.replaceAll('{'+k+'}', params[k]); return s; };
 
+// ── HTML escaping ──────────────────────────────────────────────
+// Every innerHTML template in this app interpolates data from external
+// services (track/artist/album metadata, filenames, engine log lines) or
+// direct user input (search, guest names, config values) — none of it is
+// safe to inject as raw markup. escapeHtml() is the single sink-side guard;
+// call it on every interpolated value, never on the surrounding literal
+// markup (that would escape intentional tags too).
+const _ESC_MAP = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'};
+function escapeHtml(s) {
+  if (s === null || s === undefined) return '';
+  return String(s).replace(/[&<>"']/g, c => _ESC_MAP[c]);
+}
+// NOTE: do NOT also declare `esc` here — static/js/lightbox.js already
+// defines a plain `function esc(s){...}` doing the same thing, and it's
+// loaded later in index.html. Two top-level `const`/`function` declarations
+// of the same name across separate classic <script> tags share one global
+// scope and throw `SyntaxError: Identifier 'esc' has already been declared`
+// at PARSE time for whichever script loads second — which silently kills
+// that entire file (and broke the Console tab + other views on 2026-07-22
+// until this was caught via a headless-Chrome console check). Callers that
+// want `esc(...)` already get lightbox.js's version for free.
+
 // BCP-47 tag for Date#toLocaleDateString — was hardcoded 'ru' at every call
 // site, so date labels stayed Russian even after switching the UI language.
 const _DATE_LOCALE = {ru:'ru', en:'en', hi:'hi-IN', ja:'ja', zh:'zh-CN'};
@@ -40,35 +62,16 @@ function setLang(lang) {
   try { if(typeof renderArtistPage  === 'function' && (typeof Detail !== 'undefined') && Detail.currentArtist) renderArtistPage(); } catch {}
 }
 
-function toggleLangDropdown(e) {
-  let dd = document.getElementById('lang-dropdown');
-  if(!dd) return;
-  // Ensure the dropdown lives directly under body so backdrop-filter on .topbar
-  // doesn't act as a containing block and clip position:fixed.
-  if(dd.parentElement !== document.body) {
-    document.body.appendChild(dd);
-  }
-  const open = dd.style.display !== 'none';
-  if(open) {
-    dd.style.display = 'none';
-  } else {
-    const btn = document.getElementById('lang-current');
-    if(btn) {
-      const r = btn.getBoundingClientRect();
-      dd.style.top   = (r.bottom + 4) + 'px';
-      dd.style.right = (window.innerWidth - r.right) + 'px';
-      dd.style.left  = '';
-    }
-    dd.style.display = 'block';
-    const close = () => { dd.style.display='none'; document.removeEventListener('click',close); };
-    setTimeout(() => document.addEventListener('click', close), 0);
-  }
+const _LANG_ORDER = ['ru','en','hi','ja','zh'];
+function cycleLang(e) {
+  const cur = _LANG_ORDER.indexOf(S.lang || 'ru');
+  const next = _LANG_ORDER[(cur + 1) % _LANG_ORDER.length];
+  setLang(next);
   if(e) e.stopPropagation();
 }
 
 function applyLang() {
   const lang = S.lang || 'ru';
-  const flags = {ru:'🇷🇺',en:'🇬🇧',hi:'🇮🇳',ja:'🇯🇵',zh:'🇨🇳'};
   document.documentElement.lang = lang;
   // t() returns the key itself when a translation is missing — in that case KEEP
   // the element's inline (authored) text instead of overwriting it with the raw
@@ -78,8 +81,11 @@ function applyLang() {
   document.querySelectorAll('[data-i18n-ph]').forEach(el => { const v=_tx(el.dataset.i18nPh); if(v!=null) el.placeholder = v; });
   document.querySelectorAll('[data-i18n-title]').forEach(el => { const v=_tx(el.dataset.i18nTitle); if(v!=null) el.title = v; });
   document.querySelectorAll('[data-i18n-html]').forEach(el => { const v=_tx(el.dataset.i18nHtml); if(v!=null) el.innerHTML = v; });
-  const cur = document.getElementById('lang-current');
-  if(cur) cur.textContent = flags[lang] || lang.toUpperCase();
+  const codeEl = document.getElementById('lang-code');
+  if(codeEl) codeEl.textContent = lang.toUpperCase();
+  document.querySelectorAll('#lang-dots i').forEach(dot => {
+    dot.classList.toggle('on', dot.dataset.lang === lang);
+  });
 }
 
 // ── GLOBAL STATE (must be before any function uses them) ──────────
@@ -500,7 +506,7 @@ function handleMessage(msg) {
       S.config['engine'] = msg.engine;
       if(msg.qualities){ QUALITIES.length=0; QUALITIES.push(...msg.qualities);
         const sel2=document.getElementById('url-quality');
-        if(sel2) sel2.innerHTML=QUALITIES.map(q=>`<option value="${q.id}">${q.label} — ${q.sub}</option>`).join('');
+        if(sel2) sel2.innerHTML=QUALITIES.map(q=>`<option value="${esc(q.id)}">${esc(q.label)} — ${esc(q.sub)}</option>`).join('');
       }
       updateEngineUI(msg.engine); renderQualityGrid(); updatePills(); break;
     // ── Setup ──────────────────────────────────────────────────
@@ -530,7 +536,7 @@ function handleMessage(msg) {
       const banner = document.getElementById('restart-banner');
       const reason = document.getElementById('restart-reason');
       if(banner) banner.style.display='';
-      if(reason && msg.reason) reason.innerHTML = msg.reason;
+      if(reason && msg.reason) reason.innerHTML = esc(msg.reason);
       toast('⚠ Restart required — see Setup tab','var(--orange)');
       const nav = document.querySelector('.nav-item[data-view="setup"]');
       if(nav) showView('setup',nav);
@@ -716,7 +722,7 @@ function showView(name, el) {
 // ── QUALITY SELECT POPULATE ────────────────────────────────────
 function populateQualitySelect() {
   const sel = document.getElementById('url-quality');
-  sel.innerHTML = QUALITIES.map(q=>`<option value="${q.id}">${q.label} — ${q.sub}</option>`).join('');
+  sel.innerHTML = QUALITIES.map(q=>`<option value="${esc(q.id)}">${esc(q.label)} — ${esc(q.sub)}</option>`).join('');
   sel.value = resolveQuality('apple');
 }
 
@@ -788,7 +794,7 @@ function _multiUrlPrompt(urls, quality) {
     .map(([s,c]) => `${(typeof _svcLabel==='function'?_svcLabel(s):s)||s}×${c}`).join(' · ');
   const list = urls.slice(0,8).map((u,i) => {
     const short = u.length>56 ? u.slice(0,53)+'…' : u;
-    return `<div style="font-size:10px;font-family:monospace;color:var(--muted);padding:1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${i+1}. ${short}</div>`;
+    return `<div style="font-size:10px;font-family:monospace;color:var(--muted);padding:1px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${i+1}. ${esc(short)}</div>`;
   }).join('') + (n>8 ? `<div style="font-size:10px;color:var(--muted);margin-top:2px">…${t('t.and_more')} ${n-8}</div>` : '');
 
   const modal = document.createElement('div');
@@ -921,8 +927,8 @@ function renderQualityGrid() {
         ).join('')}
       </select>
       <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:7px;font-size:11px;color:var(--muted)">
-        <span style="font-size:9px;font-weight:800;padding:2px 8px;border-radius:5px;background:${curQ.color}22;color:${curQ.color};letter-spacing:.4px">${esc(curQ.badge)}</span>
-        <span style="color:${curQ.color};font-weight:700">${esc(curQ.bitrate)}</span>
+        <span style="font-size:9px;font-weight:800;padding:2px 8px;border-radius:5px;background:${esc(curQ.color)}22;color:${esc(curQ.color)};letter-spacing:.4px">${esc(curQ.badge)}</span>
+        <span style="color:${esc(curQ.color)};font-weight:700">${esc(curQ.bitrate)}</span>
         <span>·</span>
         <span>${curQ.req==='wrapper'?t('s.req_wrapper'):t('s.req_mut')}</span>
         <span>·</span>
@@ -959,7 +965,7 @@ function renderQualityNote(id) {
   const el = document.getElementById('quality-note');
   if(!el) return;
   const q = QUALITIES.find(x=>x.id===id)||QUALITIES[0];
-  el.innerHTML = `<div class="block-title" style="color:${q?.color}">${q?.label} — CLI flag: <code style="color:${q?.color}">${q?.flag||'(default)'}</code></div>
+  el.innerHTML = `<div class="block-title" style="color:${esc(q?.color)}">${esc(q?.label)} — CLI flag: <code style="color:${esc(q?.color)}">${esc(q?.flag||'(default)')}</code></div>
     <div style="font-size:12px;color:var(--muted);line-height:1.7">${Q_NOTES[id]||''}</div>`;
 }
 
@@ -974,7 +980,7 @@ async function fetchTags() {
     const meta = await r.json();
     renderMeta(meta);
   } catch(e) {
-    document.getElementById('tag-result').innerHTML = `<div class="empty-state" style="height:120px"><div class="empty-icon" style="font-size:28px">⚠️</div><div class="empty-text">${e.message}</div></div>`;
+    document.getElementById('tag-result').innerHTML = `<div class="empty-state" style="height:120px"><div class="empty-icon" style="font-size:28px">⚠️</div><div class="empty-text">${esc(e.message)}</div></div>`;
   }
 }
 
@@ -991,18 +997,18 @@ function renderMeta(m) {
 
   const fmts = (m.formats||[]).map(f=>{
     const cls = f.includes('atmos')?'atmos':f.includes('hi-res')?'hires':'';
-    return `<span class="fmt-pill ${cls}">${f}</span>`;
+    return `<span class="fmt-pill ${cls}">${esc(f)}</span>`;
   }).join(' ');
 
   document.getElementById('tag-result').innerHTML = `
     <div class="card">
       <div class="meta-hero">
-        ${m.artworkUrl?`<div class="meta-hero-blur" style="background-image:url(${m.artworkUrl})"></div>`:''}
+        ${m.artworkUrl?`<div class="meta-hero-blur" style="background-image:url(${esc(m.artworkUrl)})"></div>`:''}
         <div class="meta-hero-content">
-          <div class="meta-art">${m.artworkUrl?`<img src="${m.artworkUrl}"/>`:'🎵'}</div>
+          <div class="meta-art">${m.artworkUrl?`<img src="${esc(m.artworkUrl)}"/>`:'🎵'}</div>
           <div>
-            <div class="meta-ti">${m.title}</div>
-            <div class="meta-ar">${m.artist}</div>
+            <div class="meta-ti">${esc(m.title)}</div>
+            <div class="meta-ar">${esc(m.artist)}</div>
             <div class="meta-badges">
               ${m.hasAtmos?'<span class="fmt-pill atmos">ATMOS</span>':''}
               ${m.hasHiRes?'<span class="fmt-pill hires">HI-RES</span>':''}
@@ -1012,9 +1018,9 @@ function renderMeta(m) {
         </div>
       </div>
       <div class="meta-body">
-        ${rows.map(([k,v])=>`<div class="meta-row"><div class="meta-key">${k}</div><div class="meta-val">${v}</div></div>`).join('')}
+        ${rows.map(([k,v])=>`<div class="meta-row"><div class="meta-key">${esc(k)}</div><div class="meta-val">${esc(v)}</div></div>`).join('')}
         ${fmts?`<div class="meta-row"><div class="meta-key">Formats</div><div class="meta-val" style="display:flex;gap:5px;flex-wrap:wrap">${fmts}</div></div>`:''}
-        ${m.artworkUrl?`<div class="meta-row"><div class="meta-key">Artwork</div><div class="meta-val"><a href="${m.artworkUrl}" target="_blank" style="color:var(--blue)">${m.artworkUrl.split('/').pop().split('?')[0]}</a></div></div>`:''}
+        ${m.artworkUrl?`<div class="meta-row"><div class="meta-key">Artwork</div><div class="meta-val"><a href="${esc(m.artworkUrl)}" target="_blank" style="color:var(--blue)">${esc(m.artworkUrl.split('/').pop().split('?')[0])}</a></div></div>`:''}
       </div>
     </div>`;
 }
@@ -1353,8 +1359,8 @@ function updatePills() {
 
 function _detailRow(label, value, color) {
   return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
-    <span style="color:var(--muted);font-size:11px">${label}</span>
-    <span style="color:${color||'var(--text)'};font-weight:600;font-size:12px">${value}</span>
+    <span style="color:var(--muted);font-size:11px">${esc(label)}</span>
+    <span style="color:${esc(color)||'var(--text)'};font-weight:600;font-size:12px">${esc(value)}</span>
   </div>`;
 }
 
@@ -1633,6 +1639,13 @@ function updateEngineUI(engine) {
   if(zhB) zhB.style.display = isZhaar ? '' : 'none';
   if(gmB) gmB.style.display = isGamdl ? '' : 'none';
   if(amB) amB.style.display = isAMD   ? '' : 'none';
+  // checkAMDStatus() was previously only ever called in response to the
+  // 'amd_ready' WS event (fired right after a fresh install completes THIS
+  // session) — so on every normal page load the block just showed the
+  // hardcoded "Not installed" placeholder from settings.html, forever,
+  // regardless of the real /api/amd/status. Check for real whenever the
+  // block becomes visible instead.
+  if(isAMD && typeof checkAMDStatus === 'function') checkAMDStatus();
   // Unified cover/tag option sections
   const coverGamdl = document.getElementById('cover-gamdl-opts');
   const tagsGamdl  = document.getElementById('tags-gamdl-opts');
@@ -1668,7 +1681,7 @@ async function switchEngine(engine) {
   QUALITIES.push(...(r.qualities||[]));
   // Rebuild quality select
   const sel = document.getElementById('url-quality');
-  if(sel) sel.innerHTML = QUALITIES.map(q=>`<option value="${q.id}">${q.label} — ${q.sub}</option>`).join('');
+  if(sel) sel.innerHTML = QUALITIES.map(q=>`<option value="${esc(q.id)}">${esc(q.label)} — ${esc(q.sub)}</option>`).join('');
   // Pick first quality of new engine
   const first = QUALITIES[0];
   if(first && S.config['quality'] !== first.id) {

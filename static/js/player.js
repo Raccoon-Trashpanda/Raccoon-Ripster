@@ -329,13 +329,17 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
       const cur = fpsEl.currentTime, dur = fpsEl.duration;
       if (!dur || !isFinite(dur)) return;
       if (_seekDragging) return;
-      const pct = (cur / dur * 100) + '%';
+      const pctNum = cur / dur * 100;
+      const pct = pctNum + '%';
       const t = fmtDur(Math.floor(cur));
       ['pp-fill','pp-fill-big','fp-fill'].forEach(id => { const e = document.getElementById(id); if(e) e.style.width = pct; });
-      ['pp-cur','pp-cur-big','fp-cur'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = t; });
+      // #pp-cur excluded: the rAF ms-loop (_ppMsLoop, already reads Preview._fpsEl)
+      // exclusively owns it so it always shows M:SS.mmm — see the timeupdate fix
+      // on the plain <audio> element for the full explanation.
+      ['pp-cur-big','fp-cur'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = t; });
       // Thumb uses --x-pct on transform (GPU, no layout). Older code set
       // `style.left` directly which forced a reflow every timeupdate tick.
-      const thumb = document.getElementById('fp-thumb'); if (thumb) thumb.style.setProperty('--x-pct', pct);
+      const thumb = document.getElementById('fp-thumb'); if (thumb) thumb.style.setProperty('--x-pct', _fpThumbPx(pctNum));
       try { _mixPosSave?.(item.posKey, cur, dur); } catch {}
       try { _lrcSyncTick?.(cur); } catch {}
       if ('mediaSession' in navigator && dur > 0) {
@@ -1075,13 +1079,33 @@ setInterval(() => {
   const t   = `${Math.floor(cur/60)}:${String(Math.floor(cur%60)).padStart(2,'0')}`;
   try { _updateBuffered(); _updateCurrentChapter(cur); } catch (_) {}
   ['pp-fill','pp-fill-big','fp-fill'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = pct + '%'; });
-  ['pp-cur','pp-cur-big','fp-cur'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = t; });
-  const thumb = document.getElementById('fp-thumb'); if (thumb) thumb.style.setProperty('--x-pct', pct + '%');
+  // #pp-cur excluded: the rAF ms-loop (_ppMsLoop, already reads _WA) exclusively
+  // owns it so it always shows M:SS.mmm — see the <audio> timeupdate fix for
+  // the full explanation of why writing plain M:SS here caused layout shift.
+  ['pp-cur-big','fp-cur'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = t; });
+  const thumb = document.getElementById('fp-thumb'); if (thumb) thumb.style.setProperty('--x-pct', _fpThumbPx(pct));
   if ('mediaSession' in navigator && dur > 0) {
     try { navigator.mediaSession.setPositionState({duration: dur, playbackRate: 1, position: Math.min(cur, dur)}); } catch {}
   }
   _floatSyncFn?.();
 }, 250);
+
+// ── Seek-bar thumb positioning ─────────────────────────────────────────────
+// `transform: translate3d(<pct>%, ...)` resolves a percentage against the
+// TRANSFORMED ELEMENT'S OWN box, not its containing block (unlike `width:%`
+// or `left:%`) — per the CSS Transforms spec, percentages in translate are
+// relative to the reference box of the element being transformed. #fp-thumb
+// is a 10px circle, so `--x-pct: 45%` moved it ~4.5px regardless of the
+// actual seek-bar width, drifting out of sync with the (correctly-scaling)
+// %-width fill bar — worse the wider the bar, hence "sometimes wider,
+// sometimes narrower" depending on window/layout width. Fix: compute the
+// real pixel offset against the track's rendered width instead; --x-pct
+// still drives a pure `transform` (GPU-composited, no layout) either way.
+function _fpThumbPx(fracPct){
+  const track = document.getElementById('fp-progress');
+  const w = track ? track.clientWidth : 0;
+  return (w * (fracPct/100)) + 'px';
+}
 
 // ── AIMP-style millisecond readout for the mini-bar current time ──────────────
 // Additive: a rAF loop owns #pp-cur and renders M:SS.mmm smoothly. The 250ms
@@ -1435,9 +1459,11 @@ function _setupAudioEvents() {
     const pct = audio.duration ? (audio.currentTime / audio.duration * 100) + '%' : '0%';
     const timeStr = fmtDur(Math.floor(audio.currentTime));
     const fill = document.getElementById('pp-fill');
-    const cur  = document.getElementById('pp-cur');
+    // #pp-cur is exclusively owned by the rAF ms-loop (_ppMsLoop) so it always
+    // reads M:SS.mmm — writing the plain M:SS format here too raced it and won
+    // right at pause/play, snapping the fractional part away and reflowing the
+    // player controls next to it (no more .mmm digits = narrower box).
     if (fill) fill.style.width = pct;
-    if (cur)  cur.textContent  = timeStr;
     const fillB = document.getElementById('pp-fill-big');
     const curB  = document.getElementById('pp-cur-big');
     if (fillB) fillB.style.width = pct;
@@ -1447,7 +1473,7 @@ function _setupAudioEvents() {
     const thumb = document.getElementById('fp-thumb');
     if (fillF) fillF.style.width = pct;
     if (curF)  curF.textContent  = timeStr;
-    if (thumb) thumb.style.setProperty('--x-pct', pct);
+    if (thumb) thumb.style.setProperty('--x-pct', _fpThumbPx(parseFloat(pct)));
   });
   audio.addEventListener('durationchange', () => {
     if (!audio.duration || !isFinite(audio.duration)) return;
@@ -1647,7 +1673,7 @@ async function _playPreviewAt(idx) {
   }
 
   ['pp-fill','pp-fill-big'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = '0%'; });
-  ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '0:00'; });
+  ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = (id==='pp-cur') ? '0:00.000' : '0:00'; });
   ['pp-dur','pp-dur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '0:00'; });
 
   // Show ⏸ immediately — don't wait for play event (autoplay might block)
@@ -2868,7 +2894,7 @@ function closePreview() {
   // Also close fullscreen player if open
   if (typeof fpClose === 'function' && _FP && _FP.open) fpClose();
   ['pp-fill','pp-fill-big'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = '0%'; });
-  ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '0:00'; });
+  ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = (id==='pp-cur') ? '0:00.000' : '0:00'; });
   const playBtn  = document.getElementById('pp-play');     if(playBtn)  playBtn.textContent  = '▶';
   const playBtnB = document.getElementById('pp-play-big'); if(playBtnB) playBtnB.textContent = '▶';
   const prevBtn  = document.getElementById('pp-prev');     if(prevBtn)  prevBtn.disabled = true;
