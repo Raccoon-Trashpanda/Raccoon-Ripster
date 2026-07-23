@@ -48,7 +48,7 @@
 
   // ── 2. Cursor-following glow on buttons ─────────────────────────────────
   const SEL = '.btn-red,.btn-ghost,.btn-orange,.pp-transport,.pp-extra,' +
-              '#pp-play,#pp-play-big,.nav-item,.glob-btn,.vbtn';
+              '#pp-play,#pp-play-big,.nav-item,.glob-btn,.dl-action-btn,.qi-close';
   function tag(root) {
     try { (root || document).querySelectorAll(SEL).forEach(b => b.classList.add('fx-glow')); } catch (_) {}
   }

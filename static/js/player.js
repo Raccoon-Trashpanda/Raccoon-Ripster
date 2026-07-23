@@ -1189,12 +1189,18 @@ function _wireSeekBar(bar) {
     previewSeek({currentTarget: bar, clientX: x});
     // 120ms defer so timeupdate doesn't snap bar back before audio.currentTime
     // has finished propagating to the new position.
-    setTimeout(() => { _seekDragging = false; if (thumb) thumb.classList.remove('no-glide'); }, 120);
+    setTimeout(() => {
+      _seekDragging = false;
+      if (thumb) thumb.classList.remove('no-glide');
+      if (fill)  fill.classList.remove('no-glide');
+    }, 120);
   };
   const thumb = bar.querySelector('[id$="-thumb"]');
   bar.addEventListener('pointerdown', (e) => {
     dragging = true; _seekDragging = true;
-    if (thumb) thumb.classList.add('no-glide');   // track the pointer 1:1, no lag
+    // Track the pointer 1:1 while dragging, no glide lag.
+    if (thumb) thumb.classList.add('no-glide');
+    if (fill)  fill.classList.add('no-glide');
     showAt(e.clientX);
     document.addEventListener('pointermove',   onMove);
     document.addEventListener('pointerup',     onUp);
