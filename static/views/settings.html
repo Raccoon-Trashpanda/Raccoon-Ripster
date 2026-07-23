@@ -1213,6 +1213,10 @@
                 <option value="5" data-i18n="s.qobuz_q5">MP3 320 — Lossy</option>
               </select>
             </div>
+            <div class="field-group">
+              <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
+              <input id="s-qobuz-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('qobuz-save-path',this.value)"/>
+            </div>
           </div>
         </div>
         </div><!-- end stab-qobuz -->
@@ -1270,6 +1274,10 @@
                 <option value="mp3_128">MP3 128kbps</option>
               </select>
             </div>
+            <div class="field-group">
+              <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
+              <input id="s-deezer-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('deezer-save-path',this.value)"/>
+            </div>
           </div>
         </div>
         </div><!-- end stab-deezer -->
@@ -1308,6 +1316,10 @@
                 <option value="Max">Ultra HD — 24/192</option>
                 <option value="Atmos_EC-3">Dolby Atmos</option>
               </select>
+            </div>
+            <div class="field-group">
+              <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
+              <input id="s-amazon-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('amazon-save-path',this.value)"/>
             </div>
           </div>
         </div>
@@ -1415,6 +1427,10 @@
                 <option value="high">AAC 320kbps</option>
                 <option value="low">AAC 96kbps</option>
               </select>
+            </div>
+            <div class="field-group">
+              <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
+              <input id="s-tidal-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('tidal-save-path',this.value)"/>
             </div>
           </div>
         </div>
@@ -1736,6 +1752,13 @@
               </div>
             </div>
 
+            <div class="settings-grid">
+              <div class="field-group">
+                <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
+                <input id="s-sc-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('soundcloud-save-path',this.value)"/>
+              </div>
+            </div>
+
             <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('soundcloud')" style="padding:6px 12px;background:rgba(255,85,0,.18);color:#ff5500;border:1px solid rgba(255,85,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.save_btn">💾 Сохранить</button>
               <button class="btn-sm" onclick="testAuth('soundcloud')" style="padding:6px 12px;background:rgba(255,85,0,.08);color:#ff5500;border:1px solid rgba(255,85,0,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.check">🔑 Проверить</button>
@@ -1822,6 +1845,11 @@
             </select>
           </div>
 
+          <div class="field-group mt8">
+            <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
+            <input id="s-bp-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('beatport-save-path',this.value)"/>
+          </div>
+
         </div>
         </div><!-- end stab-beatport -->
 
@@ -1885,6 +1913,10 @@
                 <option value="aac_192">AAC 192kbps</option>
                 <option value="aac_64">AAC 64kbps</option>
               </select>
+            </div>
+            <div class="field-group">
+              <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
+              <input id="s-yandex-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('yandex-save-path',this.value)"/>
             </div>
           </div>
           <div style="font-size:10px;color:var(--muted);margin-top:8px;line-height:1.5" data-i18n-html="ya.queue_hint">

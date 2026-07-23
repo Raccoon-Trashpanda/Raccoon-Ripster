@@ -31,7 +31,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "amd-codec-alt",
     "apple-parallel",   # apple-parallel-tracks / apple-parallel-count (zhaarey)
     "atmos-max", "max-memory",
-    "bearer", "media-user",
+    "media-user",
     "storefront",
     "qobuz-app-id", "qobuz-secrets",
     "qobuz-email", "qobuz-password",
