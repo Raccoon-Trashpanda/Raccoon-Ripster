@@ -31,6 +31,47 @@ async function saveSvcColor(svc, color) {
   try { _applyRelFilter?.(); } catch {}
   try { _libApplyFilter?.(); } catch {}
 }
+// ── Settings export/import ───────────────────────────────────────────────────
+// Export excludes credentials server-side (see core.py _EXPORT_EXCLUDE_KEYS) —
+// the frontend never even sees a token/password/account-list value to leak.
+function exportSettings() {
+  const a = document.createElement('a');
+  a.href = '/api/config/export';
+  a.download = 'ripster-settings.json';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function importSettings(ev) {
+  const file = ev.target.files && ev.target.files[0];
+  ev.target.value = '';   // allow re-selecting the same file next time
+  if (!file) return;
+  let parsed;
+  try {
+    parsed = JSON.parse(await file.text());
+  } catch (e) {
+    toast(t('t.error_c') + 'invalid JSON', 'var(--red)');
+    return;
+  }
+  // Accept either our own export shape ({settings: {...}}) or a bare
+  // key:value object someone hand-edited.
+  const settings = (parsed && typeof parsed === 'object' && parsed.settings) ? parsed.settings : parsed;
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) {
+    toast(t('t.error_c') + 'not a settings file', 'var(--red)');
+    return;
+  }
+  try {
+    const r = await api('POST', '/api/config', settings);
+    Object.assign(S.config, settings);
+    const applied = Object.keys(settings).length - (r.blocked || []).length;
+    toast(`✓ ${applied} applied` + ((r.blocked && r.blocked.length) ? `, ${r.blocked.length} skipped` : ''), 'var(--green)');
+    location.reload();   // simplest way to reflect every changed field across all tabs
+  } catch (e) {
+    toast('✗ ' + e.message, 'var(--red)');
+  }
+}
+
 async function resetSvcColors() {
   S.config['service-colors'] = {};
   try { await api('POST', '/api/config', {'service-colors': {}}); } catch {}

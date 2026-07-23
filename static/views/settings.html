@@ -419,6 +419,19 @@
           </div>
         </div>
 
+        <!-- ═══ Settings backup ═══ -->
+        <div class="block mt12">
+          <div class="block-title"><span data-i18n="s.backup_title">💾 Резервная копия настроек</span></div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">
+            <span data-i18n="s.backup_desc">Все пути/форматы/переключатели одним файлом. Токены, пароли, ARL и данные аккаунтов НЕ включаются — файл безопасно хранить или передавать.</span>
+          </div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <button class="btn-ghost btn-sm" onclick="exportSettings()"><span data-i18n="s.backup_export">⬇ Экспорт настроек</span></button>
+            <button class="btn-ghost btn-sm" onclick="document.getElementById('s-import-file').click()"><span data-i18n="s.backup_import">⬆ Импорт настроек</span></button>
+            <input type="file" id="s-import-file" accept="application/json" style="display:none" onchange="importSettings(event)"/>
+          </div>
+        </div>
+
         </div><!-- end stab-global-shared -->
 
         <!-- ══════════ PLAYER TAB ══════════ -->

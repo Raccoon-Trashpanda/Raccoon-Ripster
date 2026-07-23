@@ -87,6 +87,32 @@ def _redact_config(cfg: dict) -> dict:
     return out
 
 
+# ── Settings export/import ──────────────────────────────────────────────────
+# Export is a hard-exclude, not a redaction: the whole point is a file safe
+# to hand to someone else or re-import elsewhere, so leaked keys must be
+# ABSENT, not replaced with a "••••" placeholder that still hints at length.
+# On top of _SECRET_KEYS (single credential fields), the multi-account pool
+# lists (deezer-accounts, wrapper-accounts, ...) each embed real credentials
+# per entry (arl/password/token) that _SECRET_KEYS' flat key check can't see
+# into — excluded wholesale. A few account-identity fields (email/user-id/
+# username) are excluded too: not technically "tokens" but PII the owner
+# said not to include, and useless without the paired credential anyway.
+_EXPORT_ACCOUNT_LIST_KEYS = {
+    "deezer-accounts", "qobuz-accounts", "soundcloud-accounts",
+    "yandex-accounts", "wrapper-accounts",
+}
+_EXPORT_IDENTITY_KEYS = {
+    "qobuz-user-id", "qobuz-email", "qobuz-app-id",
+    "tidal-user-id", "beatport-username",
+    "spotify-client-id",
+}
+_EXPORT_EXCLUDE_KEYS = _SECRET_KEYS | _EXPORT_ACCOUNT_LIST_KEYS | _EXPORT_IDENTITY_KEYS
+
+
+def _export_config(cfg: dict) -> dict:
+    return {k: v for k, v in cfg.items() if k not in _EXPORT_EXCLUDE_KEYS}
+
+
 from ripster.security import config_key_allowed as _config_key_allowed
 
 
@@ -106,6 +132,26 @@ async def root():
 @router.get("/api/config")
 async def get_config():
     return _redact_config(_cfg)
+
+
+@router.get("/api/config/export")
+async def export_config():
+    """Downloadable settings backup — every preference/path/toggle EXCEPT
+    credentials (tokens, passwords, ARLs, multi-account pool lists, account
+    identity fields). Re-importable via POST /api/config, which already
+    whitelist-filters what it accepts — no separate import endpoint needed."""
+    from fastapi.responses import JSONResponse
+    import time as _time
+    payload = {
+        "_ripster_export": True,
+        "_exported_at": int(_time.time()),
+        "_app_version": _app_info.get("version", ""),
+        "settings": _export_config(_cfg),
+    }
+    return JSONResponse(
+        payload,
+        headers={"Content-Disposition": "attachment; filename=ripster-settings.json"},
+    )
 
 
 @router.post("/api/config")
