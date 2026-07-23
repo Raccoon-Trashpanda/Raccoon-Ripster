@@ -1111,15 +1111,21 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
       position:absolute; top:50%; left:0; width:10px; height:10px;
       border-radius:50%; background:#fff;
       /* translate(-50%, -50%) is the BASE — the JS drives horizontal position
-         via a CSS custom property --x-pct, applied through `translate3d`
-         BEFORE the centring offset. Pure transform → no layout, GPU-only. */
-      --x-pct: 0%;
+         via a CSS custom property --x-pct (a PIXEL offset — see _fpThumbPx in
+         player.js), applied through `translate3d` BEFORE the centring offset.
+         Pure transform → no layout, GPU-only. */
+      --x-pct: 0px;
       transform: translate3d(var(--x-pct), 0, 0) translate(-50%, -50%);
       will-change: transform;
       pointer-events:none; opacity:.85;
       box-shadow: 0 1px 4px rgba(0,0,0,.5);
-      transition: opacity .12s ease;
+      /* Glide between position updates (they arrive in ~250ms steps, not every
+         frame) instead of snapping — matched to that update cadence so it
+         neither lags behind nor sits still waiting. Suspended during an active
+         drag (.no-glide) so the thumb tracks the pointer with zero latency. */
+      transition: opacity .12s ease, transform .25s linear;
     }
+    .fp-thumb.no-glide{ transition: opacity .12s ease; }
     .fp-seek:hover .fp-thumb{
       transform: translate3d(var(--x-pct), 0, 0) translate(-50%, -50%) scale(1.4);
       opacity:1
