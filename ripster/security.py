@@ -45,8 +45,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "tidal-user-id", "tidal-country", "tidal-token-expiry",
     "tidal-quality", "tidal-save-path",
     "spotify-client-id", "spotify-client-secret", "spotify-sp-dc",
-    "spotify-release-days", "spotify-release-types", "spotify-auto-convert",
-    "spotify-default-target", "spotify-engine",
+    "spotify-engine",
     "spotify-proxy", "spotify-crawl-interval", "spotify-bg-scan",
     "spotify-totp",   # spotify-totp-secret / -ver (owner drops in a fresh TOTP when Spotify rotates)
     "orpheus-",   # orpheus-quality, orpheus-save-path, orpheus-convert-mp3, …

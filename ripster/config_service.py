@@ -210,10 +210,6 @@ class ConfigService:
     spotify_client_secret  = _s("spotify-client-secret",  "")
     spotify_sp_dc          = _s("spotify-sp-dc",          "")
     spotify_engine         = _s("spotify-engine",         "convert")
-    spotify_default_target = _s("spotify-default-target", "")
-    spotify_release_days   = _i("spotify-release-days",   30)
-    spotify_release_types  = _s("spotify-release-types",  "album,single")
-    spotify_auto_convert   = _b("spotify-auto-convert",   True)
     orpheus_quality        = _s("orpheus-quality",        "hifi")
     orpheus_save_path      = _s("orpheus-save-path",      "")
 
@@ -288,10 +284,6 @@ DEFAULT_CONFIG: dict = {
     "spotify-client-id":       "",
     "spotify-client-secret":   "",
     "spotify-sp-dc":           "",
-    "spotify-release-days":    30,
-    "spotify-release-types":   "album,single",
-    "spotify-auto-convert":    True,
-    "spotify-default-target":  "",
     # ── Remote access ───────────────────────────────────────────────────────
     "public-url": "",
     "remote-enabled": False,
