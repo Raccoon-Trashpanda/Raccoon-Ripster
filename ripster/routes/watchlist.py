@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import httpx
@@ -357,6 +357,70 @@ async def _apple_latest_album(client, artist_id: str, storefront: str = "us",
     rels.sort(key=lambda x: x.get("date", ""), reverse=True)
     released = [x for x in rels if x.get("date", "") <= today]
     return (released or rels)[0]
+
+
+# ── New-Zealand release window ────────────────────────────────────────────────
+# New music drops on Friday 00:00 LOCAL time in each territory, and New Zealand
+# is among the first places on earth to get there — a release is out in Auckland
+# roughly half a day before it is here. The checker used to run on a bare 6h
+# grid, so how early you saw a Friday release depended on where that grid
+# happened to land. Aligning one check to the Auckland Friday means the moment
+# a release exists anywhere, we look.
+#
+# Computed by hand rather than via zoneinfo: on Windows zoneinfo needs the
+# `tzdata` package, and adding a dependency to this interpreter is exactly what
+# ripster-dependency-versions says not to do casually. NZ's rule is simple and
+# stable: UTC+13 from the last Sunday of September to the first Sunday of April,
+# UTC+12 otherwise.
+
+def _last_sunday(year: int, month: int) -> "datetime":
+    from calendar import monthrange
+    d = datetime(year, month, monthrange(year, month)[1])
+    return d - timedelta(days=(d.weekday() + 1) % 7)
+
+
+def _first_sunday(year: int, month: int) -> "datetime":
+    d = datetime(year, month, 1)
+    return d + timedelta(days=(6 - d.weekday()) % 7)
+
+
+def _nz_offset(utc_dt: "datetime") -> int:
+    """Hours NZ is ahead of UTC at this instant (12 or 13)."""
+    y = utc_dt.year
+    dst_start = _last_sunday(y, 9).replace(hour=2)    # NZDT begins
+    dst_end   = _first_sunday(y, 4).replace(hour=3)   # NZDT ends
+    # Southern hemisphere: DST spans the new year, so it is the GAP that is
+    # standard time, not the span.
+    return 12 if (dst_end <= utc_dt < dst_start) else 13
+
+
+def nz_now(utc_dt: "datetime | None" = None) -> "datetime":
+    utc_dt = utc_dt or datetime.utcnow()
+    return utc_dt + timedelta(hours=_nz_offset(utc_dt))
+
+
+def seconds_to_nz_friday(utc_dt: "datetime | None" = None,
+                         grace_min: int = 5) -> float:
+    """Seconds until the next Friday 00:05 in Auckland."""
+    utc_dt = utc_dt or datetime.utcnow()
+    nz = nz_now(utc_dt)
+    target = (nz.replace(hour=0, minute=grace_min, second=0, microsecond=0)
+              + timedelta(days=(4 - nz.weekday()) % 7))
+    if target <= nz:
+        target += timedelta(days=7)
+    return (target - nz).total_seconds()
+
+
+def next_check_delay(cfg: dict | None = None, base: float = 6 * 3600) -> float:
+    """How long the background loop should sleep before the next check.
+
+    Normally the plain interval; but if the Auckland Friday lands sooner, wake
+    then instead so a Friday release is seen at the first minute it exists.
+    """
+    cfg = cfg if cfg is not None else (_s.get("config") or {})
+    if cfg.get("watchlist-nz-window", True) is False:
+        return base
+    return max(60.0, min(base, seconds_to_nz_friday()))
 
 
 def _notify_release(artist: str, release: str, compilation: bool, queued: bool) -> None:

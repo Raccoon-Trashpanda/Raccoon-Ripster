@@ -612,7 +612,9 @@ _watchlist_check_task = None
 
 async def _watchlist_loop():
     while True:
-        await asyncio.sleep(6 * 3600)
+        # Usually the plain 6h interval, but wake earlier when the Auckland
+        # Friday comes first — see watchlist.next_check_delay().
+        await asyncio.sleep(_watchlist.next_check_delay(config))
         if watchlist:
             await _watchlist._check_watchlist()
 
