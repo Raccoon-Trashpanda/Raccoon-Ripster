@@ -206,6 +206,7 @@ async function loadWatchlist() {
         ✕
       </button>
     </div>`).join('');
+  loadWlSuggestions();
 }
 
 async function wlAdd() {
@@ -233,5 +234,79 @@ async function wlCheckNow() {
   // The WS events (watchlist_check_*) drive the status line now.
   // A toast would be redundant.
   await api('POST','/api/watchlist/check');
+}
+
+// ── Smart suggestions ─────────────────────────────────────────────────────
+// Everything here comes from the local stats DB (own downloads + plays), so
+// each card states a fact about the user's own library rather than a guess.
+let _wlSug = [];
+
+const WL_SVC_LBL = {apple:'Apple Music', soundcloud:'SoundCloud', deezer:'Deezer'};
+
+async function loadWlSuggestions() {
+  const box = document.getElementById('wl-sug-box');
+  if(!box) return;
+  let r;
+  try { r = await api('GET','/api/watchlist/suggestions?limit=12'); }
+  catch(e){ box.style.display='none'; return; }
+  _wlSug = (r && r.suggestions) || [];
+  if(!_wlSug.length){ box.style.display='none'; return; }
+  box.style.display='';
+
+  const card = (s,i) => `
+    <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:rgba(0,0,0,.16);border:1px solid var(--border);border-radius:9px;margin-bottom:6px">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(s.name)}</div>
+        <div style="font-size:10px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+          ${esc(ti(s.reason, s.reason_args||{}))}
+        </div>
+      </div>
+      <span style="font-size:9px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:2px 6px;white-space:nowrap">${esc(WL_SVC_LBL[s.service]||s.service)}</span>
+      <button onclick="wlSugAccept(${i})" data-i18n-title="wls.add_t" title="Следить"
+        style="padding:4px 10px;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font)">+</button>
+      <button onclick="wlSugDismiss(${i})" data-i18n-title="wls.hide_t" title="Скрыть"
+        style="padding:4px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>
+    </div>`;
+
+  const grp = (kind, labelKey) => {
+    const list = _wlSug.map((s,i)=>[s,i]).filter(([s])=>s.kind===kind);
+    if(!list.length) return '';
+    return `<div style="font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.04em;margin:8px 0 5px">${esc(t(labelKey))}</div>`
+         + list.map(([s,i])=>card(s,i)).join('');
+  };
+
+  document.getElementById('wl-sug-list').innerHTML =
+    grp('top','wls.g_top') + grp('discovery','wls.g_discovery');
+  applyLang();
+}
+
+async function wlSugAccept(i) {
+  const s = _wlSug[i];
+  if(!s) return;
+  const r = await api('POST','/api/watchlist/suggestions/accept', {
+    name: s.name, service: s.service, apple_id: s.apple_id,
+    sc_permalink: s.sc_permalink, key: s.key, auto_download: false,
+  });
+  if(r && r.ok){
+    toast(`+ ${s.name} → ${t('v.watchlist')}`, 'var(--green)');
+    loadWatchlist();
+  } else {
+    // Honest failure: the artist could not be resolved, so no dud entry was
+    // created that would silently never be checked.
+    const k = (r && r.error==='sc_channel_not_found') ? 'wls.e_sc' : 'wls.e_apple';
+    toast(ti(k,{name:s.name}), 'var(--red)', '', 4000);
+  }
+}
+
+async function wlSugDismiss(i) {
+  const s = _wlSug[i];
+  if(!s) return;
+  await api('POST','/api/watchlist/suggestions/dismiss', {key: s.key});
+  loadWlSuggestions();
+}
+
+async function wlSugReset() {
+  await api('POST','/api/watchlist/suggestions/reset');
+  loadWlSuggestions();
 }
 

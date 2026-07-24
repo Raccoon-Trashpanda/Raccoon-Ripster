@@ -40,6 +40,19 @@
             </button>
           </div>
         </div>
+        <!-- Smart suggestions, mined from the local stats DB (own library only) -->
+        <div id="wl-sug-box" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+            <div style="font-size:12px;font-weight:700;color:var(--text)" data-i18n="wls.title">✨ Подсказки по твоей библиотеке</div>
+            <button onclick="wlSugReset()" data-i18n-title="wls.reset_t" title="Вернуть скрытые"
+              style="margin-left:auto;padding:3px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">↺</button>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:9px" data-i18n="wls.hint">
+            Считаем только по твоим закачкам и прослушиваниям — ничего наружу не уходит
+          </div>
+          <div id="wl-sug-list"></div>
+        </div>
+
         <div id="wl-list"></div>
         <div id="wl-empty" style="text-align:center;padding:40px;font-size:13px;color:var(--muted)" data-i18n="wl.empty">
           Добавь артиста — Ripster будет автоматически проверять новые релизы
