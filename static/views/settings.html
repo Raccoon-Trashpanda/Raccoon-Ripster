@@ -78,6 +78,14 @@
           </div>
           <div class="toggle-row">
             <div class="toggle-info">
+              <div class="toggle-label" data-i18n="s.notify_rel_label">🎉 Уведомлять о новых релизах</div>
+              <div class="toggle-sub" data-i18n="s.notify_rel_sub">Системное уведомление, когда у артиста из вишлиста вышел новый релиз или сборник — сработает, даже если окно закрыто</div>
+            </div>
+            <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-notify-on-release"
+              onchange="saveSetting('notify-on-release',this.checked)"><div class="toggle-slider"></div></label>
+          </div>
+          <div class="toggle-row">
+            <div class="toggle-info">
               <div class="toggle-label" data-i18n="s.tray_label">🗕 Закрытие прячет в трей</div>
               <div class="toggle-sub" data-i18n="s.tray_sub">Нажатие «✕» прячет Ripster в системный трей вместо выхода — загрузки продолжаются. Значок в трее вернёт окно, «Выход» закроет программу. Применяется после перезапуска.</div>
             </div>

@@ -356,6 +356,20 @@ async def _apple_latest_album(client, artist_id: str, storefront: str = "us",
     return (released or rels)[0]
 
 
+def _notify_release(artist: str, release: str, compilation: bool, queued: bool) -> None:
+    """Native desktop toast for a watchlist hit. Best-effort and never fatal —
+    a notification failing must not abort the check that found the release."""
+    cfg = _s.get("config") or {}
+    if cfg.get("notify-on-release", True) is False:
+        return
+    try:
+        from ripster import notify as _notify
+        _notify.toast_new_release(artist, release, compilation=compilation,
+                                  queued=queued, lang=cfg.get("language", "en"))
+    except Exception as e:
+        print(f"[watchlist] toast failed: {e}", flush=True)
+
+
 def _sc_permalink(entry: dict) -> str:
     """Extract a SoundCloud channel permalink from the entry's url/name field —
     accepts either a bare handle or a full soundcloud.com/<handle> link."""
@@ -402,6 +416,9 @@ async def _check_soundcloud_targets(items: list, broadcast, save, cfg, queue, sn
                              "artist": entry.get("name") or permalink,
                              "release": latest.get("title", ""),
                              "url": track_url})
+            _notify_release(entry.get("name") or permalink,
+                            latest.get("title", ""), False,
+                            bool(entry.get("auto_download")))
             if entry.get("auto_download"):
                 task = {
                     "id":       f"wl_{int(datetime.now().timestamp()*1000)}",
@@ -476,6 +493,9 @@ async def _check_watchlist():
                                      "release":  release_name,
                                      "compilation": bool(latest.get("compilation")),
                                      "url":      release_url})
+                    _notify_release(entry["name"], release_name,
+                                    bool(latest.get("compilation")),
+                                    bool(entry.get("auto_download")))
                     if entry.get("auto_download") and release_url:
                         task = {
                             "id":       f"wl_{int(datetime.now().timestamp()*1000)}",

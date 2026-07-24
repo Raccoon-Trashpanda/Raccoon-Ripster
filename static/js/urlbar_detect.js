@@ -164,6 +164,8 @@ function showStab(id, btn) {
     loadAuthStatus();
     setChk('s-queue-autostart', c['queue-autostart']!==false);
     setChk('s-notify-on-done', !!c['notify-on-done']);
+    // Release toasts default ON — the point of a watchlist is being told.
+    setChk('s-notify-on-release', c['notify-on-release'] !== false);
     setChk('s-minimize-to-tray', c['minimize-to-tray']!==false);
     const _mz = document.getElementById('s-minimize-to');
     if(_mz) _mz.value = (c['minimize-to'] === 'tray') ? 'tray' : 'taskbar';

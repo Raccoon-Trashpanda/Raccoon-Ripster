@@ -592,7 +592,8 @@ def _add_to_history(task: dict) -> None:
             from ripster import notify as _notify
             _notify.toast_download_done(
                 entry.get("title") or entry.get("url") or "Ripster",
-                status == "done", entry.get("got"))
+                status == "done", entry.get("got"),
+                lang=_config.get("language", "en"))
         except Exception:
             pass
     # Persistent error trail — so a failed download leaves a diagnosable record
