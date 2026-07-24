@@ -143,8 +143,18 @@ _QUALITIES = [
 _QUALITY_ORPHEUS = {
     "hifi":     "hifi",
     "lossless": "hifi",   # UI / stale queue alias
+    "flac":     "hifi",
     "high":     "high",
+    # Lossy picks. The bot's Beatport list offers ("320","MP3 320"); Beatport has
+    # NO native MP3 — its lossy tier is AAC 256 ("high"). Without these aliases,
+    # "320"/"aac"/"mp3" fell through to the default and silently downloaded FLAC
+    # instead of what the user picked (the "Beatport always returns FLAC" bug).
+    "320":      "high",
+    "aac":      "high",
+    "mp3":      "high",
     "minimum":  "minimum",
+    "128":      "minimum",
+    "low":      "minimum",
 }
 
 
@@ -300,6 +310,22 @@ class OrpheusBeatportEngine(EngineBase):
         if "BEATPORT_NOT_AUTHED" in log_text or _RE_AUTH_FAIL.search(log_text):
             return EngineResult(False, error="BEATPORT_NOT_AUTHED: неверный логин/пароль Beatport")
 
+        # Beatport's download-URL request can 403 with a permission error that
+        # is DISTINCT from a bad login (the login/subscription check above
+        # already passed, or we wouldn't be here) — the account's OAuth grant
+        # doesn't cover starting a stream for this track. Must be checked
+        # before the "Downloading track file" success gate below: that gate
+        # only tests whether a download was ATTEMPTED, not completed, and
+        # "Downloading track file" prints unconditionally right before this
+        # error — a track hitting it was silently recorded "done" with zero
+        # bytes ever written (caught live, 2026-07-23, every attempt on one
+        # track failed identically while history kept showing green).
+        if re.search(r'You do not have permission to perform this action', log_text, re.I):
+            return EngineResult(False, error="Beatport: аккаунту не хватает прав на скачивание "
+                                             "этого трека (403 на запросе потока, не на логине — "
+                                             "подписка активна). Возможно, ограничение по конкретному "
+                                             "релизу; повтори с другим треком, чтобы понять масштаб.")
+
         # Success/skip markers MUST be checked before the subscription gate:
         # Orpheus prints "Professional subscription detected, allowing high and
         # lossless quality" on EVERY successful run, and _RE_SUBSCRIPTION matches
@@ -311,7 +337,17 @@ class OrpheusBeatportEngine(EngineBase):
         downloads = len(re.findall(r'Downloading track file|Saving\s*:', log_text, re.I))
         if downloads > 0:
             errs = len(re.findall(r'\berror\b|\bfailed\b', log_text, re.I))
-            return EngineResult(success=True, tracks_ok=downloads, tracks_err=errs)
+            # "Downloading track file" only proves an attempt STARTED, not that
+            # it finished — if the SAME log also shows failure markers (most
+            # commonly this exact permission 403, but keep it general), don't
+            # report success just because a download was attempted. Only a
+            # true partial (some tracks_ok, some tracks_err) should reach the
+            # caller as success=True; if every attempt failed, say so.
+            if errs >= downloads:
+                return EngineResult(False, error=f"OrpheusDL Beatport: скачивание начиналось, но "
+                                                 f"не завершилось ({errs} ошибка/ошибок в логе) — "
+                                                 f"файл не сохранён.")
+            return EngineResult(success=True, tracks_ok=downloads - errs, tracks_err=errs)
 
         if rc == 0 and log_text.strip():
             skips = len(re.findall(r'skip|already exist', log_text, re.I))
