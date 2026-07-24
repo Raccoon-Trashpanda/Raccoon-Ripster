@@ -1979,6 +1979,27 @@
               <span style="font-size:12px;font-weight:600;color:var(--text)">Tidal</span>
               <span id="rel-cfg-tidal-status" style="font-size:10px;color:var(--muted);margin-left:auto"></span>
             </label>
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+              <input type="checkbox" id="rel-cfg-bbc" onchange="saveRelSvcConfig()"
+                style="width:15px;height:15px;accent-color:#ff4d4d;cursor:pointer"/>
+              <span style="width:8px;height:8px;border-radius:50%;background:#ff4d4d;flex-shrink:0"></span>
+              <span style="font-size:12px;font-weight:600;color:var(--text)">BBC</span>
+              <span style="font-size:10px;color:var(--muted);margin-left:auto" data-i18n="rl.src_bbc">новые эфиры шоу</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+              <input type="checkbox" id="rel-cfg-soundcloud" onchange="saveRelSvcConfig()"
+                style="width:15px;height:15px;accent-color:#ff5500;cursor:pointer"/>
+              <span style="width:8px;height:8px;border-radius:50%;background:#ff5500;flex-shrink:0"></span>
+              <span style="font-size:12px;font-weight:600;color:var(--text)">SoundCloud</span>
+              <span style="font-size:10px;color:var(--muted);margin-left:auto" data-i18n="rl.src_sc">каналы из вишлиста</span>
+            </label>
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+              <input type="checkbox" id="rel-cfg-apple" onchange="saveRelSvcConfig()"
+                style="width:15px;height:15px;accent-color:#fc3c44;cursor:pointer"/>
+              <span style="width:8px;height:8px;border-radius:50%;background:#fc3c44;flex-shrink:0"></span>
+              <span style="font-size:12px;font-weight:600;color:var(--text)">Apple Music</span>
+              <span style="font-size:10px;color:var(--muted);margin-left:auto" data-i18n="rl.src_apple">артисты из вишлиста</span>
+            </label>
           </div>
 
           <div style="display:flex;gap:10px;flex-wrap:wrap">

@@ -312,6 +312,8 @@ async def _apple_artist_collections(client, artist_id: str, storefront: str,
                 "name":  x.get("collectionName", ""),
                 "date":  (x.get("releaseDate", "") or "")[:10],
                 "artist": x.get("artistName", ""),
+                # 100px is what the API hands out; ask for a usable card size.
+                "cover": (x.get("artworkUrl100", "") or "").replace("100x100", "400x400"),
                 "compilation": _comps.is_compilation(
                     album_artist=x.get("artistName", ""), title=x.get("collectionName", "")),
             }
@@ -329,6 +331,7 @@ async def _apple_artist_collections(client, artist_id: str, storefront: str,
                 # A track's releaseDate is the collection's release date here.
                 "date":  (x.get("releaseDate", "") or "")[:10],
                 "artist": alb_artist,
+                "cover": (x.get("artworkUrl100", "") or "").replace("100x100", "400x400"),
                 "compilation": _comps.is_compilation(
                     album_artist=alb_artist, title=x.get("collectionName", ""),
                     track_artist=x.get("artistName", "")),

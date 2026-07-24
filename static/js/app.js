@@ -1951,6 +1951,15 @@ async function loadReleases(force = false) {
     fetch(`/api/releases/tidal?days=${days}`)
       .then(r => r.json()).catch(e => ({ok: false, releases: [], error: e.message}))
   );
+  // BBC shows / SoundCloud channels / Apple artists — same feed shape, so they
+  // merge into the same list and obey the same filters and chips.
+  ['bbc','soundcloud','apple'].forEach(svc => {
+    if(!activeSvcs.includes(svc)) return;
+    fetches.push(
+      fetch(`/api/releases/${svc}?days=${days}${force ? '&force=1' : ''}`)
+        .then(r => r.json()).catch(e => ({ok: false, releases: [], error: e.message}))
+    );
+  });
 
   if(!fetches.length) {
     if(st) st.style.display = 'none';

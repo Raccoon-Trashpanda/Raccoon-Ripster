@@ -184,13 +184,13 @@ function renderRelChips() {
   }
   const tc = document.getElementById('rel-type-chips');
   if (tc) {
-    const order = ['album','single','ep','compilation','appears_on','live'];
-    const lbl   = {album:t('ck.f_albums'),single:t('ck.f_singles'),ep:'EP',compilation:t('ck.f_comps'),appears_on:t('rl.appears'),live:'Live'};
+    const order = ['album','single','ep','compilation','mix','appears_on','live'];
+    const lbl   = {album:t('ck.f_albums'),single:t('ck.f_singles'),ep:'EP',compilation:t('ck.f_comps'),mix:t('rl.mix'),appears_on:t('rl.appears'),live:'Live'};
     const types = [...new Set(data.map(r => r.type || 'album'))]
       .sort((a,b) => (((order.indexOf(a)+1)||99) - ((order.indexOf(b)+1)||99)));
     tc.innerHTML = types.map(t => {
       const on = !_relTypeOff.has(t);
-      return `<button onclick="toggleRelType('${t}')" style="padding:4px 10px;border-radius:14px;border:1px solid ${on?'var(--red)':'var(--border)'};background:${on?'rgba(192,132,160,.14)':'transparent'};color:${on?'var(--red)':'var(--muted2)'};font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);white-space:nowrap">${lbl[t]||t.toUpperCase()}</button>`;
+      return `<button onclick="toggleRelType('${t}')" style="padding:4px 10px;border-radius:14px;border:1px solid ${on?'var(--red)':'var(--border)'};background:${on?'rgba(192,132,160,.14)':'transparent'};color:${on?'var(--red)':'var(--muted2)'};font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);white-space:nowrap">${escapeHtml(lbl[t]||t.toUpperCase())}</button>`;
     }).join('');
     tc.style.display = types.length ? '' : 'none';
   }
@@ -314,6 +314,10 @@ function _relActiveSvcs() {
     if(svc === 'spotify') return true; // Spotify auth handled separately
     if(svc === 'qobuz')   return hasQobuz;
     if(svc === 'tidal')   return hasTidal;
+    // BBC shows / SC channels / Apple artists need no service token of their
+    // own — they follow the watchlist (and the known BBC show list), so they
+    // are available whenever the user has switched them on.
+    if(svc === 'bbc' || svc === 'soundcloud' || svc === 'apple') return true;
     return false;
   });
 }
@@ -329,7 +333,8 @@ function _renderRelActiveSvcs() {
   const cont = document.getElementById('rel-active-svcs');
   if(!cont) return;
   const svcs = _relActiveSvcs();
-  const colors = {spotify:'#1db954',qobuz:'#1870f5',tidal:'#00d4b3'};
+  const colors = {spotify:'#1db954',qobuz:'#1870f5',tidal:'#00d4b3',
+                  bbc:'#ff4d4d',soundcloud:'#ff5500',apple:'#fc3c44'};
   cont.innerHTML = svcs.map(svc =>
     `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;border:1px solid ${colors[svc]||'var(--border)'}33;color:${colors[svc]||'var(--muted)'};background:${colors[svc]||'transparent'}11">`+
     `<span style="width:5px;height:5px;border-radius:50%;background:${colors[svc]||'var(--muted)'}"></span>${svc.charAt(0).toUpperCase()+svc.slice(1)}</span>`
@@ -337,7 +342,7 @@ function _renderRelActiveSvcs() {
 }
 
 function saveRelSvcConfig() {
-  const svcs = ['spotify','qobuz','tidal']
+  const svcs = ['spotify','qobuz','tidal','bbc','soundcloud','apple']
     .filter(s => document.getElementById('rel-cfg-'+s)?.checked)
     .join(',');
   saveSetting('releases-services', svcs || 'spotify');
@@ -347,7 +352,7 @@ function saveRelSvcConfig() {
 function _syncReleasesSettingsTab() {
   const c   = S.config || {};
   const cfg = (c['releases-services'] || 'spotify').split(',').map(s=>s.trim());
-  ['spotify','qobuz','tidal'].forEach(svc => {
+  ['spotify','qobuz','tidal','bbc','soundcloud','apple'].forEach(svc => {
     const cb = document.getElementById('rel-cfg-'+svc);
     if(cb) cb.checked = cfg.includes(svc);
   });
@@ -449,9 +454,9 @@ function renderReleaseCard(rel) {
   const dt = rel.date ? new Date(rel.date + 'T00:00:00').toLocaleDateString(_dateLoc(), {day:'numeric',month:'short',year:'numeric'}) : '';
   const svcColors = {spotify:'#1db954', qobuz:'#1870f5', tidal:'#00d4b3', apple:'var(--red)', deezer:'#a238ff'};
   const svcClr  = svcColors[rel.service] || 'var(--muted)';
-  const typeMap = {album:'ALBUM', single:'SINGLE', ep:'EP', compilation:t('rl.comp_badge'), appears_on:t('rl.appears_badge'), live:'LIVE'};
+  const typeMap = {album:'ALBUM', single:'SINGLE', ep:'EP', compilation:t('rl.comp_badge'), mix:t('rl.mix_badge'), appears_on:t('rl.appears_badge'), live:'LIVE'};
   const typeClr = rel.type === 'single' ? 'var(--orange)' : (rel.type === 'album' ? '#1db954' : 'var(--muted2)');
-  const typeTag = typeMap[rel.type] || (rel.type || '').toUpperCase();
+  const typeTag = typeMap[rel.type] || escapeHtml((rel.type || '').toUpperCase());
   const hiresBadge = rel.hires ? '<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(255,214,10,.15);color:#ffd60a;font-weight:700;margin-left:3px">HI-RES</span>' : '';
   const uid   = _relUID(rel);
   const isNew = _relIsNew(rel);
@@ -488,7 +493,7 @@ function renderReleaseCard(rel) {
         : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:32px;color:var(--muted)">♪</div>`}
       <button onclick="event.stopPropagation();playRelease('${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')" title="${t('rl.listen')}"
         style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:54px;height:54px;border-radius:50%;background:rgba(0,0,0,.5);border:2px solid rgba(255,255,255,.85);color:#fff;font-size:21px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding-left:4px;backdrop-filter:blur(3px);transition:transform .12s,background .12s;z-index:2" onmouseover="this.style.transform='translate(-50%,-50%) scale(1.12)';this.style.background='rgba(0,0,0,.7)'" onmouseout="this.style.transform='translate(-50%,-50%)';this.style.background='rgba(0,0,0,.5)'">▶</button>
-      <div style="position:absolute;top:6px;left:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${svcClr};font-weight:700;backdrop-filter:blur(4px)">${(rel.service||'?').toUpperCase()}</span></div>
+      <div style="position:absolute;top:6px;left:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${svcClr};font-weight:700;backdrop-filter:blur(4px)">${escapeHtml((rel.service||'?').toUpperCase())}</span></div>
       <div style="position:absolute;top:6px;right:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${typeClr};font-weight:700;backdrop-filter:blur(4px)">${typeTag}</span></div>
       ${isNew ? `<div style="position:absolute;bottom:6px;left:6px"><span style="font-size:8px;padding:2px 6px;border-radius:4px;background:var(--green);color:#06281f;font-weight:800;letter-spacing:.4px">${t('rl.new_badge')}</span></div>` : ''}
       ${isLive ? `<div style="position:absolute;bottom:6px;right:6px" title="${t('rl.live_title')}"><span class="rel-live-badge"><span class="rel-live-dot"></span>${t('rl.live_badge')}</span></div>` : ''}
@@ -508,7 +513,7 @@ function renderReleaseCard(rel) {
           style="padding:5px 8px;background:transparent;border:1px solid rgba(255,214,10,.35);border-radius:7px;font-size:11px;color:#ffd60a;cursor:pointer;font-family:var(--font)" title="${t('rl.auto_src')}">⚡</button>
         <button onclick="toggleRelFav('${escJ(uid)}')" style="padding:5px 8px;background:transparent;border:1px solid ${isFav?'var(--orange)':'var(--border)'};border-radius:7px;font-size:11px;color:${isFav?'var(--orange)':'var(--muted)'};cursor:pointer;font-family:var(--font)" title="${isFav?t('sc2.unfav'):t('sc2.fav')}">${isFav?'★':'☆'}</button>
         <button onclick="navigator.clipboard.writeText('${escJ(rel.url)}');toast(t('toast.link_copied'))" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font)" title="${t('ck.copy_link')}">⎘</button>
-        <a href="${esc(rel.url)}" target="_blank" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);text-decoration:none;display:flex;align-items:center" title="${t('ck.open_on')} ${rel.service}">↗</a>
+        <a href="${esc(rel.url)}" target="_blank" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);text-decoration:none;display:flex;align-items:center" title="${t('ck.open_on')} ${escapeHtml(rel.service)}">↗</a>
       </div>
     </div>
   </div>`;

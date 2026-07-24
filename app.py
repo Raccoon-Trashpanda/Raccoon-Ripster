@@ -875,6 +875,7 @@ _ctx.process_queue = process_queue
 
 # ── Route modules ──────────────────────────────────────────────────────────────
 from ripster.routes import watchlist  as _watchlist
+from ripster.routes import radar      as _radar
 from ripster.routes import history    as _history
 from ripster.routes import spotify    as _spotify
 from ripster.routes import discovery  as _discovery
@@ -898,6 +899,7 @@ from ripster import tl1001 as _tl1001
 
 _tl1001.install(config)          # 1001Tracklists source (login optional, disk-cached)
 _watchlist.install(app, _ctx)
+_radar.install(app, _ctx)
 _history.install(app, _ctx)
 _discovery.install(app, _ctx)
 _spotify.install(app, _ctx)
