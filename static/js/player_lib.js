@@ -94,7 +94,7 @@ function _libRow(it) {
   const dur = it.duration ? fmtDur(it.duration) : '';
   const cov = it.has_cover ? `<img src="/api/library/cover/${it.id}" style="width:34px;height:34px;border-radius:4px;object-fit:cover;flex-shrink:0;background:var(--surface2)" loading="lazy" onerror="this.style.display='none'"/>`
                            : `<div style="width:34px;height:34px;border-radius:4px;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:14px;color:var(--muted);flex-shrink:0">♪</div>`;
-  const extBadge = `<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(192,132,160,.12);color:#c084a0;font-family:var(--mono);font-weight:700">${(it.ext||'').toUpperCase()}</span>`;
+  const extBadge = `<span style="font-size:9px;padding:1px 5px;border-radius:3px;background:rgba(192,132,160,.12);color:#c084a0;font-family:var(--mono);font-weight:700">${escapeHtml((it.ext||'').toUpperCase())}</span>`;
   return `<div onclick="playLibraryTrack('${escJ(it.id)}')" style="display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;cursor:pointer;transition:background .12s,border-color .12s" onmouseover="this.style.background='rgba(192,132,160,.05)';this.style.borderColor='rgba(192,132,160,.3)'" onmouseout="this.style.background='var(--surface)';this.style.borderColor='var(--border)'">
     ${cov}
     <div style="flex:1;min-width:0">
@@ -108,12 +108,12 @@ function _libRow(it) {
 }
 
 function _libCopyPath(p) {
-  try { navigator.clipboard.writeText(p); toast('Путь скопирован', 'var(--muted)', '', 1500); } catch {}
+  try { navigator.clipboard.writeText(p); toast(t('pl.path_copied'), 'var(--muted)', '', 1500); } catch {}
 }
 
 function playLibraryTrack(cid) {
   const it = _LIB.items.find(x => x.id === cid);
-  if (!it) { toast('Трек не найден в индексе', 'var(--red)'); return; }
+  if (!it) { toast(t('pl.no_idx'), 'var(--red)'); return; }
   _setupAudioEvents();
   const url = `/api/library/file?p=${encodeURIComponent(it.path)}`;
   Preview.queue = [{
@@ -164,7 +164,7 @@ async function playAlbumById(service, albumId, fallbackTitle, fallbackArtist, fa
           'var(--green)', '', 2500);
     _playPreviewAt(0);
   } catch (e) {
-    toast('Ошибка альбома: ' + e.message, 'var(--red)');
+    toast(t('pl.alb_err') + e.message, 'var(--red)');
   }
 }
 
@@ -234,7 +234,7 @@ async function updateQualitySelector(svc) {
     const qs = await (await fetch(`/api/qualities?service=${apiSvc}`)).json();
     if(!qs || !qs.length) return;
     sel.innerHTML = qs.map(q =>
-      `<option value="${q.id}">${q.label} — ${q.sub||''}</option>`
+      `<option value="${escapeHtml(q.id)}">${escapeHtml(q.label)} — ${escapeHtml(q.sub||'')}</option>`
     ).join('');
     const def = resolveQuality(svc) || qs[0].id;
     if([...sel.options].some(o=>o.value===def)) sel.value = def;
@@ -281,7 +281,7 @@ async function specAnalyzePath() {
     const r = await fetch('/api/spectrogram', {
       method: 'POST',
       headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({path: p})
+      body: JSON.stringify({path: p, lang: S.lang || 'ru'})
     });
     const d = await r.json();
     if (!r.ok || d.detail || d.error) throw new Error(d.detail || d.error || t('err.generic'));
@@ -298,6 +298,7 @@ async function specAnalyzeFile(file) {
   try {
     const fd = new FormData();
     fd.append('file', file);
+    fd.append('lang', S.lang || 'ru');
     const r = await fetch('/api/spectrogram/upload', {method:'POST', body: fd});
     const d = await r.json();
     if (!r.ok || d.detail || d.error) throw new Error(d.detail || d.error || t('err.generic'));
@@ -329,7 +330,7 @@ function specShowResult(d) {
     [t('lib.channels'), d.channels], [t('lib.duration'), d.duration],
   ].filter(f => f[1]);
   info.innerHTML = fields.map(([k,v]) =>
-    `<span><span style="color:var(--muted)">${k}:</span> <b>${v}</b></span>`
+    `<span><span style="color:var(--muted)">${k}:</span> <b>${escapeHtml(v)}</b></span>`
   ).join('');
 
   // Verdict
@@ -394,7 +395,7 @@ async function mobileGuestSubmit() {
     const r = await api('POST', '/api/queue/add', { url });
     if (r.ok) {
       inp.value = '';
-      toast('Добавлено в очередь');
+      toast(t('t.added_q'));
       const qt = document.getElementById('mgt-queue');
       if (qt) qt.click();
     } else {
@@ -492,16 +493,16 @@ async function isrcUpgrade(taskId) {
     bar.appendChild(panel);
   } catch(e) {
     if (btn) { btn.textContent = t('lib.find_better'); btn.disabled = false; }
-    toast('Ошибка поиска: ' + e.message, 'var(--red)');
+    toast(t('pl.search_err') + e.message, 'var(--red)');
   }
 }
 
 async function isrcUpgradeAdd(url, title, artist, service, btn) {
-  if (!url) { toast('Нет URL', 'var(--red)'); return; }
+  if (!url) { toast(t('pl.no_url'), 'var(--red)'); return; }
   if (btn) { btn.textContent = '…'; btn.disabled = true; }
   const r = await api('POST', '/api/queue/add', {url, title, artist});
   if (r.ok) toast(`+ ${title} [${service}] ${t('lib.queued')}`);
-  else toast('Ошибка: ' + (r.detail || r.msg || '?'), 'var(--red)');
+  else toast(t('t.error_c') + (r.detail || r.msg || '?'), 'var(--red)');
   if (btn) { btn.textContent = '✓'; }
 }
 
@@ -551,67 +552,4 @@ async function uploadToCloud(taskId, btn) {
   }
 }
 
-
-// First-run: ask a forwarding (tester) instance for a display name so the
-// developer's Diagnostics tab can tell instances apart. Only when forwarding is on
-// (NOT the owner/ingest instance) and no name set yet. Asks once per machine.
-async function _maybeAskTelemetryName(){
-  try {
-    const c = S.config || {};
-    if (c['telemetry-ingest-enabled']) return;
-    if (String(c['telemetry-forward']) === 'false') return;
-    if ((c['telemetry-name']||'').trim()) return;
-    if (localStorage.getItem('tlm_named') === '1') return;
-    // NOTE: do NOT use window.prompt() — WebView2 (the pywebview backend on
-    // Windows, which is what the Ripster.exe launcher uses) suppresses prompt()
-    // entirely, so the first-run ask silently never appeared. Use an in-page modal.
-    _showFirstRunNameModal();
-  } catch(e){}
-}
-
-function _showFirstRunNameModal(){
-  if(document.getElementById('firstrun-name-modal')) return;
-  const modal = document.createElement('div');
-  modal.id = 'firstrun-name-modal';
-  modal.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.75);backdrop-filter:blur(4px)';
-  modal.innerHTML = `<div style="background:var(--surface,#1c1c1e);border:1px solid var(--border);border-radius:16px;padding:24px;width:380px;max-width:90vw">
-    <div style="font-size:16px;font-weight:700;color:var(--text);margin-bottom:6px">👋 Добро пожаловать в Ripster</div>
-    <div style="font-size:12px;color:var(--muted,#888);margin-bottom:16px">Как тебя подписать для разработчика? Имя/ник поможет понять, чей это Ripster, если пришлёшь диагностику. Можно пропустить — спросим только один раз.</div>
-    <input id="firstrun-name-input" type="text" maxlength="48" placeholder="Имя или ник"
-      style="width:100%;padding:10px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:9px;color:var(--text);font-size:15px;box-sizing:border-box;outline:none"
-      onkeydown="if(event.key==='Enter') _saveFirstRunName()">
-    <div style="display:flex;gap:8px;margin-top:14px">
-      <button onclick="_saveFirstRunName()" style="flex:1;padding:10px;background:#0a84ff;border:none;border-radius:9px;cursor:pointer;color:#fff;font-weight:600;font-size:13px;font-family:var(--font)">Сохранить</button>
-      <button onclick="_skipFirstRunName()" style="padding:10px 16px;background:transparent;border:1px solid var(--border);border-radius:9px;cursor:pointer;font-size:13px;color:var(--muted,#888);font-family:var(--font)">Пропустить</button>
-    </div>
-  </div>`;
-  document.body.appendChild(modal);
-  setTimeout(()=>{ const i=document.getElementById('firstrun-name-input'); if(i) i.focus(); },50);
-}
-
-function _skipFirstRunName(){
-  localStorage.setItem('tlm_named','1');
-  const m=document.getElementById('firstrun-name-modal'); if(m) m.remove();
-}
-
-async function _saveFirstRunName(){
-  const inp=document.getElementById('firstrun-name-input');
-  const name=((inp&&inp.value)||'').trim().slice(0,48);
-  localStorage.setItem('tlm_named','1');
-  const m=document.getElementById('firstrun-name-modal'); if(m) m.remove();
-  if(!name) return;
-  try{
-    await api('POST','/api/config', {'telemetry-name': name});
-    if(S.config) S.config['telemetry-name']=name;
-    toast('Спасибо! Имя сохранено','var(--green)');
-  }catch(e){}
-}
-
-
-
-
-
-
-
-
-
+// TELEMETRY owner tester diagnostics → moved to its own module file (see index.html).
