@@ -27,6 +27,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 # Search helpers from discovery — imported lazily to avoid circular issues at
 # module load time (discovery.install() must run before any convert call).
+from ripster import compilations as _comps
 from ripster.routes import discovery as _disc
 
 router  = APIRouter()
@@ -60,6 +61,7 @@ _sp_state_file: Path = None              # spotify_artist_state.json
 _sp_artist_state: dict = {}              # artist_id -> {name, releases:[...], ts}
 _sp_followed_cache: dict = {"artists": [], "market": "", "ts": 0.0}  # followed list cache
 _sp_banned_until: float = 0.0            # epoch until which the dev API 429-bans us
+_sp_album_meta: dict = {}                 # album_id -> {date, type, artist, label}
 _sp_crawler_started: bool = False        # background crawler loop guard
 _SP_FOLLOWED_TTL = 6 * 3600              # refresh the followed-artist list every 6h
 _SP_CRAWL_EVERY  = 6 * 3600              # OPTIONAL bg refresh wakes every 6h (smart, paced)
@@ -102,11 +104,12 @@ def install(app, ctx) -> None:
 
 
 def _load_artist_state() -> None:
-    global _sp_artist_state, _sp_banned_until, _sp_followed_cache
+    global _sp_artist_state, _sp_banned_until, _sp_followed_cache, _sp_album_meta
     if _sp_state_file and _sp_state_file.exists():
         try:
             d = json.loads(_sp_state_file.read_text(encoding="utf-8"))
             _sp_artist_state = d.get("artists", {}) or {}
+            _sp_album_meta   = d.get("album_meta", {}) or {}
             # Clamp any PERSISTED ban to the cap. A stale/huge banned_until (a
             # pre-cap 6h ban, or a Spotify Retry-After of hours that an older path
             # stored) must NEVER freeze the radar for more than _SP_BAN_CAP across
@@ -232,7 +235,12 @@ def _save_artist_state() -> None:
                 "followed":     _sp_followed_cache,
                 "banned_until": _sp_banned_until,
                 "comp_v2":      True,
+                # Album metadata is keyed by album id and never changes, so it is
+                # cached forever: the appears-on shelf gives no dates, and without
+                # this every pass would re-fetch metadata for the same comps.
+                "album_meta":   _sp_album_meta,
             }), encoding="utf-8")
+
         except Exception as e:
             print(f"[spotify] artist-state save error: {e}", flush=True)
 
@@ -449,6 +457,28 @@ _SP_GQL_DISCO_HASH = "5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564f
 # variables — как шлёт сам клиент. Хэш может ротироваться Spotify без
 # предупреждения (как и _SP_GQL_DISCO_HASH) — тогда просто перевытащить.
 _SP_GQL_WHATSNEW_HASH = "d889c8c936ab192af8ced595427f5ba2acdf63478fdc0a181c8d477f8322630e"
+# 2026-07-24: queryArtistAppearsOn — the web player's "Appears On" shelf, i.e. the
+# releases an artist is on WITHOUT being the album artist. This is the ONLY way to
+# see a various-artists compilation: it is credited to "Various Artists"/the label,
+# so queryArtistDiscographyAll never returns it and the whole class of release was
+# invisible to the radar (verified: What's-New doesn't carry them either). See
+# ripster/compilations.py for the general shape of this blind spot.
+# Its items carry only id/name/artists/coverArt — no date, no type — so a newly
+# seen album needs one getAlbum call for metadata (cached durably, see _sp_album_meta).
+_SP_GQL_APPEARS_HASH  = "9a4bb7a20d6720fe52d7b47bc001cfa91940ddf5e7113761460b4a288d18a4c1"
+_SP_GQL_GETALBUM_HASH = "b9bfabef66ed756e5e13f68a942deb60bd4125ec1f1be8cc42769dc0259b4b10"
+# Budget per crawl pass. The shelf costs exactly ONE request per artist (see
+# _gql_appears_on: the persisted query ignores offset, so there is nothing to page),
+# plus one getAlbum per album id we have never seen. Still budgeted and round-robined
+# by staleness so a pass never doubles in size and trips a 429 ban.
+_SP_APPEARS_ARTISTS_PER_PASS = 400
+_SP_APPEARS_META_PER_PASS    = 300
+# Resolve a whole shelf in one go: an artist is then either fully done (ao_ts
+# stamped) or untouched, never half-known. The pass budget below is what bounds
+# the load; capping per artist as well only made artists take several passes to
+# finish while their shelf got re-fetched each time.
+_SP_APPEARS_META_PER_ARTIST  = 50
+_SP_APPEARS_REFRESH          = 24 * 3600
 _SP_CT_URL = "https://clienttoken.spotify.com/v1/clienttoken"
 _SP_WEB_CLIENT_ID = "d8a5ed958d274c2e8ee717e6a4b0971d"
 
@@ -525,6 +555,136 @@ def _sp_gql_to_rel(item: dict, artist: dict) -> dict | None:
             "date":      date_iso,
             "year":      date_iso[:4],
             "tracks":    ((rel.get("tracks") or {}).get("totalCount")),
+            "cover":     cover,
+            "url":       f"https://open.spotify.com/album/{rid}",
+            "service":   "spotify",
+        }
+    except Exception:
+        return None
+
+
+def _neg_date(d: str) -> str:
+    """Sort key that puts NEWER ISO dates first while keeping plain string sort
+    (dates are compared as strings everywhere else in this module). An artist
+    with no known release date sorts LAST, not first — no releases is the
+    weakest signal, not the strongest."""
+    if not d:
+        return "~"          # after every digit-derived key
+    return "".join(chr(ord("9") - int(ch)) if ch.isdigit() else ch for ch in d)
+
+
+def _recent_activity(releases: list, today: str) -> str:
+    """Newest ALREADY-RELEASED date among an artist's releases.
+
+    Pre-orders carry dates months into the future, and ranking on the raw max
+    would hand the whole crawl budget to artists with a distant pre-order instead
+    of the ones who actually put something out this week."""
+    dates = [r.get("date", "") for r in releases if r.get("date", "") <= today]
+    return max(dates, default="")
+
+
+async def _gql_appears_on(gc, aid: str) -> tuple[list, int]:
+    """The artist's "Appears On" shelf → (items, totalCount).
+
+    This is where various-artists compilations live. Items carry id/name/artists/
+    coverArt only — no date and no type — so callers must resolve metadata per
+    album id (see _sp_fetch_album_meta).
+
+    NOT paginated on purpose: the persisted query accepts offset/limit variables
+    but IGNORES them — offset=0/50/100 all return the identical first 50 items
+    (verified against an artist with totalCount=104). So this is one request, and
+    for artists with a long shelf we see the 50 Spotify chose to surface. That is
+    fine in practice: a compilation credits many artists, and it only has to appear
+    on ONE followed artist's shelf to reach the feed."""
+    params = {
+        "operationName": "queryArtistAppearsOn",
+        "variables": json.dumps({"uri": f"spotify:artist:{aid}"}),
+        "extensions": json.dumps({"persistedQuery": {
+            "version": 1, "sha256Hash": _SP_GQL_APPEARS_HASH}}),
+    }
+    try:
+        r = await gc.get(_SP_GQL_URL, params=params)
+    except Exception:
+        return [], 0
+    if r.status_code != 200:
+        return [], -r.status_code
+    try:
+        ao = (((r.json().get("data") or {}).get("artistUnion") or {})
+              .get("relatedContent") or {}).get("appearsOn") or {}
+        return (ao.get("items") or []), int(ao.get("totalCount") or 0)
+    except Exception:
+        return [], 0
+
+
+async def _sp_fetch_album_meta(gc, album_id: str) -> dict:
+    """Release date + type + label for one album (getAlbum). Cached forever in
+    _sp_album_meta — an album's release date does not change, and the shelf
+    would otherwise re-ask for the same comps on every pass."""
+    cached = _sp_album_meta.get(album_id)
+    if cached is not None:
+        return cached
+    params = {
+        "operationName": "getAlbum",
+        "variables": json.dumps({"uri": f"spotify:album:{album_id}",
+                                  "locale": "", "offset": 0, "limit": 1}),
+        "extensions": json.dumps({"persistedQuery": {
+            "version": 1, "sha256Hash": _SP_GQL_GETALBUM_HASH}}),
+    }
+    try:
+        r = await gc.get(_SP_GQL_URL, params=params)
+        if r.status_code != 200:
+            return {}
+        alb = (r.json().get("data") or {}).get("albumUnion") or {}
+    except Exception:
+        return {}
+    if not alb.get("name"):
+        return {}
+    arts = [(a.get("profile") or {}).get("name", "")
+            for a in ((alb.get("artists") or {}).get("items") or [])]
+    meta = {
+        "date":   ((alb.get("date") or {}).get("isoString") or "")[:10],
+        "type":   (alb.get("type") or "album").lower(),
+        "artist": arts[0] if arts else "",
+        "label":  alb.get("label") or "",
+    }
+    _sp_album_meta[album_id] = meta      # negative results are NOT cached
+    return meta
+
+
+def _sp_appears_to_rel(item: dict, artist: dict, meta: dict) -> dict | None:
+    """An "Appears On" shelf item + its resolved metadata → store-format release.
+    Compilations get group="compilation" so the existing Сборники filter catches
+    them; plain guest appearances stay group="appears_on"."""
+    try:
+        rel = ((item.get("releases") or {}).get("items") or [{}])[0]
+        rid = rel.get("id") or (rel.get("uri", "").split(":")[-1])
+        if not rid:
+            return None
+        title = rel.get("name", "")
+        alb_artists = [(a.get("profile") or {}).get("name", "")
+                       for a in ((rel.get("artists") or {}).get("items") or [])]
+        alb_artist = meta.get("artist") or (alb_artists[0] if alb_artists else "")
+        rtype, group = _comps.classify(
+            album_type=meta.get("type", ""), album_artist=alb_artist,
+            title=title, track_artist=artist.get("name", ""),
+        )
+        covers = ((rel.get("coverArt") or {}).get("sources") or [{}])
+        cover = max(covers, key=lambda s: s.get("width") or 0).get("url", "")
+        date_iso = meta.get("date", "")
+        return {
+            "id":        rid,
+            "title":     title,
+            # The artist we were scanning for is what the feed groups by, but the
+            # album artist is what the user sees on the cover — keep both.
+            "artist":    artist["name"],
+            "artist_id": artist["id"],
+            "alb_artist": alb_artist,
+            "label":     meta.get("label", ""),
+            "type":      rtype,
+            "group":     group,
+            "date":      date_iso,
+            "year":      date_iso[:4],
+            "tracks":    None,
             "cover":     cover,
             "url":       f"https://open.spotify.com/album/{rid}",
             "service":   "spotify",
@@ -1068,6 +1228,81 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             except Exception:
                 return None, 0
 
+        # ── Appears-on budget for this pass ──────────────────────────────────
+        # Spent on the artists whose shelf is stalest, so every artist gets
+        # covered across a few passes without doubling any single one.
+        ao_on      = _cfg.get("spotify-appears-on", True) is not False
+        ao_budget  = int(_cfg.get("spotify-appears-budget",
+                                  _SP_APPEARS_ARTISTS_PER_PASS) or 0)
+        meta_budget = int(_cfg.get("spotify-appears-meta-budget",
+                                   _SP_APPEARS_META_PER_PASS) or 0)
+        ao_queue: list = []
+        if ao_on and ao_budget > 0:
+            _today = datetime.now().strftime("%Y-%m-%d")
+
+            def _ao_key(a: dict):
+                st_a = _sp_artist_state.get(a["id"], {}) or {}
+                # Stalest shelf first; among equally stale ones (everyone, on the
+                # first run) prefer artists who released something recently —
+                # they are the ones who just landed on a new label compilation.
+                return (st_a.get("ao_ts", 0),
+                        _neg_date(_recent_activity(st_a.get("releases", []), _today)))
+            ao_queue = [a for a in sorted((a for a in artists if a.get("id")), key=_ao_key)
+                        if now_ts - ((_sp_artist_state.get(a["id"], {}) or {}).get("ao_ts", 0))
+                           >= _SP_APPEARS_REFRESH][:ao_budget]
+        ao_stats = {"artists": 0, "comps": 0, "meta": 0}
+
+        async def _crawl_appears(gc, aid: str, name: str) -> tuple[list, bool]:
+            """Compilations (and guest spots) this artist appears on. Returns
+            Returns (releases, complete). `complete` is False when the shelf could
+            not be fully resolved (HTTP error, or the pass budget ran out before
+            every album id was looked up) — the caller must then NOT mark the
+            artist checked, or those compilations go unexamined for 24h.
+            A shelf hiccup never costs us the artist's own discography."""
+            out: list = []
+            items, tc = await _gql_appears_on(gc, aid)
+            ao_stats["artists"] += 1
+            if tc < 0 or not items:              # HTTP error / empty shelf
+                return out, tc >= 0              # an error is not "done"
+
+            by_id = {}
+            for it in items:
+                rel_raw = ((it.get("releases") or {}).get("items") or [{}])[0]
+                rid = rel_raw.get("id") or (rel_raw.get("uri", "").split(":")[-1])
+                if rid:
+                    by_id.setdefault(rid, it)
+
+            # Resolve metadata only for album ids we have never seen. Capped PER
+            # ARTIST as well as per pass: a single artist's 50-item shelf would
+            # otherwise swallow the whole pass budget and starve everyone behind
+            # them. Fetched concurrently — 50 sequential lookups took ~15s/artist.
+            unknown = [rid for rid in by_id if rid not in _sp_album_meta]
+            room    = max(0, meta_budget - ao_stats["meta"])
+            todo    = unknown[:min(_SP_APPEARS_META_PER_ARTIST, room)]
+            complete = len(todo) == len(unknown)
+            if todo:
+                sem = asyncio.Semaphore(6)
+
+                async def _one(rid: str):
+                    async with sem:
+                        return await _sp_fetch_album_meta(gc, rid)
+
+                await asyncio.gather(*(_one(r) for r in todo), return_exceptions=True)
+                ao_stats["meta"] += len(todo)
+
+            for rid, it in by_id.items():
+                meta = _sp_album_meta.get(rid)
+                if not meta:                     # unresolved → try on a later pass
+                    continue
+                if not meta.get("date") or meta["date"] < state_cutoff:
+                    continue
+                r = _sp_appears_to_rel(it, {"id": aid, "name": name}, meta)
+                if r:
+                    out.append(r)
+                    if r["group"] == "compilation":
+                        ao_stats["comps"] += 1
+            return out, complete
+
         gql_429s = 0
         async with httpx.AsyncClient(timeout=20, headers=gql_headers, limits=limits,
                                      **_sp_httpx_kwargs()) as gql:
@@ -1130,7 +1365,18 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
                         for r in rels:
                             if r["id"] in old_live_ids:
                                 r["live"] = True
-                    _sp_artist_state[aid] = {"name": name, "releases": rels, "ts": now_ts}
+                    prev_st = _sp_artist_state.get(aid) or {}
+                    # Carry over shelf-sourced entries: this assignment replaces
+                    # the artist's release list, and without this every
+                    # compilation found for them would be silently dropped.
+                    _comps.merge_releases(rels, [
+                        r for r in prev_st.get("releases", [])
+                        if r.get("alb_artist") is not None
+                        and r.get("date", "") >= state_cutoff
+                    ])
+                    _sp_artist_state[aid] = {"name": name, "releases": rels,
+                                              "ts": now_ts,
+                                              "ao_ts": prev_st.get("ao_ts", 0)}
                     fetched   += 1
                     completed += 1
                     if fetched % 25 == 0:
@@ -1142,9 +1388,43 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
                         "artist": name, "found": 0, "service": "spotify",
                     })
 
+            # ── Appears-on sweep, in priority order ──────────────────────────
+            # Deliberately a SEPARATE pass, not interleaved with the loop above:
+            # the loop visits artists in follow-list order, so the metadata budget
+            # would be spent on whoever happens to come first rather than on the
+            # artists most likely to be on a new compilation.
+            for a_ao in ao_queue:
+                if gql_dead:
+                    break
+                aid_ao  = a_ao["id"]
+                name_ao = a_ao.get("name", "?")
+                st_ao   = _sp_artist_state.setdefault(
+                    aid_ao, {"name": name_ao, "releases": [], "ts": 0})
+                ao_rels, ao_complete = await _crawl_appears(gql, aid_ao, name_ao)
+                # Refresh shelf-sourced entries (own-discography ones untouched).
+                st_ao["releases"] = [r for r in st_ao.get("releases", [])
+                                     if r.get("alb_artist") is None]
+                _comps.merge_releases(st_ao["releases"], ao_rels)
+                # Only mark the shelf checked once every album on it was
+                # resolved — otherwise this artist stays at the front of the
+                # queue and finishes on the next pass.
+                if ao_complete:
+                    st_ao["ao_ts"] = now_ts
+                if ao_stats["artists"] % 25 == 0:
+                    _save_artist_state()
+                # Once the metadata budget is gone the remaining artists would
+                # only re-read shelves we cannot resolve — stop and continue next
+                # pass, where they still rank first (their ao_ts is untouched).
+                if ao_stats["meta"] >= meta_budget:
+                    print(f"[spotify] appears-on: metadata budget spent after "
+                          f"{ao_stats['artists']} artists — rest next pass", flush=True)
+                    break
+
         _save_artist_state()
         print(f"[spotify] crawl pass (api-partner): {completed}/{total} covered, "
               f"{fetched} fetched live"
+              + (f", appears-on: {ao_stats['artists']} artists → {ao_stats['comps']} comps"
+                 f" ({ao_stats['meta']} album lookups)" if ao_stats["artists"] else "")
               + (f", 429s: {gql_429s}" if gql_429s else ""), flush=True)
 
     # ── Serve the feed from the durable store (single source of truth) ───────

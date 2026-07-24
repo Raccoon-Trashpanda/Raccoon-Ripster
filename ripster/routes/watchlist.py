@@ -13,6 +13,7 @@ from pathlib import Path
 import httpx
 from fastapi import APIRouter, HTTPException, Query
 
+from ripster import compilations as _comps
 from ripster import watchlist_suggest as _wls
 
 router = APIRouter()
@@ -274,43 +275,85 @@ async def api_watchlist_check():
     return {"ok": True, "msg": "Checking in background…"}
 
 
-async def _apple_latest_album(client, artist_id: str, storefront: str = "us") -> dict:
-    """Newest already-released album for an Apple artist.
+async def _apple_artist_collections(client, artist_id: str, storefront: str,
+                                    with_comps: bool = True) -> list:
+    """Every release an Apple artist is on — their own albums AND the
+    compilations they merely have a track on.
+
+    Two lookups, because one endpoint cannot answer both questions:
+
+      entity=album  the artist's own releases (they are the album artist)
+      entity=song   their tracks — and a track always carries its parent
+                    `collection*` fields, which is the ONLY way a various-artists
+                    compilation shows up. `entity=album` never returns one, so
+                    without this half a Hospital/Forza-style label compilation is
+                    invisible while its individual tracks are visible.
+
+    See ripster/compilations.py — same blind spot as the Spotify radar.
+    """
+    out: dict[str, dict] = {}
+
+    async def _lookup(params: dict) -> list:
+        try:
+            r = await client.get("https://itunes.apple.com/lookup", params=params)
+            if r.status_code != 200:
+                return []
+            return (r.json() or {}).get("results") or []
+        except Exception as e:
+            print(f"[watchlist] apple lookup {artist_id} ({params.get('entity')}): {e}",
+                  flush=True)
+            return []
+
+    for x in await _lookup({"id": artist_id, "entity": "album", "limit": 25,
+                            "sort": "recent", "country": storefront}):
+        if x.get("wrapperType") == "collection" and x.get("collectionId"):
+            out[str(x["collectionId"])] = {
+                "url":   x.get("collectionViewUrl", ""),
+                "name":  x.get("collectionName", ""),
+                "date":  (x.get("releaseDate", "") or "")[:10],
+                "artist": x.get("artistName", ""),
+                "compilation": _comps.is_compilation(
+                    album_artist=x.get("artistName", ""), title=x.get("collectionName", "")),
+            }
+
+    if with_comps:
+        for x in await _lookup({"id": artist_id, "entity": "song", "limit": 200,
+                                "sort": "recent", "country": storefront}):
+            cid = x.get("collectionId")
+            if x.get("wrapperType") != "track" or not cid or str(cid) in out:
+                continue
+            alb_artist = x.get("collectionArtistName") or x.get("artistName", "")
+            out[str(cid)] = {
+                "url":   x.get("collectionViewUrl", ""),
+                "name":  x.get("collectionName", ""),
+                # A track's releaseDate is the collection's release date here.
+                "date":  (x.get("releaseDate", "") or "")[:10],
+                "artist": alb_artist,
+                "compilation": _comps.is_compilation(
+                    album_artist=alb_artist, title=x.get("collectionName", ""),
+                    track_artist=x.get("artistName", "")),
+            }
+    return list(out.values())
+
+
+async def _apple_latest_album(client, artist_id: str, storefront: str = "us",
+                              with_comps: bool = True) -> dict:
+    """Newest already-released release for an Apple artist, compilations included.
 
     Replaces the old `itunes.apple.com/rss/artistnewreleases/id=…` feed, which
     Apple retired — it now answers 400 "Invalid RSS channel name" for every id,
     so the Apple half of the watchlist silently checked nothing. The public
-    lookup API still serves an artist's albums and needs no token.
+    lookup API still serves this and needs no token.
     """
-    try:
-        r = await client.get("https://itunes.apple.com/lookup", params={
-            "id": artist_id, "entity": "album", "limit": 25,
-            "sort": "recent", "country": storefront,
-        })
-        if r.status_code != 200:
-            return {}
-        results = (r.json() or {}).get("results") or []
-    except Exception as e:
-        print(f"[watchlist] apple lookup {artist_id}: {e}", flush=True)
+    rels = await _apple_artist_collections(client, artist_id, storefront, with_comps)
+    if not rels:
         return {}
-
-    # results[0] is the artist record itself; the rest are collections.
-    albums = [x for x in results
-              if x.get("wrapperType") == "collection" and x.get("collectionId")]
-    if not albums:
-        return {}
-
-    # The API does not actually honour sort=recent, so sort here. Pre-orders
-    # carry a future releaseDate — keep them out, they cannot be downloaded yet.
+    # Pre-orders carry a future releaseDate — keep them out, they cannot be
+    # downloaded yet. Fall back to the newest overall if everything is upcoming.
     today = datetime.now().strftime("%Y-%m-%d")
-    albums.sort(key=lambda x: x.get("releaseDate", ""), reverse=True)
-    released = [x for x in albums if (x.get("releaseDate", "") or "")[:10] <= today]
-    latest = (released or albums)[0]
-    return {
-        "url":  latest.get("collectionViewUrl", ""),
-        "name": latest.get("collectionName", ""),
-        "date": (latest.get("releaseDate", "") or "")[:10],
-    }
+    rels.sort(key=lambda x: x.get("date", ""), reverse=True)
+    released = [x for x in rels if x.get("date", "") <= today]
+    return (released or rels)[0]
 
 
 def _sc_permalink(entry: dict) -> str:
@@ -395,6 +438,9 @@ async def _check_watchlist():
         new_found += await _check_soundcloud_targets(items, broadcast, save, cfg, queue, snapshot)
 
     storefront = cfg.get("storefront", "us") or "us"
+    # Compilations cost one extra lookup per artist; on by default because a
+    # label compilation is exactly the release people miss.
+    want_comps = cfg.get("watchlist-compilations", True) is not False
     async with httpx.AsyncClient(timeout=15) as client:
         for i, entry in enumerate(targets):
             artist_id = entry["artist_id"]
@@ -405,7 +451,8 @@ async def _check_watchlist():
                 "artist":  entry.get("name", "?"),
             })
             try:
-                latest = await _apple_latest_album(client, artist_id, storefront)
+                latest = await _apple_latest_album(client, artist_id, storefront,
+                                                   with_comps=want_comps)
                 # last_check is stamped even when the lookup yields nothing, so
                 # "never checked" in the UI means exactly that.
                 entry["last_check"] = datetime.now().isoformat(timespec="seconds")
@@ -427,6 +474,7 @@ async def _check_watchlist():
                     await broadcast({"type":     "watchlist_new_release",
                                      "artist":   entry["name"],
                                      "release":  release_name,
+                                     "compilation": bool(latest.get("compilation")),
                                      "url":      release_url})
                     if entry.get("auto_download") and release_url:
                         task = {
