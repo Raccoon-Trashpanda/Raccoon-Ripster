@@ -604,6 +604,9 @@ async function openArtistPage(service, artistId){
       releases: d.releases || [],
       filter: 'all',
     };
+    // Needed before the first render so the follow button opens in the right
+    // state instead of flipping a moment later.
+    if(typeof wlIndex === 'function') { try { await wlIndex(true); } catch {} }
     renderArtistPage();
   } catch(e){ _detailError(e.message); }
 }
@@ -645,12 +648,15 @@ function renderArtistPage(){
       ${pill('live', t('ck.f_live'))}
       ${pill('appears_on', t('ck.f_appears'))}
     </div>
-    <div style="margin-bottom:18px">
+    <div style="margin-bottom:18px;display:flex;gap:8px;flex-wrap:wrap">
       <button onclick="downloadArtistDiscography()"
         style="padding:8px 16px;border-radius:9px;background:var(--red);color:#fff;border:none;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font);display:inline-flex;align-items:center;gap:7px">
         ⬇ ${filter==='all' ? t('ck.dl_all') : t('ck.dl_filtered')}
         <span style="opacity:.75;font-weight:600">${filtered.length}</span>
       </button>
+      ${typeof wlFollowButton === 'function'
+          ? wlFollowButton(artist.service || Detail.currentArtist.service, artist.name || '', artist.url || '')
+          : ''}
     </div>`;
 
   const grid = filtered.length === 0

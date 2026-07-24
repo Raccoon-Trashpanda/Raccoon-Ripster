@@ -421,6 +421,15 @@ async function scBrowseUser(permalink, displayName) {
     if (nameEl) nameEl.textContent = d.channel.username || displayName || permalink;
     if (avEl && d.channel.avatar) { avEl.src = d.channel.avatar; avEl.style.display = ''; }
   }
+  // One-click follow for the channel — the watchlist polls SC channels by
+  // permalink, so this is the one the checker can actually use as-is.
+  const followEl = document.getElementById('sc-channel-follow');
+  if (followEl && typeof wlFollowButton === 'function') {
+    const chName = (d.channel && d.channel.username) || displayName || permalink;
+    try { await wlIndex(true); } catch {}
+    followEl.innerHTML = wlFollowButton('soundcloud', chName,
+                                        `https://soundcloud.com/${permalink}`);
+  }
   _scResults = d.results || [];
   const sortSel = document.getElementById('sc-sort');
   if (sortSel) sortSel.value = 'new';   // channel browse = newest-first by default

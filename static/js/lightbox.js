@@ -236,6 +236,64 @@ async function wlCheckNow() {
   await api('POST','/api/watchlist/check');
 }
 
+// ── Follow an artist in one click (artist page / SC channel) ──────────────
+// The watchlist can only actually poll Apple artists and SoundCloud channels,
+// so a follow from any other service's artist page is watched BY NAME on Apple —
+// the backend resolves the id and tells us whether it succeeded.
+let _wlIdx = null;   // Map(normalised name -> watchlist item)
+
+const _wlNorm = s => (s||'').trim().toLowerCase().replace(/\s+/g,' ');
+
+async function wlIndex(force) {
+  if(_wlIdx && !force) return _wlIdx;
+  const m = new Map();
+  try {
+    const r = await api('GET','/api/watchlist');
+    for(const it of (r.items||[])) m.set(_wlNorm(it.name), it);
+  } catch(e){ /* offline → treat as "not watched", the button still works */ }
+  _wlIdx = m;
+  return m;
+}
+
+function wlIsWatched(name){ return !!(_wlIdx && _wlIdx.get(_wlNorm(name))); }
+
+function wlFollowButton(service, name, url){
+  const on = wlIsWatched(name);
+  return `<button onclick="wlToggleArtist('${escJ(service)}','${escJ(name)}','${escJ(url||'')}')"
+    style="padding:8px 16px;border-radius:9px;background:${on?'var(--surface)':'transparent'};color:${on?'var(--red)':'var(--muted)'};border:1px solid ${on?'var(--red)':'var(--border)'};font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font);display:inline-flex;align-items:center;gap:6px">
+    ${on?'★':'☆'} ${on ? t('wl.following') : t('wl.follow')}
+  </button>`;
+}
+
+async function wlToggleArtist(service, name, url){
+  await wlIndex();
+  const existing = _wlIdx.get(_wlNorm(name));
+  if(existing){
+    await api('DELETE','/api/watchlist/'+existing.id);
+    await wlIndex(true);
+    toast(ti('wl.unfollowed',{name}));
+  } else {
+    const sc = service === 'soundcloud';
+    const r = await api('POST','/api/watchlist', {
+      name, url: sc ? (url||'') : '', service: sc ? 'soundcloud' : 'apple',
+      auto_download: false,
+    });
+    await wlIndex(true);
+    if(r && r.ok && r.resolved) toast(ti('wl.followed',{name}), 'var(--green)');
+    // Added, but nothing will ever check it — say so instead of a green tick.
+    else if(r && r.ok)          toast(ti('wl.follow_unresolved',{name}), 'var(--orange)', '', 5000);
+    else                        toast(t('t.error_c')+((r&&r.detail)||''), 'var(--red)');
+  }
+  if(typeof renderArtistPage === 'function' && typeof Detail !== 'undefined' && Detail.currentArtist)
+    renderArtistPage();
+  const scFollow = document.getElementById('sc-channel-follow');
+  if(scFollow && scFollow.innerHTML) scFollow.innerHTML = wlFollowButton(service, name, url);
+  // Only repaint the watchlist view when it is actually on screen — otherwise
+  // every follow from the search tab would fire a pointless fetch.
+  const wlView = document.getElementById('view-watchlist');
+  if(wlView && wlView.style.display !== 'none') loadWatchlist();
+}
+
 // ── Smart suggestions ─────────────────────────────────────────────────────
 // Everything here comes from the local stats DB (own downloads + plays), so
 // each card states a fact about the user's own library rather than a guess.
