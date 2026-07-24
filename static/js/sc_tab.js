@@ -299,6 +299,16 @@ function _relUpdateLoadMore(total) {
   }
 }
 
+// Search fires on every keystroke and _applyRelFilter rebuilds the whole visible
+// list through innerHTML — at _REL_PAGE_SIZE=120 cards that is ~3600 nodes
+// discarded and re-parsed per character. Coalesce the typing: the filter itself
+// is unchanged, it just stops running mid-word.
+let _relFilterTimer = null;
+function _relFilterDebounced(ms) {
+  clearTimeout(_relFilterTimer);
+  _relFilterTimer = setTimeout(() => _applyRelFilter(), ms == null ? 160 : ms);
+}
+
 function _relShowMore() {
   _relShowing += _REL_PAGE_SIZE;
   _applyRelFilter(false);
@@ -494,10 +504,13 @@ function renderReleaseCard(rel) {
           <input type="checkbox" class="rel-lyrics-chk" ${lyricsDefault ? 'checked' : ''}
             style="width:13px;height:13px;accent-color:var(--red);cursor:pointer"/>${esc(t('rl.lyrics_toggle'))}
         </label>` : '';
-  return `<div class="rel-card${isNew ? ' rel-card-new' : ''}" style="background:var(--surface);border:1px solid ${baseBorder};border-radius:10px;overflow:hidden;transition:border-color .15s" onmouseover="this.style.borderColor='${svcClr}'" onmouseout="this.style.borderColor='${baseBorder}'">
+  // content-visibility lets the browser skip layout+paint for cards that are
+  // off-screen (the grid renders 120 at a time); contain-intrinsic-size keeps
+  // the scrollbar honest for the ones it skipped.
+  return `<div class="rel-card${isNew ? ' rel-card-new' : ''}" style="background:var(--surface);border:1px solid ${baseBorder};border-radius:10px;overflow:hidden;transition:border-color .15s;content-visibility:auto;contain-intrinsic-size:auto 300px" onmouseover="this.style.borderColor='${svcClr}'" onmouseout="this.style.borderColor='${baseBorder}'">
     <div style="position:relative">
       ${rel.cover
-        ? `<img src="${esc(rel.cover)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy"/>`
+        ? `<img src="${esc(rel.cover)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" decoding="async"/>`
         : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:32px;color:var(--muted)">♪</div>`}
       <button onclick="event.stopPropagation();playRelease('${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')" title="${t('rl.listen')}"
         style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:54px;height:54px;border-radius:50%;background:rgba(0,0,0,.5);border:2px solid rgba(255,255,255,.85);color:#fff;font-size:21px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding-left:4px;backdrop-filter:blur(3px);transition:transform .12s,background .12s;z-index:2" onmouseover="this.style.transform='translate(-50%,-50%) scale(1.12)';this.style.background='rgba(0,0,0,.7)'" onmouseout="this.style.transform='translate(-50%,-50%)';this.style.background='rgba(0,0,0,.5)'">▶</button>

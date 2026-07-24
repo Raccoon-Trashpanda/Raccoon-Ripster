@@ -59,30 +59,75 @@ def _try_alacfix(path: Path, config: dict) -> bool:
     return result.returncode == 0
 
 
+_AUDIO_SUFFIXES = (".flac", ".alac", ".m4a", ".mp3", ".aac",
+                   ".ogg", ".opus", ".wav", ".aiff", ".aif", ".wv")
+
+
+def _verify_one(f: "Path", config: dict) -> tuple:
+    """→ (status, name) where status is 'ok' | 'fixed' | 'corrupt'."""
+    err = _decode_check(f)
+    if not err:
+        return "ok", f.name
+    if f.suffix.lower() == ".m4a" and _try_alacfix(f, config):
+        if not _decode_check(f):
+            return "fixed", f.name
+    return "corrupt", f.name
+
+
 def verify_and_repair(files: list, config: dict) -> dict:
     """Decode-check every file in `files` (list of Path). ALAC (.m4a) failures
     get one repair attempt + re-check. Returns a summary dict; never raises —
-    a broken verify pass must not take down the download it's checking."""
+    a broken verify pass must not take down the download it's checking.
+
+    Checks run in parallel. Each check is one ffmpeg process that decodes a
+    whole track, and ffmpeg's lossless audio decoders are single-threaded
+    (`Threading capabilities: none` for both alac and flac), so checking a
+    20-track album serially left every core but one idle and added measurable
+    wall time to each finished album — ~5s here, several times that on the
+    modest machines this actually needs to stay quick on. There is no GPU path
+    for this: every hardware codec ffmpeg exposes (NVENC / AMF / QSV / Media
+    Foundation) is a VIDEO engine, so process-level parallelism is the only
+    accelerator available for it.
+    """
     summary = {"checked": 0, "ok": 0, "fixed": [], "corrupt": []}
-    for f in files:
-        f = Path(f)
-        if f.suffix.lower() not in (".flac", ".alac", ".m4a", ".mp3", ".aac",
-                                    ".ogg", ".opus", ".wav", ".aiff", ".aif", ".wv"):
-            continue
-        summary["checked"] += 1
-        try:
-            err = _decode_check(f)
-            if not err:
-                summary["ok"] += 1
-                continue
-            if f.suffix.lower() == ".m4a" and _try_alacfix(f, config):
-                err2 = _decode_check(f)
-                if not err2:
-                    summary["ok"] += 1
-                    summary["fixed"].append(f.name)
-                    continue
-            summary["corrupt"].append(f.name)
-        except Exception:
-            # A verify-pass bug must never fail the download it's checking.
-            continue
+    targets = [Path(f) for f in files
+               if Path(f).suffix.lower() in _AUDIO_SUFFIXES]
+    if not targets:
+        return summary
+    summary["checked"] = len(targets)
+
+    # Leave a core for the rest of the app; cap so a huge box does not spawn a
+    # swarm of ffmpegs against one disk.
+    workers = max(1, min(len(targets), (os.cpu_count() or 2) - 1, 8))
+    try:
+        workers = max(1, min(workers, int(config.get("integrity-verify-workers", workers))))
+    except (TypeError, ValueError):
+        pass
+
+    if workers == 1:
+        results = []
+        for f in targets:
+            try:
+                results.append(_verify_one(f, config))
+            except Exception:
+                pass
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        results = []
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for fut in [pool.submit(_verify_one, f, config) for f in targets]:
+                try:
+                    results.append(fut.result())
+                except Exception:
+                    # A verify-pass bug must never fail the download it checks.
+                    pass
+
+    for status, name in results:
+        if status == "ok":
+            summary["ok"] += 1
+        elif status == "fixed":
+            summary["ok"] += 1
+            summary["fixed"].append(name)
+        else:
+            summary["corrupt"].append(name)
     return summary

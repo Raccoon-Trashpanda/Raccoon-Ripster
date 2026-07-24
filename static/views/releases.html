@@ -6,7 +6,7 @@
           <div id="rel-active-svcs" style="display:flex;gap:5px;flex-wrap:wrap"></div>
           <!-- Controls -->
           <div style="display:flex;gap:6px;margin-left:auto;align-items:center;flex-wrap:wrap">
-            <input id="rel-search" type="search" data-i18n-ph="rel.search_ph" placeholder="Поиск по артисту / названию…" oninput="_applyRelFilter()" style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);outline:none;width:170px;min-width:100px"/>
+            <input id="rel-search" type="search" data-i18n-ph="rel.search_ph" placeholder="Поиск по артисту / названию…" oninput="_relFilterDebounced()" style="padding:5px 10px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);outline:none;width:170px;min-width:100px"/>
             <select id="rel-days" onchange="_relSavePrefs();loadReleases(false)" style="padding:5px 8px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
               <option value="7" data-i18n="rel.d7">7 дней</option>
               <option value="14" data-i18n="rel.d14">14 дней</option>
