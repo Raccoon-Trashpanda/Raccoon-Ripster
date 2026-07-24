@@ -69,6 +69,11 @@ function resolveQuality(service) {
     deezer: 'flac', qobuz: '27', tidal: 'lossless',
     beatport: 'hifi', yandex: 'flac', amazon: 'High',
   }[service];
+  // Services that simply do not have an Apple-style quality ladder. Falling
+  // through to the global (Apple) default made a BBC card claim 'alac' before
+  // the real list loaded — BBC Sounds only ever yields MP3 320.
+  const fixed = { bbc: 'mp3', soundcloud: 'hq' };
+  if (fixed[service]) return fixed[service];
   return c['quality'] || 'alac';
 }
 

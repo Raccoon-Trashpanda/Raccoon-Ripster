@@ -342,9 +342,17 @@ function _renderRelActiveSvcs() {
 }
 
 function saveRelSvcConfig() {
-  const svcs = ['spotify','qobuz','tidal','bbc','soundcloud','apple']
-    .filter(s => document.getElementById('rel-cfg-'+s)?.checked)
-    .join(',');
+  const ALL = ['spotify','qobuz','tidal','bbc','soundcloud','apple'];
+  const prev = new Set(((S.config || {})['releases-services'] || 'spotify')
+    .split(',').map(x => x.trim()).filter(Boolean));
+  // Only decide for the checkboxes that are actually ON SCREEN. A settings view
+  // cached from before a source existed has no checkbox for it, and reading that
+  // as "unchecked" silently dropped the source from the config — unticking
+  // SoundCloud used to take BBC and Apple down with it.
+  const svcs = ALL.filter(s => {
+    const cb = document.getElementById('rel-cfg-' + s);
+    return cb ? cb.checked : prev.has(s);
+  }).join(',');
   saveSetting('releases-services', svcs || 'spotify');
   _renderRelActiveSvcs();
 }

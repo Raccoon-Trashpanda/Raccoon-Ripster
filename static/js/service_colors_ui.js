@@ -424,10 +424,12 @@ async function _qualitiesForEngine(engine) {
   if(!engine) return QUALITIES;
   if(_QUALITIES_BY_ENGINE[engine]) return _QUALITIES_BY_ENGINE[engine];
   try {
-    const svcMap = {deezer:'deezer',qobuz:'qobuz',tidal:'tidal',soundcloud:'soundcloud',beatport:'beatport'};
-    const svc = svcMap[engine] || 'apple';
-    const qs = await (await fetch(`/api/qualities?service=${svc}`)).json();
-    _QUALITIES_BY_ENGINE[engine] = Array.isArray(qs) ? qs : QUALITIES;
+    // Ask about the service we were actually given. The old code mapped a
+    // handful of known names and sent everything ELSE as 'apple', so a BBC card
+    // was offered Apple's ALAC/Atmos list — qualities BBC cannot produce (its
+    // engine declares exactly one: MP3 320 from the Sounds stream).
+    const qs = await (await fetch(`/api/qualities?service=${encodeURIComponent(engine)}`)).json();
+    _QUALITIES_BY_ENGINE[engine] = (Array.isArray(qs) && qs.length) ? qs : QUALITIES;
     return _QUALITIES_BY_ENGINE[engine];
   } catch(e) { return QUALITIES; }
 }
