@@ -489,6 +489,10 @@ _SP_APPEARS_META_PER_PASS    = 1000
 # finish while their shelf got re-fetched each time.
 _SP_APPEARS_META_PER_ARTIST  = 50
 _SP_APPEARS_REFRESH          = 24 * 3600
+_SP_APPEARS_HOT_DAYS         = 14      # "released recently" = could be on a new comp
+_SP_APPEARS_HOT_REFRESH      = 6 * 3600
+_SP_CT_URL = "https://clienttoken.spotify.com/v1/clienttoken"
+_SP_WEB_CLIENT_ID = "d8a5ed958d274c2e8ee717e6a4b0971d"
 _SP_CT_URL = "https://clienttoken.spotify.com/v1/clienttoken"
 _SP_WEB_CLIENT_ID = "d8a5ed958d274c2e8ee717e6a4b0971d"
 
@@ -1249,21 +1253,46 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
         ao_queue: list = []
         if ao_on and ao_budget > 0:
             _today = datetime.now().strftime("%Y-%m-%d")
+            _hot_since = (datetime.now() - timedelta(days=_SP_APPEARS_HOT_DAYS)
+                          ).strftime("%Y-%m-%d")
 
-            def _ao_key(a: dict):
+            # Two tiers, and the tiering is the whole point of this feature.
+            #
+            # A label compilation lands at the same time as the tracks on it, and
+            # those tracks are released as singles by artists we follow — so the
+            # artists who just put something out ARE the artists who just landed
+            # on a new compilation. Ranking purely by "whose shelf is stalest"
+            # ground through the follow list at ~27 artists per pass and would
+            # have taken hundreds of passes to reach them (observed: the Forza
+            # Horizon 6 comp stayed invisible while its 24 artists sat in the
+            # queue). Recent activity is the signal; staleness is only the
+            # tie-break for everyone else.
+            hot, cold = [], []
+            for a in artists:
+                if not a.get("id"):
+                    continue
                 st_a = _sp_artist_state.get(a["id"], {}) or {}
-                # Stalest shelf first; among equally stale ones (everyone, on the
-                # first run) prefer artists who released something recently —
-                # they are the ones who just landed on a new label compilation.
-                return (st_a.get("ao_ts", 0),
-                        _neg_date(_recent_activity(st_a.get("releases", []), _today)))
-            ao_queue = [a for a in sorted((a for a in artists if a.get("id")), key=_ao_key)
-                        if now_ts - ((_sp_artist_state.get(a["id"], {}) or {}).get("ao_ts", 0))
-                           >= _SP_APPEARS_REFRESH][:ao_budget]
+                ao_ts = st_a.get("ao_ts", 0)
+                last  = _recent_activity(st_a.get("releases", []), _today)
+                if last >= _hot_since:
+                    # Re-check active artists often: the comp can drop days after
+                    # their single did.
+                    if now_ts - ao_ts >= _SP_APPEARS_HOT_REFRESH:
+                        hot.append((_neg_date(last), a))
+                elif now_ts - ao_ts >= _SP_APPEARS_REFRESH:
+                    cold.append((ao_ts, _neg_date(last), a))
+            hot.sort(key=lambda x: x[0])
+            cold.sort(key=lambda x: (x[0], x[1]))
+            ao_queue = ([a for _, a in hot] + [a for _, _, a in cold])[:ao_budget]
+            if hot:
+                print(f"[spotify] appears-on queue: {len(hot)} свежих артистов "
+                      f"(релиз за {_SP_APPEARS_HOT_DAYS}д) + {len(cold)} остальных",
+                      flush=True)
         ao_stats = {"artists": 0, "comps": 0, "meta": 0}
 
         async def _crawl_appears(gc, aid: str, name: str) -> tuple[list, bool]:
-            """Compilations (and guest spots) this artist appears on. Returns
+            """Compilations (and guest spots) this artist appears on.
+
             Returns (releases, complete). `complete` is False when the shelf could
             not be fully resolved (HTTP error, or the pass budget ran out before
             every album id was looked up) — the caller must then NOT mark the
