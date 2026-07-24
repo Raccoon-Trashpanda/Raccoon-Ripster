@@ -44,6 +44,13 @@ const _WA = {
   curOffset: 0,     // playback offset (for seek+resume)
   nextBuffer: null,
   nextItem:   null,
+  // A BufferSource for the NEXT track, already started with a future start time
+  // so the hand-over happens on the audio clock instead of in a JS callback.
+  schedSource: null,
+  schedBuffer: null,
+  schedItem:   null,
+  schedIdx:    -1,
+  schedStartT: 0,
   suspendedAt: 0,   // ctx.currentTime at pause
   loading: false,
   _preloading: false, // guard against concurrent preload fetches
@@ -896,6 +903,9 @@ async function _waPlay(idx, startAtSec = 0) {
   const item = Preview.queue[idx];
   if (!item) return false;
   _WA.loading = true;
+  // Any pending hand-over belongs to the track we are leaving — drop it, or a
+  // manual skip would be overtaken by the previously scheduled next track.
+  _waCancelScheduled();
   let buffer = null;
   // Reuse pre-decoded next buffer if available (seamless gapless auto-advance).
   if (_WA.nextItem === item && _WA.nextBuffer) {
@@ -956,18 +966,10 @@ async function _waPlay(idx, startAtSec = 0) {
   ['pp-dur','pp-dur-big','fp-dur'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = _waDurStr; });
   _WA.loading   = false;
   Preview.idx = idx;
-  // Pre-decode the next track in background.
+  // Pre-decode the next track in background (which then schedules the join).
   _waPreloadNext();
-  // Hook ended → advance.
-  src.onended = () => {
-    // Browsers fire onended also on .stop() — ignore if we replaced manually.
-    if (_WA.curSource !== src) return;
-    if (idx + 1 < Preview.queue.length) {
-      _waPlay(idx + 1, 0);
-    } else {
-      _WA.curSource = null;
-    }
-  };
+  _waScheduleNext();          // buffer may already be in hand (manual skip)
+  _waAttachEnded(src, idx);
   // Mirror to UI (title/cover/play-state) so the visible plumbing stays in sync.
   if (typeof fpSyncMeta === 'function') fpSyncMeta(item);
   ['pp-play','pp-play-big','fp-play'].forEach(id => {
@@ -991,11 +993,87 @@ async function _waPreloadNext() {
     _WA.nextBuffer = await _waLoadBuffer(r.url);
     _WA.nextItem = item;
     console.log('[gapless] preloaded next:', item.title);
+    _waScheduleNext();
   } catch (e) {
     console.warn('[gapless] preload failed:', e.message);
   } finally {
     _WA._preloading = false;
   }
+}
+
+// ── Sample-accurate hand-over ─────────────────────────────────────────────
+// Having the next buffer decoded is NOT enough to be gapless. Starting it from
+// `onended` means the audio has already stopped by the time JS runs, and the
+// new source then starts at `currentTime + headroom` — so every track boundary
+// cost ~20ms plus whatever the main thread was busy with, audible as a hiccup
+// in a continuous DJ mix. Instead schedule the next source WHILE the current
+// one is still playing, at the exact time the current buffer ends: the Web
+// Audio clock performs the join, and JS only does the bookkeeping afterwards.
+function _waCancelScheduled() {
+  if (_WA.schedSource) {
+    try { _WA.schedSource.onended = null; _WA.schedSource.stop(0); } catch {}
+  }
+  _WA.schedSource = null;
+  _WA.schedBuffer = null;
+  _WA.schedItem   = null;
+  _WA.schedIdx    = -1;
+}
+
+function _waScheduleNext() {
+  if (!_WA.ctx || !_WA.curSource || !_WA.curBuffer) return;
+  if (!_WA.nextBuffer || _WA.schedSource) return;
+  const nextIdx = Preview.idx + 1;
+  if (nextIdx >= Preview.queue.length || Preview.queue[nextIdx] !== _WA.nextItem) return;
+
+  // Real end time of the current source. curStartT is a rate-1 virtual origin,
+  // so recover the true start (curStartT + curOffset) and scale what is left.
+  const rate  = _WA.curSource.playbackRate?.value || 1;
+  const endAt = (_WA.curStartT + _WA.curOffset)
+              + (_WA.curBuffer.duration - _WA.curOffset) / rate;
+  // Already past it (tab was backgrounded, huge stall) — let onended do the
+  // ordinary reactive advance rather than scheduling into the past.
+  if (endAt <= _WA.ctx.currentTime) return;
+
+  const src = _WA.ctx.createBufferSource();
+  src.buffer = _WA.nextBuffer;
+  src.playbackRate.value = rate;
+  src.connect(_WA.gain);
+  src.start(endAt);
+  _WA.schedSource = src;
+  _WA.schedBuffer = _WA.nextBuffer;
+  _WA.schedItem   = _WA.nextItem;
+  _WA.schedIdx    = nextIdx;
+  _WA.schedStartT = endAt;
+}
+
+// The scheduled source is already audible by the time this runs — this only
+// moves the bookkeeping and UI onto it.
+function _waPromoteScheduled() {
+  const src = _WA.schedSource, buf = _WA.schedBuffer;
+  const item = _WA.schedItem, idx = _WA.schedIdx, startT = _WA.schedStartT;
+  _WA.schedSource = null; _WA.schedBuffer = null; _WA.schedItem = null; _WA.schedIdx = -1;
+  _WA.curSource = src;  _WA.curBuffer = buf;  _WA.curItem = item;
+  _WA.curStartT = startT; _WA.curOffset = 0;
+  _WA.nextBuffer = null;  _WA.nextItem = null;
+  Preview.idx = idx;
+  const durStr = fmtDur(Math.floor(buf.duration));
+  ['pp-dur','pp-dur-big','fp-dur'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = durStr;
+  });
+  _waAttachEnded(src, idx);
+  if (typeof fpSyncMeta === 'function') fpSyncMeta(item);
+  try { _syncAlbumPlayBtns?.(); } catch {}
+  _waPreloadNext();
+}
+
+function _waAttachEnded(src, idx) {
+  src.onended = () => {
+    // Browsers fire onended on .stop() too — ignore if we replaced manually.
+    if (_WA.curSource !== src) return;
+    if (_WA.schedSource) { _waPromoteScheduled(); return; }
+    if (idx + 1 < Preview.queue.length) _waPlay(idx + 1, 0);
+    else _WA.curSource = null;
+  };
 }
 function _waPause() {
   if (_WA.ctx && _WA.curSource) {
@@ -1037,6 +1115,9 @@ async function _waSeek(sec) {
   // re-downloaded the whole track on every seek → seek felt dead on long mixes).
   if (!_WA.ctx || !_WA.curBuffer) return;
   const off = Math.max(0, Math.min(sec, _WA.curBuffer.duration - 0.2));
+  // Seeking moves the end of this track, so the pending hand-over is now aimed
+  // at the wrong instant — drop it and re-aim below.
+  _waCancelScheduled();
   if (_WA.curSource) { try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch {} }
   if (_WA.ctx.state === 'suspended') { try { await _WA.ctx.resume(); } catch {} }
   const src = _WA.ctx.createBufferSource();
@@ -1048,12 +1129,8 @@ async function _waSeek(sec) {
   _WA.curSource = src;
   _WA.curStartT = startedAt - off;
   _WA.curOffset = off;
-  const _idx = Preview.idx;
-  src.onended = () => {
-    if (_WA.curSource !== src) return;
-    if (_idx + 1 < Preview.queue.length) _waPlay(_idx + 1, 0);
-    else _WA.curSource = null;
-  };
+  _waAttachEnded(src, Preview.idx);
+  _waScheduleNext();          // re-aim the hand-over at the new end time
   ['pp-play','pp-play-big','fp-play'].forEach(id => {
     const el = document.getElementById(id); if (el) el.textContent = '⏸';
   });
