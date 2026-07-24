@@ -607,8 +607,19 @@ async def _startup_sync_orpheus() -> None:
         print(f"[startup] OrpheusDL username sync skipped: {_e}", flush=True)
 
 
+# ── Watchlist periodic check ───────────────────────────────────────────────────
+_watchlist_check_task = None
+
+async def _watchlist_loop():
+    while True:
+        await asyncio.sleep(6 * 3600)
+        if watchlist:
+            await _watchlist._check_watchlist()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _watchlist_check_task
     _metadata.install(
         config, broadcast, save_config, _detect_service,
         spotify_token_getter=_spotify.get_access_token,
@@ -616,6 +627,7 @@ async def lifespan(app: FastAPI):
     )
     _setup.install(config, broadcast, save_config, BASE_DIR, IS_WINDOWS)
     _amd.install(config, broadcast, save_config, BASE_DIR, IS_WINDOWS)
+    _watchlist_check_task = asyncio.create_task(_watchlist_loop())
 
     saved = load_pending_queue(QUEUE_FILE)
     if saved:
@@ -862,6 +874,7 @@ process_queue      = _runner.process_queue
 _ctx.process_queue = process_queue
 
 # ── Route modules ──────────────────────────────────────────────────────────────
+from ripster.routes import watchlist  as _watchlist
 from ripster.routes import history    as _history
 from ripster.routes import spotify    as _spotify
 from ripster.routes import discovery  as _discovery
@@ -884,6 +897,7 @@ from ripster import telemetry as _telemetry
 from ripster import tl1001 as _tl1001
 
 _tl1001.install(config)          # 1001Tracklists source (login optional, disk-cached)
+_watchlist.install(app, _ctx)
 _history.install(app, _ctx)
 _discovery.install(app, _ctx)
 _spotify.install(app, _ctx)

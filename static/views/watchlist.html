@@ -1,0 +1,47 @@
+      <div style="padding:14px 16px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+          <div style="font-size:14px;font-weight:700;color:var(--text)" data-i18n="v.watchlist">Watchlist</div>
+          <button onclick="wlCheckNow()" data-i18n="wl.check_now"
+            style="padding:5px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;color:var(--text);font-family:var(--font)">
+            ↺ Проверить сейчас
+          </button>
+          <span style="font-size:11px;color:var(--muted);margin-left:auto" data-i18n="wl.auto_note">Авто: каждые 6 часов</span>
+        </div>
+
+        <!-- Live status line for watchlist refresh (driven by WS events) -->
+        <div id="wl-status-bar" style="display:none;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:10px 12px;margin-bottom:10px">
+          <div style="display:flex;align-items:center;gap:10px">
+            <div id="wl-status-text" style="font-size:12px;color:var(--text);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">…</div>
+            <div id="wl-status-count" style="font-size:11px;color:var(--muted);font-family:var(--mono)"></div>
+          </div>
+          <div style="height:3px;background:rgba(255,255,255,.05);border-radius:2px;margin-top:8px;overflow:hidden">
+            <div id="wl-status-fill" style="height:100%;width:0%;background:var(--red);transition:width .25s ease,background-color .2s"></div>
+          </div>
+        </div>
+        <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px">
+          <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px" data-i18n="wl.add_title">Добавить артиста / альбом</div>
+          <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center">
+            <input id="wl-name" data-i18n-ph="wl.name_ph" placeholder="Имя артиста"
+              style="flex:1;min-width:130px;padding:7px 10px;background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);outline:none;font-family:var(--font)"/>
+            <input id="wl-url" data-i18n-ph="wl.url_ph" placeholder="Ссылка (Apple-артист / SC-канал)"
+              style="flex:2;min-width:180px;padding:7px 10px;background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:8px;font-size:11px;font-family:var(--mono);color:var(--text);outline:none"/>
+            <select id="wl-svc"
+              style="padding:7px 10px;background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
+              <option value="apple">Apple Music</option>
+              <option value="soundcloud">SoundCloud</option>
+              <option value="deezer">Deezer</option>
+            </select>
+            <label style="display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text);cursor:pointer;white-space:nowrap">
+              <input type="checkbox" id="wl-auto" checked/> <span data-i18n="wl.auto_label">Авто-скачать</span>
+            </label>
+            <button onclick="wlAdd()" data-i18n="wl.add"
+              style="padding:7px 14px;background:var(--red);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">
+              + Добавить
+            </button>
+          </div>
+        </div>
+        <div id="wl-list"></div>
+        <div id="wl-empty" style="text-align:center;padding:40px;font-size:13px;color:var(--muted)" data-i18n="wl.empty">
+          Добавь артиста — Ripster будет автоматически проверять новые релизы
+        </div>
+      </div>

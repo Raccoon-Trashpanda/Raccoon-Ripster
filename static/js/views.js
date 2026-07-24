@@ -1,12 +1,12 @@
 const _VIEW_FILES = [
   'queue','settings','releases','soundcloud','bbc','coder',
-  'spectrogram','search','history','console','setup'
+  'spectrogram','search','history','watchlist','console','setup'
 ];
 
 async function _loadAllViews() {
   const results = await Promise.all(
     _VIEW_FILES.map(n =>
-      fetch(`/static/views/${n}.html?v=74`)
+      fetch(`/static/views/${n}.html?v=75`)
         .then(r => { if (!r.ok) throw new Error(`views/${n}.html ${r.status}`); return r.text(); })
     )
   );
