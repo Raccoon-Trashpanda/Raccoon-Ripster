@@ -2022,6 +2022,28 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     task["_files"] = [f.name for f in audio]
                     _dm.record(tid, str(d), audio, task)
                     print(f"[manifest] {_dm.short_id(tid)} → {d.name} ({len(audio)} files)", flush=True)
+                    # Integrity verify: "done" only proves the engine THINKS it
+                    # saved the file — decode-check it for real. ALAC failures get
+                    # one auto-repair pass (utils/alacfix, via the compiled Go
+                    # binary's standalone --fix-alac mode); anything else that
+                    # fails is reported, never hidden, but never blocks delivery.
+                    if _config.get("integrity-verify", True) and audio:
+                        try:
+                            from ripster.integrity_verify import verify_and_repair
+                            _iv = await asyncio.to_thread(verify_and_repair, audio, _config)
+                            if _iv["fixed"]:
+                                task.setdefault("log", []).append(
+                                    f"[integrity] repaired: {', '.join(_iv['fixed'])}")
+                                await _broadcast(_i18n.log_event("console.integrity_fixed", level="success",
+                                                                 task_id=tid, n=len(_iv["fixed"])))
+                            if _iv["corrupt"]:
+                                task.setdefault("log", []).append(
+                                    f"[integrity] still failing decode-check: {', '.join(_iv['corrupt'])}")
+                                task["_integrity_corrupt"] = _iv["corrupt"]
+                                await _broadcast(_i18n.log_event("console.integrity_corrupt", level="warn",
+                                                                 task_id=tid, n=len(_iv["corrupt"])))
+                        except Exception as _iv_e:
+                            print(f"[integrity] verify skipped: {_iv_e}", flush=True)
                 else:
                     print(f"[manifest] {_dm.short_id(tid)} — dir unresolved at completion", flush=True)
             except Exception as _e:

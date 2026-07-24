@@ -30,6 +30,8 @@ FALLBACK: dict[str, str] = {
     "console.transcode_start":  "⏳ Конвертирую в {label}…",
     "console.transcode_done":   "✓ {label}: сконвертировано {n} файл(ов)",
     "console.discs_organized":  "🗂 Многодисковый релиз: разложено по папкам ({n} трек(ов))",
+    "console.integrity_fixed":  "✓ Автопроверка: починено {n} файл(ов) (дефект ALAC-потока)",
+    "console.integrity_corrupt": "⚠ Автопроверка: {n} файл(ов) не проходят decode-check, возможна повреждённая запись — проверь вручную",
     # ── auto-mix (DJ Coder) ───────────────────────────────────────────────────
     "console.automix_skipped_lossy": "🎚 Авто-mix пропущен: источник lossy. Для бесшовного DJ-микса качай в ALAC/FLAC.",
     "console.automix_start":         "🎚 Авто-mix: склеиваю «{name}»…",
