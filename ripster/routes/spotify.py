@@ -472,7 +472,17 @@ _SP_GQL_GETALBUM_HASH = "b9bfabef66ed756e5e13f68a942deb60bd4125ec1f1be8cc42769dc
 # plus one getAlbum per album id we have never seen. Still budgeted and round-robined
 # by staleness so a pass never doubles in size and trips a 429 ban.
 _SP_APPEARS_ARTISTS_PER_PASS = 400
-_SP_APPEARS_META_PER_PASS    = 300
+# Cold-cache warm-up is the whole cost: a first-seen shelf needs ~50 getAlbum
+# calls, and covering every followed artist is not the goal — the queue is
+# ordered by recent activity, so the artists who could plausibly be on a NEW
+# compilation are served first and the long tail simply never becomes urgent.
+# api-partner has taken thousands of these without a 429 (the bans we do see are
+# on api.spotify.com/v1), so the budget is generous but still bounded.
+_SP_APPEARS_META_PER_PASS    = 1000
+# Resolve a whole shelf in one go: an artist is then either fully done (ao_ts
+# stamped) or untouched, never half-known. The pass budget below is what bounds
+# the load; capping per artist as well only made artists take several passes to
+# finish while their shelf got re-fetched each time.
 # Resolve a whole shelf in one go: an artist is then either fully done (ao_ts
 # stamped) or untouched, never half-known. The pass budget below is what bounds
 # the load; capping per artist as well only made artists take several passes to
