@@ -22,11 +22,13 @@ What each source watches, and why that is the right thing to watch:
 Every source is best-effort and independent: one failing service returns an empty
 list with an `error`, and the rest of the feed still renders. Results are cached
 briefly because these are third-party APIs and the view refetches on every filter
-change.
+change; the cache is persisted and served stale-while-revalidate, so a restart
+does not make the user wait for a cold refetch.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime, timedelta
 
@@ -39,29 +41,81 @@ _s: dict = {}
 
 _CACHE_TTL = 900          # 15 min — a new episode/upload is not a per-second event
 _cache: dict = {}         # key -> (ts, payload)
+_refreshing: set = set()  # keys with a background refresh already in flight
 
 
 def install(app, ctx) -> None:
     _s.update({
         "config":    ctx.config,
         "watchlist": ctx.watchlist,
+        "cache_file": ctx.base_dir / "radar_cache.json",
     })
+    _load_cache()
     app.include_router(router)
+
+
+# ── Cache: survives a restart, and never makes the user wait ─────────────────
+# A cold source costs ~2.5s (BBC polls 11 shows, Apple two lookups per artist).
+# In-memory only, that price was paid again after every restart, and a stale
+# entry made the user wait for a refetch before seeing anything. So: persist it,
+# and serve what we have immediately while refreshing behind the request.
+
+def _load_cache() -> None:
+    f = _s.get("cache_file")
+    try:
+        if f and f.exists():
+            raw = json.loads(f.read_text(encoding="utf-8")) or {}
+            for k, v in raw.items():
+                if isinstance(v, list) and len(v) == 2:
+                    _cache[k] = (float(v[0]), v[1])
+            print(f"[radar] cache loaded: {len(_cache)} sources", flush=True)
+    except Exception as e:
+        print(f"[radar] cache load failed: {e}", flush=True)
+
+
+def _save_cache() -> None:
+    f = _s.get("cache_file")
+    if not f:
+        return
+    try:
+        f.write_text(json.dumps({k: [ts, p] for k, (ts, p) in _cache.items()},
+                                ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        print(f"[radar] cache save failed: {e}", flush=True)
 
 
 def _cutoff(days: int) -> str:
     return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
 
-def _cached(key: str):
+def _serve_or_refresh(key: str, builder):
+    """Fresh → return it. Stale → return the stale copy NOW and refresh behind
+    the request. Nothing cached → the caller has to wait; there is nothing to
+    show yet. Returns the payload, or None when there is no cached copy."""
     hit = _cache.get(key)
-    if hit and (time.time() - hit[0]) < _CACHE_TTL:
-        return hit[1]
-    return None
+    if not hit:
+        return None
+    ts, payload = hit
+    if (time.time() - ts) < _CACHE_TTL:
+        return payload
+    if key not in _refreshing:
+        _refreshing.add(key)
+
+        async def _bg():
+            try:
+                await builder()
+            except Exception as e:
+                print(f"[radar] background refresh {key}: {e}", flush=True)
+            finally:
+                _refreshing.discard(key)
+
+        asyncio.create_task(_bg())
+    return {**payload, "stale": True}
 
 
 def _store(key: str, payload: dict) -> dict:
     _cache[key] = (time.time(), payload)
+    _save_cache()
     return payload
 
 
@@ -77,8 +131,10 @@ async def releases_bbc(days: int = Query(90, ge=1, le=365),
                        force: int = Query(0)):
     """New episodes of the BBC shows we know about."""
     key = f"bbc|{days}"
-    if not force and (hit := _cached(key)):
-        return hit
+    if not force:
+        hit = _serve_or_refresh(key, lambda: releases_bbc(days=days, force=1))
+        if hit is not None:
+            return hit
 
     from ripster.routes.bbc import BRANDS, get_episodes
 
@@ -129,8 +185,10 @@ async def releases_soundcloud(days: int = Query(90, ge=1, le=365),
                               force: int = Query(0)):
     """Recent uploads from the SoundCloud channels on the watchlist."""
     key = f"sc|{days}"
-    if not force and (hit := _cached(key)):
-        return hit
+    if not force:
+        hit = _serve_or_refresh(key, lambda: releases_soundcloud(days=days, force=1))
+        if hit is not None:
+            return hit
 
     from ripster.routes.soundcloud import sc_user_tracks
     from ripster.routes.watchlist import _sc_permalink
@@ -195,8 +253,10 @@ async def releases_apple(days: int = Query(90, ge=1, le=365),
     """New Apple releases by the artists on the watchlist — compilations
     included, which is the whole reason watchlist.py resolves them via tracks."""
     key = f"apple|{days}"
-    if not force and (hit := _cached(key)):
-        return hit
+    if not force:
+        hit = _serve_or_refresh(key, lambda: releases_apple(days=days, force=1))
+        if hit is not None:
+            return hit
 
     import httpx
     from ripster.routes.watchlist import _apple_artist_collections
