@@ -192,7 +192,7 @@ body{display:flex;flex-direction:column}
 body{height:100%;margin:0}
 
 /* ── LAYOUT ── */
-.app{display:grid;grid-template-columns:220px minmax(0, 1fr);grid-template-rows:56px minmax(0, 1fr);flex:1 1 0;min-height:0;width:100vw;gap:0;overflow:hidden}
+.app{display:grid;grid-template-columns:220px minmax(0, 1fr);grid-template-rows:68px minmax(0, 1fr);flex:1 1 0;min-height:0;width:100vw;gap:0;overflow:hidden}
 .topbar{grid-column:1/-1;display:flex;align-items:center;padding:0 20px 0 20px;background:var(--topbar-bg);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);gap:12px;position:relative;z-index:100;overflow:hidden;min-width:0}
 .topbar > *{flex-shrink:0}
 .tb-status{font-size:11px;font-family:var(--mono);color:var(--muted);white-space:nowrap;flex-shrink:0}
@@ -210,7 +210,27 @@ body{height:100%;margin:0}
    stuttered. The glow is now a second, thicker copy of the same path, and
    nothing animated carries a filter. */
 .tb-pulse{width:56px;height:34px;flex-shrink:0;display:flex;align-items:center;cursor:default}
-.tb-pulse svg{width:100%;height:100%;overflow:hidden}
+/* Framed "instrument window" in the corner. At double size the trace needs a
+   container of its own, or it reads as something that overflowed the bar. The
+   frame tints with the connection state, so the corner carries the status even
+   at a glance from across the room. */
+.tb-pulse-framed{width:112px;height:52px;padding:2px 7px;border-radius:12px;
+  background:var(--console-bg);border:1px solid var(--border);
+  transition:border-color .8s ease,background .8s ease}
+.tb-pulse-framed[data-state="live"]{border-color:color-mix(in srgb,var(--green) 34%,var(--border))}
+.tb-pulse-framed[data-state="wait"]{border-color:color-mix(in srgb,var(--orange) 36%,var(--border))}
+/* Square icon button (theme switch) — matches the pill//details heights. */
+.tb-icon-btn{background:var(--surface);border:1px solid var(--border);border-radius:9px;
+  width:34px;height:34px;font-size:15px;cursor:pointer;display:flex;align-items:center;
+  justify-content:center;color:var(--text);flex-shrink:0;padding:0;line-height:1;
+  transition:border-color var(--tr),background var(--tr)}
+.tb-icon-btn:hover{border-color:var(--muted);background:var(--surface2)}
+/* Edge feather as a CSS mask, not an SVG <mask>: an SVG mask over a moving
+   element re-rasterises every frame, which kept the beat stuttering even after
+   the drop-shadow was gone. This one is composited. */
+.tb-pulse svg{width:100%;height:100%;overflow:hidden;
+  -webkit-mask-image:linear-gradient(to right,transparent 0,rgba(0,0,0,.45) 7%,#000 18%,#000 82%,rgba(0,0,0,.45) 93%,transparent 100%);
+  mask-image:linear-gradient(to right,transparent 0,rgba(0,0,0,.45) 7%,#000 18%,#000 82%,rgba(0,0,0,.45) 93%,transparent 100%)}
 .tb-pulse path{fill:none;stroke-linecap:round;stroke-linejoin:round}
 .tb-pulse .tb-pulse-wave{fill:currentColor;fill-opacity:0;transition:fill-opacity .8s ease}
 .tb-pulse[data-morph="face"] .tb-pulse-wave{fill-opacity:1}
@@ -227,7 +247,10 @@ body{height:100%;margin:0}
 .tb-pulse .tb-pulse-wave{stroke:var(--muted2);stroke-width:1.5;opacity:0}
 .tb-pulse .tb-pulse-glow{stroke:var(--muted2);stroke-width:4;opacity:0}
 
-@keyframes tb-pulse-run{from{transform:translateX(0)}to{transform:translateX(-60px)}}
+/* The shift MUST equal the pattern's period exactly. It was left at -60 when the
+   cycle became 56 units wide, so every loop jumped 4 units — that mismatch, not
+   the frame rate, is what read as the heartbeat "breaking off" each time round. */
+@keyframes tb-pulse-run{from{transform:translateX(0)}to{transform:translateX(-56px)}}
 
 .tb-pulse[data-state="live"] .tb-pulse-wave{stroke:var(--green);opacity:1}
 .tb-pulse[data-state="live"] .tb-pulse-glow{stroke:var(--green);opacity:.20}
@@ -238,14 +261,13 @@ body{height:100%;margin:0}
 .tb-pulse[data-state="off"] .tb-pulse-glow{opacity:0}
 .tb-pulse[data-state="off"] .tb-pulse-base{stroke:var(--muted2);opacity:.4}
 
-/* Travel. Paused (not removed) during the morph, so the trace holds its exact
-   position instead of snapping back to phase zero. */
-.tb-pulse[data-state="live"] .tb-pulse-wave,
-.tb-pulse[data-state="live"] .tb-pulse-glow{animation:tb-pulse-run 2.4s linear infinite}
-.tb-pulse[data-state="wait"] .tb-pulse-wave,
-.tb-pulse[data-state="wait"] .tb-pulse-glow{animation:tb-pulse-run 4.6s linear infinite}
-.tb-pulse[data-morph] .tb-pulse-wave,
-.tb-pulse[data-morph] .tb-pulse-glow{animation-play-state:paused}
+/* Travel moves the GROUP, not the two paths separately: one promoted layer, no
+   pair of animations to drift apart. Paused (not removed) during the morph, so
+   the trace holds its exact position instead of snapping back to phase zero. */
+.tb-pulse .tb-pulse-run{will-change:transform}
+.tb-pulse[data-state="live"] .tb-pulse-run{animation:tb-pulse-run 2.4s linear infinite}
+.tb-pulse[data-state="wait"] .tb-pulse-run{animation:tb-pulse-run 4.6s linear infinite}
+.tb-pulse[data-morph] .tb-pulse-run{animation-play-state:paused}
 
 /* The morph itself. Held one full breath, then released. */
 .tb-pulse[data-morph="face"] .tb-pulse-wave,
@@ -279,6 +301,13 @@ body{height:100%;margin:0}
 .tb-sub{font-size:10px;color:var(--muted);font-weight:400;font-family:var(--mono)}
 /* (.tb-pills — removed; topbar now uses a single details popover instead of a row of pills) */
 .pill{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:600;padding:4px 10px;border-radius:20px;font-family:var(--display);letter-spacing:.2px}
+/* In the topbar the wrapper pills carry a label ("Wrapper ✓", "Public ✗") that
+   the JS rewrites on every status poll. Two word-pills side by side made the
+   corner noisy, so here they collapse to bare status lamps — the text is still
+   written by the JS (untouched) and still reachable through the tooltip. */
+.topbar .pill{font-size:0;gap:0;padding:0;width:26px;height:26px;border-radius:50%;
+  justify-content:center;flex-shrink:0}
+.topbar .pill .dot{width:9px;height:9px}
 .pill .dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
 .pill-ok{background:rgba(62,207,170,.12);color:var(--green)}.pill-ok .dot{background:var(--green);animation:pulse-g 2s infinite}
 .pill-warn{background:rgba(239,159,39,.12);color:var(--orange)}.pill-warn .dot{background:var(--orange)}

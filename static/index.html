@@ -56,40 +56,13 @@
     </div>
     <button id="mobile-menu-btn" onclick="toggleMobileDrawer()" data-i18n-title="tb.menu" title="Меню"
       style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:32px;height:32px;font-size:17px;cursor:pointer;align-items:center;justify-content:center;flex-shrink:0;color:var(--text);padding:0;line-height:1">☰</button>
-    <div class="tb-controls" style="display:flex;align-items:center;gap:8px;margin-left:8px">
-      <!-- Font picker (compact, icon + dropdown) -->
-      <select id="font-picker" onchange="setFont(this.value)" title="UI Font"
-        style="background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:0 6px;height:32px;font-size:11px;color:var(--text);cursor:pointer;outline:none;font-family:var(--font);width:85px">
-        <option value="system" selected>System</option>
-        <option value="dm">DM Sans</option>
-        <option value="inter">Inter</option>
-        <option value="geist">Geist</option>
-        <option value="nunito">Nunito</option>
-        <option value="roboto">Roboto</option>
-        <option value="manrope">Manrope</option>
-        <option value="atkinson">Atkinson</option>
-        <option value="source">Source Sans</option>
-      </select>
-      <!-- Theme toggle -->
-      <button id="theme-btn" onclick="toggleTheme()" title="Toggle theme"
-        style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:32px;height:32px;font-size:15px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all .15s;color:var(--text);flex-shrink:0">
-        🌙
-      </button>
-    </div>
     <!-- Wrapper status pill stays visible — it's the only one that signals an actionable problem -->
     <div id="wrapper-pill" class="pill pill-warn" style="cursor:pointer;margin-left:auto"
          onclick="showView('settings',document.querySelector('[data-view=settings]'))"
          title="Wrapper decryption service status">
       <div class="dot"></div>Wrapper: ?
     </div>
-    <!-- One tidy button that opens a popover with engine / tokens / quality details -->
-    <button id="tb-details-btn" type="button" onclick="toggleDetailsPopover(event)"
-            data-i18n-title="tb.details_t" title="Подробности: движок, токены, качество"
-            class="owner-only"
-            style="background:var(--surface);border:1px solid var(--border);border-radius:8px;height:32px;padding:0 12px;font-size:11px;font-weight:600;color:var(--muted);cursor:pointer;display:flex;align-items:center;gap:7px;font-family:var(--font);transition:.15s">
-      <span id="tb-details-dot" style="width:6px;height:6px;border-radius:50%;background:var(--muted);transition:background .2s"></span>
-      <span data-i18n="tb.info">Инфо</span>
-    </button>
+    <span id="tb-details-dot" style="display:none"></span>
     <button class="glob-btn" id="lang-switcher" onclick="cycleLang(event)" data-i18n-title="tb.lang_t" title="Следующий язык (клик по точке — выбрать конкретный)">
       <span class="gi">🌐</span><span class="code" id="lang-code">RU</span>
       <span class="dots" id="lang-dots">
@@ -100,34 +73,32 @@
         <i data-lang="zh" onclick="setLang('zh');event.stopPropagation()"></i>
       </span>
     </button>
+    <button id="theme-btn" onclick="toggleTheme()" class="tb-icon-btn"
+            data-i18n-title="tb.theme_t" title="Тема оформления">🌙</button>
     <!-- Live-connection indicator. Wordless on purpose: a "● Connected" label in the
          chrome reads as a debug widget, not as product. State lives in data-state
-         (live / wait / off) and the wording survives only in the tooltip. -->
-    <div class="tb-pulse" id="tb-status" data-state="off" role="status" aria-live="polite"
+         (live / wait / off) and the wording survives only in the tooltip.
+         Framed as its own little instrument window in the corner, at double size. -->
+    <div class="tb-pulse tb-pulse-framed" id="tb-status" data-state="off" role="status" aria-live="polite"
+         onclick="toggleDetailsPopover(event)"
          data-i18n-title="tb.ws_off" title="Нет связи с сервером">
+      <!-- No SVG <mask> here on purpose. An SVG mask over a moving element forces
+           a full raster re-composite every frame — that, not the drop-shadow, was
+           the remaining source of the stutter. The edge feather is now a CSS
+           mask-image on the <svg> (compositor-only), and the travel animation
+           moves ONE group instead of two separate paths, so there is a single
+           promoted layer and nothing to keep in sync. -->
       <svg viewBox="0 0 56 34" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false">
-        <defs>
-          <!-- Long, multi-stop feather: a short fade made the beat look like it was
-               being cut off at the edges rather than travelling past them. -->
-          <linearGradient id="tbPulseFade" x1="0" y1="0" x2="1" y2="0">
-            <stop offset="0" stop-color="#fff" stop-opacity="0"/>
-            <stop offset=".07" stop-color="#fff" stop-opacity=".45"/>
-            <stop offset=".18" stop-color="#fff" stop-opacity="1"/>
-            <stop offset=".82" stop-color="#fff" stop-opacity="1"/>
-            <stop offset=".93" stop-color="#fff" stop-opacity=".45"/>
-            <stop offset="1" stop-color="#fff" stop-opacity="0"/>
-          </linearGradient>
-          <mask id="tbPulseMask"><rect width="56" height="34" fill="url(#tbPulseFade)"/></mask>
-        </defs>
-        <g mask="url(#tbPulseMask)">
+        <g>
           <path class="tb-pulse-base" d="M0 24 H56"/>
-          <!-- The glow is a second, thicker copy of the trace rather than a CSS
-               drop-shadow: a filter on an animated element is recomputed every
-               frame and drops out of GPU compositing, which is what made the
-               motion stutter. Both copies carry the same `d`, set from CSS so the
-               morph can transition it. -->
-          <path class="tb-pulse-glow"/>
-          <path class="tb-pulse-wave"/>
+          <g class="tb-pulse-run">
+            <!-- The glow is a second, thicker copy of the trace rather than a CSS
+                 drop-shadow: a filter on an animated element is recomputed every
+                 frame and drops out of GPU compositing. Both copies carry the same
+                 `d`, set from CSS so the morph can transition it. -->
+            <path class="tb-pulse-glow"/>
+            <path class="tb-pulse-wave"/>
+          </g>
           <!-- Raccoon detail (eye + mask stripe): invisible while the trace runs,
                fades in only once the line has settled into the face. -->
           <g class="tb-pulse-face-detail">
