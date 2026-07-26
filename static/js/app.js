@@ -1402,6 +1402,45 @@ function _detailsOutsideClick(e) {
 function pill(type, text){ return `<div class="pill pill-${type}"><div class="dot"></div>${text}</div>`; }
 
 // ── HELPERS ───────────────────────────────────────────────────
+// ── Topbar pulse: periodic "the line gathers into a raccoon" morph ──────────
+// Timing matters more than the geometry here. The morph is started on an
+// `animationiteration` event rather than whenever the timer happens to fire:
+// at that instant the travelling trace is exactly at phase zero, so the face
+// assembles from a line that is standing still instead of one caught mid-stride.
+const PULSE_MORPH_EVERY = 17000;   // ms between morphs
+const PULSE_FACE_HOLD   = 2100;    // ms the face stays assembled
+let _pulseMorphBusy = false;
+
+function pulseMorphTick() {
+  const el = document.getElementById('tb-status');
+  if(!el || _pulseMorphBusy) return;
+  if(el.dataset.state !== 'live') return;          // only while the line is running
+  if(document.hidden) return;                      // don't animate a hidden tab
+  if(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+  const wave = el.querySelector('.tb-pulse-wave');
+  if(!wave) return;
+  _pulseMorphBusy = true;
+  const begin = () => {
+    wave.removeEventListener('animationiteration', begin);
+    el.dataset.morph = 'face';
+    setTimeout(() => {
+      // Release: `d` transitions back first, and travel only resumes once the
+      // line is a line again — otherwise it would start sliding mid-morph.
+      el.dataset.morph = 'out';
+      setTimeout(() => { delete el.dataset.morph; _pulseMorphBusy = false; }, 900);
+    }, PULSE_FACE_HOLD);
+  };
+  wave.addEventListener('animationiteration', begin);
+  // If the animation isn't running for any reason, don't leave the flag stuck.
+  setTimeout(() => {
+    if(_pulseMorphBusy && !el.dataset.morph) {
+      wave.removeEventListener('animationiteration', begin);
+      _pulseMorphBusy = false;
+    }
+  }, 5000);
+}
+setInterval(pulseMorphTick, PULSE_MORPH_EVERY);
+
 // Connection state for the topbar pulse: 'live' | 'wait' | 'off'.
 // Takes a state, not a label — the indicator is deliberately wordless, and the
 // only surviving text is the tooltip (kept for accessibility and hover).
@@ -1536,22 +1575,48 @@ const FONT_MAP = {
   nunito:  { css: "'Nunito',system-ui,sans-serif",        display: "'Nunito',sans-serif" },
   roboto:  { css: "'Roboto',system-ui,sans-serif",        display: "'Roboto',sans-serif" },
   manrope: { css: "'Manrope',system-ui,sans-serif",       display: "'Manrope',sans-serif" },
+  // Legibility-first options. Atkinson Hyperlegible was designed by the Braille
+  // Institute for low-vision readers: its letterforms are deliberately hard to
+  // confuse with one another (I/l/1, O/0), which is exactly what a dense UI needs.
+  atkinson:{ css: "'Atkinson Hyperlegible',system-ui,sans-serif", display: "'Atkinson Hyperlegible',sans-serif" },
+  source:  { css: "'Source Sans 3',system-ui,sans-serif", display: "'Source Sans 3',sans-serif" },
 };
 
+// Colour schemes. `light: true` marks a light-based palette — the `light` class
+// stays in play for it, since a handful of JS paths still read that class to
+// decide whether they're drawing on a dark or a light background.
+const THEMES = {
+  dark:     { light:false, icon:'🌙' },
+  midnight: { light:false, icon:'🌑' },
+  ember:    { light:false, icon:'🔥' },
+  sepia:    { light:true,  icon:'📜' },
+  light:    { light:true,  icon:'☀️' },
+};
+const THEME_ORDER = ['dark','midnight','ember','sepia','light'];
+
 function setTheme(t) {
-  document.documentElement.classList.toggle('light', t === 'light');
+  const spec = THEMES[t] || THEMES.dark;
+  if(!THEMES[t]) t = 'dark';
+  const root = document.documentElement;
+  root.classList.toggle('light', spec.light);
+  root.dataset.theme = t;
   localStorage.setItem('amd-theme', t);
-  // update cards
-  document.getElementById('theme-dark')?.style.setProperty('border-color', t==='dark' ? 'var(--red)' : 'transparent');
-  document.getElementById('theme-light')?.style.setProperty('border-color', t==='light' ? '#e8000f' : 'transparent');
-  document.getElementById('theme-btn').textContent = t === 'light' ? '☀️' : '🌙';
-  // update selects
-  ['theme-dark-opt','theme-light-opt'].forEach(id => {});
+  // Selection ring on the theme cards in Settings (one per scheme).
+  THEME_ORDER.forEach(name => {
+    document.getElementById('theme-' + name)?.style.setProperty(
+      'border-color', name === t ? 'var(--red)' : 'transparent');
+  });
+  const btn = document.getElementById('theme-btn');
+  if(btn){ btn.textContent = spec.icon; btn.title = t; }
 }
 
 function toggleTheme() {
-  const isLight = document.documentElement.classList.contains('light');
-  setTheme(isLight ? 'dark' : 'light');
+  // Cycles through every scheme rather than flipping dark/light — the button is
+  // the only theme control visible outside Settings.
+  const cur = document.documentElement.dataset.theme
+              || (document.documentElement.classList.contains('light') ? 'light' : 'dark');
+  const i = THEME_ORDER.indexOf(cur);
+  setTheme(THEME_ORDER[(i + 1) % THEME_ORDER.length]);
 }
 
 function setFont(key) {

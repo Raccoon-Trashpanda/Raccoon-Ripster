@@ -16,8 +16,8 @@
 <link rel="icon" type="image/svg+xml" href="/static/favicon-32.svg"/>
 <script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
-<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/css/main.css?v=75"/>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&family=Atkinson+Hyperlegible:wght@400;700&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/css/main.css?v=76"/>
 </head>
 <body>
 <div id="net-progress"></div>
@@ -67,6 +67,8 @@
         <option value="nunito">Nunito</option>
         <option value="roboto">Roboto</option>
         <option value="manrope">Manrope</option>
+        <option value="atkinson">Atkinson</option>
+        <option value="source">Source Sans</option>
       </select>
       <!-- Theme toggle -->
       <button id="theme-btn" onclick="toggleTheme()" title="Toggle theme"
@@ -103,22 +105,36 @@
          (live / wait / off) and the wording survives only in the tooltip. -->
     <div class="tb-pulse" id="tb-status" data-state="off" role="status" aria-live="polite"
          data-i18n-title="tb.ws_off" title="Нет связи с сервером">
-      <svg viewBox="0 0 60 18" preserveAspectRatio="none" aria-hidden="true" focusable="false">
+      <svg viewBox="0 0 56 34" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false">
         <defs>
-          <!-- Feathered ends so the trace flows in and out instead of being chopped -->
+          <!-- Long, multi-stop feather: a short fade made the beat look like it was
+               being cut off at the edges rather than travelling past them. -->
           <linearGradient id="tbPulseFade" x1="0" y1="0" x2="1" y2="0">
             <stop offset="0" stop-color="#fff" stop-opacity="0"/>
-            <stop offset=".16" stop-color="#fff" stop-opacity="1"/>
-            <stop offset=".84" stop-color="#fff" stop-opacity="1"/>
+            <stop offset=".07" stop-color="#fff" stop-opacity=".45"/>
+            <stop offset=".18" stop-color="#fff" stop-opacity="1"/>
+            <stop offset=".82" stop-color="#fff" stop-opacity="1"/>
+            <stop offset=".93" stop-color="#fff" stop-opacity=".45"/>
             <stop offset="1" stop-color="#fff" stop-opacity="0"/>
           </linearGradient>
-          <mask id="tbPulseMask"><rect width="60" height="18" fill="url(#tbPulseFade)"/></mask>
+          <mask id="tbPulseMask"><rect width="56" height="34" fill="url(#tbPulseFade)"/></mask>
         </defs>
         <g mask="url(#tbPulseMask)">
-          <path class="tb-pulse-base" d="M0 9 H60"/>
-          <!-- Two identical QRS segments 60u apart: translating by exactly -60
-               loops seamlessly, so the trace never visibly jumps. -->
-          <path class="tb-pulse-wave" d="M0 9 H24 l2.5 0 l1.6 -6.4 l2 11.6 l1.8 -7 l1.6 1.8 H84 l2.5 0 l1.6 -6.4 l2 11.6 l1.8 -7 l1.6 1.8 H120"/>
+          <path class="tb-pulse-base" d="M0 24 H56"/>
+          <!-- The glow is a second, thicker copy of the trace rather than a CSS
+               drop-shadow: a filter on an animated element is recomputed every
+               frame and drops out of GPU compositing, which is what made the
+               motion stutter. Both copies carry the same `d`, set from CSS so the
+               morph can transition it. -->
+          <path class="tb-pulse-glow"/>
+          <path class="tb-pulse-wave"/>
+          <!-- Raccoon detail (eye + mask stripe): invisible while the trace runs,
+               fades in only once the line has settled into the face. -->
+          <g class="tb-pulse-face-detail">
+            <path class="tb-pulse-mask" d="M19.4 11.2 C23.4 10.2, 28.4 12.6, 33.2 16.8 C30.4 19.2, 24.2 17.0, 20.6 14.4 Z"/>
+            <circle class="tb-pulse-eye" cx="24.6" cy="13.5" r="1.9"/>
+            <circle class="tb-pulse-nose" cx="37.6" cy="22.2" r="1.8"/>
+          </g>
         </g>
       </svg>
     </div>
@@ -451,7 +467,7 @@
 
 <script src="/static/js/i18n.js?v=10068"></script>
 <script src="/static/js/views.js?v=10061"></script>
-<script src="/static/js/app.js?v=10111"></script>
+<script src="/static/js/app.js?v=10112"></script>
 <script src="/static/js/wrapper.js?v=6"></script>
 <script src="/static/js/coder.js?v=5"></script>
 <script src="/static/js/guest.js?v=1"></script>

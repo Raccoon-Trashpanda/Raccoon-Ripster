@@ -25,14 +25,28 @@
           <div class="settings-row">
             <div class="field-group flex1">
               <label class="lbl" data-i18n="s.color_theme">Color theme</label>
-              <div style="display:flex;gap:8px">
-                <div class="theme-card" id="theme-dark" onclick="setTheme('dark')" style="flex:1;padding:12px;border-radius:10px;background:#0a0a0c;border:2px solid transparent;cursor:pointer;text-align:center;transition:all .15s">
-                  <div style="font-size:18px">🌙</div>
-                  <div style="font-size:11px;font-weight:700;color:var(--text);margin-top:4px">Dark</div>
+              <!-- Each card previews its own palette: the swatch background IS the
+                   scheme's --bg, so the choice is made by eye, not by name. -->
+              <div style="display:flex;gap:6px;flex-wrap:wrap">
+                <div class="theme-card" id="theme-dark" onclick="setTheme('dark')" style="flex:1 1 60px;padding:10px 6px;border-radius:10px;background:#111318;border:2px solid transparent;cursor:pointer;text-align:center;transition:all .15s">
+                  <div style="font-size:17px">🌙</div>
+                  <div style="font-size:10px;font-weight:700;color:#e8e8f8;margin-top:3px">Dark</div>
                 </div>
-                <div class="theme-card" id="theme-light" onclick="setTheme('light')" style="flex:1;padding:12px;border-radius:10px;background:#f4f4f8;border:2px solid transparent;cursor:pointer;text-align:center;transition:all .15s">
-                  <div style="font-size:18px">☀️</div>
-                  <div style="font-size:11px;font-weight:700;color:#18181f;margin-top:4px">Light</div>
+                <div class="theme-card" id="theme-midnight" onclick="setTheme('midnight')" style="flex:1 1 60px;padding:10px 6px;border-radius:10px;background:#000;border:2px solid transparent;cursor:pointer;text-align:center;transition:all .15s">
+                  <div style="font-size:17px">🌑</div>
+                  <div style="font-size:10px;font-weight:700;color:#ece7e1;margin-top:3px">Midnight</div>
+                </div>
+                <div class="theme-card" id="theme-ember" onclick="setTheme('ember')" style="flex:1 1 60px;padding:10px 6px;border-radius:10px;background:#0b0908;border:2px solid transparent;cursor:pointer;text-align:center;transition:all .15s">
+                  <div style="font-size:17px">🔥</div>
+                  <div style="font-size:10px;font-weight:700;color:#f2e8dd;margin-top:3px">Ember</div>
+                </div>
+                <div class="theme-card" id="theme-sepia" onclick="setTheme('sepia')" style="flex:1 1 60px;padding:10px 6px;border-radius:10px;background:#f5efe4;border:2px solid transparent;cursor:pointer;text-align:center;transition:all .15s">
+                  <div style="font-size:17px">📜</div>
+                  <div style="font-size:10px;font-weight:700;color:#2c2620;margin-top:3px">Sepia</div>
+                </div>
+                <div class="theme-card" id="theme-light" onclick="setTheme('light')" style="flex:1 1 60px;padding:10px 6px;border-radius:10px;background:#f4f4f8;border:2px solid transparent;cursor:pointer;text-align:center;transition:all .15s">
+                  <div style="font-size:17px">☀️</div>
+                  <div style="font-size:10px;font-weight:700;color:#18181f;margin-top:3px">Light</div>
                 </div>
               </div>
             </div>
@@ -48,6 +62,8 @@
                   <option value="nunito">Nunito — rounded friendly</option>
                   <option value="roboto">Roboto — Material Design</option>
                   <option value="manrope">Manrope — technical editorial</option>
+                  <option value="atkinson">Atkinson Hyperlegible — max readability</option>
+                  <option value="source">Source Sans 3 — soft humanist</option>
                 </select>
                 <div id="font-preview" style="font-size:13px;color:var(--muted);padding:6px 8px;background:var(--surface2);border-radius:7px">
                   The quick brown fox jumps over the lazy dog 0123456789
