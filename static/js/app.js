@@ -3,6 +3,7 @@
 // ── STATE ──────────────────────────────────────────────────────
 const S = { config:{}, queue:[], running:false, paused:false, guestMode:false, lang:'ru' };
 let ws = null;
+let _wsRetries = 0;   // consecutive failed reconnects — drives the topbar pulse state
 const QUALITIES = [];
 
 // ── i18n ───────────────────────────────────────────────────────
@@ -152,14 +153,20 @@ function connectWS() {
       location.reload();
       return;
     }
-    setStatus('● Connected', 'var(--green)');
+    _wsRetries = 0;
+    setStatus('live');
     appendLog('WebSocket connected — ready', 'success');
     pullQueue();   // resync queue from the authoritative REST on every (re)connect —
                    // a long-lived socket that silently missed queue_update events
                    // otherwise leaves S.queue frozen on a stale snapshot.
   };
   ws.onclose = () => {
-    setStatus('● Disconnected', 'var(--red)');
+    // A dropped socket is not the same thing as a dead server: we retry every 2s
+    // and normally reconnect on the first try. Show the amber "reconnecting" beat
+    // for the first few attempts and only flatline once it's genuinely not coming
+    // back — otherwise a routine blip looks like an outage.
+    _wsRetries++;
+    setStatus(_wsRetries <= 3 ? 'wait' : 'off');
     setTimeout(connectWS, 2000);
   };
   ws.onerror = () => ws.close();
@@ -1395,9 +1402,19 @@ function _detailsOutsideClick(e) {
 function pill(type, text){ return `<div class="pill pill-${type}"><div class="dot"></div>${text}</div>`; }
 
 // ── HELPERS ───────────────────────────────────────────────────
-function setStatus(text, color) {
+// Connection state for the topbar pulse: 'live' | 'wait' | 'off'.
+// Takes a state, not a label — the indicator is deliberately wordless, and the
+// only surviving text is the tooltip (kept for accessibility and hover).
+function setStatus(state) {
   const el = document.getElementById('tb-status');
-  if(el){ el.textContent=text; el.style.color=color; }
+  if(!el) return;
+  const st = (state === 'live' || state === 'wait') ? state : 'off';
+  el.dataset.state = st;
+  const key = st === 'live' ? 'tb.ws_live' : st === 'wait' ? 'tb.ws_wait' : 'tb.ws_off';
+  el.dataset.i18nTitle = key;
+  const label = t(key);
+  el.title = label;
+  el.setAttribute('aria-label', label);
 }
 
 

@@ -98,6 +98,31 @@ body{height:100%;margin:0}
 .topbar{grid-column:1/-1;display:flex;align-items:center;padding:0 20px 0 20px;background:var(--topbar-bg);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);gap:12px;position:relative;z-index:100;overflow:hidden;min-width:0}
 .topbar > *{flex-shrink:0}
 .tb-status{font-size:11px;font-family:var(--mono);color:var(--muted);white-space:nowrap;flex-shrink:0}
+/* ── Live-connection pulse (replaces the old "● Connected" text label) ──────
+   A wordless ECG trace: it runs while the socket is alive, slows to an amber
+   beat while reconnecting, and flatlines when the connection is really gone.
+   Only the <g> moves (compositor-only transform), so the cost is negligible. */
+.tb-pulse{width:60px;height:18px;flex-shrink:0;display:flex;align-items:center;cursor:default}
+.tb-pulse svg{width:100%;height:100%;overflow:visible}
+.tb-pulse path{fill:none;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;
+  vector-effect:non-scaling-stroke}
+.tb-pulse .tb-pulse-base{stroke:var(--border2);stroke-width:1;opacity:.55}
+.tb-pulse .tb-pulse-wave{stroke:var(--muted2);opacity:0;transition:opacity .5s ease,stroke .5s ease}
+@keyframes tb-pulse-run{from{transform:translateX(0)}to{transform:translateX(-60px)}}
+.tb-pulse[data-state="live"] .tb-pulse-wave{stroke:var(--green);opacity:1;
+  filter:drop-shadow(0 0 3px var(--green));animation:tb-pulse-run 2.4s linear infinite}
+.tb-pulse[data-state="wait"] .tb-pulse-wave{stroke:var(--orange);opacity:.9;
+  filter:drop-shadow(0 0 2px var(--orange));animation:tb-pulse-run 4.6s linear infinite}
+/* Gone: the trace fades out and the flat baseline is all that's left. */
+.tb-pulse[data-state="off"] .tb-pulse-wave{opacity:0;animation:none}
+.tb-pulse[data-state="off"] .tb-pulse-base{stroke:var(--muted2);opacity:.4}
+@media (prefers-reduced-motion:reduce){
+  .tb-pulse .tb-pulse-wave{animation:none!important}
+  /* Motion was the whole signal, so colour has to carry it alone — hold the
+     trace still and visible rather than leaving an ambiguous flat line. */
+  .tb-pulse[data-state="live"] .tb-pulse-wave,
+  .tb-pulse[data-state="wait"] .tb-pulse-wave{opacity:1}
+}
 .tb-restart{background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:14px;padding:2px 7px;cursor:pointer;line-height:1;flex-shrink:0}
 .tb-restart:hover{color:var(--fg);border-color:var(--muted)}
 .sidebar{background:var(--sidebar-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;padding:12px 10px;gap:2px;min-height:0;scrollbar-width:thin}
@@ -783,6 +808,7 @@ img[data-cover].loaded{
   .tb-controls{display:none!important}
   #lang-switcher{display:none!important}
   .tb-status{display:none!important}
+  .tb-pulse{display:none!important}   /* same call as the old text status: topbar is too tight */
   .wrapper-pill{display:none!important}
   .tb-sub{display:none}
   .tb-mark{width:28px;height:28px;border-radius:8px}
