@@ -75,9 +75,21 @@ class ZhaereyEngine(EngineBase):
         # save-lrc-file alone; True/False = this run only, nothing persisted).
         lyrics_ov = config.get("_lyrics_override")
         lyrics_flag = ["--lyrics=" + ("on" if lyrics_ov else "off")] if lyrics_ov is not None else []
+        # Single-track album link (/album/<slug>/<id>?i=<trackid>): main.go only
+        # honours the ?i= track selection under --song (main.go:1666), so without
+        # this flag a one-track link downloaded the WHOLE album. Add it ONLY when
+        # ?i= is present — --song without an `i` hits the empty branch above and
+        # silently saves nothing.
+        song_flag = []
+        try:
+            from urllib.parse import urlparse, parse_qs
+            if parse_qs(urlparse(url).query).get("i"):
+                song_flag = ["--song"]
+        except Exception:
+            pass
         # --json makes Go print a JSON array of saved tracks at the end so we
         # can extract the exact output directory without guessing.
-        return base + ([flag] if flag else []) + lyrics_flag + ["--json", url]
+        return base + ([flag] if flag else []) + lyrics_flag + song_flag + ["--json", url]
 
     @staticmethod
     def _json_tracks(line: str) -> Optional[list]:
@@ -331,6 +343,16 @@ class ZhaereyEngine(EngineBase):
         m = _RE_DONE.search(log_text)
         if m:
             ok, total = int(m.group(1)), int(m.group(2))
+            if ok == 0 and _RE_UNAVAIL.search(log_text):
+                # "Completed: 0/N" with an Unavailable line above it is the same
+                # quiet give-up _RE_UNAVAIL exists to catch below — just WITH a
+                # summary line this time. Surface the real reason instead of an
+                # empty-error failure that renders as bare "Exit code 0" after
+                # the partial-retry loop exhausts itself (see runner.py msg =
+                # result.error or f"Exit code {rc}").
+                return EngineResult(False, tracks_ok=0, tracks_err=total, error=(
+                    "Apple: трек недоступен в этом регионе/качестве (Unavailable) — "
+                    "смени storefront (регион) или качай через AMD (публичный wrapper)."))
             return EngineResult(success=ok > 0, tracks_ok=ok, tracks_err=total-ok)
         # Local docker wrapper couldn't mint a content key — the wrapper's saved
         # Apple SESSION is expired/unsubscribed (logs "Invalid CKC"). This is the
