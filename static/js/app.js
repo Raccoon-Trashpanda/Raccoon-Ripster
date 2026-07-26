@@ -1417,7 +1417,10 @@ function pulseMorphTick() {
   if(el.dataset.state !== 'live') return;          // only while the line is running
   if(document.hidden) return;                      // don't animate a hidden tab
   if(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
-  const wave = el.querySelector('.tb-pulse-wave');
+  // Listen on the element that actually carries the travel animation. It moved to
+  // the wrapping <g> (one promoted layer instead of two), and a listener left on
+  // the path never fires again — which silently stopped the morph happening at all.
+  const wave = el.querySelector('.tb-pulse-run');
   if(!wave) return;
   _pulseMorphBusy = true;
   const begin = () => {
