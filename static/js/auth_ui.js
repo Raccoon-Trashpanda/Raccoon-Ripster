@@ -13,7 +13,7 @@ async function yandexGetToken() {
   set(t('ya.requesting'));
   const r = await api('POST', '/api/yandex/auth/start', {});
   if (!r || !r.ok) { set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((r && r.error) || '?')}</span>`); return; }
-  try { window.open(r.verification_url, '_blank', 'noopener'); } catch (e) {}
+  openExternal(r.verification_url);
   set(ti('dlg.enter_code', {url: esc(r.verification_url)})
     + `<b style="font-size:15px;letter-spacing:2px;color:#ffcc00">${esc(r.user_code)}</b>`
     + ` <span style="opacity:.7">${t('dlg.waiting')}</span>`);
@@ -47,7 +47,7 @@ async function tidalTvLogin() {
   set(t('td.requesting'));
   const r = await api('POST', '/api/tidal/auth/start', {});
   if (!r || !r.ok) { set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((r && r.error) || '?')}</span>`); if (btn) btn.disabled = false; return; }
-  try { window.open(r.verification_url, '_blank', 'noopener'); } catch (e) {}
+  openExternal(r.verification_url);
   set(ti('dlg.enter_code', {url: esc(r.verification_url)})
     + `<b style="font-size:15px;letter-spacing:2px;color:#00d4b3">${esc(r.user_code)}</b>`
     + ` <span style="opacity:.7">${t('dlg.waiting')}</span>`);
@@ -81,7 +81,7 @@ async function spotifyOggLogin() {
   set(t('sp.ogg_starting'));
   const r = await api('POST', '/api/spotify/auth/start', {});
   if (!r || !r.ok) { set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((r && r.error) || '?')}</span>`); if (btn) btn.disabled = false; return; }
-  try { window.open(r.auth_url, '_blank', 'noopener'); } catch (e) {}
+  openExternal(r.auth_url);
   set(t('sp.ogg_page_opened'));
   const deadline = Date.now() + 180 * 1000;
   const poll = async () => {
@@ -100,7 +100,7 @@ async function spotifyOggLogin() {
 function yandexBrowserToken() {
   const url = 'https://oauth.yandex.ru/authorize?response_type=token'
             + '&client_id=23cabbbdc6cd418abb4b39c32c41195d';
-  try { window.open(url, '_blank', 'noopener'); } catch (e) {}
+  openExternal(url);
   const hint = document.getElementById('yandex-token-hint');
   if (hint) hint.innerHTML = t('ya.browser_hint');
 }

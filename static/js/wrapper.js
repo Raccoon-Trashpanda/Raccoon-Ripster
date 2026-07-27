@@ -93,7 +93,7 @@ function updateWrapperUI(running, port, dockerOk, dockerMsg, hasSession) {
   if(wbStart) {
     if(dockerOk===false) {
       wbStart.textContent=t('s.need_docker_dl');
-      wbStart.onclick=()=>window.open('https://www.docker.com/products/docker-desktop/','_blank');
+      wbStart.onclick=()=>openExternal('https://www.docker.com/products/docker-desktop/');
     } else {
       wbStart.textContent=t('s.start_short');
       wbStart.onclick=startWrapper;

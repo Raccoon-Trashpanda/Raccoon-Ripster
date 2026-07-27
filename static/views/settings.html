@@ -685,7 +685,7 @@
               <div style="font-size:12px;font-weight:700;margin-bottom:2px">media-user-token</div>
               <div id="apple-auth-status-text" style="font-size:11px;color:var(--muted)" data-i18n="s.checking">Проверка…</div>
             </div>
-            <button id="btn-apple-login" onclick="window.open('/apple/login','_blank','width=580,height=680')"
+            <button id="btn-apple-login" onclick="openExternal('/apple/login','apple_login','width=580,height=680')"
               style="padding:8px 16px;background:rgba(10,132,255,.12);border:1px solid rgba(10,132,255,.3);border-radius:8px;color:#0a84ff;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font);white-space:nowrap">
               <span data-i18n="s.apple_login">🍎 Войти через Apple</span>
             </button>
@@ -1274,6 +1274,9 @@
                   oninput="saveSetting('deezer-arl',this.value)"/>
                 <button class="btn-ghost btn-sm btn-icon" onclick="const f=document.getElementById('s-deezer-arl');f.type=f.type==='password'?'text':'password'" data-i18n-title="s.show_hide" title="Показать/скрыть">👁</button>
               </div>
+              <div style="margin-top:8px">
+                <button class="btn-ghost btn-sm" onclick="svcLogin('deezer','s-deezer-arl',this)" data-i18n="sl.login_btn">🔐 Войти в Deezer</button>
+              </div>
             </div>
             <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5" data-i18n-html="s.deezer_arl_note">
               deezer.com → DevTools (F12) → Application → Cookies → <code>arl</code><br>
@@ -1527,7 +1530,7 @@
                       <div id="sp-email" style="font-size:10px;color:var(--muted)"></div>
                     </div>
                     <div style="margin-left:auto;display:flex;gap:6px">
-                      <button onclick="window.open('/spotify/login')"
+                      <button onclick="openExternal('/spotify/login','spotify_login','width=580,height=720')"
                         style="padding:5px 12px;background:rgba(29,185,84,.2);border:1px solid rgba(29,185,84,.3);border-radius:7px;font-size:11px;font-weight:700;color:#1db954;cursor:pointer;font-family:var(--font)">
                         <span data-i18n="s.sp_connect">Подключить</span>
                       </button>
@@ -1727,6 +1730,9 @@
                   oninput="saveSetting('soundcloud-oauth-token',this.value.replace(/^OAuth\s+/i,''))"/>
                 <button class="btn-ghost btn-sm btn-icon" onclick="const f=document.getElementById('s-sc-oauth');f.type=f.type==='password'?'text':'password'" data-i18n-title="s.show_hide" title="Показать/скрыть">👁</button>
               </div>
+              <div style="margin-top:8px">
+                <button class="btn-ghost btn-sm" onclick="svcLogin('soundcloud','s-sc-oauth',this)" data-i18n="sl.login_sc">🔐 Войти в SoundCloud</button>
+              </div>
             </div>
 
             <!-- Multi-account pool: several OAuth tokens, downloads load-balanced -->
@@ -1904,6 +1910,9 @@
                   style="font-family:var(--mono);font-size:11px;flex:1"
                   oninput="saveSetting('yandex-token',this.value)"/>
                 <button class="btn-ghost btn-sm btn-icon" onclick="const f=document.getElementById('s-yandex-token');f.type=f.type==='password'?'text':'password'" data-i18n-title="s.show_hide" title="Показать/скрыть">👁</button>
+              </div>
+              <div style="margin-top:8px">
+                <button class="btn-ghost btn-sm" onclick="svcLogin('yandex','s-yandex-token',this)" data-i18n="sl.login_ya">🔐 Войти в Яндекс</button>
               </div>
             </div>
             <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5" data-i18n-html="ya.howto">

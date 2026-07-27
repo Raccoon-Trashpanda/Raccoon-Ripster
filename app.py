@@ -896,6 +896,7 @@ from ripster.routes import beatport    as _beatport_routes
 from ripster.routes import soundcloud  as _soundcloud_routes
 from ripster.routes import ripster_coder as _coder_routes
 from ripster.routes import telemetry    as _telemetry_routes
+from ripster.routes import service_login as _service_login_routes
 from ripster import telemetry as _telemetry
 from ripster import tl1001 as _tl1001
 
@@ -921,6 +922,9 @@ _beatport_routes.install(app, _ctx)
 _soundcloud_routes.install(app, _ctx)
 _coder_routes.install(app, _ctx)
 _telemetry_routes.install(app, _ctx)
+# Единый вход в сервисы: кнопка открывает окно входа и сама забирает токен,
+# вместо «открой DevTools и скопируй куку» (SoundCloud/Deezer/Apple/Яндекс).
+_service_login_routes.install(app, _ctx)
 # Diagnostics telemetry: this (tester) build forwards warn/error to the owner.
 # configure() mints an anon instance id; ingest endpoint is PUBLIC (token-gated).
 config["_release_version"] = RELEASE_VERSION
