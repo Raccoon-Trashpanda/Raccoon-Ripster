@@ -608,8 +608,26 @@ def _single_instance_guard() -> bool:
     return True
 
 
+def _claim_install_mutex() -> None:
+    """Hold a named mutex the INSTALLER checks (AppMutex=Global\\RipsterRunning).
+
+    Without it an install over a running Ripster silently failed: Ripster.exe and
+    python\\python.exe are locked, the files are not replaced, and the user ends up
+    still on the old build convinced they upgraded. Now Inno Setup detects the
+    running app up front and asks to close it. Purely advisory — any failure here
+    must never stop the launcher."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        ctypes.windll.kernel32.CreateMutexW(None, False, "Global\\RipsterRunning")
+    except Exception as e:
+        _log(f"[launcher] install-mutex skipped: {type(e).__name__}: {e}")
+
+
 def main() -> None:
     import threading
+    _claim_install_mutex()
     if not _single_instance_guard():
         return
     desired = config_port()

@@ -108,6 +108,7 @@ def _validate_wvd(path: Path) -> tuple[bool, str]:
             return False, (tail[-1] if tail else "load failed")
         except Exception as e:
             return False, f"{type(e).__name__}: {e}"
+    # No isolated venv — best-effort in-process (may fail on a polluted env).
     try:
         from pywidevine.device import Device
         Device.load(path)
@@ -1053,10 +1054,31 @@ async def _install_orpheus_component() -> bool:
         await _setup.irun([git, "pull"], cwd=str(orph_dir))
     else:
         await _setup.ilog("⬇ Клонирую OrpheusDL…", "info")
-        rc, _ = await _setup.irun(
-            [git, "clone", "https://github.com/OrfiTeam/OrpheusDL", str(orph_dir)])
-        if rc != 0:
-            await _setup.ilog("✗ Ошибка git clone OrpheusDL", "error")
+        # `git clone` РУГАЕТСЯ на непустой каталог: "destination path already
+        # exists and is not an empty directory". А каталог существует всегда —
+        # установщик кладёт туда наш _auth_helper.py (вход в Spotify). Поэтому
+        # клонируем во временную папку рядом и переносим содержимое, сохраняя
+        # то, что уже лежало.
+        tmp_dir = orph_dir.parent / (orph_dir.name + "_clone_tmp")
+        try:
+            if tmp_dir.exists():
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+            rc, _ = await _setup.irun(
+                [git, "clone", "https://github.com/OrfiTeam/OrpheusDL", str(tmp_dir)])
+            if rc != 0:
+                await _setup.ilog("✗ Ошибка git clone OrpheusDL", "error")
+                shutil.rmtree(tmp_dir, ignore_errors=True)
+                return False
+            orph_dir.mkdir(parents=True, exist_ok=True)
+            for item in tmp_dir.iterdir():
+                dst = orph_dir / item.name
+                if dst.exists():
+                    continue          # своё (например _auth_helper.py) не затираем
+                shutil.move(str(item), str(dst))
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        if not (orph_dir / "orpheus.py").exists():
+            await _setup.ilog("✗ OrpheusDL склонирован не полностью", "error")
             return False
 
     # Spotify module (separate repo) → orpheus/modules/spotify
@@ -1232,10 +1254,22 @@ async def update_check():
 @router.post("/api/update/apply")
 async def update_apply():
     """Pull new source (git), reconcile pinned pip deps, verify the tree imports.
-    Heavy deps + user data untouched. On {ok, restart_required} the UI then calls
-    /api/restart. On a verify failure the result flags rollback_needed."""
+    Heavy deps + user data untouched. On success the NEW code is already on disk —
+    we then EXIT this server so the stale (old-version) process can't survive: the
+    bundled headless server keeps running after the window is closed, and the
+    launcher would otherwise re-attach to it on reopen → 'update did nothing'.
+    Killing it means the launcher respawns (window open) or the user's reopen starts
+    fresh — either way loading the new version. Heavy deps/user data untouched."""
     from ripster import updater
-    return await updater.apply_update(_cfg, _base_dir)
+    res = await updater.apply_update(_cfg, _base_dir)
+    if res.get("ok"):
+        import threading, time as _t
+        def _bye():
+            _t.sleep(3.0)          # let the HTTP response reach the UI first
+            _respawn_detached()    # guarantee a successor regardless of launcher state
+            os._exit(0)            # overlay already wrote new code → fresh start = new version
+        threading.Thread(target=_bye, daemon=True).start()
+    return res
 
 
 def _respawn_detached() -> bool:

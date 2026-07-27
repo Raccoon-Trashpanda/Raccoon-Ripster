@@ -30,6 +30,16 @@ Compression=lzma2
 SolidCompression=yes
 PrivilegesRequired=admin
 ArchitecturesAllowed=x64compatible
+
+; Установка ПОВЕРХ работающего Ripster тихо проваливалась: Ripster.exe и
+; python\python.exe заняты, файлы не перезаписываются, человек получает старую
+; сборку и уверен, что обновился. Мьютекс ловит запущенное приложение ДО начала
+; копирования, а CloseApplications предлагает закрыть его штатно (иначе Ripster
+; продолжает жить в трее и остаётся незамеченным).
+AppMutex=Global\RipsterRunning
+CloseApplications=yes
+CloseApplicationsFilter=Ripster.exe,python.exe,pythonw.exe
+RestartApplications=no
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
 UninstallDisplayName={#AppName}
