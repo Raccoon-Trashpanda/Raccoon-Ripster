@@ -77,9 +77,10 @@ _GUEST_GET_EXACT = frozenset({
     "/api/download-file", "/api/cover/best", "/api/queue",
     "/api/soundcloud/search",
 })
-_GUEST_GET_PREFIX  = ("/api/artist/", "/api/album/", "/api/soundcloud/playlist/", "/api/lyrics")
+_GUEST_GET_PREFIX  = ("/api/artist/", "/api/album/", "/api/soundcloud/playlist/",
+                      "/api/lyrics")
 _GUEST_POST_EXACT  = frozenset({
-    "/api/queue/add", "/api/zip-request",
+    "/api/queue/add", "/api/cloud-upload", "/api/zip-request",
 })
 _GUEST_POST_PREFIX = ("/api/queue/retry/",)
 # Prefixes a guest may use with any HTTP method (browse + own files + media).
@@ -118,8 +119,10 @@ def set_guest_checker(fn) -> None:
 # Mutating HTTP methods — we enforce CSRF origin-check on these.
 _CSRF_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # Paths exempt from the Origin-based CSRF guard (secret-authenticated, meant to
-# be called cross-origin — e.g. the browser-extension Spotify token push).
-_CSRF_EXEMPT_PATHS = {"/api/spotify-token-push", "/api/telemetry/ingest"}
+# be called cross-origin — e.g. the browser-extension Spotify token push, and the
+# telemetry ingest webhook that tester builds POST to from their own machines).
+_CSRF_EXEMPT_PATHS = {"/api/spotify-token-push", "/api/telemetry/ingest",
+                      "/api/telemetry/report"}
 
 # Module-level state set by ``install()``. These are small enough that holding
 # references here rather than threading them through every helper is cleaner.

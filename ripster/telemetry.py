@@ -52,6 +52,13 @@ _REDACT = [
                 # quotes (streamrip DEBUG logs Python-dict repr → 'key': 'value').
                 r"(['\"]?\s*[=:]\s*['\"]?\s*|\s+)([^\s\"',}]{6,})", re.I),
      r"\1\2«…»"),
+    # Секрет, переданный движку АРГУМЕНТОМ командной строки. Правило выше ловит
+    # только «имя=значение» и знакомые имена, а `--token <значение>` проходило
+    # насквозь: живой яндекс-токен нашёлся в errors.log при проверке отчёта
+    # 28.07.2026. Флаг оставляем, значение режем.
+    (re.compile(r"(--?(?:token|password|passwd|pass|secret|arl|cookie|apikey|api[-_]key|"
+                r"auth|key)(?:\s+|=))(\S{6,})", re.I),
+     r"\1«…»"),
     (re.compile(r"Bearer\s+[A-Za-z0-9._\-]{12,}", re.I), "Bearer «…»"),
     (re.compile(r"eyJ[A-Za-z0-9._\-]{20,}"), "«jwt…»"),            # JWTs
     (re.compile(r"[A-Za-z0-9_\-]{32,}\.[A-Za-z0-9_\-]{32,}"), "«token…»"),
@@ -117,13 +124,31 @@ def redact(text: str) -> str:
 
 
 # ── CLIENT ───────────────────────────────────────────────────────────────────
+# Адрес и токен приёмной стороны держим В КОДЕ, а не только в config.example.yaml.
+# Пример конфига применяется лишь к чистой установке (onlyifdoesntexist), поэтому
+# у всех, кто ставил раньше, эти поля навсегда остались бы пустыми — а пустой
+# адрес отключает отправку целиком, сколько ни щёлкай тумблер. Именно так вся
+# диагностика и оказалась мёртвой при живом на вид переключателе. Значение из
+# конфига по-прежнему главнее: свой сервер приёма никто не запрещает.
+_DEFAULT_URL   = "https://raccoon-ripster.serveousercontent.com"
+_DEFAULT_TOKEN = "OtHdzmO7GiZPTPjxSaj9lEUCy0A__rhW"
+
+
+def ingest_url() -> str:
+    return ((_cfg.get("telemetry-url") or "").strip() or _DEFAULT_URL).rstrip("/")
+
+
+def ingest_token() -> str:
+    return (_cfg.get("telemetry-token") or "").strip() or _DEFAULT_TOKEN
+
+
 def forwarding_enabled() -> bool:
     # Opt-in (default OFF, security audit 2026-07-21): a fresh public install
     # must not silently phone home before the user has agreed to it. An
     # instance that itself ingests should also never forward to itself.
     if _cfg.get("telemetry-ingest-enabled"):
         return False
-    return bool(_cfg.get("telemetry-forward", False)) and bool((_cfg.get("telemetry-url") or "").strip())
+    return bool(_cfg.get("telemetry-forward", False)) and bool(ingest_url())
 
 
 def record(level: str, text: str) -> None:
@@ -151,10 +176,10 @@ async def _flush_once(client) -> None:
         "name":        (_cfg.get("telemetry-name") or "").strip()[:48],
         "app_version": str(_cfg.get("_release_version") or ""),
         "platform":    f"{os.name}",
-        "token":       (_cfg.get("telemetry-token") or "").strip(),
+        "token":       ingest_token(),
         "lines":       batch,
     }
-    base = (_cfg.get("telemetry-url") or "").strip().rstrip("/")
+    base = ingest_url()
     try:
         r = await client.post(f"{base}/api/telemetry/ingest", json=payload, timeout=15)
         if r.status_code >= 400:
@@ -338,8 +363,105 @@ def set_label(iid: str, label: str) -> bool:
         return False
 
 
+# ── FULL REPORTS (owner side) ────────────────────────────────────────────────
+# Построчный поток warn/error годится для «что-то сломалось прямо сейчас», но
+# разбирать по нему чужую установку нельзя: не видно версии, окружения, что было
+# ДО ошибки. Люди в итоге слали скриншоты, а по скриншоту диагноза не поставить —
+# два бага 27.07.2026 нашлись только потому, что удалось расспросить человека.
+# Поэтому отдельный канал: пользователь жмёт кнопку и присылает полный архив.
+
+_MAX_REPORT_BYTES = 12 * 1024 * 1024
+_MAX_REPORTS_PER_INSTANCE = 10
+
+
+def _reports_dir() -> Path:
+    d = _remote_dir() / "reports"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _report_code() -> str:
+    """Короткий код, который человек продиктует голосом или в чате."""
+    return uuid.uuid4().hex[:6].upper()
+
+
+def store_report(meta: dict, blob: bytes, client_ip: str = "") -> dict:
+    """Owner side: сохранить присланный архив логов. Никогда не бросает."""
+    if not _cfg.get("telemetry-ingest-enabled"):
+        return {"ok": False, "error": "ingest disabled"}
+    want = (_cfg.get("telemetry-token") or "").strip()
+    if want and (meta.get("token") or "").strip() != want:
+        return {"ok": False, "error": "bad token"}
+    if not blob:
+        return {"ok": False, "error": "empty"}
+    if len(blob) > _MAX_REPORT_BYTES:
+        return {"ok": False, "error": "too big"}
+    if not blob.startswith(b"PK"):                 # только zip, ничего исполняемого
+        return {"ok": False, "error": "not a zip"}
+
+    iid  = _safe_id(meta.get("instance_id"))
+    code = _report_code()
+    ts   = int(time.time())
+    try:
+        fp = _reports_dir() / f"{iid}_{ts}_{code}.zip"
+        fp.write_bytes(blob)
+
+        idx = _read_index()
+        rec = idx.get(iid) or {"instance_id": iid, "first_seen": ts, "total": 0, "errors": 0}
+        rec["last_seen"] = ts
+        for k, src in (("name", "name"), ("app_version", "app_version"), ("platform", "platform")):
+            v = str(meta.get(src) or "")[:64]
+            if v:
+                rec[k] = v
+        rec["ip"] = (client_ip or rec.get("ip") or "")[:45]
+        reports = list(rec.get("reports") or [])
+        reports.append({"code": code, "t": ts, "size": len(blob),
+                        "note": str(meta.get("note") or "")[:300], "file": fp.name})
+        # старые архивы удаляем вместе с записями — иначе диск утечёт незаметно
+        while len(reports) > _MAX_REPORTS_PER_INSTANCE:
+            old = reports.pop(0)
+            try:
+                (_reports_dir() / str(old.get("file") or "")).unlink(missing_ok=True)
+            except Exception:
+                pass
+        rec["reports"] = reports
+        idx[iid] = rec
+        _index_path().write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+        return {"ok": True, "code": code}
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:120]}
+
+
+def list_reports() -> list:
+    """Owner UI: все присланные архивы, свежие сверху."""
+    out: list = []
+    for rec in _read_index().values():
+        for r in rec.get("reports") or []:
+            out.append({**r,
+                        "instance_id": rec.get("instance_id", ""),
+                        "name":        rec.get("label") or rec.get("name") or "",
+                        "app_version": rec.get("app_version", ""),
+                        "platform":    rec.get("platform", "")})
+    return sorted(out, key=lambda r: r.get("t", 0), reverse=True)
+
+
+def report_path(code: str) -> Optional[Path]:
+    code = _safe_id(code).upper()
+    for r in list_reports():
+        if str(r.get("code", "")).upper() == code:
+            fp = _reports_dir() / str(r.get("file") or "")
+            if fp.exists():
+                return fp
+    return None
+
+
 def clear_instance(iid: str) -> bool:
     try:
+        for r in (_read_index().get(_safe_id(iid), {}) or {}).get("reports") or []:
+            try:
+                (_reports_dir() / str(r.get("file") or "")).unlink(missing_ok=True)
+            except Exception:
+                pass
         (_remote_dir() / f"{_safe_id(iid)}.jsonl").unlink(missing_ok=True)
         idx = _read_index()
         idx.pop(_safe_id(iid), None)

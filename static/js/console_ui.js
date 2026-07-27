@@ -357,6 +357,56 @@ function downloadLogs(btn) {
   }
 }
 
+// Отправка логов разработчику одним нажатием. До этого единственным способом
+// получить диагностику с чужой машины было «скачай zip и пришли», а на практике
+// люди присылали фотографии экрана — по ним не видно ни версии, ни того, что
+// было до ошибки. Отправка всегда явная: фонового аплоада архивов нет.
+async function sendLogsToDev(btn) {
+  const note = prompt(t('cn.send_note_ask'), '');
+  if (note === null) return;                       // отменил — ничего не шлём
+  const orig = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ ' + t('cn.sending'); }
+  try {
+    const r = await api('POST', '/api/diag/send-report', { note });
+    if (r && r.ok) {
+      const kb = r.size ? ' · ' + Math.round(r.size / 1024) + ' КБ' : '';
+      if (window.toast) toast(ti('cn.sent_ok', { code: r.code }) + kb, 'var(--green)', 15000);
+    } else {
+      if (window.toast) toast(t('cn.send_fail') + (r?.error || '—'), 'var(--red)', 12000);
+    }
+  } catch (e) {
+    if (window.toast) toast(t('cn.send_fail') + ((e && e.message) || e), 'var(--red)', 12000);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = orig; }
+  }
+}
+
+// Ошибки самой страницы никуда не попадали: они жили в DevTools, которые никто
+// не открывает, поэтому в логах их не было вообще. Теперь они уходят на сервер
+// и ложатся в console.log рядом с серверными — в отчёте видно обе стороны.
+(function captureClientErrors() {
+  let sent = 0;
+  const push = (text) => {
+    if (sent++ > 50) return;                       // не заваливаем сервер циклом ошибок
+    try {
+      fetch('/api/client-log', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: String(text).slice(0, 1000), url: location.hash || '' }),
+      }).catch(() => {});
+    } catch (_) {}
+  };
+  window.addEventListener('error', (e) => {
+    if (!e) return;
+    const where = e.filename ? ` (${e.filename}:${e.lineno})` : '';
+    push('JS: ' + ((e.error && e.error.stack) || e.message || 'error') + where);
+  });
+  window.addEventListener('unhandledrejection', (e) => {
+    const r = e && e.reason;
+    push('JS promise: ' + ((r && (r.stack || r.message)) || r || 'rejected'));
+  });
+})();
+
 // Convenience for the user / us: dump the last N entries to DevTools
 window.ripsterDumpLogs = function(n = 50) {
   console.table(_LOG.slice(-n).map(e => ({ time: e.hms, level: e.level, text: e.text })));

@@ -92,9 +92,12 @@ player-stream-quality: mp3
 # out) to the developer so problems can be fixed without you copying logs.
 # No music, no personal files, no tokens. Off unless you turn it on yourself.
 telemetry-forward: false
-telemetry-url: ''
+# Куда уходят диагностические данные. Раньше здесь было пусто, и из-за этого
+# отправка не работала НИ У КОГО: тумблер в настройках включался, а адреса не
+# было — forwarding_enabled() молча возвращал False. Люди слали скриншоты.
+telemetry-url: 'https://raccoon-ripster.serveousercontent.com'
 telemetry-level: warn      # warn = warnings + errors · error = errors only
-telemetry-token: ''
+telemetry-token: 'OtHdzmO7GiZPTPjxSaj9lEUCy0A__rhW'
 telemetry-name: ''          # your name/label (asked on first run, shown to the developer)
 telemetry-instance-id: ''  # auto-generated anonymous id on first run
 

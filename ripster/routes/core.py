@@ -77,11 +77,37 @@ _SECRET_KEYS = {
 }
 
 
+# Имена полей ВНУТРИ записей пулов аккаунтов. Плоская проверка по _SECRET_KEYS
+# видит только верхний уровень, поэтому пароли из wrapper-accounts/deezer-accounts
+# уходили в открытом виде и в /api/config (то есть гостю в init-пакете), и в
+# отчёт с логами. Нашлось 28.07.2026 при проверке архива отчёта на утечки.
+_NESTED_SECRET_FIELDS = ("password", "passwd", "token", "secret", "arl",
+                         "cookie", "api_key", "apikey", "key")
+
+
+def _looks_secret(key: str) -> bool:
+    k = str(key).lower().replace("-", "_")
+    return any(f in k for f in _NESTED_SECRET_FIELDS)
+
+
+def _redact_deep(value):
+    """Замаскировать всё, что похоже на секрет, на любой глубине."""
+    if isinstance(value, dict):
+        return {k: (f"••••••••  ({len(str(v))} chars)" if (v and _looks_secret(k) and not isinstance(v, (dict, list)))
+                    else _redact_deep(v))
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_deep(v) for v in value]
+    return value
+
+
 def _redact_config(cfg: dict) -> dict:
     out = {}
     for k, v in cfg.items():
         if k in _SECRET_KEYS and v:
             out[k] = f"••••••••  ({len(str(v))} chars)"
+        elif isinstance(v, (dict, list)):
+            out[k] = _redact_deep(v)
         else:
             out[k] = v
     return out

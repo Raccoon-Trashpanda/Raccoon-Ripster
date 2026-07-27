@@ -926,6 +926,9 @@ _telemetry_routes.install(app, _ctx)
 config["_release_version"] = RELEASE_VERSION
 _telemetry.configure(config, save_config, BASE_DIR)
 _app_auth.add_public_path("/api/telemetry/ingest")
+# Полный архив логов, который пользователь отправляет кнопкой. Тоже публичный и
+# token-gated: он приходит с чужой машины, сессии у неё быть не может.
+_app_auth.add_public_path("/api/telemetry/report")
 
 # ── Hot-restart ────────────────────────────────────────────────────────────────
 def _spawn_restart(delay: float = 0.4) -> None:
