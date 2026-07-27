@@ -2381,6 +2381,71 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
 
 # ── Task dispatcher ──────────────────────────────────────────────────────────
 
+# Which service(s) each engine can actually speak. Used by the sanity gate in
+# run_task() — an engine handed a URL from a service it doesn't know produces a
+# confusing "failure that looks like nothing happened" rather than a clean error.
+# Engines absent from this map are never re-routed (unknown → leave alone).
+_ENGINE_SERVICES: dict[str, frozenset] = {
+    "zhaarey":          frozenset({"apple"}),
+    "amd":              frozenset({"apple"}),
+    "gamdl":            frozenset({"apple"}),
+    "qobuz":            frozenset({"qobuz"}),
+    "deezer":           frozenset({"deezer"}),
+    "tidal":            frozenset({"tidal"}),
+    "soundcloud":       frozenset({"soundcloud"}),
+    "sc_widevine":      frozenset({"soundcloud"}),
+    "orpheus_spotify":  frozenset({"spotify"}),
+    "zotify":           frozenset({"spotify"}),
+    "spotiflac":        frozenset({"spotify"}),
+    "orpheus_beatport": frozenset({"beatport"}),
+    "yandex":           frozenset({"yandex"}),
+    "amazon":           frozenset({"amazon"}),
+    "bbc":              frozenset({"bbc"}),
+}
+
+
+def _sanity_route(task: dict, svc: str, engine: str, url: str) -> tuple[str, str]:
+    """Make sure *engine* can speak the service *url* belongs to.
+
+    `service`/`engine` used to default to apple/zhaarey when a task carried
+    neither, so ANY task that reached the runner without them — a legacy entry
+    restored from queue_pending.json, or an add-path that forgot to set them —
+    was handed to apple-music-downloader.exe. On 2026-07-27 that sent an
+    open.spotify.com album to the Apple Go tool: "Failed to get album response",
+    exit code 0, three retries, and the task vanished without a history row.
+
+    Fill in a missing service from the URL, and re-route the engine when it
+    provably cannot handle that service. An ALREADY-SET service is never
+    overwritten — the Spotify convert flow deliberately keeps service=spotify
+    while running an Apple URL through zhaarey, and `service` picks the save
+    folder, so rewriting it would move files.
+    """
+    if not url or not _detect_service:
+        return svc, engine
+    try:
+        url_svc = _detect_service(url) or ""
+    except Exception:
+        return svc, engine
+    if not url_svc or url_svc == "unknown":
+        return svc, engine
+
+    if not task.get("service"):
+        svc = url_svc
+        task["service"] = svc
+
+    allowed = _ENGINE_SERVICES.get(engine)
+    if allowed is not None and url_svc not in allowed:
+        try:
+            from ripster import service_layer as _sl
+            new_engine = _sl.engine_for_svc(url_svc) or ""
+        except Exception:
+            new_engine = ""
+        if new_engine and new_engine != engine and url_svc in _ENGINE_SERVICES.get(new_engine, frozenset()):
+            task.setdefault("log", []).append(
+                f"⚠ Движок «{engine}» не умеет {url_svc} — переключаюсь на «{new_engine}»")
+            task["engine"] = new_engine
+            engine = new_engine
+    return svc, engine
 
 
 async def run_task(task: dict) -> None:
@@ -2389,6 +2454,7 @@ async def run_task(task: dict) -> None:
     engine = task.get("engine", _config.get("engine", "zhaarey"))
     url    = task.get("url", "")
     qid    = task.get("quality", _config.get("quality", "alac"))
+    svc, engine = _sanity_route(task, svc, engine, url)
 
     _advance_task(task, TaskStatus.RUNNING)
     task["progress"]    = 0

@@ -64,13 +64,24 @@ def server_url() -> str:
 
 
 def server_python() -> str:
-    """A REAL interpreter to run app.py — never sys.executable (that's Ripster.exe
-    itself when frozen). Prefer the install's bundled embeddable, then a dev .venv."""
+    """A REAL interpreter to run app.py — never sys.executable when frozen,
+    because that IS Ripster.exe: spawning it re-enters the launcher, which sees
+    the parent's lock file, logs "already running → surfacing it, exiting" and
+    dies without ever starting a server. The launcher then respawns it forever.
+
+    Seen in the wild on 3.0.38 (path `…\\Raccoon-Ripster-3.0.38\\Raccoon-Ripster-3.0.38\\`
+    = the GitHub *source* zip): that archive has no bundled `python/`, so the
+    old last-resort branch handed back Ripster.exe and the app never started.
+    Returns "" when no real interpreter exists — the caller reports that
+    plainly instead of looping."""
     for cand in (BASE / "python" / "python.exe",
                  BASE / ".venv" / "Scripts" / "python.exe"):
         if cand.exists():
             return str(cand)
-    return sys.executable  # last resort (non-frozen dev run)
+    frozen = getattr(sys, "frozen", False)
+    if frozen:
+        return ""          # no interpreter shipped → cannot run the server
+    return sys.executable  # plain dev run: this really is a python.exe
 
 
 def ripster_alive(port: int, timeout: float = 1.5) -> bool:
@@ -120,6 +131,27 @@ def start_server(port: int) -> "subprocess.Popen | None":
     exactly the port the launcher will open the window on (config.yaml `port` no
     longer has to agree — the launcher is the single source of truth)."""
     py = server_python()
+    if not py:
+        # No bundled interpreter (source zip instead of the installer). Say so
+        # once, in words the user can act on, and do NOT respawn — an endless
+        # restart loop is what this cost people on 3.0.38.
+        _log("[launcher] НЕТ интерпретатора: в этой папке отсутствует bundled python\\.")
+        _log("[launcher] Похоже, скачан архив с ИСХОДНЫМ КОДОМ вместо установщика.")
+        _log("[launcher] Поставь Ripster установщиком RipsterSetup-*.exe со страницы релиза.")
+        try:
+            (BASE / "logs").mkdir(parents=True, exist_ok=True)
+            (BASE / "logs" / "ЧИТАЙ_МЕНЯ_ошибка_запуска.txt").write_text(
+                "Ripster не запустился: в папке нет встроенного Python.\n\n"
+                "Скорее всего скачан архив «Source code» со страницы релиза —\n"
+                "в нём нет ни Python, ни зависимостей, только исходный код.\n\n"
+                "Что делать: скачать RipsterSetup-<версия>.exe со страницы релиза\n"
+                "и установить им. Либо, если нужен запуск из исходников,\n"
+                "создать окружение: python -m venv .venv && "
+                ".venv\\Scripts\\pip install -r requirements.txt\n",
+                encoding="utf-8")
+        except Exception:
+            pass
+        return None
     env = dict(os.environ)
     env["RIPSTER_PORT"] = str(port)
     env["RIPSTER_LAUNCHER"] = "1"   # tells /api/restart we supervise it → clean exit, no os.execv console flash

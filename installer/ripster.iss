@@ -60,6 +60,14 @@ Type: filesandordirs; Name: "{app}\__pycache__"
 Source: "{#SrcDir}\*"; DestDir: "{app}"; Flags: recursesubdirs createallsubdirs ignoreversion; \
   Excludes: "\.git\*,\.git,\.venv\*,\.venv,run.bat,installer\output\*,dist\*,*-portable.zip,RipsterSetup*.exe,apple-music-downloader.exe,apple-music-downloader\*,downloads\*,tokens\*,logs\*,backups\*,*.wvd,frida-server*,tools\widevine\*,tools\lucida\node_modules\*,tools\lucida\node_modules,tools\node\*,tools\node,AppleMusicDecrypt\*,AppleMusicDecrypt,orpheus\*,orpheus,_widevine_setup\_keydive_out\*,config.yaml"
 
+; The orpheus\ tree is excluded above (43 MB of engine + its own sessions), but
+; ONE file out of it must ship: the standalone PKCE helper that performs the
+; Spotify login. Without it "Войти в Spotify" dies with
+; "Auth helper не найден: ...\Ripster\orpheus\_auth_helper.py" — reported by a
+; user on 3.0.38. It has no orpheus imports of its own (stdlib + requests), so
+; shipping it alone is enough.
+Source: "{#SrcDir}\orpheus\_auth_helper.py"; DestDir: "{app}\orpheus"; Flags: ignoreversion
+
 ; Seed config.yaml from the example only if the user doesn't already have one.
 Source: "{#SrcDir}\config.example.yaml"; DestDir: "{app}"; DestName: "config.yaml"; \
   Flags: onlyifdoesntexist uninsneveruninstall

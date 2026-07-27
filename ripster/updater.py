@@ -19,6 +19,7 @@ A release is a coherent whole-tree snapshot, so a new file never arrives "unknow
 from __future__ import annotations
 
 import importlib
+import json
 import pkgutil
 import re
 import subprocess
@@ -138,6 +139,79 @@ def _http_hint(code: int) -> str:
     return ""
 
 
+_STAMP_NAME = ".installed_release.json"
+
+
+def _stamp_path() -> Path:
+    return Path(__file__).resolve().parent.parent / "logs" / _STAMP_NAME
+
+
+def record_installed_release(tag: str, published_at: str) -> None:
+    """Remember WHICH build of a tag this install came from.
+
+    Written after a successful update so a later republish of the same tag is
+    detectable. Best-effort — a missing stamp falls back to file mtimes."""
+    try:
+        p = _stamp_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(json.dumps({"tag": tag, "published_at": published_at}),
+                     encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _release_is_fresher(rel: dict, tag: str, current_version: str) -> tuple[bool, str]:
+    """True when the SAME version number was published again after this install.
+
+    Two signals, in order of trust:
+      1. the stamp written by our own updater (exact — we know what we installed);
+      2. otherwise the mtime of app.py, which is when this tree was built or
+         unpacked. An asset uploaded after that means the release was fixed.
+    Deliberately conservative: any doubt returns False, so we never nag a user
+    who is already current."""
+    if _norm_tag(tag) != _norm_tag(current_version):
+        return False, ""
+
+    def _ts(s: str) -> float:
+        try:
+            from datetime import datetime
+            return datetime.strptime((s or "")[:19], "%Y-%m-%dT%H:%M:%S").timestamp()
+        except Exception:
+            return 0.0
+
+    # newest of: the release itself and every attached asset
+    stamps = [_ts(rel.get("published_at", "")), _ts(rel.get("created_at", ""))]
+    for a in (rel.get("assets") or []):
+        stamps += [_ts(a.get("updated_at", "")), _ts(a.get("created_at", ""))]
+    remote = max(stamps or [0.0])
+    if not remote:
+        return False, ""
+
+    try:
+        stamp = json.loads(_stamp_path().read_text(encoding="utf-8"))
+        if _norm_tag(stamp.get("tag", "")) == _norm_tag(tag):
+            local = _ts(stamp.get("published_at", ""))
+            if local and remote > local + 60:
+                return True, "релиз пересобран (та же версия, новая сборка)"
+            return False, ""
+    except Exception:
+        pass
+
+    try:
+        local = (Path(__file__).resolve().parent.parent / "app.py").stat().st_mtime
+    except Exception:
+        return False, ""
+    # 1 hour of slack: packaging and publishing are minutes apart, and a user
+    # who installed FROM this release must not be told to reinstall it.
+    if remote > local + 3600:
+        return True, "релиз пересобран — доступна исправленная сборка"
+    return False, ""
+
+
+def _norm_tag(t: str) -> str:
+    return (t or "").strip().lstrip("vV")
+
+
 async def check_for_update(config, current_version: str) -> dict:
     """Query GitHub for the latest release and compare to current_version."""
     repo = _repo(config)
@@ -152,11 +226,25 @@ async def check_for_update(config, current_version: str) -> dict:
             return {"ok": False, "error": f"GitHub HTTP {r.status_code}{_http_hint(r.status_code)}"}
         j = r.json()
         tag = j.get("tag_name", "")
+        newer_version = is_newer(tag, current_version)
+
+        # A release can be REPUBLISHED under the same number: a broken build
+        # replaced, a missing installer attached, a shipped file that was
+        # excluded by mistake. Comparing version strings alone declares "у вас
+        # последняя версия" while the user still runs the broken build. So also
+        # compare WHAT is published — release/asset timestamps against what this
+        # install was built from.
+        republished, why = _release_is_fresher(j, tag, current_version)
         return {
             "ok": True, "current": current_version, "latest": tag,
-            "available": is_newer(tag, current_version),
+            "available": newer_version or republished,
+            "republished": republished and not newer_version,
+            "reason": ("новая версия" if newer_version else (why if republished else "")),
             "changelog": (j.get("body") or "")[:2000],
             "url": j.get("html_url", ""), "zip": j.get("zipball_url", ""),
+            "assets": [{"name": a.get("name", ""), "size": a.get("size", 0),
+                        "url": a.get("browser_download_url", "")}
+                       for a in (j.get("assets") or [])],
         }
     except Exception as e:                            # noqa: BLE001
         return {"ok": False, "error": str(e)}

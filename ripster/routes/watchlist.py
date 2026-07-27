@@ -268,7 +268,7 @@ async def api_watchlist_download_latest(item_id: str, body: dict | None = None):
     queued, skipped = [], []
     for rel in rels[:how_many]:
         url = rel.get("url", "")
-        if svc not in ("spotify", "deezer"):
+        if (rel.get("service") or "") != svc:      # источник ≠ цель → переводим
             try:
                 m = await _disc._match_seeds_in_service([rel], svc, entry["name"], 1,
                                                         cfg.get("storefront", "us"))
@@ -665,10 +665,15 @@ async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> 
                                 False, bool(entry.get("auto_download")))
                 if not entry.get("auto_download"):
                     continue
-                # The monitoring source (Spotify/Deezer) is not necessarily where
-                # the user downloads from — locate the same release in their service.
+                # The monitoring source is not necessarily the download target,
+                # so translate whenever they differ. Testing `svc not in
+                # (spotify, deezer)` was wrong: a label watched with
+                # service="deezer" still gets its releases from SPOTIFY (the
+                # first catalogue queried), and that branch queued the raw
+                # Spotify link — which Ripster then tried to fetch as an Apple
+                # ALAC album and hung on "Fetching metadata…".
                 url = rel.get("url", "")
-                if svc not in ("spotify", "deezer"):
+                if (rel.get("service") or "") != svc:
                     try:
                         m = await _disc._match_seeds_in_service([rel], svc, name, 1,
                                                                 cfg.get("storefront", "us"))
