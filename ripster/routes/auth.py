@@ -397,9 +397,33 @@ async def _tidal_refresh_token() -> str:
     """Use stored refresh_token to mint a fresh access_token. Persists on success.
     Returns the new access_token, or "" on failure."""
     refresh = (_cfg.get("tidal-refresh") or "").strip()
+
+    # FIRST: the OrpheusDL TV session, which is what actually works.
+    # A refresh token belongs to the client that issued it — a TV-issued token
+    # refreshed with a web client_id gets "This token was issued to another
+    # client" (verified live 2026-07-27, all three web ids below failed, and
+    # zU4XHVVkc3hFw1lb no longer exists at all: "Client with token not found").
+    # The engine keeps a TV session that refreshes correctly with client_id +
+    # SECRET, and downloads already rely on it — so reuse it instead of writing
+    # a dead token into the config.
+    try:
+        from ripster.engines import tidal as _tid_engine
+        tok, cc = await _tid_engine._orpheus_access_token()
+        if tok:
+            _cfg["tidal-token"] = tok
+            if cc:
+                _cfg["tidal-country"] = cc
+            if _save_config:
+                try: _save_config(_cfg)
+                except Exception: pass
+            return tok
+    except Exception:
+        pass
+
     if not refresh:
         return ""
-    # Tidal's PKCE/web-client client_id (matches the listen.tidal.com web app).
+    # Fallback: web-client refresh. Only works if the refresh token was itself
+    # issued by one of these clients (i.e. a browser login, not the TV flow).
     for client_id in ("zU4XHVVkc3hFw1lb", "CzET4vdadNUFQ5JU", "aR7gUaTK1ihpXOEP"):
         try:
             async with httpx.AsyncClient(timeout=10) as c:

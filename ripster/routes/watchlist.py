@@ -102,14 +102,49 @@ async def api_watchlist_add(body: dict):
     url       = body.get("url", "").strip()
     service   = body.get("service", _s["detect_service"](url)) or "apple"
     artist_id = body.get("artist_id", "")
+    kind      = (body.get("kind") or "artist").strip()
     if not name and not url:
         raise HTTPException(400, "name or url required")
+
+    # ── Label subscription ───────────────────────────────────────────────────
+    # A label has no artist id and no channel to resolve — the name IS the key.
+    # Verify up front that the label actually returns releases, so a typo can't
+    # create an entry that silently never fires.
+    if kind == "label":
+        if not name:
+            raise HTTPException(400, "название лейбла обязательно")
+        rels = await _label_releases(name, 10)
+        entry = {
+            "id":           f"wl_{int(datetime.now().timestamp()*1000)}",
+            "name":         name,
+            "kind":         "label",
+            "url":          url,
+            "service":      service,          # где качать, не где следить
+            "artist_id":    "",
+            "quality":      body.get("quality", _s["config"].get("quality", "alac")),
+            "added":        datetime.now().isoformat(timespec="seconds"),
+            "last_check":   datetime.now().isoformat(timespec="seconds") if rels else None,
+            # Baseline immediately: subscribing must not dump the back catalogue
+            # into the queue on the first check.
+            "last_release":      (rels[0].get("title", "") if rels else None),
+            "last_release_date": (str(rels[0].get("date") or rels[0].get("year") or "")
+                                  if rels else ""),
+            "auto_download": body.get("auto_download", False),
+        }
+        _s["items"].append(entry)
+        _s["save"](_s["items"])
+        return {"ok": True, "item": entry, "resolved": bool(rels),
+                "found": len(rels),
+                "warning": ("" if rels else
+                            f"Лейбл «{name}» не найден в каталогах Spotify/Deezer — "
+                            f"проверь написание, иначе отслеживать нечего")}
 
     resolved = await _resolve_target(name, url, service, artist_id)
 
     entry = {
         "id":           f"wl_{int(datetime.now().timestamp()*1000)}",
         "name":         resolved["name"] or name,
+        "kind":         "artist",
         "url":          resolved["url"],
         "service":      service,
         "artist_id":    resolved["artist_id"],
@@ -191,6 +226,7 @@ async def api_watchlist_suggestion_accept(body: dict):
     entry = {
         "id":           f"wl_{int(datetime.now().timestamp()*1000)}",
         "name":         resolved["name"] or name,
+        "kind":         "artist",
         "url":          resolved["url"],
         "service":      service,
         "artist_id":    resolved["artist_id"],
@@ -206,6 +242,57 @@ async def api_watchlist_suggestion_accept(body: dict):
     return {"ok": True, "item": entry}
 
 
+@router.post("/api/watchlist/{item_id}/download-latest")
+async def api_watchlist_download_latest(item_id: str, body: dict | None = None):
+    """Queue the label's most recent release right now.
+
+    Subscribing records a baseline (otherwise the whole back catalogue lands in
+    the queue), so the checker legitimately waits for the NEXT release — which
+    reads as "it says new release but downloads nothing". This is the explicit
+    "I want the current one" action."""
+    entry = next((e for e in _s["items"] if e.get("id") == item_id), None)
+    if not entry:
+        raise HTTPException(404, "запись не найдена")
+    if entry.get("kind") != "label":
+        raise HTTPException(400, "только для лейблов")
+
+    how_many = int((body or {}).get("count") or 1)
+    how_many = max(1, min(how_many, 5))
+    rels = await _label_releases(entry["name"], 20)
+    if not rels:
+        return {"ok": False, "error": f"У лейбла «{entry['name']}» не нашлось релизов"}
+
+    from ripster.routes import discovery as _disc
+    cfg, queue, snapshot = _s["config"], _s["queue"], _s["queue_snapshot"]
+    svc = entry.get("service", "apple")
+    queued, skipped = [], []
+    for rel in rels[:how_many]:
+        url = rel.get("url", "")
+        if svc not in ("spotify", "deezer"):
+            try:
+                m = await _disc._match_seeds_in_service([rel], svc, entry["name"], 1,
+                                                        cfg.get("storefront", "us"))
+                url = (m[0].get("url") if m else "") or ""
+            except Exception:
+                url = ""
+        if not url:
+            skipped.append(rel.get("title", "?"))
+            continue
+        queue.append({
+            "id":       f"wl_{int(datetime.now().timestamp()*1000)}_{len(queued)}",
+            "url":      url,
+            "quality":  entry.get("quality", cfg.get("quality", "alac")),
+            "status":   "queued", "progress": 0, "log": [],
+            "source":   "watchlist-label",
+        })
+        queued.append(rel.get("title", "?"))
+    if queued:
+        await _s["broadcast"]({"type": "queue_update", "queue": snapshot()})
+    return {"ok": bool(queued), "queued": queued, "skipped": skipped,
+            "label": entry["name"],
+            "error": ("" if queued else f"Не нашёл этих релизов в {svc}")}
+
+
 @router.post("/api/watchlist/repair")
 async def api_watchlist_repair():
     """Backfill missing artist_ids and drop duplicates.
@@ -219,8 +306,10 @@ async def api_watchlist_repair():
     unique: list[dict] = []
     dropped = 0
     for it in items:
-        sig = (_wls._norm(it.get("name", "")), it.get("service", ""),
-               it.get("url", ""))
+        # `kind` is part of the signature: a LABEL called "Mesh" and an ARTIST
+        # called "Mesh" are different subscriptions and must not collapse.
+        sig = (it.get("kind", "artist"), _wls._norm(it.get("name", "")),
+               it.get("service", ""), it.get("url", ""))
         if sig in seen:
             dropped += 1
             continue
@@ -229,6 +318,12 @@ async def api_watchlist_repair():
 
     fixed = 0
     for it in unique:
+        # Labels have no artist_id by design — never try to "repair" them into
+        # an artist. Doing so rewrote the label's name/url to a same-named
+        # artist and then the artist_id de-dup below deleted it as a duplicate,
+        # which is exactly how label subscriptions vanished after a check.
+        if it.get("kind") == "label":
+            continue
         if it.get("service", "apple") != "apple" or it.get("artist_id"):
             continue
         aid = _wls.apple_id_from_url(it.get("url", ""))
@@ -248,6 +343,9 @@ async def api_watchlist_repair():
     by_id: set[str] = set()
     final: list[dict] = []
     for it in unique:
+        if it.get("kind") == "label":       # labels never de-dup by artist_id
+            final.append(it)
+            continue
         aid = it.get("artist_id", "")
         if aid and aid in by_id:
             dropped += 1
@@ -501,6 +599,99 @@ async def _check_soundcloud_targets(items: list, broadcast, save, cfg, queue, sn
     return new_found
 
 
+async def _label_releases(label: str, limit: int = 20) -> list[dict]:
+    """Releases of a label, newest first.
+
+    Reuses the label search built for /api/search: Spotify and Deezer are the
+    only services that can answer "what did this label put out", so they are the
+    monitoring source regardless of where the user wants the files from.
+    Sorted by release date because those APIs return by relevance, and a
+    relevance-ordered list would make an old album look like a new release."""
+    from ripster.routes import discovery as _disc
+    try:
+        seeds = await _disc._label_seeds(label, limit)
+    except Exception as e:
+        print(f"[watchlist] label «{label}» lookup failed: {e}", flush=True)
+        return []
+    seeds = [s for s in seeds if (s.get("date") or s.get("year"))]
+    seeds.sort(key=lambda s: str(s.get("date") or s.get("year") or ""), reverse=True)
+    return seeds
+
+
+async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> int:
+    """Poll label subscriptions.
+
+    Honest monitoring: we compare RELEASE DATES, not list position. A label puts
+    out several records a month, so "the newest one changed" is not enough —
+    everything dated after the last seen date counts as new, and the first check
+    only records a baseline instead of queueing the whole back catalogue."""
+    labels = [e for e in items if e.get("kind") == "label" and e.get("name")]
+    if not labels:
+        return 0
+    from ripster.routes import discovery as _disc
+    found = 0
+    for entry in labels:
+        name = entry["name"]
+        await broadcast({"type": "watchlist_check_progress", "artist": f"🏷 {name}"})
+        try:
+            rels = await _label_releases(name, 20)
+            entry["last_check"] = datetime.now().isoformat(timespec="seconds")
+            if not rels:
+                continue
+            seen_date = entry.get("last_release_date") or ""
+            newest = str(rels[0].get("date") or rels[0].get("year") or "")
+            if not seen_date:
+                entry["last_release_date"] = newest        # baseline only
+                entry["last_release"] = rels[0].get("title", "")
+                save(items)
+                continue
+            fresh = [r for r in rels
+                     if str(r.get("date") or r.get("year") or "") > seen_date]
+            if not fresh:
+                continue
+            entry["last_release_date"] = newest
+            entry["last_release"] = fresh[0].get("title", "")
+            found += len(fresh)
+            save(items)
+
+            svc = entry.get("service", "apple")
+            for rel in fresh[:5]:            # guard against a catalogue dump
+                title = rel.get("title", "")
+                await broadcast({"type": "watchlist_new_release",
+                                 "artist": f"{rel.get('artist','')} · {name}",
+                                 "release": title, "label": name,
+                                 "url": rel.get("url", "")})
+                _notify_release(f"{name} · {rel.get('artist','')}", title,
+                                False, bool(entry.get("auto_download")))
+                if not entry.get("auto_download"):
+                    continue
+                # The monitoring source (Spotify/Deezer) is not necessarily where
+                # the user downloads from — locate the same release in their service.
+                url = rel.get("url", "")
+                if svc not in ("spotify", "deezer"):
+                    try:
+                        m = await _disc._match_seeds_in_service([rel], svc, name, 1,
+                                                                cfg.get("storefront", "us"))
+                        url = (m[0].get("url") if m else "") or ""
+                    except Exception:
+                        url = ""
+                if not url:
+                    print(f"[watchlist] «{title}» не найден в {svc} — пропускаю", flush=True)
+                    continue
+                queue.append({
+                    "id":       f"wl_{int(datetime.now().timestamp()*1000)}",
+                    "url":      url,
+                    "quality":  entry.get("quality", cfg.get("quality", "alac")),
+                    "status":   "queued", "progress": 0, "log": [],
+                    "source":   "watchlist-label",
+                })
+                await broadcast({"type": "queue_update", "queue": snapshot()})
+        except Exception as e:
+            print(f"[watchlist] label {name}: {e}", flush=True)
+    save(items)
+    return found
+
+
 async def _check_watchlist():
     items      = _s["items"]
     broadcast  = _s["broadcast"]
@@ -509,14 +700,21 @@ async def _check_watchlist():
     queue      = _s["queue"]
     snapshot   = _s["queue_snapshot"]
 
-    targets = [e for e in items if e.get("service") == "apple" and e.get("artist_id")]
-    sc_count = len([e for e in items if e.get("service") == "soundcloud"])
-    total = len(targets) + sc_count
+    targets = [e for e in items
+               if e.get("service") == "apple" and e.get("artist_id")
+               and e.get("kind") != "label"]
+    sc_count = len([e for e in items
+                    if e.get("service") == "soundcloud" and e.get("kind") != "label"])
+    label_count = len([e for e in items if e.get("kind") == "label"])
+    total = len(targets) + sc_count + label_count
     if total == 0:
         return
 
     new_found = 0
     await broadcast({"type": "watchlist_check_start", "total": total})
+
+    if label_count:
+        new_found += await _check_label_targets(items, broadcast, save, cfg, queue, snapshot)
 
     if sc_count:
         new_found += await _check_soundcloud_targets(items, broadcast, save, cfg, queue, snapshot)

@@ -21,6 +21,13 @@
         <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:12px;margin-bottom:12px">
           <div style="font-size:12px;font-weight:700;color:var(--text);margin-bottom:8px" data-i18n="wl.add_title">Добавить артиста / альбом</div>
           <div style="display:flex;gap:7px;flex-wrap:wrap;align-items:center">
+            <!-- Артист или лейбл: у лейбла нет id и канала — ключ это само название,
+                 а мониторинг идёт через каталоги Spotify/Deezer. -->
+            <select id="wl-kind" onchange="wlKindChanged()"
+              style="padding:7px 10px;background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">
+              <option value="artist" data-i18n="wl.kind_artist">Артист</option>
+              <option value="label" data-i18n="wl.kind_label">Лейбл</option>
+            </select>
             <input id="wl-name" data-i18n-ph="wl.name_ph" placeholder="Имя артиста"
               style="flex:1;min-width:130px;padding:7px 10px;background:rgba(0,0,0,.2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);outline:none;font-family:var(--font)"/>
             <input id="wl-url" data-i18n-ph="wl.url_ph" placeholder="Ссылка (Apple-артист / SC-канал)"

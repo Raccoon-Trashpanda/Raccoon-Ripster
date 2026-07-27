@@ -1583,10 +1583,23 @@ function _setupAudioEvents() {
     // Persist last-playing track so we can offer resume on next page load.
     const _lpt = Preview.queue[Preview.idx];
     if (_lpt && _lpt.posKey) {
-      try { localStorage.setItem('ripster_last_track', JSON.stringify({
-        service: _lpt.service || '', id: _lpt.id || '', title: _lpt.title || '',
-        artist: _lpt.artist || '', cover: _lpt.cover || '', posKey: _lpt.posKey, ts: Date.now(),
-      })); } catch {}
+      // Persist the WHOLE queue, not just the current track. Saving one track
+      // meant that hitting play on an album and reloading the page resumed that
+      // single track and then fell silent — the album context was thrown away.
+      try {
+        const _slim = (Preview.queue || []).slice(0, 200).map(x => ({
+          service: x.service || '', id: String(x.id || ''), title: x.title || '',
+          artist: x.artist || '', cover: x.cover || '', posKey: x.posKey || '',
+          full: x.full !== false, url: x.url || '', label: x.label || '',
+        }));
+        localStorage.setItem('ripster_last_track', JSON.stringify({
+          service: _lpt.service || '', id: _lpt.id || '', title: _lpt.title || '',
+          artist: _lpt.artist || '', cover: _lpt.cover || '', posKey: _lpt.posKey,
+          ts: Date.now(),
+          queue: _slim, idx: Preview.idx | 0,
+          ctx: Preview.contextTitle || Preview.albumTitle || '',
+        }));
+      } catch {}
     }
     try { _syncAlbumPlayBtns?.(); } catch {}
   });
@@ -3037,6 +3050,18 @@ function _offerMixResume() {
       try { localStorage.removeItem('ripster_last_track'); } catch {}
       if (!lt.service || !lt.id) return;
       _setupAudioEvents();
+      // Restore the full queue when we have it, so the album keeps playing after
+      // the resumed track instead of stopping dead.
+      if (Array.isArray(lt.queue) && lt.queue.length) {
+        Preview.queue = lt.queue.map(x => ({ ...x, full: x.full !== false }));
+        let i = Math.min(Math.max(lt.idx | 0, 0), Preview.queue.length - 1);
+        // Prefer the track we actually stopped on, even if the index drifted.
+        const byKey = Preview.queue.findIndex(x => x.posKey && x.posKey === lt.posKey);
+        if (byKey >= 0) i = byKey;
+        Preview.idx = i;
+        _playPreviewAt(i);
+        return;
+      }
       Preview.queue = [{
         service: lt.service, id: String(lt.id), title: lt.title || '—',
         artist: lt.artist || '', cover: lt.cover || '', full: true,
@@ -3047,8 +3072,13 @@ function _offerMixResume() {
       _playPreviewAt(0);
     };
     const safeName = (lt.title || t('p.mix_word')).replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0, 40);
+    // When a whole release was playing, say so — "продолжить трек" on album
+    // playback is what made it look like Ripster had forgotten the context.
+    const _qn = Array.isArray(lt.queue) ? lt.queue.length : 0;
+    const _rest = _qn > 1 ? ' <span style="opacity:.75">(' + (lt.ctx ? String(lt.ctx).slice(0, 28) + ', ' : '')
+                          + (_qn - (lt.idx | 0) - 1) + ' ' + t('p.tracks_left') + ')</span>' : '';
     toast(
-      '<span>▶ «' + safeName + '» — ' + t('p.resume_q') + ' ' + durStr + '?</span>' +
+      '<span>▶ «' + safeName + '» — ' + t('p.resume_q') + ' ' + durStr + '?' + _rest + '</span>' +
       '<button onclick="event.stopPropagation();_resumeLastTrack()" style="margin-left:8px;padding:2px 9px;border-radius:5px;font-size:11px;font-weight:700;background:rgba(192,132,160,.18);border:1px solid rgba(192,132,160,.3);color:var(--red);cursor:pointer;font-family:var(--font)">'+t('player.resume_toast_btn')+'</button>',
       'var(--muted)', '', 9000
     );

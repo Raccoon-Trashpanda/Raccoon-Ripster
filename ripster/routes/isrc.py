@@ -58,8 +58,13 @@ async def _qobuz_search_isrc(isrc: str, app_id: str, token: str) -> Optional[dic
                 return None
             items = (r.json().get("tracks") or {}).get("items") or []
             for t in items:
+                # Qobuz returns the ISRC as a PLAIN `isrc` field on the track;
+                # there is no `external_ids` object (that's Spotify's shape).
+                # Reading only external_ids made every Qobuz ISRC lookup return
+                # None even though the API had found the track — verified live:
+                # track/search?query=<isrc> answers 200 with total:1.
                 ext_ids = t.get("external_ids") or {}
-                t_isrc = (ext_ids.get("isrc") or "").upper()
+                t_isrc = (t.get("isrc") or ext_ids.get("isrc") or "").upper()
                 if t_isrc == isrc.upper():
                     alb      = t.get("album") or {}
                     alb_id   = str(alb.get("id", ""))

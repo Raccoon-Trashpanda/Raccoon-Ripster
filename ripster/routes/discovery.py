@@ -121,6 +121,28 @@ async def api_search(q: str, service: str = "apple", type: str = "album", limit:
     if not q.strip():
         return {"results": []}
 
+    # Apply the same rate limit used by queue/add for guest sessions
+    if request is not None:
+        try:
+            from ripster.guest_manager import get_manager as _get_gm
+            from fastapi import HTTPException as _HTTPException
+            gm  = _get_gm()
+            sid = gm.get_session_id_from_request(request)
+            if sid and gm.get_session(sid):
+                if not gm.check_rate(sid):
+                    raise _HTTPException(429, "Too many requests, please wait")
+                gm.record_rate(sid)
+        except Exception as exc:
+            from fastapi import HTTPException as _HTTPException
+            if isinstance(exc, _HTTPException):
+                raise
+
+    # Label search is its own thing: only some services can filter by label at
+    # the API level, and for the rest we have to fall back to matching the label
+    # field of album metadata. Handled before the per-service dispatch below.
+    if type == "label":
+        return await _search_label(q, service, limit, country)
+
     if service == "apple":
         # iTunes direct (_search_apple): includes 30-sec previewUrl (the zhaarey
         # engine search omitted it → cards had no ▶ play), supports the music-video
@@ -158,6 +180,312 @@ async def api_search(q: str, service: str = "apple", type: str = "album", limit:
         return await _search_yandex(q, type, limit)
     else:
         return {"results": [], "error": f"Unknown service: {service}"}
+
+# ── Label search ─────────────────────────────────────────────────────────────
+# Which services can actually filter by label, verified live (2026-07-27):
+#   Spotify — yes, `label:"Hospital Records"` in the search query
+#   Deezer  — yes, same advanced-query syntax, and album objects carry `label`
+#   others  — no label filter in their search API, so we search albums by the
+#             label's name and keep only those whose metadata really names it
+_LABEL_NATIVE = ("spotify", "deezer")
+
+
+def _label_matches(value: str, wanted: str) -> bool:
+    """Loose label comparison: catalogue spellings differ wildly
+    ('Hospital', 'Hospital Records', 'Hospital Records Ltd')."""
+    a = (value or "").strip().lower()
+    b = (wanted or "").strip().lower()
+    if not a or not b:
+        return False
+    return a == b or a.startswith(b) or b.startswith(a) or b in a
+
+
+async def _search_label(q: str, service: str, limit: int, country: str = "") -> dict:
+    """Releases put out by a label.
+
+    Returns the usual {"results": [...]} shape so the UI renders label hits with
+    the same album cards as everything else. `native` tells the caller whether
+    the service filtered server-side (trustworthy) or we filtered locally
+    (best-effort — a service that doesn't expose the label field at all can only
+    return name matches)."""
+    label = q.strip().strip('"')
+    if not label:
+        return {"results": []}
+
+    if service == "spotify":
+        out = await _search_spotify(f'label:"{label}"', "album", limit)
+        out["native"] = True
+        out["label"] = label
+        return out
+
+    if service == "deezer":
+        out = await _search_deezer(f'label:"{label}"', "album", limit)
+        # Deezer honours the filter but still returns loose matches; keep the
+        # ones we can confirm, and don't drop entries whose label is unknown
+        # (search results omit `label` on some albums).
+        res = out.get("results") or []
+        confirmed = [r for r in res if not r.get("label") or _label_matches(r.get("label", ""), label)]
+        out["results"] = confirmed or res
+        out["native"] = True
+        out["label"] = label
+        return out
+
+    # ── Services without a label filter: find the releases elsewhere, then
+    #    locate each one HERE. Spotify/Deezer act as the catalogue of "what this
+    #    label put out"; the target service only has to be asked "do you have
+    #    this album". That gives real label results everywhere instead of
+    #    name-matching, which returned almost nothing.
+    seeds = await _label_seeds(label, limit)
+    if not seeds:
+        return {"results": [], "label": label, "native": False,
+                "note": f"Не нашёл релизов лейбла «{label}» — проверь написание"}
+
+    found = await _match_seeds_in_service(seeds, service, label, limit, country)
+    return {"results": found, "label": label, "native": False,
+            "matched_from": "spotify/deezer",
+            "note": ("" if found else
+                     f"Релизы лейбла найдены, но в {service} их сопоставить не удалось")}
+
+
+async def _label_seeds(label: str, limit: int) -> list[dict]:
+    """What the label released, from whoever can actually answer that.
+    Spotify first (best coverage), Deezer as backup and to fill gaps."""
+    seeds, seen = [], set()
+    for svc in _LABEL_NATIVE:
+        try:
+            out = await (_search_spotify(f'label:"{label}"', "album", limit)
+                         if svc == "spotify" else
+                         _search_deezer(f'label:"{label}"', "album", limit))
+        except Exception:
+            continue
+        for r in (out.get("results") or []):
+            key = (_wl_norm(r.get("artist", "")), _wl_norm(r.get("title", "")))
+            if key in seen or not key[1]:
+                continue
+            seen.add(key)
+            seeds.append(r)
+        if len(seeds) >= limit * 2:
+            break
+    return seeds
+
+
+def _wl_norm(s: str) -> str:
+    import re as _r
+    return _r.sub(r"[^a-z0-9а-я]+", "", (s or "").lower())
+
+
+async def _seed_upc(seed: dict) -> str:
+    """Barcode of a release, fetched from wherever the seed came from.
+
+    Search endpoints don't return it, so it costs one extra request — worth it,
+    because a barcode is an exact identity. Title matching confuses deluxe
+    editions, remasters and "Extended Mix" versions with the original."""
+    sid, svc = str(seed.get("id") or ""), seed.get("service", "")
+    if not sid:
+        return ""
+    try:
+        if svc == "spotify":
+            token = await _get_spotify_app_token()
+            if not token:
+                return ""
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.spotify.com/v1/albums/{sid}",
+                                headers={"Authorization": f"Bearer {token}"})
+            return str(((r.json().get("external_ids") or {}).get("upc") or "")).strip()
+        if svc == "deezer":
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.deezer.com/album/{sid}")
+            return str(r.json().get("upc") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
+async def _seed_isrc(seed: dict) -> str:
+    """ISRC of the release's first track.
+
+    Qobuz and Tidal have no barcode lookup, but they do have exact ISRC search
+    (already implemented in routes/isrc.py). A track ISRC identifies the
+    recording, so finding it gives us the right album with no guessing."""
+    sid, svc = str(seed.get("id") or ""), seed.get("service", "")
+    if not sid:
+        return ""
+    try:
+        if svc == "spotify":
+            token = await _get_spotify_app_token()
+            if not token:
+                return ""
+            h = {"Authorization": f"Bearer {token}"}
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.spotify.com/v1/albums/{sid}/tracks",
+                                params={"limit": 1}, headers=h)
+                items = (r.json().get("items") or [])
+                if not items:
+                    return ""
+                tid = items[0].get("id")
+                if not tid:
+                    return ""
+                r2 = await c.get(f"https://api.spotify.com/v1/tracks/{tid}", headers=h)
+            return str(((r2.json().get("external_ids") or {}).get("isrc") or "")).upper()
+        if svc == "deezer":
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.deezer.com/album/{sid}")
+                tracks = ((r.json().get("tracks") or {}).get("data") or [])
+                if not tracks:
+                    return ""
+                r2 = await c.get(f"https://api.deezer.com/track/{tracks[0]['id']}")
+            return str(r2.json().get("isrc") or "").upper()
+    except Exception:
+        return ""
+    return ""
+
+
+async def _find_by_isrc(isrc: str, service: str) -> dict | None:
+    """Exact lookup through the ISRC matchers that already ship in routes/isrc.py."""
+    if not isrc:
+        return None
+    try:
+        from ripster.routes import isrc as _isrc_mod
+        if service == "qobuz":
+            hit = await _isrc_mod._qobuz_search_isrc(
+                isrc, (_config.get("qobuz-app-id") or "312369995").strip(),
+                (_config.get("qobuz-auth-token") or "").strip())
+        elif service == "tidal":
+            # NOT config["tidal-token"]: that one is minted by auth.py's
+            # _tidal_refresh_token(), which tries web client_ids WITHOUT a
+            # secret — Tidal rejects them for a TV-issued refresh token
+            # ("This token was issued to another client"), so it sits there
+            # expired. The engine's OrpheusDL TV session refreshes correctly
+            # (TV client_id + secret) and is what downloads already use.
+            tok, cc = "", ""
+            try:
+                from ripster.engines import tidal as _tid
+                tok, cc = await _tid._orpheus_access_token()
+            except Exception:
+                tok = ""
+            if not tok:
+                tok = (_config.get("tidal-token") or "").strip()
+                cc = (_config.get("tidal-country") or "US").strip().upper()
+            hit = await _isrc_mod._tidal_search_isrc(
+                isrc, tok, (cc or _config.get("tidal-country") or "US").strip().upper())
+        else:
+            return None
+        if not hit:
+            return None
+        return {"id": str(hit.get("album_id") or ""), "title": hit.get("album") or hit.get("title", ""),
+                "artist": hit.get("artist", ""), "url": hit.get("url", ""),
+                "cover": hit.get("cover", ""), "service": service, "type": "album",
+                "matched_by": "isrc"}
+    except Exception:
+        return None
+
+
+async def _find_by_upc(upc: str, service: str, country: str = "") -> dict | None:
+    """Exact release lookup by barcode. Returns a result dict or None."""
+    upc = "".join(ch for ch in (upc or "") if ch.isdigit())
+    if not upc:
+        return None
+    try:
+        if service == "deezer":
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.deezer.com/album/upc:{upc}")
+            j = r.json()
+            if j and not j.get("error") and j.get("id"):
+                return {"id": str(j["id"]), "title": j.get("title", ""),
+                        "artist": (j.get("artist") or {}).get("name", ""),
+                        "url": j.get("link", ""), "cover": j.get("cover_medium", ""),
+                        "date": j.get("release_date", ""), "label": j.get("label", ""),
+                        "service": "deezer", "type": "album", "matched_by": "upc"}
+        elif service == "apple":
+            bearer = (_config.get("authorization-token") or "").strip()
+            if bearer and bearer != "your-authorization-token":
+                sf = (country or _config.get("storefront", "us") or "us").lower()
+                h = {"Authorization": f"Bearer {bearer}",
+                     "Origin": "https://music.apple.com"}
+                async with _HTTP.ashared() as c:
+                    r = await c.get(f"https://api.music.apple.com/v1/catalog/{sf}/albums",
+                                    params={"filter[upc]": upc}, headers=h)
+                data = (r.json().get("data") or []) if r.status_code == 200 else []
+                if data:
+                    a = data[0]; at = a.get("attributes") or {}
+                    return {"id": a.get("id", ""), "title": at.get("name", ""),
+                            "artist": at.get("artistName", ""), "url": at.get("url", ""),
+                            "cover": _amp_art(at, 300), "date": at.get("releaseDate", ""),
+                            "label": at.get("recordLabel", ""), "service": "apple",
+                            "type": "album", "matched_by": "upc"}
+    except Exception:
+        return None
+    return None
+
+
+async def _match_seeds_in_service(seeds: list[dict], service: str, label: str,
+                                  limit: int, country: str = "") -> list[dict]:
+    """Look each release up in the target service.
+
+    Barcode first (exact), title+artist only as a fallback."""
+    out = []
+    for s in seeds:
+        if len(out) >= limit:
+            break
+        # ── exact paths first, guessing only as a last resort ────────────────
+        # barcode → the release itself (Apple, Deezer)
+        if service in ("apple", "deezer"):
+            upc = await _seed_upc(s)
+            if upc:
+                hit = await _find_by_upc(upc, service, country)
+                if hit:
+                    hit["label"] = hit.get("label") or label
+                    hit["date"] = hit.get("date") or s.get("date", "")
+                    out.append(hit)
+                    continue
+        # track ISRC → the album that contains it (Qobuz, Tidal)
+        if service in ("qobuz", "tidal"):
+            isrc = await _seed_isrc(s)
+            if isrc:
+                hit = await _find_by_isrc(isrc, service)
+                if hit:
+                    hit["label"] = hit.get("label") or label
+                    hit["date"] = hit.get("date") or s.get("date", "")
+                    out.append(hit)
+                    continue
+        artist, title = s.get("artist", ""), s.get("title", "")
+        term = f"{artist} {title}".strip()
+        if not term:
+            continue
+        try:
+            if service == "apple":
+                r = await _search_apple(term, "album", 3, country)
+            elif service in ("qobuz", "tidal"):
+                try:
+                    from ripster.engines import get_engine
+                    res = await get_engine(service).search(term, "album", 3, _config) or []
+                    r = {"results": res}
+                except Exception:
+                    r = await (_search_qobuz(term, "album", 3) if service == "qobuz"
+                               else _search_tidal(term, "album", 3))
+            elif service == "yandex":
+                r = await _search_yandex(term, "album", 3)
+            else:
+                continue
+        except Exception:
+            continue
+        want_t = _wl_norm(title)
+        for cand in (r.get("results") or []):
+            if not want_t or want_t not in _wl_norm(cand.get("title", "")) and \
+               _wl_norm(cand.get("title", "")) not in want_t:
+                continue
+            # Apple exposes the label inside the copyright line ("℗ 2020 Hospital
+            # Records Limited") — use it to confirm, but don't require it: the
+            # field is absent on plenty of albums.
+            cp = cand.get("copyright", "") or ""
+            if cp and label.lower() not in cp.lower() and not _label_matches(cand.get("label", ""), label):
+                continue
+            cand["label"] = cand.get("label") or label
+            cand["date"] = cand.get("date") or s.get("date", "")
+            out.append(cand)
+            break
+    return out
+
 
 _AMP_TYPE = {"album": "albums", "track": "songs", "song": "songs",
              "artist": "artists", "video": "music-videos", "playlist": "playlists"}

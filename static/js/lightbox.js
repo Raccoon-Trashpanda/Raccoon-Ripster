@@ -196,13 +196,21 @@ async function loadWatchlist() {
   list.innerHTML = items.map(w => `
     <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:7px">
       <div style="flex:1;min-width:0">
-        <div style="font-size:13px;font-weight:600;color:var(--text)">${esc(w.name||w.url)}</div>
+        <div style="font-size:13px;font-weight:600;color:var(--text)">${w.kind==='label'?'🏷 ':''}${esc(w.name||w.url)}</div>
         <div style="font-size:11px;color:var(--muted);margin-top:2px">
           ${w.service||'apple'} · ${w.auto_download?t('wl.auto_dl'):t('wl.notify_only')}
           ${w.last_check?' · '+t('wl.checked_at')+' '+new Date(w.last_check).toLocaleString('ru'):''}
-          ${w.last_release?'<span style="color:var(--green);margin-left:6px">' + t('wl.new_release') + '</span>':''}
+          ${w.last_release?'<span style="color:var(--muted2);margin-left:6px">' +
+             // Это ПОСЛЕДНИЙ известный релиз (точка отсчёта), а не новинка —
+             // подпись «новый релиз» здесь вводила в заблуждение: запись только
+             // что создана, качать нечего, а выглядело как пропущенная загрузка.
+             t('wl.last_known') + ': ' + esc(String(w.last_release).slice(0,38)) + '</span>':''}
         </div>
       </div>
+      ${w.kind==='label'?`<button onclick="wlDownloadLatest('${w.id}')" title="${t('wl.dl_latest_t')}"
+        style="padding:4px 9px;background:rgba(62,207,170,.14);border:1px solid rgba(62,207,170,.3);border-radius:6px;font-size:11px;cursor:pointer;color:var(--green);font-family:var(--font);white-space:nowrap">
+        ⬇ ${t('wl.dl_latest')}
+      </button>`:''}
       <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);cursor:pointer;white-space:nowrap">
         <input type="checkbox" ${w.auto_download?'checked':''} onchange="wlToggleAuto('${w.id}',this.checked)"/> ${t('wl.auto_short')}
       </label>
@@ -214,15 +222,46 @@ async function loadWatchlist() {
   loadWlSuggestions();
 }
 
+// Лейбл отслеживается по названию, ссылка ему не нужна — прячем поле, чтобы
+// пустой инпут не выглядел как забытое обязательное поле.
+function wlKindChanged() {
+  const kind = document.getElementById('wl-kind')?.value || 'artist';
+  const url  = document.getElementById('wl-url');
+  const name = document.getElementById('wl-name');
+  if(url)  url.style.display = (kind === 'label') ? 'none' : '';
+  if(name) name.placeholder = (kind === 'label') ? t('wl.label_ph') : t('wl.name_ph');
+}
+
 async function wlAdd() {
   const name = document.getElementById('wl-name')?.value?.trim();
   const url  = document.getElementById('wl-url')?.value?.trim();
   const svc  = document.getElementById('wl-svc')?.value||'apple';
   const auto = document.getElementById('wl-auto')?.checked !== false;
-  if(!name && !url){ toast(t('lb.enter_artist')); return; }
-  const r = await api('POST','/api/watchlist',{name,url,service:svc,auto_download:auto});
-  if(r.ok){ toast(`+ ${name||url} → watchlist`,'var(--green)'); loadWatchlist(); document.getElementById('wl-name').value=''; document.getElementById('wl-url').value=''; }
+  const kind = document.getElementById('wl-kind')?.value || 'artist';
+  if(kind === 'label' ? !name : (!name && !url)){ toast(t(kind==='label'?'wl.enter_label':'lb.enter_artist')); return; }
+  const r = await api('POST','/api/watchlist',{name,url,service:svc,auto_download:auto,kind});
+  if(r.ok){
+    // Сервер проверяет лейбл сразу: если каталоги ничего не вернули, запись
+    // создана, но следить не за чем — честно сказать, а не молча «добавлено».
+    if(r.warning) toast(r.warning,'var(--orange)','',8000);
+    else toast(`+ ${name||url} → watchlist` + (r.found ? ` (${r.found})` : ''),'var(--green)');
+    loadWatchlist();
+    document.getElementById('wl-name').value=''; document.getElementById('wl-url').value='';
+  }
   else toast(t('t.error_c')+(r.detail||''),'var(--red)');
+}
+
+// Подписка запоминает точку отсчёта, поэтому чекер ждёт СЛЕДУЮЩИЙ релиз.
+// Эта кнопка — явное «хочу текущий», чтобы не сидеть в ожидании месяц.
+async function wlDownloadLatest(id) {
+  toast(t('wl.dl_latest_go'), 'var(--muted)');
+  const r = await api('POST', '/api/watchlist/' + id + '/download-latest', {count: 1});
+  if (r.ok) {
+    toast('⬇ ' + (r.queued || []).join(', '), 'var(--green)');
+    if (typeof pullQueue === 'function') pullQueue();
+  } else {
+    toast(r.error || t('t.error_c'), 'var(--orange)', '', 7000);
+  }
 }
 
 async function wlRemove(id) {
