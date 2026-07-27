@@ -49,7 +49,7 @@ from pathlib import Path
 
 import httpx
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
 from ripster import setup as _setup
 from ripster import amd as _amd
@@ -699,6 +699,10 @@ def _orpheus_creds_path() -> Path:
     return _orpheus_dir() / "config" / "credentials.json"
 
 _oauth_proc: asyncio.subprocess.Process | None = None
+# URL последнего login-start — чтобы login-open мог открыть его системным
+# браузером. Держим на сервере, а не принимаем от клиента: открывать любой
+# присланный URL на машине хозяина нельзя.
+_oauth_url: str = ""
 
 
 @router.get("/api/orpheus/status")
@@ -726,7 +730,7 @@ async def orpheus_status():
 @router.post("/api/orpheus/login-start")
 async def orpheus_login_start():
     """Start PKCE OAuth flow. Returns Spotify auth URL for the browser popup."""
-    global _oauth_proc
+    global _oauth_proc, _oauth_url
 
     if not (_orpheus_dir() / "orpheus.py").exists():
         return {"ok": False, "error": "OrpheusDL не установлен — OrpheusDL отсутствует в папке orpheus/"}
@@ -776,8 +780,46 @@ async def orpheus_login_start():
     except RuntimeError as e:
         return {"ok": False, "error": str(e)}
 
+    _oauth_url = auth_url or ""
     asyncio.create_task(_watch_orpheus_oauth())
     return {"ok": True, "url": auth_url}
+
+
+@router.post("/api/orpheus/login-open")
+async def orpheus_login_open(request: Request):
+    """Открыть страницу входа Spotify системным браузером.
+
+    Окно Ripster.exe — это WebView2, и он молча режет window.open(): попап
+    приходит null, фронт показывал «Popup заблокирован» и отменял вход. То есть
+    из exe залогиниться было невозможно в принципе, а из браузерного ярлыка тот
+    же самый билд работал — так и обнаружили (два пользователя, 27.07.2026).
+
+    Открываем только URL, который сам же выдал login-start, и только если
+    запрос пришёл с этой машины: через туннель браузер хозяина открывать нельзя.
+    """
+    host = (request.client.host if request.client else "") or ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        return {"ok": False, "error": "Открыть браузер можно только на этой машине — "
+                                      "скопируй ссылку входа вручную"}
+    if not _oauth_url:
+        return {"ok": False, "error": "Нет активной ссылки входа — нажми «Войти в Spotify» заново"}
+
+    def _open() -> bool:
+        import webbrowser
+        try:
+            if webbrowser.open(_oauth_url):
+                return True
+        except Exception:
+            pass
+        try:                       # запасной путь: штатный обработчик URL Windows
+            os.startfile(_oauth_url)  # type: ignore[attr-defined]
+            return True
+        except Exception:
+            return False
+
+    if not await asyncio.to_thread(_open):
+        return {"ok": False, "error": "Не удалось открыть браузер — скопируй ссылку входа вручную"}
+    return {"ok": True}
 
 
 async def _sync_orpheus_username() -> str:
@@ -864,7 +906,8 @@ async def _watch_orpheus_oauth():
 
 @router.delete("/api/orpheus/login-cancel")
 async def orpheus_login_cancel():
-    global _oauth_proc
+    global _oauth_proc, _oauth_url
+    _oauth_url = ""
     if _oauth_proc is not None:
         try:
             _oauth_proc.kill()

@@ -133,9 +133,24 @@ async function orpheusLogin() {
   setStatus(t('op.opening'), '#0a84ff');
   const popup = window.open(r.url, 'orpheus_oauth', 'width=520,height=700');
   if(!popup) {
-    setStatus(t('op.popup_blocked'), 'var(--orange)');
-    await api('DELETE', '/api/orpheus/login-cancel');
-    if(btn) { btn.disabled=false; btn.textContent='🎵 ' + t('op.login_sp'); }
+    // Окно Ripster.exe — WebView2, и он режет window.open() молча. Раньше мы тут
+    // сдавались и убивали helper: вход из exe был невозможен, хотя из браузерного
+    // ярлыка тот же билд работал. Просим сервер открыть страницу входа системным
+    // браузером, helper на 4381 оставляем жить — колбэк придёт по WebSocket.
+    const opened = await api('POST', '/api/orpheus/login-open');
+    if(!opened || !opened.ok) {
+      setStatus(opened?.error || t('op.popup_blocked'), 'var(--orange)');
+      await api('DELETE', '/api/orpheus/login-cancel');
+      if(btn) { btn.disabled=false; btn.textContent='🎵 ' + t('op.login_sp'); }
+      return;
+    }
+    setStatus(t('op.opened_ext'), '#0a84ff');
+    window._orpheusLoginDone = () => {
+      window._orpheusLoginDone = null;
+      if(stEl) stEl.style.display='none';
+      if(btn) { btn.disabled=false; btn.textContent='🎵 ' + t('op.login_sp'); }
+      loadOrpheusStatus();
+    };
     return;
   }
 
