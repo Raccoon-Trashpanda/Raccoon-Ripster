@@ -427,9 +427,108 @@ def store_report(meta: dict, blob: bytes, client_ip: str = "") -> dict:
         rec["reports"] = reports
         idx[iid] = rec
         _index_path().write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+
+        _schedule_bot_notify({**reports[-1], "name": rec.get("label") or rec.get("name") or "",
+                              "app_version": rec.get("app_version", ""),
+                              "platform": rec.get("platform", ""),
+                              "instance_id": iid}, fp)
         return {"ok": True, "code": code}
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
+
+
+# ── доставка отчёта владельцу в Telegram ─────────────────────────────────────
+# Отчёт, который лежит на диске и ждёт, пока владелец откроет страницу, — это
+# почти то же самое, что скриншот в переписке: узнаёшь о проблеме поздно.
+# Поэтому архив сразу уходит в личку владельцу вместе с описанием.
+
+def _bot_cfg() -> dict:
+    """Токен и id владельца из tgbot/config.json.
+
+    Файл приватный и в публичный репозиторий не попадает, так что у обычного
+    пользователя его просто нет — доставка молча пропускается. Никакого токена
+    в коде и в поставке.
+    """
+    try:
+        p = _base_dir / "tgbot" / "config.json"
+        d = json.loads(p.read_text(encoding="utf-8"))
+        if d.get("bot_token") and d.get("owner_id"):
+            return d
+    except Exception:
+        pass
+    return {}
+
+
+async def notify_owner_bot(rec: dict, zip_path: Path) -> tuple[bool, str]:
+    """Отправить владельцу карточку отчёта и сам архив. Возвращает (ок, причина)."""
+    cfg = _bot_cfg()
+    if not cfg:
+        return False, "tgbot/config.json недоступен"
+    token   = str(cfg["bot_token"])
+    owner   = str(cfg["owner_id"])
+    # Локальный Bot API снимает потолок на размер файла; если контейнер лежит,
+    # уходим на официальный адрес.
+    bases = [str(cfg.get("local_bot_api") or "").rstrip("/"), "https://api.telegram.org"]
+
+    when = time.strftime("%d.%m.%Y %H:%M", time.localtime(rec.get("t") or time.time()))
+    who  = rec.get("name") or rec.get("instance_id") or "—"
+    note = (rec.get("note") or "").strip()
+    text = (
+        f"📨 <b>Отчёт о логах</b>  <code>{rec.get('code','')}</code>\n"
+        f"От: <b>{_esc_html(str(who))}</b>\n"
+        f"Версия: {_esc_html(str(rec.get('app_version') or '—'))}\n"
+        f"Система: {_esc_html(str(rec.get('platform') or '—'))}\n"
+        f"Когда: {when}\n"
+        f"Размер: {round((rec.get('size') or 0) / 1024)} КБ"
+    )
+    if note:
+        text += f"\n\n💬 <i>{_esc_html(note[:600])}</i>"
+
+    import httpx
+    last = "нет ответа"
+    for base in [b for b in bases if b]:
+        try:
+            async with httpx.AsyncClient(timeout=120) as c:
+                r = await c.post(f"{base}/bot{token}/sendMessage",
+                                 data={"chat_id": owner, "text": text,
+                                       "parse_mode": "HTML"})
+                if r.status_code != 200:
+                    last = f"sendMessage {r.status_code}"
+                    continue
+                if zip_path and zip_path.exists():
+                    with zip_path.open("rb") as fh:
+                        r2 = await c.post(
+                            f"{base}/bot{token}/sendDocument",
+                            data={"chat_id": owner,
+                                  "caption": f"Логи · отчёт {rec.get('code','')}"},
+                            files={"document": (zip_path.name, fh, "application/zip")})
+                    if r2.status_code != 200:
+                        last = f"sendDocument {r2.status_code}"
+                        continue
+            return True, base
+        except Exception as e:                                # noqa: BLE001
+            last = f"{type(e).__name__}: {str(e)[:90]}"
+    return False, last
+
+
+def _esc_html(s: str) -> str:
+    return (str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _schedule_bot_notify(rec: dict, zip_path: Path) -> None:
+    """Отправка не должна задерживать ответ отправителю и не должна ронять приём."""
+    async def _run():
+        try:
+            ok, why = await notify_owner_bot(rec, zip_path)
+            print(f"[telemetry] отчёт {rec.get('code')} → бот: "
+                  f"{'доставлен через ' + why if ok else 'НЕ доставлен (' + why + ')'}",
+                  flush=True)
+        except Exception as e:                                # noqa: BLE001
+            print(f"[telemetry] доставка отчёта в бот сорвалась: {e}", flush=True)
+    try:
+        asyncio.get_running_loop().create_task(_run())
+    except RuntimeError:
+        pass                       # не в цикле событий — просто не отправляем
 
 
 def list_reports() -> list:

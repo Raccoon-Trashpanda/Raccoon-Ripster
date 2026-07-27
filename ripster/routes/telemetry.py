@@ -138,6 +138,30 @@ async def reports_list():
     return {"reports": _t.list_reports()}
 
 
+@router.post("/api/telemetry/reports/push-bot")
+async def reports_push_bot(body: dict | None = None):
+    """Дослать владельцу в Telegram уже накопленные отчёты.
+
+    Нужно для тех, что пришли до появления доставки, и как ручной повтор, если
+    бот в тот момент лежал. `code` — один конкретный, без него — все.
+    """
+    code = str((body or {}).get("code") or "").strip().upper()
+    items = _t.list_reports()
+    if code:
+        items = [r for r in items if str(r.get("code", "")).upper() == code]
+    if not items:
+        return {"ok": False, "error": "нечего отправлять"}
+    sent, failed = [], []
+    for rec in reversed(items):            # от старых к новым — читать по порядку
+        fp = _t.report_path(str(rec.get("code") or ""))
+        if fp is None:
+            failed.append({"code": rec.get("code"), "error": "архив не найден"})
+            continue
+        ok, why = await _t.notify_owner_bot(rec, fp)
+        (sent if ok else failed).append({"code": rec.get("code"), "info": why})
+    return {"ok": not failed, "sent": sent, "failed": failed}
+
+
 @router.get("/api/telemetry/report/{code}")
 async def report_download(code: str):
     from fastapi import Response
