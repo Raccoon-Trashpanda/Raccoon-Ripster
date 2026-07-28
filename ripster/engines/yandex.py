@@ -29,7 +29,12 @@ _QUALITIES = [
 ]
 
 # our quality id → ymd --quality value (0=AAC64, 1=AAC192, 2=FLAC)
-_QMAP = {"flac": "2", "aac_192": "1", "aac": "1", "aac_64": "0", "low": "0"}
+# Ripster/bot quality id → ymd --quality (0=AAC64, 1=AAC192, 2=FLAC). Yandex has NO
+# native MP3, so the bot's "mp3" pick maps to its lossy AAC tier — without this it
+# fell through to the "2" (FLAC) default and silently returned FLAC instead of the
+# lossy the user picked (same class as the Beatport "320"→FLAC bug).
+_QMAP = {"flac": "2", "aac_192": "1", "aac": "1", "mp3": "1", "320": "1",
+         "aac_64": "0", "low": "0", "128": "0"}
 
 _RE_PROGRESS = re.compile(r"\[(\d+)\s*/\s*(\d+)\]")
 _RE_DOWNLOADING = re.compile(r"Загружается", re.IGNORECASE)
@@ -171,6 +176,11 @@ class YandexEngine(EngineBase):
             return int(m.group(1)), int(m.group(2))
         return current, total
 
+    # Строка самого ymd о том, что он РЕАЛЬНО забрал: «[1/1] [AAC 256kbps] …».
+    # Это единственный честный источник — запрошенное качество ничего не
+    # гарантирует, Яндекс отдаёт что есть на конкретный трек.
+    _RE_GOT_CODEC = re.compile(r"\[\s*(FLAC|AAC[^\]]*|MP3[^\]]*)\s*\]", re.I)
+
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
         downloaded = len(_RE_DOWNLOADING.findall(log_text))
         low = log_text.lower()
@@ -185,7 +195,24 @@ class YandexEngine(EngineBase):
                 return EngineResult(False, error="Yandex: скачивание не удалось (проверь токен/подписку Plus и регион)")
 
         if downloaded > 0:
-            return EngineResult(True, tracks_ok=downloaded)
+            # Что Яндекс отдал НА САМОМ ДЕЛЕ. Запрошенное качество ничего не
+            # гарантирует: 28.07.2026 при `--quality 2` (FLAC) приехал AAC 256 и
+            # лёг в папку …/yandex/FLAC/… — ffprobe показал aac 268 kbps. Папка
+            # называется по запрошенному качеству, поэтому она врёт молча, а
+            # человек уверен, что у него lossless. Возвращаем реальный кодек в
+            # штатном поле — раннер перепишет им качество задачи, и в карточке,
+            # истории и боте будет правда.
+            got = next((m.group(1).strip()
+                        for m in self._RE_GOT_CODEC.finditer(log_text)), "")
+            actual = ""
+            g = got.lower()
+            if g.startswith("flac"):
+                actual = "flac"
+            elif g.startswith("aac"):
+                actual = "aac_64" if "64" in g else "aac_192"
+            elif g.startswith("mp3"):
+                actual = "mp3"
+            return EngineResult(True, tracks_ok=downloaded, quality_actual=actual)
 
         # rc==0 but nothing downloaded — likely all unavailable (no Plus / region)
         if _RE_UNAVAIL.search(log_text):
