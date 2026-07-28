@@ -274,7 +274,19 @@ async def _probe_qobuz(overlay: dict | None = None) -> dict:
     app_id     = custom_app or "312369995"
 
     if user_id and auth_token:
-        return await _qobuz_probe_token(user_id, auth_token, app_id)
+        res = await _qobuz_probe_token(user_id, auth_token, app_id)
+        # Протухший токен НАВСЕГДА заслонял рабочие email+пароль: до ветки входа
+        # ниже дело просто не доходило, и Qobuz лежал с 401, пока владелец не
+        # обновит куку руками. Хуже того, сохранённая пара id+токен может быть
+        # вообще от другого аккаунта (28.07.2026: в конфиге лежал id 11384795,
+        # а вход по паролю отдавал 13637057). Раз пароль есть — перелогиниваемся
+        # и перезаписываем пару; вход сам сохраняет свежий токен.
+        if not res.get("ok") and email and password:
+            fresh = await _qobuz_probe_password(email, password, app_id)
+            if fresh.get("ok"):
+                fresh["note"] = "токен протух — перевошёл по паролю и обновил его"
+                return fresh
+        return res
     if email and password:
         return await _qobuz_probe_password(email, password, app_id)
     return {"ok": False,

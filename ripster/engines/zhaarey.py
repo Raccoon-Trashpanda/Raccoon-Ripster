@@ -87,6 +87,14 @@ class ZhaereyEngine(EngineBase):
                 song_flag = ["--song"]
         except Exception:
             pass
+        # Хост-псевдоним geo.music.apple.com (кнопка «Поделиться») регексы
+        # main.go не принимают вовсе. Очередь чинит это на входе, но задача
+        # может прийти и мимо неё — из бота или восстановленной очереди.
+        try:
+            from ripster.service_layer import normalize_url as _norm
+            url = _norm(url)
+        except Exception:
+            pass
         # --json makes Go print a JSON array of saved tracks at the end so we
         # can extract the exact output directory without guessing.
         return base + ([flag] if flag else []) + lyrics_flag + song_flag + ["--json", url]
@@ -135,21 +143,43 @@ class ZhaereyEngine(EngineBase):
     def iter_events(self, line: str, *, progress: tuple[int, int]):
         clean = _strip_ansi(line)
         if _RE_DECRYPT_FAIL.search(clean):
-            # Mark the local wrapper as CKC-unhealthy so the router auto-routes
-            # subsequent lossless tasks to the public wrapper (AMD) instead.
+            # «Invalid CKC» ≠ «сессия умерла». Второй, куда более частый случай —
+            # у контента просто нет прав в регионе аккаунта враппера. Раньше мы
+            # не различали: помечали враппер нездоровым на 15 минут и уводили ВСЮ
+            # lossless-загрузку на публичный wrapper (который регулярно лежит), а
+            # владельцу советовали перелогиниться — совет не просто бесполезный,
+            # а вредный: лишние логины жгут device-lease и загоняют аккаунт в
+            # throttle. 28.07.2026 так и вышло на альбоме, изданном только в
+            # tr/ru, при канадском аккаунте — в те же минуты этот же враппер
+            # расшифровал соседний альбом целиком.
+            alive = False
             try:
-                from ripster.apple_router import mark_local_wrapper_unhealthy
-                mark_local_wrapper_unhealthy()
+                from ripster.apple_router import (mark_local_wrapper_unhealthy,
+                                                  local_wrapper_session_alive)
+                alive = local_wrapper_session_alive()
+                if not alive:
+                    mark_local_wrapper_unhealthy()
             except Exception:
                 pass
-            yield Event(
-                kind=EventKind.FATAL,
-                message="✗ Локальный wrapper не выдаёт ключ (Invalid CKC) — "
-                        "Apple-сессия протухла/без подписки. Перелогинь wrapper "
-                        "или качай через AMD (публичный wrapper). Следующие "
-                        "lossless-задачи уйдут на AMD автоматически.",
-                level=LineLevel.ERROR,
-            )
+            if alive:
+                yield Event(
+                    kind=EventKind.FATAL,
+                    message="✗ Apple не выдал ключ на этот альбом (Invalid CKC), "
+                            "но сессия wrapper'а ЖИВА — значит у контента нет прав "
+                            "в регионе аккаунта. Перелогин НЕ поможет: возьми "
+                            "релиз через AMD (публичный wrapper держит несколько "
+                            "регионов) или ссылкой из другой витрины.",
+                    level=LineLevel.ERROR,
+                )
+            else:
+                yield Event(
+                    kind=EventKind.FATAL,
+                    message="✗ Локальный wrapper не выдаёт ключ (Invalid CKC) и "
+                            "аккаунт-API молчит — Apple-сессия протухла/без "
+                            "подписки. Перелогинь wrapper или качай через AMD. "
+                            "Следующие lossless-задачи уйдут на AMD автоматически.",
+                    level=LineLevel.ERROR,
+                )
             return
         if _RE_RETRY.search(clean):
             yield Event(

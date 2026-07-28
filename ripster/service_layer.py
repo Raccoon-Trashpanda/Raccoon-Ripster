@@ -9,7 +9,7 @@ live, mutable config dict without any extra plumbing.
 """
 from __future__ import annotations
 
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 _config: dict = {}
 
@@ -44,6 +44,33 @@ def validate_url(url: str) -> bool:
         return any(h == d or h.endswith("." + d) for d in ALLOWED_HOSTS)
     except Exception:
         return False
+
+
+# Хосты-псевдонимы, которые сервисы отдают своей же кнопкой «Поделиться», но
+# которые их собственные инструменты не разбирают.
+_HOST_ALIASES = {
+    # Apple Music делится ссылками через geo.music.apple.com — редирект на
+    # витрину по стране. Регексы Go-загрузчика принимают только music /
+    # beta.music / classical.music, поэтому такая ссылка не разбиралась вовсе:
+    # инструмент отвечал «Failed to get album response» и выходил с кодом 0,
+    # то есть провал выглядел как успех. Поймано 28.07.2026 на задаче, где
+    # альбом целиком качался, а отдельный трек по share-ссылке — нет.
+    "geo.music.apple.com": "music.apple.com",
+}
+
+
+def normalize_url(url: str) -> str:
+    """Привести ссылку к виду, который понимают движки. Пустое/чужое — как есть."""
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        target = _HOST_ALIASES.get(host)
+        if not target:
+            return url
+        netloc = target + (f":{p.port}" if p.port else "")
+        return urlunparse(p._replace(netloc=netloc))
+    except Exception:
+        return url
 
 
 def detect_service(url: str) -> str:

@@ -84,7 +84,15 @@ def install(app, ctx) -> None:
 # ── Routes ─────────────────────────────────────────────────────────────────
 
 def _guest_session_id(request: Request) -> str:
-    """Public build has no guest mode — every request is the owner/local user."""
+    """Return guest session_id from cookie, or '' for owner requests."""
+    try:
+        from ripster.guest_manager import get_manager
+        gm  = get_manager()
+        sid = gm.get_session_id_from_request(request)
+        if sid and gm.get_session(sid):
+            return sid
+    except Exception:
+        pass
     return ""
 
 
@@ -115,6 +123,11 @@ async def add_to_queue(body: dict, request: Request):
     url = (body.get("url") or "").strip()
     if not url:
         raise HTTPException(400, "URL is required")
+    # Ссылка из кнопки «Поделиться» приходит на хост-псевдоним (geo.music.apple.com),
+    # который движки не разбирают. Приводим СРАЗУ на входе, чтобы одинаковый вид
+    # лёг и в очередь, и в историю, и в дедупликацию.
+    from ripster.service_layer import normalize_url as _norm_url
+    url = _norm_url(url)
     if _validate_url and not _validate_url(url):
         raise HTTPException(400,
             "URL not from a supported service. Supported: Apple Music, "
@@ -135,9 +148,43 @@ async def add_to_queue(body: dict, request: Request):
             "защищённый DRM radio-поток, а не трек/альбом каталога. Дай ссылку на "
             "трек, альбом или плейлист.")
 
-    sid = ""
-    quality = body.get("quality") or (_default_quality(svc) if _default_quality else _cfg.get("quality", "alac"))
-    engine  = body.get("engine")  or (_engine_for_svc(svc)  if _engine_for_svc  else _cfg.get("engine", "zhaarey"))
+    # Guests always use the owner's engine — they cannot switch
+    sid = _guest_session_id(request)
+    if sid:
+        quality = body.get("quality") or (_default_quality(svc) if _default_quality else _cfg.get("quality", "alac"))
+        engine  = _engine_for_svc(svc) if _engine_for_svc else _cfg.get("engine", "zhaarey")
+        # Enforce quota and rate limit
+        try:
+            from ripster.guest_manager import get_manager
+            gm = get_manager()
+            if not gm.check_quota(sid):
+                gm.log_activity(sid, {"event": "add_blocked", "reason": "quota_exceeded", "url": url, "service": svc})
+                raise HTTPException(429, "Квота исчерпана")
+            # Count-quota counts COMPLETED downloads (consume_quota fires on 'done'
+            # in runner.py), so a guest could burst many adds before any completes
+            # and overrun the limit. Also count this session's IN-FLIGHT (queued/
+            # running) tasks → total (done + in-flight) can never exceed the
+            # allowance. Failed tasks are terminal (not queued/running) and never
+            # consumed, so they don't penalise the guest. (vuln-sweep pass 3.)
+            _qq = (gm.get_session(sid) or {}).get("quota", {})
+            if _qq.get("type") == "count":
+                _inflight = sum(1 for _t in _queue
+                                if _t.get("session_id") == sid
+                                and _t.get("status") in ("queued", "running"))
+                if _qq.get("used", 0) + _inflight >= int(_qq.get("limit", 0) or 0):
+                    gm.log_activity(sid, {"event": "add_blocked", "reason": "quota_inflight", "url": url, "service": svc})
+                    raise HTTPException(429, "Квота исчерпана (есть незавершённые загрузки)")
+            if not gm.check_rate(sid):
+                gm.log_activity(sid, {"event": "add_blocked", "reason": "rate_limit", "url": url, "service": svc})
+                raise HTTPException(429, "Слишком много запросов, подожди минуту")
+            gm.record_rate(sid)
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+    else:
+        quality = body.get("quality") or (_default_quality(svc) if _default_quality else _cfg.get("quality", "alac"))
+        engine  = body.get("engine")  or (_engine_for_svc(svc)  if _engine_for_svc  else _cfg.get("engine", "zhaarey"))
 
     # Guard: an Apple-centric quality (alac/atmos/aac…) sent for a non-Apple
     # service is meaningless — the engine would silently drop to MP3. Fall back
@@ -201,7 +248,7 @@ async def add_to_queue(body: dict, request: Request):
     # Caller-supplied metadata (SoundCloud tiles, release radar, etc. already
     # have cover/title/duration) — merge so the queue card shows it instantly.
     pre_meta = body.get("meta") if isinstance(body.get("meta"), dict) else None
-    # Per-release lyrics checkbox override (Apple/Deezer — see release-card UI).
+    # Per-release lyrics checkbox override (Apple only — see release-card UI).
     # Omitted/null means "use the global save-lrc-file/embed-lrc setting".
     _lyrics_raw = body.get("lyrics")
     lyrics_override = bool(_lyrics_raw) if isinstance(_lyrics_raw, bool) else None
@@ -222,7 +269,21 @@ async def add_to_queue(body: dict, request: Request):
             t["meta"].update({k: v for k, v in tmeta.items() if v not in (None, "")})
             if mark_enriched:
                 t["meta"]["enriched"] = True
+        # Store the link token so download auth survives session rotation after restart
+        if sid:
+            try:
+                from ripster.guest_manager import get_manager as _gm2
+                t["_guest_token"] = _gm2()._sessions.get(sid, "")
+            except Exception:
+                pass
         _queue.append(t)
+        if sid:
+            try:
+                from ripster.guest_manager import get_manager as _gm
+                _gm().log_activity(sid, {"event": "queued", "url": turl, "service": svc,
+                                         "quality": quality, "task_id": t["id"]})
+            except Exception:
+                pass
         return t
 
     added: list = []

@@ -166,6 +166,37 @@ def _public_wrapper_ok(config: dict) -> bool:
 _local_unhealthy_until: float = 0.0
 
 
+def local_wrapper_session_alive(config: dict | None = None, timeout: float = 4.0) -> bool:
+    """Жива ли Apple-сессия внутри локального враппера ПРЯМО СЕЙЧАС.
+
+    «Invalid CKC» имеет две совершенно разные причины, и лечатся они
+    противоположно:
+      · сессия протухла — тогда враппер бесполезен для любого контента;
+      · у контента нет прав в регионе аккаунта — сессия при этом здорова.
+
+    28.07.2026 второе принимали за первое: альбом, изданный только в tr и ru,
+    не дал ключ канадскому аккаунту → враппер помечался нездоровым на 15 минут
+    → ВСЯ lossless-загрузка уходила на публичный wrapper, который регулярно
+    лежит. Один чужой регион ронял Apple целиком. Причём в те же минуты этот же
+    враппер расшифровал соседний альбом 9 треков из 9.
+
+    Аккаунт-API отдаёт media-user-token только при живой сессии — это и есть
+    честный признак, в отличие от открытого TCP-порта.
+    """
+    cfg = config if config is not None else globals().get("config") or {}
+    url = str((cfg or {}).get("gamdl-wrapper-account-url") or "http://127.0.0.1:30020").strip()
+    if not url:
+        return False
+    try:
+        r = httpx.get(url, timeout=timeout)
+        if r.status_code != 200:
+            return False
+        tok = (r.json() or {}).get("music_token") or ""
+        return len(str(tok)) > 50
+    except Exception:
+        return False
+
+
 def mark_local_wrapper_unhealthy(ttl: float = 900.0) -> None:
     """Flag the local docker wrapper as unable to decrypt (bad/expired Apple
     session) for ``ttl`` seconds — the router will skip it meanwhile."""

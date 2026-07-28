@@ -2445,6 +2445,18 @@ def _sanity_route(task: dict, svc: str, engine: str, url: str) -> tuple[str, str
                 f"⚠ Движок «{engine}» не умеет {url_svc} — переключаюсь на «{new_engine}»")
             task["engine"] = new_engine
             engine = new_engine
+        else:
+            # Nothing can speak this URL. engine_for_svc() falls back to the APPLE
+            # default for every service it has no mapping for, so with the default
+            # spotify-engine=convert a raw open.spotify.com URL is handed straight
+            # BACK to apple-music-downloader.exe — the exact 2026-07-27 failure this
+            # gate exists to stop, and the gate silently no-ops on it. (Only
+            # spotify-engine=orpheus_spotify happens to route out of it.) Flag it
+            # instead; run_task raises inside its try so this lands as a named ERROR
+            # row rather than an exit-0 that looks like nothing happened.
+            task["_route_error"] = (
+                f"движок «{engine}» не умеет {url_svc} — задача не запущена "
+                f"(включи движок для {url_svc} в настройках)")
     return svc, engine
 
 
@@ -2475,6 +2487,11 @@ async def run_task(task: dict) -> None:
     _apple_local_only = (str(_config.get("apple-wrapper") or "auto").strip().lower() == "local")
 
     try:
+        # Sanity gate found no engine able to speak this URL — fail cleanly here,
+        # inside the handler, so the task gets a real ERROR row and a message.
+        if task.get("_route_error"):
+            raise ValueError(task.pop("_route_error"))
+
         # zhaarey without wrapper → auto-switch to AMD (skipped in local-only mode)
         if engine == "zhaarey" and svc in ("apple", "") and not _apple_local_only:
             wrapper_quals = {"alac", "atmos", "binaural", "downmix"}
