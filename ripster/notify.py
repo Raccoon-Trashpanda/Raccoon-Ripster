@@ -83,8 +83,10 @@ def _ps_toast(title: str, body: str, sub: str = "", image: str = "") -> None:
         return
     img_xml = ""
     if image and os.path.exists(image):
-        img_xml = (f'<image placement="appLogoOverride" hint-crop="default" '
-                   f'src="{_xml_esc(image)}"/>')
+        # У hint-crop допустимы ТОЛЬКО "none" и "circle". С посторонним значением
+        # (у меня было "default") Windows не ругается — она молча выбрасывает всю
+        # картинку, и уведомление приходит голым текстом. Атрибут не пишем вовсе.
+        img_xml = f'<image placement="appLogoOverride" src="{_xml_esc(image)}"/>'
     lines = f"<text>{_xml_esc(title)}</text><text>{_xml_esc(body)}</text>"
     if sub:
         lines += f"<text>{_xml_esc(sub)}</text>"
