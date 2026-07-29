@@ -898,10 +898,33 @@ async function _waResolveUrl(item) {
   item.url = resp.url;
   return {url: item.url, status: 200};
 }
+/* Остановить Web-Audio-источник, если он играет. Нужен обеим сторонам: у плеера
+ * два независимых движка, и каждый умел гасить только свой. */
+function _waStopIfPlaying() {
+  try {
+    if (typeof _waCancelScheduled === 'function') _waCancelScheduled();
+    if (_WA && _WA.curSource) {
+      try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch (_) {}
+      _WA.curSource = null;
+    }
+  } catch (_) {}
+}
+
+/* И симметрично — заглушить обычный <audio>. */
+function _plainStopIfPlaying() {
+  try {
+    const a = document.getElementById('pp-audio');
+    if (a && !a.paused) a.pause();
+  } catch (_) {}
+}
+
 async function _waPlay(idx, startAtSec = 0) {
   await _waInit();
   const item = Preview.queue[idx];
   if (!item) return false;
+  // Симметрично обычному пути: он мог играть прямо сейчас, и без этого два
+  // движка звучали бы вместе.
+  _plainStopIfPlaying();
   _WA.loading = true;
   // Any pending hand-over belongs to the track we are leaving — drop it, or a
   // manual skip would be overtaken by the previously scheduled next track.
@@ -1866,6 +1889,13 @@ async function _playPreviewAt(idx) {
   // stream URL — do NOT start this (superseded) playback. Prevents the "closed
   // the player but a Tidal track still plays" race.
   if (_gen !== Preview._playGen) return;
+
+  // Заглушить ВТОРОЙ движок воспроизведения. У плеера их два: Web Audio для
+  // однодоменных потоков (наш прокси Deezer и библиотека) и обычный <audio> для
+  // остальных. Каждый останавливал только сам себя, поэтому переход между
+  // треками РАЗНЫХ движков оставлял оба играть одновременно — Tidal поверх
+  // Deezer. Смена src у <audio> глушит только <audio>.
+  _waStopIfPlaying();
 
   if (item.format === 'drm-hls-cbc' || item.format === 'drm-hls-ctr') {
     _scDrmHls(audio, item, playBtn, playBtnB);

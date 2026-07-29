@@ -1066,6 +1066,13 @@ async def _search_tidal(q: str, ent: str, limit: int) -> dict:
                     "type":    ent,
                     "url":     f"https://listen.tidal.com/album/{alb_id}",
                     "cover":   _tidal_cover(item.get("cover", "")),
+                    # Полная дата, а не только год. Tidal её отдаёт, но её
+                    # обрезали до четырёх символов и клали лишь в `year` — у
+                    # всех остальных сервисов поле `date` есть, и карточки
+                    # сортируются по нему. Из-за этого свежий релиз Tidal
+                    # оказывался в выборке по новизне неизвестно где: сортировке
+                    # было не за что зацепиться.
+                    "date":    (item.get("releaseDate") or "")[:10],
                     "year":    (item.get("releaseDate") or "")[:4],
                     "tracks":  item.get("numberOfTracks"),
                     "service": "tidal",

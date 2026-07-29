@@ -463,6 +463,10 @@ class TidalEngine(EngineBase):
                         "type":    search_type,
                         "url":     f"https://listen.tidal.com/album/{alb_id}",
                         "cover":   _tidal_cover(item.get("cover", "")),
+                        # Полная дата — карточки сортируются по ней. Раньше здесь
+                        # оставался только год, и релизы Tidal в выборке по
+                        # новизне вставали куда попало.
+                        "date":    (item.get("releaseDate") or "")[:10],
                         "year":    (item.get("releaseDate") or "")[:4],
                         "tracks":  item.get("numberOfTracks"),
                         "available": self._avail_from_item(item),
