@@ -757,16 +757,12 @@ async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> 
                 # first catalogue queried), and that branch queued the raw
                 # Spotify link — which Ripster then tried to fetch as an Apple
                 # ALAC album and hung on "Fetching metadata…".
-                url = rel.get("url", "")
-                if (rel.get("service") or "") != svc:
-                    try:
-                        m = await _disc._match_seeds_in_service([rel], svc, name, 1,
-                                                                cfg.get("storefront", "us"))
-                        url = (m[0].get("url") if m else "") or ""
-                    except Exception:
-                        url = ""
+                # Куда стрелять — решает не подписка, а реальная доступность.
+                # Раньше мы упирались в ОДИН сервис: не нашли там — пропустили
+                # релиз совсем, хотя он мог лежать в трёх других. А витрины
+                # наполняются вразнобой, и аккаунты у нас в разных странах.
+                url = await _pick_download_url(rel, svc, name, cfg, title)
                 if not url:
-                    print(f"[watchlist] «{title}» не найден в {svc} — пропускаю", flush=True)
                     continue
                 _t = _make_task(url, entry.get("quality", ""), cfg,
                                 "watchlist-label")
@@ -777,6 +773,58 @@ async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> 
             print(f"[watchlist] label {name}: {e}", flush=True)
     save(items)
     return found
+
+
+
+async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
+                             title: str) -> str:
+    """Ссылка на релиз в том сервисе, где его РЕАЛЬНО можно взять сейчас.
+
+    Предпочтение — сначала сервис подписки, дальше порядок владельца по
+    качеству. Если нигде нет, это не ошибка: витрина просто ещё не наполнилась,
+    и писать такое в лог ошибкой значит приучить владельца не читать логи.
+    """
+    from ripster.routes import discovery as _disc
+    from ripster import availability as _av
+
+    # Уже в нужном сервисе — ничего выяснять не надо.
+    if (rel.get("service") or "") == want_svc and rel.get("url"):
+        return rel.get("url", "")
+
+    upc = ""
+    try:
+        upc = await _disc._seed_upc(rel)
+    except Exception:
+        upc = ""
+
+    if upc:
+        pref = [want_svc] + [x for x in (cfg.get("availability-preference")
+                                         or ["apple", "qobuz", "deezer", "tidal"])
+                             if x != want_svc]
+        m = await _av.matrix(upc=upc, title=title, artist=rel.get("artist", ""))
+        best = _av.pick_source(m["services"], pref)
+        if best:
+            u = (m["services"][best] or {}).get("url", "")
+            if u:
+                if best != want_svc:
+                    print(f"[watchlist] «{title}»: в {want_svc} ещё нет, беру из {best}",
+                          flush=True)
+                return u
+        print(f"[watchlist] «{title}» пока нигде не доступен "
+              f"({_av.summary_ru(m['services'])}) — проверю позже", flush=True)
+        return ""
+
+    # Штрихкода нет — старый путь: поиск в целевом сервисе по названию.
+    try:
+        mm = await _disc._match_seeds_in_service([rel], want_svc, label, 1,
+                                                 cfg.get("storefront", "us"))
+        u = (mm[0].get("url") if mm else "") or ""
+    except Exception:
+        u = ""
+    if not u:
+        print(f"[watchlist] «{title}» не найден в {want_svc} (нет штрихкода) — пропускаю",
+              flush=True)
+    return u
 
 
 async def _check_watchlist():

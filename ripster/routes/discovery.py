@@ -418,6 +418,24 @@ async def _find_by_upc(upc: str, service: str, country: str = "") -> dict | None
     return None
 
 
+def _titles_match(want: str, cand: str) -> bool:
+    """Одно ли это издание по названию.
+
+    Раньше хватало вхождения подстроки в любую сторону, а это ловит совсем
+    посторонние релизы: короткое название входит в длинное чужое. Требуем либо
+    точного совпадения, либо вхождения при близкой длине — «Album» и «Album
+    (Deluxe)» это одно, «Insight» и «Insight Out Reworked» уже нет.
+    """
+    if not want or not cand:
+        return False
+    if want == cand:
+        return True
+    if want in cand or cand in want:
+        short, long_ = sorted((len(want), len(cand)))
+        return short / long_ >= 0.7
+    return False
+
+
 async def _match_seeds_in_service(seeds: list[dict], service: str, label: str,
                                   limit: int, country: str = "") -> list[dict]:
     """Look each release up in the target service.
@@ -470,9 +488,17 @@ async def _match_seeds_in_service(seeds: list[dict], service: str, label: str,
         except Exception:
             continue
         want_t = _wl_norm(title)
+        want_a = _wl_norm(artist)
         for cand in (r.get("results") or []):
-            if not want_t or want_t not in _wl_norm(cand.get("title", "")) and \
-               _wl_norm(cand.get("title", "")) not in want_t:
+            if not _titles_match(want_t, _wl_norm(cand.get("title", ""))):
+                continue
+            # Артист не проверялся ВООБЩЕ — совпадения искали по одному
+            # названию. Вместе с проверкой «одно входит в другое» это давало
+            # чужие альбомы: 29.07.2026 запрос «нет такого» принял «нет такого
+            # как он». Для автоскачивания это не мелочь: оно кладёт находку в
+            # очередь без участия человека.
+            cand_a = _wl_norm(cand.get("artist", ""))
+            if want_a and cand_a and not (want_a in cand_a or cand_a in want_a):
                 continue
             # Apple exposes the label inside the copyright line ("℗ 2020 Hospital
             # Records Limited") — use it to confirm, but don't require it: the
