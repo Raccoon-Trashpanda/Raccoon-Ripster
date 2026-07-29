@@ -31,18 +31,73 @@ def _psq(s: str) -> str:
     return (s or "").replace("'", "''")[:90]
 
 
-def _ps_toast(title: str, body: str) -> None:
+def _psq_xml(s: str) -> str:
+    """То же, но без обрезки — XML уведомления целиком, резать его нельзя."""
+    return (s or "").replace("'", "''")
+
+
+def _xml_esc(s: str) -> str:
+    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))[:120]
+
+
+def _cover_file(url: str) -> str:
+    """Скачать обложку во временный файл и вернуть путь.
+
+    Windows-уведомление НЕ умеет http-картинки для неупакованных приложений —
+    только локальный файл. Поэтому качаем и кэшируем по имени: один и тот же
+    релиз не должен тянуть обложку заново.
+    """
+    url = (url or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        return ""
+    try:
+        import hashlib
+        import tempfile
+        import urllib.request
+        from pathlib import Path
+        d = Path(tempfile.gettempdir()) / "ripster_toast_covers"
+        d.mkdir(parents=True, exist_ok=True)
+        fp = d / (hashlib.sha1(url.encode()).hexdigest()[:16] + ".jpg")
+        if fp.exists() and fp.stat().st_size > 0:
+            return str(fp)
+        req = urllib.request.Request(url, headers={"User-Agent": "Ripster"})
+        with urllib.request.urlopen(req, timeout=8) as r:
+            data = r.read(2_000_000)
+        if not data:
+            return ""
+        fp.write_bytes(data)
+        return str(fp)
+    except Exception:
+        return ""
+
+
+def _ps_toast(title: str, body: str, sub: str = "", image: str = "") -> None:
+    """Показать уведомление Windows.
+
+    Раньше использовался шаблон ToastText02 — он ТОЛЬКО ТЕКСТОВЫЙ, картинку в
+    него положить нельзя в принципе, поэтому обложки и не было. Собираем XML
+    сами: две-три строки плюс обложка релиза сбоку.
+    """
     if os.name != "nt":
         return
+    img_xml = ""
+    if image and os.path.exists(image):
+        img_xml = (f'<image placement="appLogoOverride" hint-crop="default" '
+                   f'src="{_xml_esc(image)}"/>')
+    lines = f"<text>{_xml_esc(title)}</text><text>{_xml_esc(body)}</text>"
+    if sub:
+        lines += f"<text>{_xml_esc(sub)}</text>"
+    toast_xml = (f'<toast><visual><binding template="ToastGeneric">'
+                 f'{lines}{img_xml}</binding></visual></toast>')
     script = (
         "$ErrorActionPreference='Stop'\n"
         "[void][Windows.UI.Notifications.ToastNotificationManager,"
         "Windows.UI.Notifications,ContentType=WindowsRuntime]\n"
-        "$x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent("
-        "[Windows.UI.Notifications.ToastTemplateType]::ToastText02)\n"
-        "$t=$x.GetElementsByTagName('text')\n"
-        f"$t.Item(0).AppendChild($x.CreateTextNode('{_psq(title)}'))>$null\n"
-        f"$t.Item(1).AppendChild($x.CreateTextNode('{_psq(body)}'))>$null\n"
+        "[void][Windows.Data.Xml.Dom.XmlDocument,"
+        "Windows.Data.Xml.Dom,ContentType=WindowsRuntime]\n"
+        "$x=[Windows.Data.Xml.Dom.XmlDocument]::new()\n"
+        f"$x.LoadXml('{_psq_xml(toast_xml)}')\n"
         "$toast=[Windows.UI.Notifications.ToastNotification]::new($x)\n"
         f"[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{_AUMID}').Show($toast)\n"
     )
@@ -99,12 +154,19 @@ def toast_download_done(title: str, ok: bool, got=None, lang: str = "en") -> Non
 
 
 def toast_new_release(artist: str, release: str, compilation: bool = False,
-                      queued: bool = False, lang: str = "en") -> None:
+                      queued: bool = False, lang: str = "en",
+                      cover: str = "", year: str = "", label: str = "",
+                      service: str = "") -> None:
     """Toast for a watchlist hit. This is the whole point of the watchlist when
     the window is closed: the in-app toast and the WS broadcast only reach a page
     that is currently open, so without this a release found at 4am is discovered
-    whenever the user next happens to look."""
+    whenever the user next happens to look.
+
+    Обложка и подробности не украшение: по одному названию не понять, тот ли это
+    релиз и откуда он — а уведомление часто единственное, что владелец увидит.
+    """
     head = _tt(lang, "rel_comp" if compilation else "rel_new")
     body = _tt(lang, "rel_queued" if queued else "rel_body",
                artist=artist or "?", release=release or "")
-    _ps_toast(head, body)
+    sub = " · ".join(x for x in (str(year or "")[:4], label, service) if x)
+    _ps_toast(head, body, sub=sub, image=_cover_file(cover))

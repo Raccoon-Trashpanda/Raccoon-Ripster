@@ -600,16 +600,28 @@ def next_check_delay(cfg: dict | None = None, base: float = 6 * 3600) -> float:
     return max(60.0, min(base, seconds_to_nz_friday()))
 
 
-def _notify_release(artist: str, release: str, compilation: bool, queued: bool) -> None:
+def _notify_release(artist: str, release: str, compilation: bool, queued: bool,
+                    rel: dict | None = None) -> None:
     """Native desktop toast for a watchlist hit. Best-effort and never fatal —
-    a notification failing must not abort the check that found the release."""
+    a notification failing must not abort the check that found the release.
+
+    `rel` — сама запись релиза: из неё берём обложку, год, лейбл и сервис. Без
+    них уведомление было голой строкой «артист — название», по которой не
+    понять ни что это за релиз, ни откуда его брать.
+    """
     cfg = _s.get("config") or {}
     if cfg.get("notify-on-release", True) is False:
         return
+    r = rel or {}
     try:
         from ripster import notify as _notify
-        _notify.toast_new_release(artist, release, compilation=compilation,
-                                  queued=queued, lang=cfg.get("language", "en"))
+        _notify.toast_new_release(
+            artist, release, compilation=compilation, queued=queued,
+            lang=cfg.get("language", "en"),
+            cover=str(r.get("cover") or r.get("artwork") or r.get("artworkUrl") or ""),
+            year=str(r.get("date") or r.get("year") or ""),
+            label=str(r.get("label") or ""),
+            service=str(r.get("service") or ""))
     except Exception as e:
         print(f"[watchlist] toast failed: {e}", flush=True)
 
@@ -662,7 +674,7 @@ async def _check_soundcloud_targets(items: list, broadcast, save, cfg, queue, sn
                              "url": track_url})
             _notify_release(entry.get("name") or permalink,
                             latest.get("title", ""), False,
-                            bool(entry.get("auto_download")))
+                            bool(entry.get("auto_download")), latest)
             if entry.get("auto_download"):
                 task = _make_task(track_url, entry.get("quality", ""), cfg,
                                   "watchlist")
@@ -735,7 +747,7 @@ async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> 
                                  "release": title, "label": name,
                                  "url": rel.get("url", "")})
                 _notify_release(f"{name} · {rel.get('artist','')}", title,
-                                False, bool(entry.get("auto_download")))
+                                False, bool(entry.get("auto_download")), rel)
                 if not entry.get("auto_download"):
                     continue
                 # The monitoring source is not necessarily the download target,
@@ -835,7 +847,7 @@ async def _check_watchlist():
                                      "url":      release_url})
                     _notify_release(entry["name"], release_name,
                                     bool(latest.get("compilation")),
-                                    bool(entry.get("auto_download")))
+                                    bool(entry.get("auto_download")), latest)
                     if entry.get("auto_download") and release_url:
                         task = _make_task(release_url, entry.get("quality", ""),
                                           cfg, "watchlist")
