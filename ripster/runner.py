@@ -2043,6 +2043,14 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                 task["_integrity_corrupt"] = _iv["corrupt"]
                                 await _broadcast(_i18n.log_event("console.integrity_corrupt", level="warn",
                                                                  task_id=tid, n=len(_iv["corrupt"])))
+                            # Обещанное качество ≠ полученное. Сервис отдаёт что
+                            # есть на конкретный трек, а папка называется по
+                            # ЗАПРОШЕННОМУ качеству и потому врёт сама: 28.07.2026
+                            # при запросе FLAC приехал AAC 268 kbps в папку «FLAC».
+                            # Спрашиваем сам файл и сверяем с тем, что движок
+                            # ОБЕЩАЛ для этого качества — Atmos, например, тоже не
+                            # lossless по кодеку (EC-3), и ругаться на него нельзя.
+                            await _warn_quality_mismatch(task, audio, tid)
                         except Exception as _iv_e:
                             print(f"[integrity] verify skipped: {_iv_e}", flush=True)
                 else:
@@ -2460,6 +2468,47 @@ def _sanity_route(task: dict, svc: str, engine: str, url: str) -> tuple[str, str
     return svc, engine
 
 
+
+async def _warn_quality_mismatch(task: dict, audio: list, tid: str) -> None:
+    """Сказать вслух, если файл оказался не того качества, что просили.
+
+    Это не придирка: папки называются по ЗАПРОШЕННОМУ качеству, поэтому молчание
+    означает, что человек считает свою фонотеку lossless, а там lossy. Сверяем с
+    обещанием САМОГО движка (поле badge у качества), иначе Atmos — законный EC-3,
+    то есть по кодеку не lossless — попадал бы в нарушители.
+    """
+    try:
+        from ripster.integrity_verify import probe_codec
+        from ripster.engines import get_engine
+        qid = str(task.get("quality") or "")
+        eng = str(task.get("engine") or "")
+        if not qid or not eng or not audio:
+            return
+        try:
+            quals = get_engine(eng).qualities() or []
+        except Exception:
+            return
+        badge = next((str(q.get("badge") or "").upper()
+                      for q in quals if q.get("id") == qid), "")
+        if badge not in ("LOSSLESS", "HI-RES"):
+            return                       # lossy/spatial просили осознанно
+        info = await asyncio.to_thread(probe_codec, audio[0])
+        if not info or info.get("lossless"):
+            return
+        got = info.get("codec", "?")
+        kbps = ""
+        try:
+            kbps = f" {int(info['bit_rate']) // 1000} kbps" if info.get("bit_rate", "").isdigit() else ""
+        except Exception:
+            kbps = ""
+        task["quality_actual_codec"] = got
+        msg = (f"⚠ Просили {qid} ({badge}), а в файле {got}{kbps} — сервис отдал "
+               f"lossy. Файл сохранён, но папка называется по запрошенному качеству.")
+        task.setdefault("log", []).append(msg)
+        await _broadcast({"type": "log", "level": "warn", "task_id": tid, "text": msg})
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[quality-check] пропущено: {e}", flush=True)
+
 async def run_task(task: dict) -> None:
     """Dispatch a single task to the correct engine runner."""
     svc    = task.get("service", "apple")
@@ -2471,7 +2520,7 @@ async def run_task(task: dict) -> None:
     _advance_task(task, TaskStatus.RUNNING)
     task["progress"]    = 0
     task["_start_time"] = time.time()
-    svc = task.get("service", "apple")
+    svc = task.get("service", svc)
     from ripster.service_config import get_save_path
     task["_base_save_path"] = get_save_path(_config, svc, qid or "")
     await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})

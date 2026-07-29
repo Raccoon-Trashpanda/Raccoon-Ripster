@@ -1,5 +1,5 @@
 // ======================================================================
-// Dependency updates (owner Settings)
+// Dependency updates UI
 // Extracted from app.js (mechanical split — same global functions, no behaviour
 // change). Loaded AFTER app.js in index.html, so it sees S/api/toast/etc.
 // ======================================================================
@@ -11,32 +11,39 @@ async function loadDeps() {
   try {
     const r = await api('GET', '/api/admin/deps');
     const pkgs = r.packages || [];
-    if (!pkgs.length) { box.innerHTML = '✅ Всё актуально — устаревших пакетов нет.'; return; }
+    // Про остальные зависимости говорим ЧЕСТНО и отдельно: они внутри есть, но
+    // обновлять их отсюда нельзя — у них взаимоисключающие версии, и апгрейд
+    // ломает загрузки целиком. Раньше они лежали в общем списке с рабочей
+    // кнопкой, то есть до поломки был один клик.
+    const note = r.locked_count
+      ? `<div style="margin-top:10px;padding:8px 10px;background:rgba(255,184,77,.08);border:1px solid rgba(255,184,77,.25);border-radius:8px;font-size:11px;color:var(--muted);line-height:1.6">
+           🔒 ${esc(t('dep.locked_head'))} — ${r.locked_count}<br>${esc(r.locked_note || '')}
+           <div style="margin-top:5px;opacity:.75;font-family:var(--mono);font-size:10px;word-break:break-word">${esc((r.locked_names || []).join(', '))}</div>
+         </div>`
+      : '';
+    if (!pkgs.length) { box.innerHTML = '✅ ' + esc(t('dep.all_fresh')) + note; return; }
     box.innerHTML = pkgs.map(p => {
-      const pin = p.pinned ? ' <span title="закреплён — обновление ломает сборку">📌</span>' : '';
-      const col = p.pinned ? '#ffb84d' : 'var(--text)';
       return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #ffffff11">
-        <span style="color:${col};min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}${pin}
+        <span style="color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}
           <span style="color:var(--muted)">${esc(p.version)} → ${esc(p.latest)}</span></span>
-        <button onclick="updateDep('${esc(p.name)}',${p.pinned?'true':'false'})"
+        <button onclick="updateDep('${esc(p.name)}')"
           style="flex-shrink:0;padding:4px 10px;border-radius:7px;border:1px solid var(--red);background:transparent;color:var(--text);cursor:pointer;font-size:12px">⬆</button>
       </div>`;
-    }).join('');
+    }).join('') + note;
   } catch (e) { box.innerHTML = '⛔ ' + esc(e.message || e); }
 }
-async function updateDep(pkg, pinned) {
-  if (pinned && !confirm(pkg + ' закреплён — обновление может сломать сборку (Qobuz/AMD/Widevine). Точно обновить?')) return;
+async function updateDep(pkg) {
   const box = document.getElementById('deps-list');
   if (box) box.innerHTML = '⏳ Обновляю ' + esc(pkg) + '… (до 10 мин)';
   try {
-    const r = await api('POST', '/api/admin/deps/update', { package: pkg, force: !!pinned });
+    const r = await api('POST', '/api/admin/deps/update', { package: pkg });
     if (r.pinned) { alert(r.msg); loadDeps(); return; }
     alert((r.ok ? '✅ ' : '⚠️ ') + pkg + ' — ' + (r.ok ? 'обновлён. Нужен рестарт app.py.' : 'не удалось, см. консоль.'));
     loadDeps();
   } catch (e) { alert('⛔ ' + (e.message || e)); loadDeps(); }
 }
 async function updateAllDeps() {
-  if (!confirm('Обновить ВСЕ незакреплённые пакеты? Закреплённые (📌) не трогаются. Может занять время; после — рестарт app.py.')) return;
+  if (!confirm('Обновить все пакеты из списка? Те, что заблокированы, не трогаются. Может занять время; после — рестарт app.py.')) return;
   const box = document.getElementById('deps-list');
   if (box) box.innerHTML = '⏳ Обновляю все незакреплённые… (это долго)';
   try {

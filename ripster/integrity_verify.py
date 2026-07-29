@@ -36,6 +36,37 @@ def _decode_check(path: Path) -> str:
     return result.stderr.decode(errors="replace").strip()[-300:]
 
 
+_LOSSLESS_CODECS = {"flac", "alac", "ape", "wavpack", "pcm_s16le", "pcm_s24le", "tta"}
+
+
+def probe_codec(path: Path) -> dict:
+    """Каким кодеком файл ЗАКОДИРОВАН на самом деле.
+
+    Обещанное качество ничего не гарантирует: сервис отдаёт что есть на
+    конкретный трек, а папка называется по ЗАПРОШЕННОМУ качеству и потому врёт
+    сама по себе. 28.07.2026 так и вышло — при запросе FLAC приехал AAC 268
+    kbps и лёг в папку «FLAC». Спрашиваем сам файл.
+    """
+    cmd = ["ffprobe", "-v", "error", "-select_streams", "a:0",
+           "-show_entries", "stream=codec_name,bit_rate,sample_rate,bits_per_raw_sample",
+           "-of", "default=nw=1", str(path)]
+    try:
+        r = subprocess.run(cmd, timeout=30, capture_output=True, creationflags=_CNW)
+    except Exception:
+        return {}
+    out = {}
+    for line in (r.stdout or b"").decode(errors="replace").splitlines():
+        if "=" in line:
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip()
+    codec = (out.get("codec_name") or "").lower()
+    if not codec:
+        return {}
+    return {"codec": codec, "lossless": codec in _LOSSLESS_CODECS,
+            "bit_rate": out.get("bit_rate", ""),
+            "sample_rate": out.get("sample_rate", "")}
+
+
 def _alacfix_binary(config: dict) -> list:
     """Same binary-vs-`go run` resolution as ripster/engines/zhaarey.py's
     build_cmd — prefer the compiled exe (fast), fall back to `go run` in dev."""
