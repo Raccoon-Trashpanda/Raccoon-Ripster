@@ -16,6 +16,84 @@ from fastapi import APIRouter, HTTPException, Query
 from ripster import compilations as _comps
 from ripster import watchlist_suggest as _wls
 
+
+def _engine_quality_ids(engine: str) -> set:
+    """Какие качества умеет движок. Пустое множество = выяснить не удалось.
+
+    Реестр движков наполняется автодискавери при старте приложения, поэтому в
+    отрыве от него (тест, ранний импорт) он пуст — и проверка молча ничего не
+    проверяла бы. Наполняем сами, если пусто.
+    """
+    try:
+        from ripster.engines.registry import REGISTRY, get_engine
+        if not REGISTRY:
+            import pkgutil
+            import ripster.engines as _pkg
+            for _m in pkgutil.iter_modules(_pkg.__path__):
+                if _m.name in ("base", "registry", "__init__", "streamrip_utils"):
+                    continue
+                try:
+                    __import__(f"ripster.engines.{_m.name}")
+                except Exception:
+                    pass
+        # get_engine отдаёт ГОТОВЫЙ объект движка, а не класс — вызывать его
+        # как конструктор нельзя (TypeError уходил в except, и проверка молча
+        # ничего не проверяла).
+        return {x.get("id") for x in (get_engine(engine).qualities() or [])}
+    except Exception:
+        return set()
+
+
+def _make_task(url: str, entry_quality: str, cfg: dict, source: str, idx: int = 0) -> dict:
+    """Собрать задачу очереди из ссылки — с сервисом, движком и его качеством.
+
+    Вишлист ставил задачи, указывая только ссылку и качество, а качество брал из
+    ГЛОБАЛЬНОГО умолчания (оно эпловское). В итоге 29.07.2026 в очереди повисли
+    четыре Deezer-альбома с качеством `alac-hires`, без `service` и без `engine`.
+    Без них раннер подставляет apple+zhaarey по умолчанию, то есть Deezer-ссылка
+    ушла бы в Apple-загрузчик, а метаданные не резолвились вовсе — карточки так и
+    висели «Fetching metadata…».
+
+    Сервис берём из самой ссылки, движок — из сервиса, качество — качество этого
+    сервиса, если запрошенное ему не подходит.
+    """
+    from ripster.service_layer import (normalize_url, detect_service,
+                                       engine_for_svc, default_quality)
+    url = normalize_url(url)
+    svc = detect_service(url)
+    engine = engine_for_svc(svc)
+    q = (entry_quality or "").strip()
+    valid = _engine_quality_ids(engine)
+    if valid and q not in valid:      # качество из другого сервиса — не годится
+        q = ""
+    if not q:
+        q = default_quality(svc) or cfg.get("quality", "alac")
+    return {
+        "id":       f"wl_{int(datetime.now().timestamp()*1000)}" + (f"_{idx}" if idx else ""),
+        "url":      url,
+        "service":  svc,
+        "engine":   engine,
+        "quality":  q,
+        "status":   "queued", "progress": 0, "log": [],
+        "source":   source,
+    }
+
+
+def _enrich_soon(task: dict) -> None:
+    """Дозаполнить карточку названием, артистом и обложкой — в фоне.
+
+    Задачи вишлиста попадали в очередь напрямую, поэтому в интерфейсе висели
+    «album · 1027914702 — Fetching metadata…» без обложки, пока не скачаются.
+    """
+    fn = _s.get("enrich_meta")
+    if not fn:
+        return
+    try:
+        asyncio.create_task(fn(task))
+    except Exception:
+        pass
+
+
 router = APIRouter()
 _s: dict = {}  # items, save, broadcast, config, queue, queue_snapshot, detect_service
 
@@ -30,6 +108,10 @@ def install(app, ctx) -> None:
         "queue_snapshot": ctx.queue_snapshot,
         "detect_service": ctx.detect_service,
         "base_dir":       ctx.base_dir,
+        # Без него карточки задач вишлиста показывали голый id и не имели
+        # обложки: обогащение метаданными вызывается в маршруте добавления, а
+        # вишлист кладёт задачу в очередь напрямую, мимо него.
+        "enrich_meta":    getattr(ctx, "enrich_meta", None),
     })
     app.include_router(router)
 
@@ -278,13 +360,10 @@ async def api_watchlist_download_latest(item_id: str, body: dict | None = None):
         if not url:
             skipped.append(rel.get("title", "?"))
             continue
-        queue.append({
-            "id":       f"wl_{int(datetime.now().timestamp()*1000)}_{len(queued)}",
-            "url":      url,
-            "quality":  entry.get("quality", cfg.get("quality", "alac")),
-            "status":   "queued", "progress": 0, "log": [],
-            "source":   "watchlist-label",
-        })
+        _t = _make_task(url, entry.get("quality", ""), cfg,
+                        "watchlist-label", idx=len(queued) or 1)
+        queue.append(_t)
+        _enrich_soon(_t)
         queued.append(rel.get("title", "?"))
     if queued:
         await _s["broadcast"]({"type": "queue_update", "queue": snapshot()})
@@ -585,15 +664,9 @@ async def _check_soundcloud_targets(items: list, broadcast, save, cfg, queue, sn
                             latest.get("title", ""), False,
                             bool(entry.get("auto_download")))
             if entry.get("auto_download"):
-                task = {
-                    "id":       f"wl_{int(datetime.now().timestamp()*1000)}",
-                    "url":      track_url,
-                    "quality":  entry.get("quality", cfg.get("quality", "alac")),
-                    "status":   "queued",
-                    "progress": 0,
-                    "log":      [],
-                    "source":   "watchlist",
-                }
+                task = _make_task(track_url, entry.get("quality", ""), cfg,
+                                  "watchlist")
+                _enrich_soon(task)
                 queue.append(task)
                 await broadcast({"type": "queue_update", "queue": snapshot()})
     return new_found
@@ -683,13 +756,10 @@ async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> 
                 if not url:
                     print(f"[watchlist] «{title}» не найден в {svc} — пропускаю", flush=True)
                     continue
-                queue.append({
-                    "id":       f"wl_{int(datetime.now().timestamp()*1000)}",
-                    "url":      url,
-                    "quality":  entry.get("quality", cfg.get("quality", "alac")),
-                    "status":   "queued", "progress": 0, "log": [],
-                    "source":   "watchlist-label",
-                })
+                _t = _make_task(url, entry.get("quality", ""), cfg,
+                                "watchlist-label")
+                queue.append(_t)
+                _enrich_soon(_t)
                 await broadcast({"type": "queue_update", "queue": snapshot()})
         except Exception as e:
             print(f"[watchlist] label {name}: {e}", flush=True)
@@ -767,15 +837,9 @@ async def _check_watchlist():
                                     bool(latest.get("compilation")),
                                     bool(entry.get("auto_download")))
                     if entry.get("auto_download") and release_url:
-                        task = {
-                            "id":       f"wl_{int(datetime.now().timestamp()*1000)}",
-                            "url":      release_url,
-                            "quality":  entry.get("quality", cfg.get("quality", "alac")),
-                            "status":   "queued",
-                            "progress": 0,
-                            "log":      [],
-                            "source":   "watchlist",
-                        }
+                        task = _make_task(release_url, entry.get("quality", ""),
+                                          cfg, "watchlist")
+                        _enrich_soon(task)
                         queue.append(task)
                         await broadcast({"type": "queue_update", "queue": snapshot()})
             except Exception as e:

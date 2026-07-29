@@ -2520,8 +2520,22 @@ async def run_task(task: dict) -> None:
                 # Local-only: do NOT salvage via the public wrapper. Surface the
                 # local-wrapper DRM/CKC failure as a real error so the owner can
                 # re-login the premium wrapper instead of silently going public.
-                await _broadcast(_i18n.log_event("console.wrapper_local_drm_fail", level="error",
-                                                 task_id=task.get("id", "")))
+                # НО «нет ключа» ≠ «сессия умерла»: zhaarey уже различает эти два
+                # случая (engines/zhaarey.py:145). 28.07.2026 эта строка шла сразу
+                # ПОСЛЕ его вывода «сессия ЖИВА, перелогин НЕ поможет» и советовала
+                # ровно перелогин — противоречие, за которым стоит реальный вред:
+                # лишние логины жгут device-lease и загоняют аккаунт в throttle.
+                # Спрашиваем то же состояние и советуем то, что действительно чинит.
+                try:
+                    from ripster.apple_router import local_wrapper_session_alive
+                    # to_thread: это HTTP-запрос с таймаутом 4 с, а мы в event loop.
+                    _sess_alive = await asyncio.to_thread(local_wrapper_session_alive)
+                except Exception:
+                    _sess_alive = False
+                await _broadcast(_i18n.log_event(
+                    "console.wrapper_local_region_fail" if _sess_alive
+                    else "console.wrapper_local_drm_fail",
+                    level="error", task_id=task.get("id", "")))
                 task["log"].append("─── local-only: AMD-фолбэк подавлен ───")
                 _try_advance_task(task, TaskStatus.ERROR)
             else:

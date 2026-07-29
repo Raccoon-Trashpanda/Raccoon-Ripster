@@ -58,6 +58,7 @@ FALLBACK: dict[str, str] = {
     "console.salvaged_disk":    "⚠ Процесс прервался ({msg}), но на диске {n} файл(ов) — отдаю их",
     # ── wrapper / engine fallbacks ────────────────────────────────────────────
     "console.wrapper_local_drm_fail": "✗ Локальный wrapper не смог расшифровать (DRM/CKC). Публичный wrapper отключён (режим «local») — перелогинь премиум-wrapper или временно выбери «auto».",
+    "console.wrapper_local_region_fail": "✗ Ключ не выдан на ЭТОТ релиз, но сессия wrapper'а жива — прав в регионе аккаунта нет. Перелогин НЕ поможет: временно выбери «auto» (AMD держит несколько регионов) или возьми ссылку из другой витрины.",
     "console.drm_retry_amd":    "⚡ -1002: DRM — автоматически повторяю через AMD v2…",
     "console.amd_alac_fallback": "⚡ AMD: ALAC недоступен — автоматически пробую zhaarey {quality}…",
     "console.orpheus_retry":    "⟳ OrpheusDL: новые настройки — автоматический повтор…",
