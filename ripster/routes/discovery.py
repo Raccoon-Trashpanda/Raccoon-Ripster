@@ -1998,9 +1998,26 @@ async def isrc_upgrade(body: dict):
 
 # ── Матрица доступности релиза ────────────────────────────────────────────────
 
+async def _upc_from_url(url: str) -> str:
+    """Штрихкод релиза по его ссылке — чтобы карточке хватало того, что у неё есть."""
+    import re
+    u = (url or "").lower()
+    svc = ("deezer" if "deezer.com" in u else
+           "spotify" if "spotify.com" in u else "")
+    if not svc:
+        return ""
+    m = re.search(r"/album/([A-Za-z0-9]+)", url or "")
+    if not m:
+        return ""
+    try:
+        return await _seed_upc({"id": m.group(1), "service": svc})
+    except Exception:
+        return ""
+
+
 @router.get("/api/availability")
 async def api_availability(upc: str = "", isrc: str = "", title: str = "",
-                           artist: str = "", force: bool = False):
+                           artist: str = "", url: str = "", force: bool = False):
     """Где релиз можно скачать ПРЯМО СЕЙЧАС, а не где он «вышел».
 
     Отвечает по каждому сервису отдельно и с причиной: витрина ещё не
@@ -2008,8 +2025,10 @@ async def api_availability(upc: str = "", isrc: str = "", title: str = "",
     и лечатся они по-разному.
     """
     from ripster import availability as _av
+    if not upc and url:
+        upc = await _upc_from_url(url)
     if not (upc or isrc or title):
-        return {"ok": False, "error": "нужен upc, isrc или название"}
+        return {"ok": False, "error": "нужен upc, isrc, ссылка или название"}
     m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist, force=force)
     return {"ok": True, **m,
             "recommended": _av.pick_source(m["services"]),

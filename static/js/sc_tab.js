@@ -527,6 +527,11 @@ function renderReleaseCard(rel) {
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${dt}${rel.tracks ? ' · ' + rel.tracks + ' ' + t('p.trk_abbr') : ''}</div>
       ${qualSelect}
       ${lyricsToggle}
+      <div class="rel-avail" style="margin-top:6px;font-size:10px;line-height:1.5">
+        <button onclick="event.stopPropagation();relCheckAvail(this,'${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}')"
+          style="padding:3px 7px;background:transparent;border:1px dashed var(--border);border-radius:6px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font)"
+          title="${t('rl.avail_hint')}">${t('rl.avail_check')}</button>
+      </div>
       <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
         <button onclick="downloadRelease(this,'${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}')"
           style="flex:1 1 100%;padding:5px 0;background:rgba(192,132,160,.12);border:1px solid rgba(192,132,160,.2);border-radius:7px;font-size:10px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--font)">${t('btn.download')}</button>
@@ -686,3 +691,52 @@ async function playRelease(service, url, title, artist, cover) {
   }
 }
 
+
+/* Где релиз реально можно взять прямо сейчас.
+ *
+ * По нажатию, а не сразу: в сетке до 120 карточек, и опрос витрин за все — это
+ * сотни запросов ради данных, на которые никто не смотрит. Мировая дата релиза
+ * ничего не говорит о том, откуда файл отдаётся: витрины наполняются вразнобой,
+ * а аккаунты у нас в разных странах.
+ */
+async function relCheckAvail(btn, url, title, artist) {
+  const box = btn.parentNode;
+  btn.disabled = true;
+  btn.textContent = '⏳ ' + t('rl.avail_checking');
+  try {
+    const q = new URLSearchParams({url: url || '', title: title || '', artist: artist || ''});
+    const r = await api('GET', '/api/availability?' + q.toString());
+    if (!r || !r.ok) {
+      box.innerHTML = '<span style="color:var(--orange)">' + esc((r && r.error) || t('rl.avail_fail')) + '</span>';
+      return;
+    }
+    const svcs = r.services || {};
+    const ready = Object.keys(svcs).filter(function(s){ return svcs[s] && svcs[s].available; });
+    if (!ready.length) {
+      box.innerHTML = '<span style="color:var(--muted)">' + esc(r.summary || '') + '</span>';
+      return;
+    }
+    // Кнопка на каждый сервис, где релиз ЕСТЬ — качать из недоступного нельзя.
+    // Собираем через DOM, а не склейкой строк: адрес релиза попадал бы внутрь
+    // атрибута onclick, и одна кавычка в нём ломала бы всю карточку.
+    box.innerHTML = '';
+    const head = document.createElement('div');
+    head.style.cssText = 'color:var(--muted);margin-bottom:2px';
+    head.textContent = r.summary || '';
+    box.appendChild(head);
+    ready.forEach(function(s){
+      const b = document.createElement('button');
+      b.textContent = s;
+      b.style.cssText = 'padding:3px 7px;margin:2px 3px 0 0;background:rgba(62,207,170,.12);'
+                      + 'border:1px solid rgba(62,207,170,.3);border-radius:6px;font-size:10px;'
+                      + 'color:var(--green);cursor:pointer;font-family:var(--font)';
+      b.onclick = function(ev){
+        ev.stopPropagation();
+        downloadRelease(b, s, String(svcs[s].url || ''), title, artist);
+      };
+      box.appendChild(b);
+    });
+  } catch (e) {
+    box.innerHTML = '<span style="color:var(--orange)">' + esc(t('rl.avail_fail')) + '</span>';
+  }
+}
