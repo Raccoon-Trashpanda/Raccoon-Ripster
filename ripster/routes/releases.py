@@ -328,3 +328,131 @@ async def tidal_releases(days: int = 30):
 
     except Exception as e:
         return {"ok": False, "error": str(e), "releases": []}
+
+
+# ── Deezer ────────────────────────────────────────────────────────────────────
+# Последний источник, которого не хватало радару: Spotify, Qobuz, Tidal, Apple,
+# BBC и SoundCloud уже были. ARL — это полноценная сессия аккаунта, и любимые
+# артисты читаются из неё напрямую, без отдельного OAuth.
+
+async def _deezer_user_id(arl: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, cookies={"arl": arl}) as c:
+            r = await c.post("https://www.deezer.com/ajax/gw-light.php",
+                             params={"method": "deezer.getUserData",
+                                     "api_version": "1.0", "api_token": ""})
+        return str((((r.json() or {}).get("results") or {}).get("USER") or {}).get("USER_ID") or "")
+    except Exception:
+        return ""
+
+
+async def _deezer_fetch_artist(sem: asyncio.Semaphore, c: httpx.AsyncClient,
+                               artist: dict, cutoff: str) -> list[dict]:
+    async with sem:
+        try:
+            aid = str(artist.get("id") or "")
+            if not aid:
+                return []
+            r = await c.get(f"https://api.deezer.com/artist/{aid}/albums",
+                            params={"limit": 50})
+            out = []
+            for alb in (r.json().get("data") or []):
+                date = str(alb.get("release_date") or "")[:10]
+                if not date or date < cutoff:
+                    continue
+                alb_id = str(alb.get("id") or "")
+                if not alb_id:
+                    continue
+                rt = (alb.get("record_type") or "album").lower()
+                out.append({
+                    "id":      f"dz{alb_id}",
+                    "title":   alb.get("title", ""),
+                    "artist":  artist.get("name", ""),
+                    "type":    {"album": "album", "ep": "ep", "single": "single",
+                                "compile": "compilation"}.get(rt, rt),
+                    "date":    date, "year": date[:4],
+                    "tracks":  alb.get("nb_tracks"),
+                    "label":   "",
+                    "cover":   alb.get("cover_medium") or alb.get("cover") or "",
+                    "url":     alb.get("link") or f"https://www.deezer.com/album/{alb_id}",
+                    "artist_id": aid,
+                    "service": "deezer",
+                })
+            return out
+        except Exception:
+            return []
+
+
+@router.get("/api/releases/deezer")
+async def deezer_releases(days: int = 30):
+    arl = (_config.get("deezer-arl") or "").strip() if _config else ""
+    if not arl:
+        return {"ok": False, "error": "Deezer ARL не настроен (Settings → Deezer)", "releases": []}
+
+    uid = await _deezer_user_id(arl)
+    if not uid:
+        return {"ok": False, "error": "Deezer: ARL недействителен или истёк — обнови его в Settings.",
+                "releases": []}
+
+    cutoff = _cutoff(days)
+    try:
+        artists: list[dict] = []
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
+            index = 0
+            while True:
+                r = await c.get(f"https://api.deezer.com/user/{uid}/artists",
+                                params={"limit": 100, "index": index})
+                j = r.json() or {}
+                if j.get("error"):
+                    return {"ok": False,
+                            "error": f"Deezer API: {str(j.get('error'))[:120]}", "releases": []}
+                items = j.get("data") or []
+                artists.extend(items)
+                if len(items) < 100 or not j.get("next"):
+                    break
+                index += 100
+
+        if not artists:
+            return {"ok": True, "releases": [], "artists_checked": 0}
+
+        total = len(artists)
+        if _broadcast:
+            await _broadcast({"type": "releases_scan_start", "phase": "albums",
+                              "total": total, "service": "deezer"})
+
+        completed = [0]
+        found_so_far = [0]
+        step = max(1, total // 20)
+
+        async with httpx.AsyncClient(timeout=_TIMEOUT,
+                                     limits=httpx.Limits(max_connections=20)) as c:
+            sem = asyncio.Semaphore(_CONCURRENCY)
+
+            async def _fetch_one(a: dict) -> list[dict]:
+                res = await _deezer_fetch_artist(sem, c, a, cutoff)
+                completed[0] += 1
+                found_so_far[0] += len(res)
+                if _broadcast and (completed[0] % step == 0 or completed[0] == total):
+                    await _broadcast({"type": "releases_scan_progress",
+                                      "current": completed[0], "total": total,
+                                      "artist": a.get("name", "?"),
+                                      "found": found_so_far[0], "service": "deezer"})
+                return res
+
+            batches = await asyncio.gather(*[_fetch_one(a) for a in artists])
+
+        releases: list[dict] = []
+        seen: set[str] = set()
+        for batch in batches:
+            for rel in batch:
+                if rel["id"] not in seen:
+                    seen.add(rel["id"])
+                    releases.append(rel)
+        releases.sort(key=lambda x: x["date"], reverse=True)
+
+        if _broadcast:
+            await _broadcast({"type": "releases_scan_done", "artists_checked": total,
+                              "releases_count": len(releases), "service": "deezer"})
+        return {"ok": True, "releases": releases, "artists_checked": total}
+    except Exception as e:
+        return {"ok": False, "error": str(e), "releases": []}

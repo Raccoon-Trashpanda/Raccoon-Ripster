@@ -2038,7 +2038,7 @@ async function loadReleases(force = false) {
   );
   // BBC shows / SoundCloud channels / Apple artists — same feed shape, so they
   // merge into the same list and obey the same filters and chips.
-  ['bbc','soundcloud','apple'].forEach(svc => {
+  ['bbc','soundcloud','apple','deezer'].forEach(svc => {
     if(!activeSvcs.includes(svc)) return;
     fetches.push(
       fetch(`/api/releases/${svc}?days=${days}${force ? '&force=1' : ''}`)

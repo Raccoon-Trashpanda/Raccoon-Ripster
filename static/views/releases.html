@@ -58,6 +58,15 @@
         </div>
 
         <div id="rel-status" style="font-size:12px;color:var(--muted);text-align:center;padding:16px 0;display:none" data-i18n="rel.loading">Загружаю релизы…</div>
+
+        <!-- Как это устроено — чтобы не выглядело магией. Дата релиза здесь
+             намеренно не главная: витрины наполняются вразнобой, а аккаунты
+             владельца живут в разных странах. -->
+        <div style="display:flex;gap:8px;align-items:flex-start;padding:9px 12px;margin-bottom:12px;background:rgba(62,207,170,.06);border:1px solid rgba(62,207,170,.18);border-radius:9px;font-size:11px;color:var(--muted);line-height:1.6">
+          <span style="flex-shrink:0">🌍</span>
+          <span data-i18n="rl.how_it_works">Витрины наполняются каждая в своей часовой зоне и в своём темпе, а аккаунты у тебя в разных странах — поэтому радар не верит дате релиза, а сверяет запись по штрихкоду и ISRC и показывает, из какого сервиса её можно забрать прямо сейчас.</span>
+        </div>
+
         <div id="releases-grid"></div>
         <div id="rel-load-more" style="display:none;text-align:center;padding:16px 0">
           <button onclick="_relShowMore()" style="padding:8px 24px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer;font-family:var(--mono)">

@@ -452,6 +452,18 @@ _PINNED_PKGS = {
     "sqlalchemy", "numpy", "torch", "torchvision", "matplotlib",
     "pyqt6", "pyqt6-qt6", "pyqt6-sip", "pyside6", "pyside6_addons", "pyside6_essentials",
     "shiboken6", "psycopg2-binary", "psycopg2",
+    # Добавлено 29.07.2026 после прямого вопроса владельца «а точно ли всё
+    # остальное можно обновлять». Нет: список закреплённых вёлся руками, и в
+    # обновляемых спокойно лежало то, на чём всё держится.
+    "aiogram",        # на нём работает бот целиком
+    "websockets",     # uvicorn + протокол отладки в едином входе
+    "cryptography",   # цепочка DRM/расшифровки
+    "frida", "frida-tools",   # инструментарий добычи Widevine, версионно-капризный
+    "pillow",         # иконка в трее у собранного лаунчера
+    "pywin32",        # Win32 API: окна, мьютекс установщика
+    "lxml", "msgpack", "greenlet", "cffi",
+    "setuptools",     # ломает сборку колёс
+    "docker",         # управление контейнером Apple-враппера
     # Build / browser-automation — keep stable (launcher build + selenium stack).
     "pyinstaller", "pyinstaller-hooks-contrib", "selenium", "webdriver-manager", "seleniumbase",
 }
@@ -499,6 +511,14 @@ async def deps_list(request: Request):
                     "убрано: у них взаимоисключающие требования к версиям, и "
                     "апгрейд ломает загрузки целиком — decrypt, теги, разбор "
                     "потоков. Обновлять их можно только осознанно и вручную."),
+                # Честная подпись к оставшимся. Список закреплённых ведётся
+                # руками, поэтому «не в нём» означает лишь «не попал в перечень
+                # заведомо ломких», а вовсе не «проверено, что безопасно».
+                # Говорить иначе — обещать надёжность, которой нет.
+                "safe_note": (
+                    "Это те, что не входят в перечень заведомо ломких. Проверки, "
+                    "что каждый из них обновится без последствий, нет — "
+                    "обновляй по одному и после каждого смотри, что всё живо."),
                 "pinned": sorted(_PINNED_PKGS)}
     except Exception as e:
         raise HTTPException(500, f"pip list failed: {e}")

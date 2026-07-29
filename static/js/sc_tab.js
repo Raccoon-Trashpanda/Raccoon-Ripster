@@ -324,6 +324,8 @@ function _relActiveSvcs() {
     if(svc === 'spotify') return true; // Spotify auth handled separately
     if(svc === 'qobuz')   return hasQobuz;
     if(svc === 'tidal')   return hasTidal;
+    // Deezer читает подписки по ARL — той же сессии, что уже качает.
+    if(svc === 'deezer')  return !!(c['deezer-arl'] || '').trim();
     // BBC shows / SC channels / Apple artists need no service token of their
     // own — they follow the watchlist (and the known BBC show list), so they
     // are available whenever the user has switched them on.
@@ -344,7 +346,8 @@ function _renderRelActiveSvcs() {
   if(!cont) return;
   const svcs = _relActiveSvcs();
   const colors = {spotify:'#1db954',qobuz:'#1870f5',tidal:'#00d4b3',
-                  bbc:'#ff4d4d',soundcloud:'#ff5500',apple:'#fc3c44'};
+                  bbc:'#ff4d4d',soundcloud:'#ff5500',apple:'#fc3c44',
+                  deezer:'#a238ff'};
   cont.innerHTML = svcs.map(svc =>
     `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;border:1px solid ${colors[svc]||'var(--border)'}33;color:${colors[svc]||'var(--muted)'};background:${colors[svc]||'transparent'}11">`+
     `<span style="width:5px;height:5px;border-radius:50%;background:${colors[svc]||'var(--muted)'}"></span>${svc.charAt(0).toUpperCase()+svc.slice(1)}</span>`
@@ -352,7 +355,7 @@ function _renderRelActiveSvcs() {
 }
 
 function saveRelSvcConfig() {
-  const ALL = ['spotify','qobuz','tidal','bbc','soundcloud','apple'];
+  const ALL = ['spotify','qobuz','tidal','bbc','soundcloud','apple','deezer'];
   const prev = new Set(((S.config || {})['releases-services'] || 'spotify')
     .split(',').map(x => x.trim()).filter(Boolean));
   // Only decide for the checkboxes that are actually ON SCREEN. A settings view
@@ -370,7 +373,7 @@ function saveRelSvcConfig() {
 function _syncReleasesSettingsTab() {
   const c   = S.config || {};
   const cfg = (c['releases-services'] || 'spotify').split(',').map(s=>s.trim());
-  ['spotify','qobuz','tidal','bbc','soundcloud','apple'].forEach(svc => {
+  ['spotify','qobuz','tidal','bbc','soundcloud','apple','deezer'].forEach(svc => {
     const cb = document.getElementById('rel-cfg-'+svc);
     if(cb) cb.checked = cfg.includes(svc);
   });
@@ -713,7 +716,7 @@ async function relCheckAvail(btn, url, title, artist) {
     const svcs = r.services || {};
     const ready = Object.keys(svcs).filter(function(s){ return svcs[s] && svcs[s].available; });
     if (!ready.length) {
-      box.innerHTML = '<span style="color:var(--muted)">' + esc(r.summary || '') + '</span>';
+      box.innerHTML = '<span style="color:var(--muted)">' + esc(_availSummary(svcs)) + '</span>';
       return;
     }
     // Кнопка на каждый сервис, где релиз ЕСТЬ — качать из недоступного нельзя.
@@ -722,7 +725,7 @@ async function relCheckAvail(btn, url, title, artist) {
     box.innerHTML = '';
     const head = document.createElement('div');
     head.style.cssText = 'color:var(--muted);margin-bottom:2px';
-    head.textContent = r.summary || '';
+    head.textContent = _availSummary(svcs);
     box.appendChild(head);
     ready.forEach(function(s){
       const b = document.createElement('button');
@@ -739,4 +742,29 @@ async function relCheckAvail(btn, url, title, artist) {
   } catch (e) {
     box.innerHTML = '<span style="color:var(--orange)">' + esc(t('rl.avail_fail')) + '</span>';
   }
+}
+
+/* Сводка доступности собирается ЗДЕСЬ, а не на сервере.
+ *
+ * Сервер отдаёт состояние по каждому сервису с МАШИННОЙ причиной, а человеческий
+ * текст строится на языке интерфейса. Первая версия присылала уже готовую
+ * русскую строку — и она лезла в английский интерфейс как есть.
+ */
+function _availSummary(svcs) {
+  const by = {ready: [], waiting: [], region: [], notoken: [], noid: []};
+  Object.keys(svcs || {}).forEach(function (s) {
+    const v = svcs[s] || {};
+    if (v.available) { by.ready.push(s); return; }
+    if (v.reason === 'region_locked')  { by.region.push(s);  return; }
+    if (v.reason === 'no_token')       { by.notoken.push(s); return; }
+    if (v.reason === 'no_identifier')  { by.noid.push(s);    return; }
+    by.waiting.push(s);
+  });
+  const parts = [];
+  if (by.ready.length)   parts.push('✅ ' + by.ready.join(', ')   + ' — ' + t('rl.av_ready'));
+  if (by.waiting.length) parts.push('⏳ ' + by.waiting.join(', ') + ' — ' + t('rl.av_waiting'));
+  if (by.region.length)  parts.push('🚫 ' + by.region.join(', ')  + ' — ' + t('rl.av_region'));
+  if (by.notoken.length) parts.push('🔑 ' + by.notoken.join(', ') + ' — ' + t('rl.av_notoken'));
+  if (by.noid.length)    parts.push('❔ ' + by.noid.join(', ')    + ' — ' + t('rl.av_noid'));
+  return parts.join(' · ') || t('rl.av_nowhere');
 }

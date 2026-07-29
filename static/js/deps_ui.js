@@ -21,6 +21,9 @@ async function loadDeps() {
            <div style="margin-top:5px;opacity:.75;font-family:var(--mono);font-size:10px;word-break:break-word">${esc((r.locked_names || []).join(', '))}</div>
          </div>`
       : '';
+    const safeNote = r.safe_note
+      ? `<div style="margin-bottom:8px;font-size:11px;color:var(--muted);line-height:1.6;opacity:.9">${esc(r.safe_note)}</div>`
+      : '';
     if (!pkgs.length) { box.innerHTML = '✅ ' + esc(t('dep.all_fresh')) + note; return; }
     box.innerHTML = pkgs.map(p => {
       return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #ffffff11">
@@ -29,7 +32,8 @@ async function loadDeps() {
         <button onclick="updateDep('${esc(p.name)}')"
           style="flex-shrink:0;padding:4px 10px;border-radius:7px;border:1px solid var(--red);background:transparent;color:var(--text);cursor:pointer;font-size:12px">⬆</button>
       </div>`;
-    }).join('') + note;
+    }).join('');
+    box.innerHTML = safeNote + box.innerHTML + note;
   } catch (e) { box.innerHTML = '⛔ ' + esc(e.message || e); }
 }
 async function updateDep(pkg) {
@@ -43,15 +47,11 @@ async function updateDep(pkg) {
   } catch (e) { alert('⛔ ' + (e.message || e)); loadDeps(); }
 }
 async function updateAllDeps() {
-  if (!confirm('Обновить все пакеты из списка? Те, что заблокированы, не трогаются. Может занять время; после — рестарт app.py.')) return;
-  const box = document.getElementById('deps-list');
-  if (box) box.innerHTML = '⏳ Обновляю все незакреплённые… (это долго)';
-  try {
-    const r = await api('POST', '/api/admin/deps/update', { package: 'all' });
-    const n = (r.updated || []).length;
-    alert((r.ok ? '✅ ' : '⚠️ ') + 'Обработано пакетов: ' + n + (r.msg ? ('\n' + r.msg) : '') + '\nНужен рестарт app.py.');
-    loadDeps();
-  } catch (e) { alert('⛔ ' + (e.message || e)); loadDeps(); }
+  // Массовое обновление убрано намеренно. Список — это «не признано ломким», а
+  // не «проверено, что безопасно»: перечень закреплённых ведётся руками и
+  // заведомо неполон. Обновлять пачкой то, о чём не думал, — самый быстрый
+  // способ получить нерабочую сборку, причём выяснится это не сразу.
+  alert(t('dep.no_bulk'));
 }
 
 async function saveSetting(key, value) {
