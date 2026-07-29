@@ -414,8 +414,14 @@ def check_watchlist():
     if not items:
         ok("Вишлист пуст — нечего проверять"); return
 
+    # Подписки на ЛЕЙБЛ сюда не относятся: у них artist_id не бывает вовсе —
+    # ключом служит название, и опрашиваются они своим путём. Без этого условия
+    # каждая подписка на лейбл считалась сломанной записью (29.07.2026: «This
+    # Never Happened»). Ложная краснота вредна ровно так же, как ложная зелень:
+    # и та и другая приучают не смотреть на проверку.
     broken = [x for x in items
-              if x.get("service", "apple") == "apple" and not x.get("artist_id")]
+              if x.get("kind") != "label"
+              and x.get("service", "apple") == "apple" and not x.get("artist_id")]
     seen, dups = set(), 0
     for x in items:
         sig = ((x.get("name") or "").strip().lower(), x.get("service", ""))
@@ -559,13 +565,34 @@ _ERR_BUCKETS = [
     ("apple-hires-wrapper", ("wm.wol.moe", "wrapper-manager", "decrypt stream", "деш",
                               "wrappermanagerexception", "no healthy and ready instances",
                               "caught internally by rip_song")),
-    ("apple-ckc",           ("invalid ckc", "decryptfragment")),
+    # Каждый Invalid-CKC инцидент печатает ДВЕ строки: диагноз движка («Invalid
+    # CKC») и следом совет раннера, где написано «DRM/CKC» — вторая не совпадала
+    # ни с одним ключом и падала в `other`. 29.07.2026 те же 4 инцидента лежали в
+    # двух бакетах сразу: apple-ckc×4 + 4 безымянных. Ловим обе формы.
+    ("apple-ckc",           ("invalid ckc", "decryptfragment", "drm/ckc")),
     ("apple-region",        ("resource not found", "40400", "territory")),
     ("apple-tags",          ("failed to write tags", "parseuint")),
+    # Лирика Spotify отдаёт 400 на треках, у которых её просто нет. Ключ
+    # "spotify" в бакете авторизации проглатывал это и рисовал spotify-auth×3 при
+    # полностью здоровой авторизации (29.07.2026: 2 строки лирики + 1 попытка
+    # blob'а 1/4, которая сама же и пересоздалась). Держать ПЕРЕД spotify-auth.
+    ("spotify-lyrics",      ("color-lyrics", "error fetching spotify lyrics")),
     ("spotify-auth",        ("orpheus_not_authed", "gettrack", "401", "spotify", "attribute 'download_type'")),
     ("qobuz-sub",           ("нет активной подписки", "ineligible")),
+    # Beatport отвечает 403 «You do not have permission to perform this action» на
+    # запросе ПОТОКА (логин при этом проходит, подписка активна) — это права на
+    # конкретный релиз, а не регион и не поломка. 29.07.2026 дало 21 безымянную
+    # строку в `other` от одного релиза, качавшегося по кругу.
+    ("beatport-entitlement", ("do not have permission to perform this action",
+                              "не хватает прав на скачивание")),
     ("beatport-region",     ("region locked", "territory restricted")),
     ("network",             ("getaddrinfo", "deadline exceeded", "connection", "timeout", "429")),
+    # Хвосты уже посчитанных провалов: «Exit code 0» печатается ПОСЛЕ причины
+    # (apple-album-unavailable), «=== Track N failed ===» — после 403 Beatport.
+    # Сами по себе они ничего не диагностируют, но раздували `other` вдвое.
+    # Держать ПОСЛЕДНИМИ: любой хвост, у которого есть своя причина, до сюда не
+    # дойдёт. Смысл `other` — «такого я ещё не видел», и он должен быть честным.
+    ("noise-tail",          ("exit code 0", "=== track ")),
 ]
 
 
