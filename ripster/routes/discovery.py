@@ -1948,3 +1948,23 @@ async def isrc_upgrade(body: dict):
     order   = ["deezer", "apple", "qobuz", "tidal", "yandex"]
     results = [candidates[s] for s in order if s in candidates]
     return {"results": results, "isrc": isrc}
+
+
+# ── Матрица доступности релиза ────────────────────────────────────────────────
+
+@router.get("/api/availability")
+async def api_availability(upc: str = "", isrc: str = "", title: str = "",
+                           artist: str = "", force: bool = False):
+    """Где релиз можно скачать ПРЯМО СЕЙЧАС, а не где он «вышел».
+
+    Отвечает по каждому сервису отдельно и с причиной: витрина ещё не
+    наполнилась / нет в регионе аккаунта / нет токена — это три разные истории,
+    и лечатся они по-разному.
+    """
+    from ripster import availability as _av
+    if not (upc or isrc or title):
+        return {"ok": False, "error": "нужен upc, isrc или название"}
+    m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist, force=force)
+    return {"ok": True, **m,
+            "recommended": _av.pick_source(m["services"]),
+            "summary": _av.summary_ru(m["services"])}

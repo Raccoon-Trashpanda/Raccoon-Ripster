@@ -929,6 +929,10 @@ _service_login_routes.install(app, _ctx)
 # configure() mints an anon instance id; ingest endpoint is PUBLIC (token-gated).
 config["_release_version"] = RELEASE_VERSION
 _telemetry.configure(config, save_config, BASE_DIR)
+# Матрица доступности релиза по сервисам: кэш на диске, чтобы не опрашивать
+# витрины заново после каждого перезапуска.
+from ripster import availability as _availability
+_availability.configure(config, BASE_DIR)
 _app_auth.add_public_path("/api/telemetry/ingest")
 # Полный архив логов, который пользователь отправляет кнопкой. Тоже публичный и
 # token-gated: он приходит с чужой машины, сессии у неё быть не может.
