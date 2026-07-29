@@ -123,7 +123,15 @@ async def _probe_one(service: str, upc: str, isrc: str) -> dict:
             hit = await _disc._find_by_upc(upc, service,
                                            str((_cfg or {}).get("storefront", "us")))
         if hit is None and isrc and service in ("qobuz", "tidal"):
-            hit = await _disc._find_by_isrc(isrc, service)
+            # Список ISRC (несколько первых треков) — одного мало: его может не
+            # быть в каталоге при том, что релиз там есть.
+            for one in (isrc.split(",") if isinstance(isrc, str) else list(isrc)):
+                one = one.strip()
+                if not one:
+                    continue
+                hit = await _disc._find_by_isrc(one, service)
+                if hit:
+                    break
         if hit is None and service in ("qobuz", "tidal") and not isrc:
             return {"available": False, "reason": REASON_NO_ID, "checked_ts": now}
         if hit:
@@ -154,7 +162,8 @@ async def _derive_isrc(service: str, hit: dict) -> str:
             aid = m.group(1) if m else ""
         if not aid:
             return ""
-        return await _disc._seed_isrc({"id": aid, "service": service}) or ""
+        vals = await _disc._seed_isrcs({"id": aid, "service": service}) or []
+        return ",".join(vals)
     except Exception:
         return ""
 

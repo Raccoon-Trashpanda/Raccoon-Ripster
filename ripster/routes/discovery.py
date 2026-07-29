@@ -301,43 +301,59 @@ async def _seed_upc(seed: dict) -> str:
     return ""
 
 
-async def _seed_isrc(seed: dict) -> str:
-    """ISRC of the release's first track.
+async def _seed_isrcs(seed: dict, limit: int = 4) -> list[str]:
+    """ISRC нескольких первых треков релиза.
 
-    Qobuz and Tidal have no barcode lookup, but they do have exact ISRC search
-    (already implemented in routes/isrc.py). A track ISRC identifies the
-    recording, so finding it gives us the right album with no guessing."""
+    Сверка по ОДНОМУ первому треку промахивалась: у Qobuz замер 27.07 дал 3 из 4
+    — единственного взятого ISRC не оказалось в каталоге, и весь релиз считался
+    отсутствующим, хотя остальные треки там были. Берём несколько и пробуем по
+    очереди: попадания достаточно одного.
+    """
     sid, svc = str(seed.get("id") or ""), seed.get("service", "")
     if not sid:
-        return ""
+        return []
+    out: list[str] = []
     try:
         if svc == "spotify":
             token = await _get_spotify_app_token()
             if not token:
-                return ""
+                return []
             h = {"Authorization": f"Bearer {token}"}
             async with _HTTP.ashared() as c:
                 r = await c.get(f"https://api.spotify.com/v1/albums/{sid}/tracks",
-                                params={"limit": 1}, headers=h)
-                items = (r.json().get("items") or [])
-                if not items:
-                    return ""
-                tid = items[0].get("id")
-                if not tid:
-                    return ""
-                r2 = await c.get(f"https://api.spotify.com/v1/tracks/{tid}", headers=h)
-            return str(((r2.json().get("external_ids") or {}).get("isrc") or "")).upper()
+                                params={"limit": limit}, headers=h)
+                ids = [it.get("id") for it in (r.json().get("items") or []) if it.get("id")]
+                if not ids:
+                    return []
+                r2 = await c.get("https://api.spotify.com/v1/tracks",
+                                 params={"ids": ",".join(ids[:limit])}, headers=h)
+                for t in (r2.json().get("tracks") or []):
+                    v = str(((t or {}).get("external_ids") or {}).get("isrc") or "").upper()
+                    if v and v not in out:
+                        out.append(v)
+            return out
         if svc == "deezer":
             async with _HTTP.ashared() as c:
                 r = await c.get(f"https://api.deezer.com/album/{sid}")
-                tracks = ((r.json().get("tracks") or {}).get("data") or [])
-                if not tracks:
-                    return ""
-                r2 = await c.get(f"https://api.deezer.com/track/{tracks[0]['id']}")
-            return str(r2.json().get("isrc") or "").upper()
+                tracks = ((r.json().get("tracks") or {}).get("data") or [])[:limit]
+                for tr in tracks:
+                    try:
+                        r2 = await c.get(f"https://api.deezer.com/track/{tr['id']}")
+                        v = str(r2.json().get("isrc") or "").upper()
+                        if v and v not in out:
+                            out.append(v)
+                    except Exception:
+                        continue
+            return out
     except Exception:
-        return ""
-    return ""
+        return out
+    return out
+
+
+async def _seed_isrc(seed: dict) -> str:
+    """ISRC первого трека — обратная совместимость для старых вызовов."""
+    v = await _seed_isrcs(seed, limit=1)
+    return v[0] if v else ""
 
 
 async def _find_by_isrc(isrc: str, service: str) -> dict | None:
@@ -456,16 +472,20 @@ async def _match_seeds_in_service(seeds: list[dict], service: str, label: str,
                     hit["date"] = hit.get("date") or s.get("date", "")
                     out.append(hit)
                     continue
-        # track ISRC → the album that contains it (Qobuz, Tidal)
+        # track ISRC → the album that contains it (Qobuz, Tidal).
+        # Пробуем несколько треков, а не только первый: его ISRC вполне может
+        # отсутствовать в каталоге, хотя сам релиз там есть.
         if service in ("qobuz", "tidal"):
-            isrc = await _seed_isrc(s)
-            if isrc:
+            hit = None
+            for isrc in await _seed_isrcs(s):
                 hit = await _find_by_isrc(isrc, service)
                 if hit:
-                    hit["label"] = hit.get("label") or label
-                    hit["date"] = hit.get("date") or s.get("date", "")
-                    out.append(hit)
-                    continue
+                    break
+            if hit:
+                hit["label"] = hit.get("label") or label
+                hit["date"] = hit.get("date") or s.get("date", "")
+                out.append(hit)
+                continue
         artist, title = s.get("artist", ""), s.get("title", "")
         term = f"{artist} {title}".strip()
         if not term:
