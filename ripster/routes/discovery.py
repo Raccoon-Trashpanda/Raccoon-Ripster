@@ -456,7 +456,15 @@ async def _match_seeds_in_service(seeds: list[dict], service: str, label: str,
                                   limit: int, country: str = "") -> list[dict]:
     """Look each release up in the target service.
 
-    Barcode first (exact), title+artist only as a fallback."""
+    Barcode first (exact), title+artist only as a fallback.
+
+    У Deezer и Spotify ветки поиска по названию не было вовсе (`else: continue`),
+    хотя `_search_deezer`/`_search_spotify` давно существуют. Единственной
+    дорогой туда оставался штрихкод, а `_seed_upc` умеет доставать его только из
+    самих Deezer/Spotify — то есть релиз, найденный в Apple, НИКОГДА не
+    переводился в Deezer, и подписка «следить → качать из Deezer» молча падала
+    на запасной вариант. Найдено 31.07.2026 живой проверкой: альбом в Deezer
+    есть, а сопоставление возвращало пусто."""
     out = []
     for s in seeds:
         if len(out) >= limit:
@@ -503,6 +511,10 @@ async def _match_seeds_in_service(seeds: list[dict], service: str, label: str,
                                else _search_tidal(term, "album", 3))
             elif service == "yandex":
                 r = await _search_yandex(term, "album", 3)
+            elif service == "deezer":
+                r = await _search_deezer(term, "album", 3)
+            elif service == "spotify":
+                r = await _search_spotify(term, "album", 3)
             else:
                 continue
         except Exception:

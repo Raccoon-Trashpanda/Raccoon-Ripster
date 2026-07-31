@@ -164,9 +164,13 @@ async def _resolve_target(name: str, url: str, service: str, artist_id: str) -> 
             out["url"] = r["url"]
         return out
 
-    if service != "apple":
-        return out
-
+    # Для ВСЕХ остальных сервисов artist_id тоже нужен: следим мы всегда через
+    # каталог Apple (единственный бесплатный полный источник по артисту), а
+    # `service` говорит лишь КУДА качать — ровно как у подписки на лейбл.
+    # Раньше здесь стоял ранний выход для service != "apple", и запись вида
+    # «Praana / deezer» уходила в список с пустым artist_id: цикл проверки её
+    # не видел, last_check навсегда оставался null, а add-ответ рапортовал
+    # resolved=true. Тихая слепота, найдена 31.07.2026.
     if not out["artist_id"]:
         out["artist_id"] = _wls.apple_id_from_url(url)
     if not out["artist_id"] and name:
@@ -240,8 +244,10 @@ async def api_watchlist_add(body: dict):
     _s["save"](_s["items"])
     # `resolved` is reported so the UI can warn when an entry went in unpollable
     # (no Apple artist id / unresolvable SC channel) instead of failing silently.
+    # SoundCloud резолвится в url, у остальных признак пригодности — artist_id.
     return {"ok": True, "item": entry,
-            "resolved": bool(entry["artist_id"] or service != "apple")}
+            "resolved": bool(entry["url"] if service == "soundcloud"
+                             else entry["artist_id"])}
 
 
 # ── Smart suggestions (mined from the local stats DB) ────────────────────────
@@ -403,7 +409,8 @@ async def api_watchlist_repair():
         # which is exactly how label subscriptions vanished after a check.
         if it.get("kind") == "label":
             continue
-        if it.get("service", "apple") != "apple" or it.get("artist_id"):
+        # SoundCloud опрашивается по permalink-у, а не по artist_id.
+        if it.get("service") == "soundcloud" or it.get("artist_id"):
             continue
         aid = _wls.apple_id_from_url(it.get("url", ""))
         if not aid and it.get("name"):
@@ -419,17 +426,21 @@ async def api_watchlist_repair():
 
     # De-dup by resolved artist_id too — "max cooper" and a pasted Max Cooper
     # link are the same target once both have an id.
-    by_id: set[str] = set()
+    # Ключ включает СЕРВИС: один и тот же артист, подписанный на Apple и на
+    # Deezer, — это две разные подписки (разные источники скачивания), и после
+    # того как artist_id стал появляться у всех сервисов, общий ключ молча
+    # удалял бы одну из них.
+    by_id: set[tuple] = set()
     final: list[dict] = []
     for it in unique:
         if it.get("kind") == "label":       # labels never de-dup by artist_id
             final.append(it)
             continue
-        aid = it.get("artist_id", "")
-        if aid and aid in by_id:
+        aid = (it.get("service", "apple"), it.get("artist_id", ""))
+        if aid[1] and aid in by_id:
             dropped += 1
             continue
-        if aid:
+        if aid[1]:
             by_id.add(aid)
         final.append(it)
 
@@ -835,8 +846,12 @@ async def _check_watchlist():
     queue      = _s["queue"]
     snapshot   = _s["queue_snapshot"]
 
+    # Следим через Apple-каталог независимо от того, откуда потом качаем:
+    # у подписки на Deezer/Qobuz/Tidal сервис — это адрес доставки, а не
+    # источник наблюдения. Пока здесь стояло `service == "apple"`, такие
+    # записи не попадали НИ в один список и не проверялись вообще.
     targets = [e for e in items
-               if e.get("service") == "apple" and e.get("artist_id")
+               if e.get("service") != "soundcloud" and e.get("artist_id")
                and e.get("kind") != "label"]
     sc_count = len([e for e in items
                     if e.get("service") == "soundcloud" and e.get("kind") != "label"])
@@ -897,7 +912,20 @@ async def _check_watchlist():
                                     bool(latest.get("compilation")),
                                     bool(entry.get("auto_download")), latest)
                     if entry.get("auto_download") and release_url:
-                        task = _make_task(release_url, entry.get("quality", ""),
+                        # Нашли в Apple — но качать надо туда, куда подписан
+                        # владелец. Для service="apple" это короткое замыкание
+                        # внутри _pick_download_url и ровно прежнее поведение.
+                        # Если в целевом сервисе релиза ещё нет, берём Apple-
+                        # ссылку, которая у нас уже на руках: потерять релиз
+                        # хуже, чем скачать его не из любимого сервиса.
+                        dl_url = await _pick_download_url(
+                            {"service": "apple", "url": release_url,
+                             "title": release_name,
+                             "artist": latest.get("artist", ""),
+                             "date": latest.get("date", "")},
+                            entry.get("service", "apple"), "", cfg, release_name,
+                        ) or release_url
+                        task = _make_task(dl_url, entry.get("quality", ""),
                                           cfg, "watchlist")
                         _enrich_soon(task)
                         queue.append(task)

@@ -287,7 +287,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "3.2.0"
+RELEASE_VERSION = "3.3.0"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -897,6 +897,7 @@ from ripster.routes import soundcloud  as _soundcloud_routes
 from ripster.routes import ripster_coder as _coder_routes
 from ripster.routes import telemetry    as _telemetry_routes
 from ripster.routes import service_login as _service_login_routes
+from ripster.routes import digs         as _digs_routes
 from ripster import telemetry as _telemetry
 from ripster import tl1001 as _tl1001
 
@@ -905,6 +906,7 @@ _watchlist.install(app, _ctx)
 _radar.install(app, _ctx)
 _history.install(app, _ctx)
 _discovery.install(app, _ctx)
+_digs_routes.install(app, _ctx)
 _spotify.install(app, _ctx)
 _releases.install(app, _ctx)
 _setup_routes.install(app, _ctx)
@@ -1002,12 +1004,27 @@ async def services_status(request: Request):
     def _has(key: str) -> bool:
         return bool((eff.get(key) or config.get(key) or "").strip())
 
+    # Spotify used to be gated on `spotify-client-id` — a Developer-App key that
+    # is not involved in a single Spotify download. So a user who had signed in
+    # properly still saw Spotify as unavailable and was told to go create a
+    # Developer App (which Spotify then refuses without Premium). What actually
+    # makes Spotify usable is the librespot session; sp_dc/client-id only ever
+    # helped the legacy release scan. Checked in that order (found 31.07.2026).
+    def _spotify_available() -> bool:
+        try:
+            from ripster.engines.orpheus_spotify import is_authenticated as _sp_authed
+            if _sp_authed():
+                return True
+        except Exception:
+            pass
+        return _has("spotify-sp-dc") or _has("spotify-client-id")
+
     return {
         "apple":      True,   # iTunes public API — always searchable
         "qobuz":      _has("qobuz-auth-token"),
         "deezer":     _has("deezer-arl"),
         "tidal":      _has("tidal-token"),
-        "spotify":    _has("spotify-client-id"),
+        "spotify":    _spotify_available(),
         "beatport":   _has("beatport-username"),
         "soundcloud": _has("soundcloud-oauth-token"),
         "yandex":     _has("yandex-token"),

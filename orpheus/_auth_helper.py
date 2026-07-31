@@ -49,22 +49,45 @@ def _challenge(v: str) -> str:
 _code: list[str] = []
 _error: list[str] = []
 
+# Where the browser goes after the callback. Two reasons this is not just a
+# "you can close this window" note: (1) the in-window login option has no popup
+# to close — the person IS in the Ripster window and must be brought back;
+# (2) the old bare English line left users unsure whether anything happened,
+# and Ripster's own screen still said "не авторизован" until an app restart.
+_RETURN_URL = os.environ.get("RIPSTER_RETURN_URL", "http://127.0.0.1:7799/?spotify_login=ok")
+
+
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         qs = parse_qs(urlparse(self.path).query)
         if "code" in qs:
             _code.append(qs["code"][0])
-            self._respond("Login successful — you can close this window.")
+            self._respond("&#10003; Spotify подключён", "Возвращаю в Ripster…",
+                          ok=True)
         elif "error" in qs:
             _error.append(qs["error"][0])
-            self._respond("Login failed — " + qs["error"][0])
+            self._respond("Вход не удался", qs["error"][0], ok=False)
         else:
-            self._respond("Unexpected callback.")
+            self._respond("Неожиданный ответ Spotify", "Попробуй войти заново.",
+                          ok=False)
 
-    def _respond(self, msg: str):
-        body = f"<html><body><p>{msg}</p></body></html>".encode()
+    def _respond(self, title: str, msg: str, ok: bool):
+        meta = (f"<meta http-equiv='refresh' content='2;url={_RETURN_URL}'>"
+                if ok else "")
+        body = (
+            "<!doctype html><html lang='ru'><head><meta charset='utf-8'>"
+            f"<title>{title}</title>{meta}"
+            "<style>html,body{height:100%;margin:0;background:#0a0a0c;color:#f0f0f4;"
+            "font-family:-apple-system,Segoe UI,sans-serif;display:flex;"
+            "align-items:center;justify-content:center;text-align:center}"
+            f"h2{{color:{'#1db954' if ok else '#fc3c44'};margin:0 0 8px}}"
+            "p{color:#9a9aa4;font-size:13px;line-height:1.6}a{color:#1db954}</style>"
+            f"</head><body><div><h2>{title}</h2><p>{msg}</p>"
+            f"<p><a href='{_RETURN_URL}'>Открыть Ripster</a></p>"
+            "</div></body></html>"
+        ).encode("utf-8")
         self.send_response(200)
-        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

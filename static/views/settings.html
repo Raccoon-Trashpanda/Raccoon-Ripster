@@ -685,7 +685,10 @@
               <div style="font-size:12px;font-weight:700;margin-bottom:2px">media-user-token</div>
               <div id="apple-auth-status-text" style="font-size:11px;color:var(--muted)" data-i18n="s.checking">Проверка…</div>
             </div>
-            <button id="btn-apple-login" onclick="openExternal('/apple/login','apple_login','width=580,height=680')"
+            <!-- here:false — страница входа Apple требует перетащить букмарклет
+                 на панель закладок, а в окне Ripster.exe (WebView2) панели
+                 закладок нет и назад вернуться нечем. Нужен настоящий браузер. -->
+            <button id="btn-apple-login" onclick="openAuthPage('/apple/login','Apple Music',{here:false})"
               style="padding:8px 16px;background:rgba(10,132,255,.12);border:1px solid rgba(10,132,255,.3);border-radius:8px;color:#0a84ff;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font);white-space:nowrap">
               <span data-i18n="s.apple_login">🍎 Войти через Apple</span>
             </button>
@@ -718,7 +721,7 @@
           <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
             <button class="btn-sm" onclick="saveTokens()" data-i18n="s.save_tokens" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">💾 Сохранить</button>
             <button class="btn-sm" onclick="testAuth('apple')" data-i18n="s.check" style="padding:6px 12px;background:rgba(252,60,68,.08);color:#fc3c44;border:1px solid rgba(252,60,68,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🔑 Проверить</button>
-            <div id="test-auth-apple" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
+            <div id="test-auth-apple" class="test-auth-out" data-svc="apple" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
           </div>
 
           <!-- Apple cookies.txt (gamdl: AAC / music videos) -->
@@ -1134,7 +1137,7 @@
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('apple')" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="as.save">💾 Сохранить</button>
               <button class="btn-sm" onclick="testAuth('apple')" style="padding:6px 12px;background:rgba(252,60,68,.08);color:#fc3c44;border:1px solid rgba(252,60,68,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="as.check">🔑 Проверить</button>
-              <div id="test-auth-apple" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
+              <div class="test-auth-out" data-svc="apple" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
             </div>
           </div>
         </div><!-- end stab-apple -->
@@ -1479,6 +1482,31 @@
         <!-- ══════════ SPOTIFY TAB ══════════ -->
         <div class="stab-panel" id="stab-spotify">
 
+          <!-- ─ Блок 0: ВХОД ─────────────────────────────────────────────
+               Единственное, что вообще нужно для Spotify. Раньше эта кнопка
+               лежала ВНУТРИ свёрнутого блока «OAuth (Developer App) — резервная
+               авторизация», то есть настоящий вход был спрятан под заголовком
+               «резервный», а на виду оставались Client ID и Secret — которые к
+               скачиванию отношения не имеют вовсе. Люди честно шли заводить
+               Developer App, получали от Spotify «нужен Premium у владельца
+               приложения» и упирались в тупик (два пользователя, 30–31.07.2026).
+               Вход — первым блоком, Developer App — свёрнут и подписан как
+               необязательный. -->
+          <div class="block mt12" style="border:1.5px solid rgba(29,185,84,.35);border-radius:10px;padding:14px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+              <span style="font-size:15px">🎧</span>
+              <div style="font-weight:700;font-size:13px;color:var(--text)" data-i18n="sp.login_title">Вход в Spotify</div>
+              <div id="sp-login-badge" style="margin-left:auto;font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;background:rgba(255,255,255,.07);color:var(--muted)"><span data-i18n="s.not_authed">не авторизован</span></div>
+            </div>
+            <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:10px" data-i18n="sp.login_desc">
+              Это всё, что нужно для скачивания со Spotify: обычный вход в аккаунт Spotify. Developer App, Client ID и Client Secret <b>не нужны</b> — они ниже и только для резервного скана релизов.
+            </div>
+            <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn-sm" id="sp-ogg-btn" onclick="spotifyOggLogin()" style="padding:8px 16px;background:#1db954;color:#000;border:none;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)" data-i18n="sp.ogg_login">🎧 Войти в Spotify</button>
+              <div id="sp-ogg-hint" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
+            </div>
+          </div>
+
           <!-- ─ Блок 1: Релизы ──────────────────────────────────────────── -->
           <div class="block mt12">
             <div class="block-title" style="color:#1db954" data-i18n="sp.new_releases">🟢 Новые релизы</div>
@@ -1530,7 +1558,7 @@
                       <div id="sp-email" style="font-size:10px;color:var(--muted)"></div>
                     </div>
                     <div style="margin-left:auto;display:flex;gap:6px">
-                      <button onclick="openExternal('/spotify/login','spotify_login','width=580,height=720')"
+                      <button onclick="openAuthPage('/spotify/login','Spotify Developer App')"
                         style="padding:5px 12px;background:rgba(29,185,84,.2);border:1px solid rgba(29,185,84,.3);border-radius:7px;font-size:11px;font-weight:700;color:#1db954;cursor:pointer;font-family:var(--font)">
                         <span data-i18n="s.sp_connect">Подключить</span>
                       </button>
@@ -1541,23 +1569,20 @@
                   </div>
                 </div>
 
-                <!-- Out-of-box OGG download login (librespot blob via browser OAuth)
-                     — SEPARATE from the dev-API "Подключить" above (release radar).
-                     This is what a fresh clone needs to actually download Spotify. -->
-                <div style="background:rgba(29,185,84,.06);border:1px solid rgba(29,185,84,.15);border-radius:8px;padding:10px 12px;margin-bottom:10px">
-                  <div style="font-size:11px;font-weight:700;color:#1db954;margin-bottom:6px" data-i18n="sp.ogg_title">🎧 Вход для загрузок (OGG)</div>
-                  <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-bottom:8px" data-i18n="sp.ogg_desc">
-                    Нужен, чтобы качать со Spotify. Нажми «Войти» → откроется страница Spotify в браузере, подтверди вход. Сессия сохранится и будет обновляться сама — без расширения и вставки токенов.
-                  </div>
-                  <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-                    <button class="btn-sm" id="sp-ogg-btn" onclick="spotifyOggLogin()" style="padding:6px 14px;background:#1db954;color:#000;border:none;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font)" data-i18n="sp.ogg_login">🎧 Войти в Spotify</button>
-                    <div id="sp-ogg-hint" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
-                  </div>
+                <!-- Вход для загрузок переехал НАВЕРХ, первым блоком вкладки
+                     (см. «Блок 0: ВХОД»). Здесь он был спрятан внутри свёрнутой
+                     секции «резервная авторизация» — люди его не находили и
+                     заводили вместо этого Developer App, который для скачивания
+                     не нужен. Не возвращать сюда: два элемента с id sp-ogg-btn
+                     сломают и кнопку, и подсказку. -->
+
+                <div style="font-size:10px;color:var(--muted);line-height:1.6;background:rgba(255,159,10,.08);border:1px solid rgba(255,159,10,.25);border-radius:7px;padding:8px 10px;margin-bottom:10px" data-i18n="sp.devapp_warn">
+                  ⚠ Developer App для скачивания <b>не нужен</b> — и часто вообще не работает: Spotify отказывает в Web API, если у владельца приложения нет Premium («Active premium subscription required for the owner of the app»). Заполняй, только если нужен резервный скан релизов.
                 </div>
 
                 <div class="settings-grid" style="margin-bottom:8px">
                   <div class="field-group">
-                    <label class="lbl">Client ID <a href="https://developer.spotify.com/dashboard" target="_blank" style="color:var(--muted);font-size:10px;margin-left:4px">→ Dashboard</a></label>
+                    <label class="lbl">Client ID <span style="font-size:10px;font-weight:400;color:var(--muted)" data-i18n="sp.optional">(необязательно)</span> <a href="https://developer.spotify.com/dashboard" target="_blank" style="color:var(--muted);font-size:10px;margin-left:4px">→ Dashboard</a></label>
                     <input id="s-sp-cid" data-i18n-ph="sp.cid_ph" placeholder="Из Spotify Developer App"
                       style="font-family:var(--mono);font-size:11px"
                       oninput="saveSetting('spotify-client-id',this.value)"/>
@@ -1572,7 +1597,7 @@
 
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
                   <button class="btn-sm" onclick="testAuth('spotify')" style="padding:5px 11px;background:rgba(29,185,84,.18);color:#1db954;border:1px solid rgba(29,185,84,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.check_token">🔑 Проверить токен</button>
-                  <div id="test-auth-spotify" style="font-size:11px;color:var(--muted);flex:1;min-width:160px"></div>
+                  <div id="test-auth-spotify" class="test-auth-out" data-svc="spotify" style="font-size:11px;color:var(--muted);flex:1;min-width:160px"></div>
                 </div>
 
                 <div style="font-size:10px;color:var(--muted);line-height:1.6;background:rgba(0,0,0,.2);border-radius:7px;padding:8px 10px" data-i18n-html="sp.redirect_note">
@@ -1626,13 +1651,19 @@
               <button onclick="orpheusLogout()" style="padding:5px 10px;background:rgba(255,69,58,.1);border:1px solid rgba(255,69,58,.3);border-radius:6px;color:#ff453a;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.logout">Выйти</button>
             </div>
 
-            <!-- Login section -->
+            <!-- Login section — ЗАПАСНОЙ вход (PKCE).
+                 Он выдаёт токен Web API, а не постоянную сессию librespot: качать
+                 им можно, но Spotify такой токен периодически отзывает. Раньше обе
+                 кнопки назывались одинаково («Войти в Spotify»), человек жал эту,
+                 получал «✓ Авторизован orpheus_pkce_user» — и упирался в то, что
+                 скачивание всё равно не работает. Название и подпись теперь прямо
+                 говорят, что основной вход — наверху. -->
             <div id="orp-login-section">
-              <div style="margin-bottom:12px;padding:10px 12px;background:rgba(29,185,84,.06);border:1.5px solid rgba(29,185,84,.2);border-radius:8px">
-                <div style="font-size:10px;color:var(--muted);margin-bottom:8px" data-i18n="sp.orp_login_desc">Откроется окно Spotify — выбери «Продолжить с Apple» или войди обычным способом. Пароль Spotify не нужен.</div>
+              <div style="margin-bottom:12px;padding:10px 12px;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:8px">
+                <div style="font-size:10px;color:var(--muted);margin-bottom:8px" data-i18n="sp.orp_login_desc">Запасной способ, если основной вход наверху не сработал. Откроется окно Spotify — выбери «Продолжить с Apple» или войди обычным способом. Такую сессию Spotify периодически отзывает, поэтому основной вход надёжнее.</div>
                 <button id="btn-orp-login" onclick="orpheusLogin()"
-                  style="width:100%;padding:9px;background:rgba(29,185,84,.12);border:1px solid rgba(29,185,84,.3);border-radius:7px;color:#1db954;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font);display:flex;align-items:center;justify-content:center;gap:6px">
-                  <span data-i18n="sp.orp_login_btn">🎵 Войти в Spotify</span>
+                  style="width:100%;padding:9px;background:rgba(255,255,255,.05);border:1px solid var(--border);border-radius:7px;color:var(--muted);font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font);display:flex;align-items:center;justify-content:center;gap:6px">
+                  <span data-i18n="sp.orp_login_btn">🎵 Запасной вход (PKCE)</span>
                 </button>
                 <div id="orp-login-status" style="display:none;font-size:10px;color:var(--muted);margin-top:6px;text-align:center"></div>
               </div>
@@ -1675,7 +1706,7 @@
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('spotify')" style="padding:6px 12px;background:rgba(29,185,84,.18);color:#1db954;border:1px solid rgba(29,185,84,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.save_btn">💾 Сохранить</button>
               <button class="btn-sm" onclick="testAuth('spotify')" style="padding:6px 12px;background:rgba(29,185,84,.08);color:#1db954;border:1px solid rgba(29,185,84,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.check">🔑 Проверить</button>
-              <div id="test-auth-spotify" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
+              <div class="test-auth-out" data-svc="spotify" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
             </div>
           </div>
 

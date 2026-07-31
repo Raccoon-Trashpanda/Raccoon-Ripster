@@ -381,7 +381,16 @@ async def _sp_get(path: str):
                     )
             if r.status_code == 403:
                 msg = r.json().get("error", {}).get("message", "") if r.headers.get("content-type","").startswith("application/json") else r.text[:200]
-                _sp_403_error = msg or "User not registered for this Spotify app"
+                raw = msg or "User not registered for this Spotify app"
+                # Spotify refuses Web-API access to Developer Apps owned by a
+                # non-Premium account. Shown bare, this read as "Ripster needs
+                # Premium" and sent people buying subscriptions — it does not:
+                # downloads never touch the Developer API. Say which is which.
+                if "premium" in raw.lower():
+                    raw += (" — это ограничение Developer App, а не Ripster. "
+                            "Для скачивания Developer App не нужен: Settings → "
+                            "Spotify → «🎧 Войти в Spotify» (первый блок вкладки).")
+                _sp_403_error = raw
                 print(f"[spotify] 403 {path}: {_sp_403_error}", flush=True)
                 return None
             _sp_403_error = ""  # clear on success
@@ -789,11 +798,29 @@ async def _gql_whatsnew(gc) -> list:
 
 
 def _sp_merge_whatsnew(items: list) -> int:
-    """Merge queryWhatsNewFeed items into the durable per-artist store. Only
-    fans out to artists already in the followed set — _build_feed only ever
-    reads entries for followed artist ids, so anything else would be dead
-    weight. Returns how many genuinely new releases were added."""
+    """Merge queryWhatsNewFeed items into the durable per-artist store.
+
+    Normally fans out only to artists already in the followed set: _build_feed
+    reads entries for followed artist ids, so anything else would be dead weight.
+
+    BUT when we have no followed list at all, that filter threw away everything
+    and the radar stayed permanently empty. That is the ONLY state a Spotify
+    account without Premium can ever be in: the follow list comes from
+    api.spotify.com/v1/me/following, which needs a Developer App, and Spotify
+    refuses Web-API access to any app whose OWNER has no Premium. So a free
+    account could never get a single release — not because the data was
+    unavailable, but because we discarded it on arrival.
+
+    The feed itself is already personalised BY SPOTIFY to this account's own
+    follows — filtering it through our copy of that same list is belt-and-braces,
+    not a correctness requirement. With no list, take the feed as authoritative
+    and SEED the followed set from it, so the per-artist crawl has somewhere to
+    start too. Found 31.07.2026 while answering "why does the radar work on that
+    site without Premium, but not here".
+    """
     followed_ids = {a.get("id") for a in _sp_followed_cache.get("artists", []) if a.get("id")}
+    seeding = not followed_ids
+    seeded: dict[str, str] = {}
     added = 0
     for it in items:
         rel, artists = _sp_whatsnew_to_rel(it)
@@ -801,13 +828,27 @@ def _sp_merge_whatsnew(items: list) -> int:
             continue
         for wa in artists:
             waid = wa.get("id")
-            if not waid or waid not in followed_ids:
+            if not waid:
+                continue
+            if seeding:
+                seeded[waid] = wa.get("name", "")
+            elif waid not in followed_ids:
                 continue
             st = _sp_artist_state.setdefault(waid, {"name": wa.get("name", ""), "releases": [], "ts": 0})
             if not any(r.get("id") == rel["id"] for r in st["releases"]):
                 st["releases"].append({**rel, "artist": wa.get("name", rel["artist"]),
                                         "artist_id": waid, "live": True})
                 added += 1
+
+    if seeding and seeded:
+        # Первые артисты, известные радару на аккаунте без Developer App. Дальше
+        # они пополняются с каждой лентой, и обычный краул дискографий получает
+        # с чего начать.
+        _sp_followed_cache["artists"] = [{"id": i, "name": n} for i, n in seeded.items()]
+        _sp_followed_cache.setdefault("market", "")
+        _sp_followed_cache["ts"] = datetime.now().timestamp()
+        print(f"[spotify] подписок не было — засеял {len(seeded)} артистов из ленты "
+              f"«Что нового» (Developer App не нужен)", flush=True)
     return added
 
 
@@ -914,11 +955,20 @@ async def sp_callback(code: str = "", error: str = ""):
         _save_sp(tok)
         if _broadcast:
             await _broadcast({"type": "spotify_authed"})
+        # window.close() works only for a page a script opened. With the login
+        # now offered IN THE RIPSTER WINDOW (popups are dropped outright by
+        # WebView2), there is no opener — the tab would just sit there saying
+        # "закроется автоматически" forever. Try to close, then navigate back.
+        from ripster.routes.core import _return_url
+        _ret = _return_url()
         return HTMLResponse(
-            """<html><body style="font-family:sans-serif;padding:40px;background:#0a0a0c;color:#f0f0f4">
+            f"""<html><head><meta charset="utf-8">
+            <meta http-equiv="refresh" content="2;url={_ret}"></head>
+            <body style="font-family:sans-serif;padding:40px;background:#0a0a0c;color:#f0f0f4">
             <h2 style="color:#1db954">✓ Spotify подключён!</h2>
-            <p style="color:#888">Вкладка закроется автоматически…</p>
-            <script>setTimeout(()=>window.close(),1500)</script></body></html>"""
+            <p style="color:#888">Возвращаю в Ripster…</p>
+            <p><a href="{_ret}" style="color:#1db954">Открыть Ripster</a></p>
+            <script>setTimeout(()=>{{try{{window.close()}}catch(e){{}}}},1200)</script></body></html>"""
         )
     except Exception as e:
         return HTMLResponse(
@@ -1013,36 +1063,48 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
         # the radar keep scanning without a manual sp_dc cookie refresh.
         web_token = _sp_minted_bearer()
         _tok_src = "keeper-bearer"
-    if web_token:
+
+    # `hdr` is used for api.spotify.com/**v1** only — /me and /me/following. The
+    # api-partner crawl below builds its OWN headers from the web-player token
+    # (gql_headers) and is unaffected by anything decided here.
+    #
+    # THE WEB-PLAYER TOKEN CANNOT TALK TO /v1. Ours are answered with a permanent
+    # 429 on every endpoint, instantly, no matter how fresh (see the
+    # ripster-spotify-tokens skill). The Developer-App OAuth token CAN — measured
+    # side by side on 31.07.2026: same endpoint, same second, web token 429,
+    # dev-OAuth token 200. Yet this block preferred the web token whenever one
+    # existed, so on any box with a librespot session the ONE credential that
+    # works for /me/following was never even tried: the follow list came back
+    # empty and the radar had nothing to crawl. It was masked here only because
+    # a 5.7k-artist follow cache from earlier passes kept serving it.
+    # So: dev-OAuth FIRST for /v1, web token only as the fallback.
+    oauth_t = _load_sp()
+    if oauth_t.get("access_token"):
+        if oauth_t.get("expires_at", 0) < datetime.now().timestamp() + 60:
+            oauth_t = await _sp_refresh(oauth_t) or oauth_t
+    if oauth_t.get("access_token"):
+        hdr = {"Authorization": f"Bearer {oauth_t['access_token']}"}
+        print("[spotify] scan: /v1 via dev-OAuth token (web-player token is 429 on /v1)",
+              flush=True)
+    elif web_token:
         hdr = {"Authorization": f"Bearer {web_token}"}
-        print(f"[spotify] scan using web-player token ({_tok_src})", flush=True)
+        print(f"[spotify] scan using web-player token ({_tok_src}) — "
+              f"нет dev-OAuth, /v1 скорее всего ответит 429", flush=True)
     else:
-        t = _load_sp()
+        # Neither credential exists — nothing to scan with.
+        _sp_scan_running = False
         sp_dc_set = bool((_cfg.get("spotify-sp-dc") or "").strip())
         minted_exists = bool(_sp_state_file and
                              (_sp_state_file.parent / "orpheus" / "config" / "spotify-token.txt").exists())
-        if not t.get("access_token"):
-            _sp_scan_running = False
-            print("[spotify] scan aborted: no web-player token and no OAuth token", flush=True)
-            err = ("sp_dc cookie протух — обнови в Settings → Spotify (bookmarklet)"
-                   if sp_dc_set or minted_exists
-                   else "Spotify не авторизован — подключи OAuth или sp_dc в Settings → Spotify")
-            _sp_last_error = err
-            if _broadcast:
-                await _broadcast({"type": "releases_scan_done", "error": err,
-                                  "artists_checked": 0, "releases_count": 0})
-            return
-        if t.get("expires_at", 0) < datetime.now().timestamp() + 60:
-            t = await _sp_refresh(t) or t
-        if not t.get("access_token"):
-            _sp_scan_running = False
-            _sp_last_error = "Spotify: не удалось обновить OAuth-токен"
-            if _broadcast:
-                await _broadcast({"type": "releases_scan_done",
-                                  "error": _sp_last_error,
-                                  "artists_checked": 0, "releases_count": 0})
-            return
-        hdr = {"Authorization": f"Bearer {t['access_token']}"}
+        print("[spotify] scan aborted: no web-player token and no OAuth token", flush=True)
+        err = ("sp_dc cookie протух — обнови в Settings → Spotify (bookmarklet)"
+               if sp_dc_set or minted_exists
+               else "Spotify не авторизован — подключи OAuth или sp_dc в Settings → Spotify")
+        _sp_last_error = err
+        if _broadcast:
+            await _broadcast({"type": "releases_scan_done", "error": err,
+                              "artists_checked": 0, "releases_count": 0})
+        return
 
     if _broadcast:
         await _broadcast({"type": "releases_scan_start", "phase": "artists"})
@@ -1158,6 +1220,15 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             if cached:
                 artists = cached
                 market = _sp_followed_cache.get("market", market)
+            else:
+                # Подписок нет и взять их неоткуда — ровно то состояние, в
+                # котором навсегда остаётся аккаунт без Premium: список подписок
+                # даёт только /v1/me/following, а он требует Developer App,
+                # которому Spotify отказывает без Premium у ВЛАДЕЛЬЦА приложения.
+                # Лента «Что нового» живёт в api-partner, работает по одной
+                # librespot-сессии и Developer App не требует — идём через неё.
+                print("[spotify] подписок нет — иду через ленту «Что нового» "
+                      "(Developer App не требуется)", flush=True)
 
         # ── Paced, persistent DELTA crawl — api-partner GraphQL ─────────────
         # 2026-07-19: api.spotify.com/v1 для наших веб-токенов перманентно 429

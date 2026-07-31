@@ -707,7 +707,7 @@ _oauth_url: str = ""
 
 @router.get("/api/orpheus/status")
 async def orpheus_status():
-    from ripster.engines.orpheus_spotify import is_installed, is_authenticated
+    from ripster.engines.orpheus_spotify import is_installed, is_authenticated, session_kind
     # Sync real username + credentials on every status check (cheap, idempotent)
     asyncio.create_task(_sync_orpheus_username())
     creds_p = _orpheus_creds_path()
@@ -721,6 +721,10 @@ async def orpheus_status():
     return {
         "installed":      is_installed(),
         "authenticated":  is_authenticated(),
+        # "blob" = постоянная сессия librespot (то, чем реально качается),
+        # "oauth" = слабая PKCE-сессия, "" = входа нет. Без этого различия UI
+        # показывал одинаково зелёное «✓ Авторизован» в обоих случаях.
+        "session":        session_kind(),
         "username":       username,
         "mode":           _cfg.get("spotify-engine", "convert"),
         "quality":        _cfg.get("orpheus-quality", "hifi"),
@@ -748,8 +752,13 @@ async def orpheus_login_start():
     if not helper_p.exists():
         return {"ok": False, "error": f"Auth helper не найден: {helper_p}"}
 
+    # RIPSTER_RETURN_URL: the helper's callback page bounces the browser back
+    # here when it's done, so the in-window login option has somewhere to
+    # return to and the UI re-checks auth without an app restart.
+    from ripster.routes.core import _return_url
     env = {**os.environ, "PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python",
-           "PYTHONIOENCODING": "utf-8"}
+           "PYTHONIOENCODING": "utf-8",
+           "RIPSTER_RETURN_URL": _return_url()}
     try:
         _oauth_proc = await asyncio.create_subprocess_exec(
             sys.executable, str(helper_p),

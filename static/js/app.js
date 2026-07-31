@@ -228,8 +228,13 @@ function handleMessage(msg) {
       applyConfig(); renderQueue(); updateTransport(); updatePills(); renderQualityGrid(); renderConfig(); _syncReleasesSettingsTab();
       if(typeof _maybeAskTelemetryName!=='undefined') setTimeout(_maybeAskTelemetryName, 2500);  // first-run consent ask (owner/tester builds only — public mirror doesn't ship telemetry_ui.js)
       setTimeout(autoValidateServices, 1500);   // probe all configured tokens on startup — no need to open each tab
-      if(S.config['engine']==='gamdl') setTimeout(checkCookies, 1200);
-      if(S.config['engine']==='amd')   setTimeout(checkAMDStatus, 800);
+      // Guarded: these live in cookies_ui.js. If that file ever fails to parse
+      // (it did — see the search.js/_srchItems collision fixed 31.07.2026), an
+      // unguarded call here throws INSIDE the WebSocket message handler and
+      // kills the rest of `init` processing, so the whole UI comes up half-dead
+      // for a reason that looks nothing like the real cause.
+      if(S.config['engine']==='gamdl' && typeof checkCookies === 'function')   setTimeout(checkCookies, 1200);
+      if(S.config['engine']==='amd'   && typeof checkAMDStatus === 'function') setTimeout(checkAMDStatus, 800);
       // Init quality selector for current service
       updateQualitySelector('apple');
       _refreshSearchSvcSelect();
@@ -461,7 +466,7 @@ function handleMessage(msg) {
       break;
     }
     case 'amd_ready': {
-      checkAMDStatus();
+      if(typeof checkAMDStatus === 'function') checkAMDStatus();
       toast(t('t.amd_ready'),'var(--green)');
       break;
     }

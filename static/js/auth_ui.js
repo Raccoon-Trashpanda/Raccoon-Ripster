@@ -13,7 +13,8 @@ async function yandexGetToken() {
   set(t('ya.requesting'));
   const r = await api('POST', '/api/yandex/auth/start', {});
   if (!r || !r.ok) { set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((r && r.error) || '?')}</span>`); return; }
-  openExternal(r.verification_url);
+  // here:false — код подтверждения показан здесь же, уводить это окно нельзя.
+  openAuthPage(r.verification_url, t('sl.login_ya'), {here: false});
   set(ti('dlg.enter_code', {url: esc(r.verification_url)})
     + `<b style="font-size:15px;letter-spacing:2px;color:#ffcc00">${esc(r.user_code)}</b>`
     + ` <span style="opacity:.7">${t('dlg.waiting')}</span>`);
@@ -47,7 +48,8 @@ async function tidalTvLogin() {
   set(t('td.requesting'));
   const r = await api('POST', '/api/tidal/auth/start', {});
   if (!r || !r.ok) { set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((r && r.error) || '?')}</span>`); if (btn) btn.disabled = false; return; }
-  openExternal(r.verification_url);
+  // here:false — device-flow: код подтверждения показан здесь, окно уводить нельзя.
+  openAuthPage(r.verification_url, 'Tidal', {here: false});
   set(ti('dlg.enter_code', {url: esc(r.verification_url)})
     + `<b style="font-size:15px;letter-spacing:2px;color:#00d4b3">${esc(r.user_code)}</b>`
     + ` <span style="opacity:.7">${t('dlg.waiting')}</span>`);
@@ -81,7 +83,13 @@ async function spotifyOggLogin() {
   set(t('sp.ogg_starting'));
   const r = await api('POST', '/api/spotify/auth/start', {});
   if (!r || !r.ok) { set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((r && r.error) || '?')}</span>`); if (btn) btn.disabled = false; return; }
-  openExternal(r.auth_url);
+  // Ask HOW to open instead of firing a popup that WebView2 (Ripster.exe) drops
+  // silently — see openAuthPage. "Здесь" navigates away and the helper's
+  // callback page brings the browser back to Ripster, so there is nothing left
+  // to poll in this page.
+  const how = await openAuthPage(r.auth_url, t('sp.ogg_login'));
+  if (how === 'here') return;
+  if (!how) { set(t('sl.cancelled')); if (btn) btn.disabled = false; return; }
   set(t('sp.ogg_page_opened'));
   const deadline = Date.now() + 180 * 1000;
   const poll = async () => {
@@ -100,7 +108,9 @@ async function spotifyOggLogin() {
 function yandexBrowserToken() {
   const url = 'https://oauth.yandex.ru/authorize?response_type=token'
             + '&client_id=23cabbbdc6cd418abb4b39c32c41195d';
-  openExternal(url);
+  // here:false — после входа Яндекс отдаёт токен во фрагменте адреса, и его
+  // надо вставить обратно в поле здесь; уводить это окно нельзя.
+  openAuthPage(url, t('sl.login_ya'), {here: false});
   const hint = document.getElementById('yandex-token-hint');
   if (hint) hint.innerHTML = t('ya.browser_hint');
 }
@@ -150,7 +160,17 @@ async function showGuestServiceInfo() {
 
 // ── Token probe: show live auth status for Qobuz/Tidal/Deezer ─────────────
 async function testAuth(service){
-  const out = document.getElementById('test-auth-' + service);
+  // Apple и Spotify показывают результат пробы в ДВУХ местах (внутри блока
+  // токенов и в нижней строке «Сохранить / Проверить»). Раньше оба <div> носили
+  // один и тот же id, а getElementById возвращает только первый — у Spotify это
+  // блок внутри свёрнутой секции, поэтому человек жал «Проверить» внизу и не
+  // видел вообще ничего. Пишем во все блоки сервиса.
+  const outs = Array.from(document.querySelectorAll('.test-auth-out[data-svc="' + service + '"]'));
+  const out = outs.length ? {
+    set textContent(v){ outs.forEach(e => e.textContent = v); },
+    set innerHTML(v){ outs.forEach(e => e.innerHTML = v); },
+    get style(){ return { set color(v){ outs.forEach(e => e.style.color = v); } }; },
+  } : document.getElementById('test-auth-' + service);
   // Tidal's real "is it connected" signal belongs in the prominent Quick Login
   // box (#tidal-tok-expiry), not just the collapsed "manual tokens" fallback
   // that most people using device-flow login never open — mirror the same
@@ -731,3 +751,35 @@ async function removeYandexAccount(slot) {
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
 }
 
+
+// ── Возврат из внешнего входа в Spotify ───────────────────────────────────────
+// Оба helper'а входа (librespot на 5588 и PKCE на 4381) после колбэка Spotify
+// уводят браузер обратно сюда с ?spotify_login=ok. Без этого человек оставался
+// на странице helper'а с надписью «Login successful», а Ripster у него всё ещё
+// показывал «не авторизован» — статус обновлялся только при следующем открытии
+// вкладки, поэтому единственным известным лечением был ПЕРЕЗАПУСК приложения
+// (жалоба пользователя 31.07.2026). Теперь возврат сам перепроверяет вход.
+(function _spotifyLoginReturn() {
+  let ok = false;
+  try { ok = new URLSearchParams(location.search).get('spotify_login') === 'ok'; } catch (e) { return; }
+  if (!ok) return;
+  // Убираем параметр из адреса, чтобы перезагрузка страницы не повторяла всё это.
+  try { history.replaceState(null, '', location.pathname + location.hash); } catch (e) {}
+  const run = async () => {
+    try { await loadOrpheusStatus?.(); } catch (e) {}
+    try { await loadSpotifyStatus?.(); } catch (e) {}
+    let authed = false;
+    try { authed = !!(await api('GET', '/api/orpheus/status'))?.authenticated; } catch (e) {}
+    if (window.toast) toast(authed ? t('sp.login_back_ok') : t('sp.login_back_fail'),
+                            authed ? 'var(--green)' : 'var(--orange)', 9000);
+    // Показываем вкладку Spotify — человек вернулся именно за этим.
+    try {
+      const nav = document.querySelector('.nav-item[data-view="settings"]');
+      if (nav && typeof showView === 'function') showView('settings', nav);
+      const tab = document.querySelector('.stab[data-stab="spotify"]');
+      if (typeof showStab === 'function') showStab('spotify', tab);
+    } catch (e) {}
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(run, 1200));
+  else setTimeout(run, 1200);
+})();

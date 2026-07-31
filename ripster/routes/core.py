@@ -409,6 +409,14 @@ async def tidal_auth_poll(body: dict):
 _SP_OAUTH: dict = {"proc": None}
 
 
+def _return_url() -> str:
+    """Ripster's own address, for a login helper to bounce the browser back to.
+    Honours RIPSTER_PORT so a non-default port still returns to the right app."""
+    import os as _os
+    port = (_os.environ.get("RIPSTER_PORT") or "7799").strip() or "7799"
+    return f"http://127.0.0.1:{port}/?spotify_login=ok"
+
+
 def _sp_oauth_paths():
     base = Path(__file__).resolve().parents[2]
     cache = base / "orpheus" / "config" / ".librespot_cache"
@@ -454,6 +462,11 @@ async def spotify_auth_start(body: dict = None):
             pass
     env = dict(_os.environ)
     env.setdefault("PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION", "python")
+    # Send the browser back into Ripster after Spotify's redirect instead of
+    # leaving it on the helper's dead-end page — the in-window login option has
+    # no popup to close, and `?spotify_login=ok` is what makes the UI re-check
+    # auth immediately (it used to look logged-out until the app was restarted).
+    env["RIPSTER_RETURN_URL"] = _return_url()
     flags = subprocess.CREATE_NO_WINDOW if _os.name == "nt" else 0
     try:
         proc = subprocess.Popen([_sys.executable, str(P["helper"])],

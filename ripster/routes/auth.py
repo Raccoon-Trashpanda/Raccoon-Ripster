@@ -615,8 +615,76 @@ async def _probe_deezer(overlay: dict | None = None) -> dict:
 
 
 async def _probe_spotify(overlay: dict | None = None) -> dict:
-    # sp_dc candidates can't be probed cheaply (web-token flow is IP-gated) —
-    # overlay is accepted for signature parity but the probe tests the live OAuth.
+    """What "Spotify works" actually means for Ripster — and what it does NOT.
+
+    Until 31.07.2026 this probe tested exactly ONE thing: the optional Developer-
+    App OAuth token against ``api.spotify.com/v1/me``. That is the one Spotify
+    path Ripster cannot rely on:
+
+      * ``/v1`` answers our web tokens with a permanent 429 (see the
+        ripster-spotify-tokens skill) — waiting never clears it;
+      * a Developer App owned by a non-Premium account is refused outright
+        ("Your application is blocked from accessing the Web API since you do
+        not have a Spotify Premium subscription");
+      * and none of it is involved in a single download.
+
+    So a user who had signed in properly — durable librespot session, downloads
+    working — got "Не авторизован. Нажми «Подключить»" every time, and the only
+    way to make the probe green was to go create a Developer App that Ripster
+    has no use for. Now the probe asks the components that actually do the work,
+    in the order they matter, and only falls back to the dev-app OAuth last.
+    """
+    cfg = _view(overlay)
+
+    # 1. The download session (librespot). This is what makes Spotify usable.
+    kind = ""
+    try:
+        from ripster.engines.orpheus_spotify import session_kind
+        kind = session_kind()
+    except Exception:
+        pass
+
+    # 2. The web-player Bearer the keeper mints from that same session — what the
+    #    radar/metadata actually query (api-partner, never rate-limited for us).
+    bearer_fresh = False
+    try:
+        from ripster.routes.spotify import _sp_minted_bearer
+        bearer_fresh = bool(_sp_minted_bearer())
+    except Exception:
+        pass
+
+    if kind == "blob":
+        note = ("сессия Spotify (librespot) активна"
+                + (" · web-токен свежий" if bearer_fresh else ""))
+        return {"ok": True, "via": "librespot",
+                "user": {"login": "Spotify session", "subscription": "Premium (OGG)",
+                         "hq": True, "note": note}}
+
+    if kind == "oauth":
+        # Signed in, but with the WEAK credential: metadata-grade OAuth, no
+        # durable librespot blob. Downloads may work and may die at any moment
+        # when Spotify revokes the token. Say so instead of a flat green ✓.
+        return {"ok": True, "via": "pkce", "user": {
+            "login": "PKCE-сессия", "hq": True,
+            "note": ("вход есть, но это слабая PKCE-сессия — Spotify её периодически "
+                     "отзывает. Нажми «🎧 Войти в Spotify» (первый блок вкладки) в Settings → Spotify, "
+                     "чтобы получить постоянную сессию."),
+        }}
+
+    if bearer_fresh:
+        return {"ok": True, "via": "web-token", "user": {
+            "login": "web-токен", "hq": True,
+            "note": "качать нечем (нет сессии), но метаданные и радар работают",
+        }}
+
+    if (cfg.get("spotify-sp-dc") or "").strip():
+        return {"ok": True, "via": "sp_dc", "user": {
+            "login": "sp_dc", "hq": True,
+            "note": "есть только кука sp_dc — хватает радару, для загрузок нужен вход",
+        }}
+
+    # 3. Last resort: the optional Developer-App OAuth. Nothing downloads through
+    #    it; it only ever mattered for the legacy /v1 release scan.
     try:
         from ripster.routes.spotify import get_access_token as _sp_token
     except ImportError:
@@ -625,7 +693,8 @@ async def _probe_spotify(overlay: dict | None = None) -> dict:
     token = await _sp_token()
     if not token:
         return {"ok": False,
-                "error": "Не авторизован. Нажми «Подключить» в Settings → Spotify."}
+                "error": "Нет входа в Spotify. Settings → Spotify → «🎧 Войти в Spotify» (первый блок вкладки) "
+                         "(логин/пароль Spotify, Developer App и Client ID НЕ нужны)."}
 
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -639,6 +708,8 @@ async def _probe_spotify(overlay: dict | None = None) -> dict:
     if r.status_code == 401:
         return {"ok": False,
                 "error": "Токен Spotify истёк — переподключись в Settings → Spotify."}
+    if r.status_code in (403, 429):
+        return {"ok": False, "error": _spotify_devapi_hint(r)}
     if r.status_code != 200:
         return {"ok": False, "error": f"Spotify API → HTTP {r.status_code}"}
 
@@ -653,6 +724,31 @@ async def _probe_spotify(overlay: dict | None = None) -> dict:
             "subscription": sub_map.get(product, product or "?"),
         },
     }
+
+
+def _spotify_devapi_hint(r) -> str:
+    """Turn the two dead-end Developer-App answers into something actionable.
+
+    Both look like a Ripster failure and are not: Spotify refuses Web-API access
+    to apps owned by non-Premium accounts, and it permanently 429s our web
+    tokens on /v1. Neither blocks downloading — that path doesn't touch /v1."""
+    body = ""
+    try:
+        body = (r.json().get("error", {}) or {}).get("message", "") or ""
+    except Exception:
+        body = (r.text or "")[:200]
+    low = body.lower()
+    if "premium" in low:
+        return ("Spotify не пускает Developer App без Premium у владельца приложения "
+                f"({body}). Это НЕ нужно для скачивания: Ripster качает через вход "
+                "«🎧 Войти в Spotify» (первый блок вкладки), а не через Developer App. Client ID/Secret "
+                "можно вообще не заполнять.")
+    if r.status_code == 429:
+        return ("Spotify держит api.spotify.com/v1 в постоянном 429 для наших токенов — "
+                "ожидание не помогает и на скачивание не влияет. Используй вход "
+                "«🎧 Войти в Spotify» (первый блок вкладки) в Settings → Spotify.")
+    return (f"Spotify Developer API → HTTP {r.status_code}: {body or '—'}. "
+            "На скачивание не влияет — оно идёт через вход «🎧 Войти в Spotify» (первый блок вкладки).")
 
 
 async def _probe_soundcloud(overlay: dict | None = None) -> dict:

@@ -27,6 +27,13 @@ _RE_FINISH      = re.compile(r"Finished with (\d+) error", re.I)
 _RE_SKIP        = re.compile(r"Skipping .+: (?:API Error|Requested format)")
 _RE_API1002     = re.compile(r'"status":-1002')
 _RE_DRM_KEYERR  = re.compile(r"KeyError.*AUDIO-SESSION-KEY-IDS", re.I)
+# gamdl печатает это, когда cookies.txt протух или экспортирован из вышедшей
+# сессии. Ошибка ПОСТОЯННАЯ: сама собой не пройдёт. Раньше она не попадала в
+# текст ошибки вообще — наружу шло «unexpected finish», из которого не следует
+# ничего, и раннер честно тратил три повтора по 15/45/120с на заведомо мёртвую
+# попытку (31.07.2026, «Youth - Single»). Слово «cookies» в сообщении важно:
+# по нему _RE_NO_RETRY в runner.py выключает повторы.
+_RE_NO_SUB      = re.compile(r"No active Apple Music subscription", re.I)
 
 # yt-dlp segment noise
 _RE_NOISY  = re.compile(
@@ -201,6 +208,11 @@ class GamdlEngine(EngineBase):
         return current, total
 
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
+        if _RE_NO_SUB.search(log_text):
+            return EngineResult(False, error=(
+                "gamdl: подписка Apple Music не видна — протухли cookies "
+                "(cookies.txt). Экспортируй их заново из браузера с активной "
+                "подпиской: Settings → gamdl → Cookies. Повторы не помогут."))
         if _RE_DRM_KEYERR.search(log_text):
             return EngineResult(False, error="ALAC без wrapper не работает в gamdl 3.x — включи wrapper в Settings → gamdl или переключись на zhaarey")
         m = _RE_FINISH.search(log_text)

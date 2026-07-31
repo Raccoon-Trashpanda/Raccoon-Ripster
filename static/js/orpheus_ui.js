@@ -45,6 +45,23 @@ async function loadOrpheusStatus() {
       loginSec.style.display = '';
     }
   }
+
+  // Бейдж основного блока входа (наверху вкладки). Отдельно показываем СЛАБУЮ
+  // PKCE-сессию: раньше она давала такое же зелёное «✓ Авторизован», и человек
+  // не понимал, почему скачивание всё равно не идёт.
+  const lb = document.getElementById('sp-login-badge');
+  if(lb) {
+    if(r.session === 'blob') {
+      lb.textContent = t('sp.badge_ok');
+      lb.style.background = 'rgba(62,207,170,.15)'; lb.style.color = 'var(--green)';
+    } else if(r.authenticated) {
+      lb.textContent = t('sp.badge_weak');
+      lb.style.background = 'rgba(255,159,10,.15)'; lb.style.color = 'var(--orange)';
+    } else {
+      lb.textContent = t('s.not_authed');
+      lb.style.background = 'rgba(255,255,255,.07)'; lb.style.color = 'var(--muted)';
+    }
+  }
 }
 
 async function saveSpotifyToken() {
@@ -131,47 +148,43 @@ async function orpheusLogin() {
   }
 
   setStatus(t('op.opening'), '#0a84ff');
-  const popup = window.open(r.url, 'orpheus_oauth', 'width=520,height=700');
-  if(!popup) {
-    // Окно Ripster.exe — WebView2, и он режет window.open() молча. Раньше мы тут
-    // сдавались и убивали helper: вход из exe был невозможен, хотя из браузерного
-    // ярлыка тот же билд работал. Просим сервер открыть страницу входа системным
-    // браузером, helper на 4381 оставляем жить — колбэк придёт по WebSocket.
-    const opened = await api('POST', '/api/orpheus/login-open');
-    if(!opened || !opened.ok) {
-      setStatus(opened?.error || t('op.popup_blocked'), 'var(--orange)');
-      await api('DELETE', '/api/orpheus/login-cancel');
-      if(btn) { btn.disabled=false; btn.textContent='🎵 ' + t('op.login_sp'); }
-      return;
-    }
-    setStatus(t('op.opened_ext'), '#0a84ff');
-    window._orpheusLoginDone = () => {
-      window._orpheusLoginDone = null;
-      if(stEl) stEl.style.display='none';
-      if(btn) { btn.disabled=false; btn.textContent='🎵 ' + t('op.login_sp'); }
-      loadOrpheusStatus();
-    };
+  // Спрашиваем способ вместо слепого window.open: в окне Ripster.exe (WebView2)
+  // попап возвращается null точно так же, как при блокировщике в браузере, и
+  // отличить их нельзя — люди разрешали попапы, а вход всё равно не открывался.
+  // Вариант «здесь» блокировать нечем; helper на 4381 при этом ЖИВ, его колбэк
+  // вернёт браузер обратно в Ripster сам.
+  const how = await openAuthPage(r.url, t('op.login_sp'));
+  if(how === 'here') return;
+  if(!how) {
+    setStatus(t('sl.cancelled'), 'var(--muted)');
+    await api('DELETE', '/api/orpheus/login-cancel');
+    if(btn) { btn.disabled=false; btn.textContent='🎵 ' + t('op.login_sp'); }
     return;
   }
 
-  const pollTimer = setInterval(async () => {
-    if(popup.closed) {
-      clearInterval(pollTimer);
-      window._orpheusLoginDone = null;
-      setStatus(t('op.win_closed'), 'var(--orange)');
-      await api('DELETE', '/api/orpheus/login-cancel');
-      if(btn) { btn.disabled=false; btn.textContent='🎵 ' + t('op.login_sp'); }
-    }
-  }, 1000);
-
-  window._orpheusLoginDone = () => {
-    clearInterval(pollTimer);
+  setStatus(t('op.opened_ext'), '#0a84ff');
+  // Не полагаемся на одно только WS-событие: если человек за это время
+  // перезагрузил страницу (или логинился во внешнем браузере из другой вкладки),
+  // событие приходит в никуда — и Ripster показывал «не авторизован» до
+  // перезапуска приложения. Поэтому ещё и опрашиваем статус.
+  const deadline = Date.now() + 180 * 1000;
+  const finish = () => {
     window._orpheusLoginDone = null;
-    try { popup.close(); } catch(e) {}
     if(stEl) stEl.style.display='none';
     if(btn) { btn.disabled=false; btn.textContent='🎵 ' + t('op.login_sp'); }
     loadOrpheusStatus();
   };
+  const pollTimer = setInterval(async () => {
+    const st = await api('GET', '/api/orpheus/status').catch(()=>null);
+    if(st && st.authenticated) { clearInterval(pollTimer); finish(); return; }
+    if(Date.now() > deadline) {
+      clearInterval(pollTimer);
+      setStatus(t('op.win_closed'), 'var(--orange)');
+      if(btn) { btn.disabled=false; btn.textContent='🎵 ' + t('op.login_sp'); }
+    }
+  }, 2500);
+
+  window._orpheusLoginDone = () => { clearInterval(pollTimer); finish(); };
 }
 
 async function orpheusLogout() {

@@ -419,9 +419,14 @@ def check_watchlist():
     # каждая подписка на лейбл считалась сломанной записью (29.07.2026: «This
     # Never Happened»). Ложная краснота вредна ровно так же, как ложная зелень:
     # и та и другая приучают не смотреть на проверку.
+    # artist_id нужен записи ЛЮБОГО сервиса, кроме SoundCloud: наблюдение всегда
+    # идёт по каталогу Apple, сервис записи говорит лишь куда качать. 31.07.2026
+    # фильтр `service == "apple"` пропустил мёртвую deezer-подписку — она
+    # показывалась мягким «ни разу не проверялась» вместо «не проверяется вообще».
     broken = [x for x in items
               if x.get("kind") != "label"
-              and x.get("service", "apple") == "apple" and not x.get("artist_id")]
+              and x.get("service", "apple") != "soundcloud"
+              and not x.get("artist_id")]
     seen, dups = set(), 0
     for x in items:
         sig = ((x.get("name") or "").strip().lower(), x.get("service", ""))
@@ -570,7 +575,17 @@ _ERR_BUCKETS = [
     # ни с одним ключом и падала в `other`. 29.07.2026 те же 4 инцидента лежали в
     # двух бакетах сразу: apple-ckc×4 + 4 безымянных. Ловим обе формы.
     ("apple-ckc",           ("invalid ckc", "decryptfragment", "drm/ckc")),
-    ("apple-region",        ("resource not found", "40400", "territory")),
+    # Совет раннера про регион («прав в регионе аккаунта нет / перелогин НЕ
+    # поможет») — это ВТОРАЯ строка того же инцидента, что и apple-ckc, и она не
+    # совпадала ни с одним ключом: 31.07.2026 четыре таких строки составили
+    # большую часть `other` и прятали за собой настоящую находку. Диагноз в них
+    # верный — им не хватало только имени.
+    ("apple-region",        ("resource not found", "40400", "territory",
+                             "прав в регионе аккаунта нет")),
+    # Протухшие cookies.txt: gamdl рапортует «нет подписки», хотя подписка есть.
+    # Постоянное состояние, чинится только руками владельца (см. gamdl.py).
+    ("gamdl-cookies",       ("no active apple music subscription",
+                             "протухли cookies")),
     ("apple-tags",          ("failed to write tags", "parseuint")),
     # Лирика Spotify отдаёт 400 на треках, у которых её просто нет. Ключ
     # "spotify" в бакете авторизации проглатывал это и рисовал spotify-auth×3 при
@@ -626,6 +641,13 @@ def check_errors_24h():
             return
         top = sorted(buckets.items(), key=lambda x: -x[1])
         summary = ", ".join(f"{k}×{v}" for k, v in top[:6])
+        # Единственный бакет, который требует РУК владельца: cookies.txt заново
+        # не экспортируешь автоматически. Отдельной строкой, иначе он тонет в
+        # информационной сводке и месяцами никем не читается.
+        if buckets.get("gamdl-cookies"):
+            warn(f"gamdl: cookies.txt протух ({buckets['gamdl-cookies']} падений за сутки) — "
+                 f"экспортируй заново из браузера с активной подпиской. "
+                 f"Загрузки через wrapper (zhaarey/AMD) это не затрагивает")
         # A high error count of a FIXABLE class is worth flagging; noise (region/sub)
         # is expected, so it's informational.
         _report.append(f"📈 Ошибки за 24ч ({total}): {summary}")

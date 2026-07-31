@@ -182,19 +182,38 @@ def _heal_blob() -> bool:
     return False
 
 
-def is_authenticated() -> bool:
-    # Durable desktop/zeroconf blob is a full, long-lived credential — prefer it.
+def session_kind() -> str:
+    """WHICH Spotify credential we actually hold — the two are NOT equivalent and
+    conflating them is what made "✓ Авторизован" appear next to downloads that
+    could never work (found 31.07.2026, two users):
+
+      "blob"  — reusable_credentials.json, the librespot/desktop credential.
+                This is the ONLY one that streams audio reliably; the token
+                keeper also mints web Bearers from it, so the radar works too.
+      "oauth" — config/credentials.json written by the PKCE helper
+                (orpheus/_auth_helper.py). A Web-API token: fine for metadata,
+                but audio only via librespot's fragile OAuth path, and Spotify
+                revokes it periodically. A user who clicked the wrong one of the
+                two identically-labelled "Войти в Spotify" buttons ends up here
+                — typically shown as user `orpheus_pkce_user`, which is the
+                helper's own fallback name when /v1/me is blocked.
+      ""      — nothing.
+    """
     # Self-heal from the .bak an abandoned re-login may have left behind.
     if _heal_blob():
-        return True
+        return "blob"
     p = _creds_path()
     if not p.exists():
-        return False
+        return ""
     try:
         d = json.loads(p.read_text(encoding="utf-8"))
-        return bool(d.get("access_token"))
+        return "oauth" if d.get("access_token") else ""
     except Exception:
-        return False
+        return ""
+
+
+def is_authenticated() -> bool:
+    return bool(session_kind())
 
 
 def delete_creds() -> None:
