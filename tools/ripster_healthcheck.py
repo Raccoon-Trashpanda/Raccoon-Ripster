@@ -237,6 +237,69 @@ def check_apple_wrapper():
             "ручной разбор (skill ripster-apple-wrapper)")
 
 
+def check_gamdl_cookies():
+    """Отличить ДВА состояния cookies.txt, которые до 01.08.2026 выглядели одинаково.
+
+    gamdl падает с «unexpected finish»/«No active Apple Music subscription» и по
+    обоим поводам совет был один: «экспортируй cookies.txt заново». Но причины
+    две, и лечатся они по-разному:
+      * сессия ПРОТУХЛА (401/403) → повторный экспорт из браузера действительно чинит;
+      * сессия ЖИВА, а подписка на этом аккаунте КОНЧИЛАСЬ (200, active=False) →
+        повторный экспорт тех же куки не изменит НИЧЕГО, и владелец потратит
+        время впустую.
+    01.08.2026: куки жили с 06.05, mut-refresh истёк 09.06 — по всем внешним
+    признакам «протухли», а на деле сессия отвечала 200 и storefront=gb; мёртвой
+    была подписка. Второй аккаунт (враппер, ca) при этом active=True.
+
+    Проверка read-only: dev_token берём у локального враппера (30020),
+    media-user-token — из самого cookies.txt. Ни одного запроса на скачивание,
+    ни одной записи."""
+    p = Path(_cfg_get("gamdl-cookies-path") or "cookies.txt")
+    if not p.is_absolute():
+        p = ROOT / p
+    if not p.exists():
+        return  # gamdl просто не настроен — это не поломка
+    mut = ""
+    try:
+        for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+            f = line.split("\t")
+            if len(f) >= 7 and f[5].strip() == "media-user-token":
+                mut = f[6].strip()
+    except Exception:
+        return
+    if not mut:
+        warn(f"gamdl: в {p.name} нет media-user-token — экспортируй заново "
+             f"из залогиненного music.apple.com")
+        return
+    st, data = _api_raw_30020()
+    dev = (data.get("dev_token") or "").strip() if isinstance(data, dict) else ""
+    if not dev:
+        return  # без dev_token проверить нечем; враппер уже отмечен выше
+    try:
+        req = urllib.request.Request(
+            "https://amp-api.music.apple.com/v1/me/account?meta=subscription",
+            headers={"Authorization": f"Bearer {dev}", "Media-User-Token": mut,
+                     "Origin": "https://music.apple.com", "User-Agent": "Ripster"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            body = json.loads(r.read().decode("utf-8", "ignore"))
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            warn(f"gamdl: сессия в {p.name} протухла ({e.code}) — экспортируй "
+                 f"cookies.txt заново из браузера с активной подпиской")
+        return
+    except Exception:
+        return  # сеть — не наша поломка, молчим
+    sub = (body.get("meta") or {}).get("subscription") or {}
+    sf = sub.get("storefront") or "?"
+    if sub.get("active"):
+        ok(f"gamdl: cookies.txt жив, подписка активна (storefront {sf})")
+    else:
+        warn(f"gamdl: сессия в {p.name} ЖИВА, но подписки на этом аккаунте нет "
+             f"(storefront {sf}) — повторный экспорт ТЕХ ЖЕ куки не поможет. "
+             f"Нужны куки аккаунта С подпиской либо продлить текущий. "
+             f"Загрузки через wrapper (zhaarey/AMD) это не затрагивает")
+
+
 def _api_raw_30020():
     try:
         with urllib.request.urlopen("http://127.0.0.1:30020", timeout=6) as r:
@@ -645,8 +708,11 @@ def check_errors_24h():
         # не экспортируешь автоматически. Отдельной строкой, иначе он тонет в
         # информационной сводке и месяцами никем не читается.
         if buckets.get("gamdl-cookies"):
-            warn(f"gamdl: cookies.txt протух ({buckets['gamdl-cookies']} падений за сутки) — "
-                 f"экспортируй заново из браузера с активной подпиской. "
+            # Не советуем «экспортируй заново» вслепую: с 01.08.2026 точный
+            # диагноз (протухшая сессия vs кончившаяся подписка) даёт
+            # check_gamdl_cookies выше — там же и правильное действие.
+            warn(f"gamdl: {buckets['gamdl-cookies']} падений за сутки из-за cookies.txt — "
+                 f"смотри строку «gamdl:» выше, там точная причина и что делать. "
                  f"Загрузки через wrapper (zhaarey/AMD) это не затрагивает")
         # A high error count of a FIXABLE class is worth flagging; noise (region/sub)
         # is expected, so it's informational.
@@ -697,6 +763,7 @@ def main():
     app_ok = check_app()
     if app_ok:
         check_apple_wrapper()
+        check_gamdl_cookies()
         check_tokens()
         check_engine_probe()
         check_tunnel()

@@ -1498,7 +1498,10 @@
               <div style="font-weight:700;font-size:13px;color:var(--text)" data-i18n="sp.login_title">Вход в Spotify</div>
               <div id="sp-login-badge" style="margin-left:auto;font-size:10px;font-weight:700;padding:2px 7px;border-radius:5px;background:rgba(255,255,255,.07);color:var(--muted)"><span data-i18n="s.not_authed">не авторизован</span></div>
             </div>
-            <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:10px" data-i18n="sp.login_desc">
+            <!-- data-i18n-HTML, а не data-i18n: в строке есть <b>, и как обычный
+                 текст она печатала теги прямо на экран («Client Secret <b>не
+                 нужны</b>»). Видно на скриншоте владельца 01.08.2026. -->
+            <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:10px" data-i18n-html="sp.login_desc">
               Это всё, что нужно для скачивания со Spotify: обычный вход в аккаунт Spotify. Developer App, Client ID и Client Secret <b>не нужны</b> — они ниже и только для резервного скана релизов.
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
@@ -1510,9 +1513,23 @@
           <!-- ─ Блок 1: Релизы ──────────────────────────────────────────── -->
           <div class="block mt12">
             <div class="block-title" style="color:#1db954" data-i18n="sp.new_releases">🟢 Новые релизы</div>
+            <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:8px" data-i18n="sp.releases_ok">
+              Работают на том же входе, что и скачивание — заполнять ничего не нужно.
+            </div>
 
-            <!-- sp_dc — основной метод авторизации для скана -->
-            <div class="field-group" style="margin-bottom:10px">
+            <!-- Ручные токены СВЁРНУТЫ. Оба поля ниже — наследие тех времён, когда
+                 web-токен приходилось добывать руками через DevTools. Сейчас его
+                 сам добывает кипер из постоянной сессии librespot, а sp_dc нужен
+                 разве что как запасной путь. На виду они требовали от человека
+                 «F12 → Network → фильтр api-partner → Request Headers», и по
+                 скриншоту владельца 01.08.2026 вкладка читалась как приборная
+                 панель, а не как настройка: «ну не каждый разберётся». -->
+            <details style="margin-top:4px">
+              <summary style="cursor:pointer;font-size:11px;color:var(--muted);user-select:none;list-style:none;display:flex;align-items:center;gap:6px">
+                <span style="font-size:10px">▶</span>
+                <span data-i18n="sp.manual_summary">Ручные токены — обычно не нужны</span>
+              </summary>
+            <div class="field-group" style="margin-bottom:10px;margin-top:10px">
               <label class="lbl">sp_dc cookie
                 <span style="font-size:10px;font-weight:400;color:var(--muted);margin-left:6px">F12 → Application → Cookies → open.spotify.com</span>
               </label>
@@ -1526,20 +1543,6 @@
                 </button>
               </div>
               <div id="sp-dc-auto-status" style="font-size:10px;color:var(--muted);margin-top:3px" data-i18n="sp.dc_status">Скан подписок идёт через веб-плеер — выше лимиты, не нужен Developer App. Живёт ~1 год.</div>
-            </div>
-
-            <!-- Saved conversion target -->
-            <div id="sp-saved-target-row" style="display:none;background:rgba(0,0,0,.15);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-top:10px">
-              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-                <div style="flex:1;min-width:200px">
-                  <div style="font-size:12px;color:var(--text);font-weight:600" data-i18n="s.sp_saved_target">Сохранённый выбор конвертации</div>
-                  <div style="font-size:11px;color:var(--muted);margin-top:2px">
-                    Spotify-ссылки автоматически идут через <span id="sp-saved-target-name" style="color:var(--text)">—</span> без вопроса.
-                  </div>
-                </div>
-                <button onclick="resetSpotifyDefaultTarget()" data-i18n="s.sp_reset"
-                  style="padding:5px 11px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;font-family:var(--font)"><span data-i18n="s.reset_btn">Сбросить</span></button>
-              </div>
             </div>
 
             <!-- OAuth — свёрнутый блок для тех у кого нет sp_dc или нужен запасной -->
@@ -1607,6 +1610,22 @@
                 </div>
               </div>
             </details>
+            </details><!-- /Ручные токены -->
+
+            <!-- Saved conversion target — это настоящая настройка человека,
+                 а не служебный токен, поэтому осталась на виду. -->
+            <div id="sp-saved-target-row" style="display:none;background:rgba(0,0,0,.15);border:1px solid var(--border);border-radius:9px;padding:10px 12px;margin-top:10px">
+              <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+                <div style="flex:1;min-width:200px">
+                  <div style="font-size:12px;color:var(--text);font-weight:600" data-i18n="s.sp_saved_target">Сохранённый выбор конвертации</div>
+                  <div style="font-size:11px;color:var(--muted);margin-top:2px">
+                    Spotify-ссылки автоматически идут через <span id="sp-saved-target-name" style="color:var(--text)">—</span> без вопроса.
+                  </div>
+                </div>
+                <button onclick="resetSpotifyDefaultTarget()" data-i18n="s.sp_reset"
+                  style="padding:5px 11px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;font-family:var(--font)"><span data-i18n="s.reset_btn">Сбросить</span></button>
+              </div>
+            </div>
           </div>
 
           <!-- ─ Блок 2: Скачивание ──────────────────────────────────────── -->
@@ -1620,9 +1639,17 @@
               OrpheusDL — PKCE OAuth (Apple ID, Google, обычный аккаунт). OGG ~320 kbps, нужен Spotify Premium.
             </div>
 
-            <!-- Web-token refresh: Spotify killed the embed token (2026-06), so native
-                 metadata needs a manually-pasted web-player Bearer + client-token. -->
-            <div style="margin-bottom:12px;padding:10px 12px;background:rgba(29,185,84,.06);border:1px solid rgba(29,185,84,.2);border-radius:8px">
+            <!-- Web-токен СВЁРНУТ. Он требовал «F12 → Network → фильтр api-partner
+                 → Request Headers → скопируй блок» — на виду это делало вкладку
+                 нечитаемой для обычного человека. И главное: вручную он больше не
+                 нужен, кипер сам минтит его из постоянной сессии librespot каждые
+                 ~45 минут. Оставлен как аварийный путь, если сессии нет. -->
+            <details style="margin-bottom:12px">
+              <summary style="cursor:pointer;font-size:11px;color:var(--muted);user-select:none;list-style:none;display:flex;align-items:center;gap:6px">
+                <span style="font-size:10px">▶</span>
+                <span data-i18n="sp.webtoken_summary">Web-токен вручную — обычно не нужен, обновляется сам</span>
+              </summary>
+            <div style="margin-top:10px;padding:10px 12px;background:rgba(29,185,84,.06);border:1px solid rgba(29,185,84,.2);border-radius:8px">
               <div style="font-size:11px;font-weight:700;color:#1db954;margin-bottom:6px" data-i18n="sp.webtoken_title">🔑 Web-токен (нативный OGG)</div>
               <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5" data-i18n-html="sp.webtoken_desc">
                 Spotify убрал токен с embed-страницы. open.spotify.com → F12 → Network → фильтр
@@ -1641,6 +1668,7 @@
                    "token expired N min ago / no pushes yet" line. The manual
                    web-token paste above is the primary path. -->
             </div>
+            </details><!-- /Web-токен вручную -->
 
             <!-- Auth status bar -->
             <div id="orp-auth-bar" style="display:none;align-items:center;gap:10px;margin-bottom:12px;padding:10px 12px;background:rgba(62,207,170,.07);border:1px solid rgba(62,207,170,.2);border-radius:8px">
