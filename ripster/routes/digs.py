@@ -83,7 +83,12 @@ async def digs_similar(artist: str = "", limit: int = 12):
     if not name:
         return {"ok": False, "error": "не указан артист"}
     items = await _s.similar(name, limit=limit)
-    return {"ok": True, "artist": name, "items": items}
+    # Фото подтягиваем и для центрального артиста тоже — иначе центр круга
+    # выглядит беднее собственных ответвлений.
+    pics = await _s.artist_pics([name] + [i["name"] for i in items])
+    for it in items:
+        it["pic"] = pics.get(it["name"], "")
+    return {"ok": True, "artist": name, "pic": pics.get(name, ""), "items": items}
 
 
 @router.post("/api/digs/exclude")

@@ -1763,3 +1763,23 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 @keyframes help-pop-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 @media (max-width:640px){.help-pop{max-width:calc(100vw - 32px)}}
 
+
+
+/* Кнопка воспроизведения на обложке релиза.
+   Была 54px на обложке ~180px — треть картинки, — и рисовалась символом ▶
+   (U+25B6), у которого в каждом шрифте свой внутренний отступ; центровали
+   костылём padding-left:4px, и всё равно вело. SVG-треугольник центрируется
+   геометрически и одинаков везде. Смещение на 1px вправо — оптическая
+   компенсация: треугольник кажется левее своего геометрического центра. */
+.rel-play{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:40px;height:40px;border-radius:50%;background:rgba(0,0,0,.48);
+  border:1.5px solid rgba(255,255,255,.8);cursor:pointer;padding:0;z-index:2;
+  display:flex;align-items:center;justify-content:center;
+  backdrop-filter:blur(3px);transition:transform .12s,background .12s,border-color .12s}
+.rel-play svg{width:16px;height:16px;fill:#fff;margin-left:1px}
+.rel-play:hover{transform:translate(-50%,-50%) scale(1.1);background:rgba(0,0,0,.68);
+  border-color:#fff}
+.rel-play:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+/* Нижний блок карточки прижат к низу — иначе строки действий в ряду стоят
+   на разной высоте у карточек с селектором качества и без него. */
+.rel-card > div:last-child{margin-top:auto}

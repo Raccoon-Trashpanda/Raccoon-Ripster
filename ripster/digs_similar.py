@@ -29,6 +29,11 @@ from pathlib import Path
 _BASE = Path(__file__).parent.parent
 _CACHE = _BASE / "digs_similar_cache.json"
 _TTL = 30 * 86_400          # похожесть артистов — величина медленная
+# ...но ПУСТОЙ ответ так кэшировать нельзя. MusicBrainz отдаёт 503 под нагрузкой
+# (поймано живьём на «Lemongrass»), и один такой сбой записывал «похожих нет» на
+# месяц вперёд. Так «Max Cooper» — у которого в ListenBrainz 88 похожих — на
+# месяц стал в интерфейсе артистом без данных. Промах живёт час, не месяц.
+_TTL_EMPTY = 3600
 
 _MB_URL = "https://musicbrainz.org/ws/2/artist"
 _LB_URL = "https://labs.api.listenbrainz.org/similar-artists/json"
@@ -38,7 +43,14 @@ _LB_ALGOS = (
     "session_based_days_9000_session_300_contribution_5_threshold_15_limit_50_skip_30",
     "session_based_days_7500_session_300_contribution_5_threshold_15_limit_50",
 )
-_UA = {"User-Agent": "Ripster/3.3 (personal music library tool)"}
+_UA = {"User-Agent": "Ripster/3.4 (personal music library tool)"}
+
+# Фото артистов. Deezer отдаёт их бесплатно и без токена, и имя в ответе можно
+# сверить с запросом — проверено на выборке, совпало у всех. Это, кстати, тот же
+# Deezer, чей эндпоинт /related мёртв: искать он умеет, «похожих» — нет.
+_DZ_SEARCH = "https://api.deezer.com/search/artist"
+_PIC_CACHE = _BASE / "digs_artist_pics.json"
+_PIC_TTL = 90 * 86_400          # фото артиста меняется редко
 
 
 def _load() -> dict:
@@ -56,20 +68,76 @@ def _save(d: dict) -> None:
         pass
 
 
-async def _mbid(client, name: str) -> str:
+async def _mbids(client, name: str) -> list[str]:
+    """ВСЕ кандидаты с точным совпадением имени, а не только первый.
+
+    Тёзки — обычное дело: по «Max Cooper» MusicBrainz отдаёт и электронщика
+    (88 похожих в ListenBrainz), и вокалиста 1940-х (0). Взяв первого попавшегося,
+    легко объявить мировую знаменитость артистом без данных. Проверяем по
+    очереди, пока кто-то не отдаст похожих.
+
+    Имя всё равно сверяем: MusicBrainz всегда что-нибудь возвращает, и без
+    проверки «Debit» превращается в постороннего артиста.
+    """
     try:
-        r = await client.get(_MB_URL, params={"query": name, "fmt": "json", "limit": 1})
+        r = await client.get(_MB_URL, params={"query": name, "fmt": "json", "limit": 8})
         if r.status_code != 200:
-            return ""
-        arts = (r.json() or {}).get("artists") or []
-        if not arts:
-            return ""
-        # Сверяем имя: MusicBrainz всегда что-нибудь возвращает, и без проверки
-        # «Debit» легко превращается в постороннего артиста.
-        got = (arts[0].get("name") or "").strip().lower()
-        return arts[0].get("id", "") if got == name.strip().lower() else ""
+            return []
+        want = name.strip().lower()
+        return [a.get("id", "") for a in ((r.json() or {}).get("artists") or [])
+                if (a.get("name") or "").strip().lower() == want and a.get("id")]
     except Exception:
-        return ""
+        return []
+
+
+def _load_pics() -> dict:
+    try:
+        d = json.loads(_PIC_CACHE.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _save_pics(d: dict) -> None:
+    try:
+        _PIC_CACHE.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+async def artist_pics(names: list[str]) -> dict:
+    """Имя → фото. Пусто у кого не нашлось — это не ошибка, кружок просто
+    останется с инициалом.
+
+    Сверяем имя из ответа с запросом: Deezer всегда что-нибудь возвращает, и без
+    проверки в кружок «Debit» легко приезжает лицо постороннего артиста — а
+    неверное лицо хуже отсутствующего.
+    """
+    import asyncio as _aio
+    import httpx
+
+    cache = _load_pics()
+    now = int(time.time())
+    todo = [n for n in names
+            if (now - int((cache.get(n.lower()) or {}).get("ts", 0))) > _PIC_TTL]
+    if todo:
+        sem = _aio.Semaphore(6)
+        async with httpx.AsyncClient(timeout=12, headers=_UA) as c:
+            async def one(nm: str) -> None:
+                async with sem:
+                    pic = ""
+                    try:
+                        r = await c.get(_DZ_SEARCH, params={"q": nm, "limit": 1})
+                        if r.status_code == 200:
+                            d = ((r.json() or {}).get("data") or [{}])[0]
+                            if (d.get("name") or "").strip().lower() == nm.strip().lower():
+                                pic = d.get("picture_medium") or d.get("picture") or ""
+                    except Exception:
+                        pass
+                    cache[nm.lower()] = {"pic": pic, "ts": now}
+            await _aio.gather(*(one(n) for n in todo), return_exceptions=True)
+        _save_pics(cache)
+    return {n: (cache.get(n.lower()) or {}).get("pic", "") for n in names}
 
 
 async def similar(name: str, limit: int = 12) -> list[dict]:
@@ -82,13 +150,15 @@ async def similar(name: str, limit: int = 12) -> list[dict]:
         return []
     cache = _load()
     hit = cache.get(key)
-    if hit and (time.time() - hit.get("ts", 0)) < _TTL:
-        return hit.get("items", [])[:limit]
+    if hit:
+        age = time.time() - hit.get("ts", 0)
+        ttl = _TTL_EMPTY if not (hit.get("items") or []) else _TTL
+        if age < ttl:
+            return hit.get("items", [])[:limit]
 
     out: list[dict] = []
     async with httpx.AsyncClient(timeout=20, headers=_UA, follow_redirects=True) as c:
-        mbid = await _mbid(c, name)
-        if mbid:
+        for mbid in (await _mbids(c, name))[:3]:
             for algo in _LB_ALGOS:
                 try:
                     r = await c.get(_LB_URL, params={"artist_mbids": mbid, "algorithm": algo})
@@ -108,7 +178,9 @@ async def similar(name: str, limit: int = 12) -> list[dict]:
                                     "mbid": it.get("artist_mbid", "")})
                 if out:
                     break
+            if out:
+                break
     out.sort(key=lambda x: x["score"], reverse=True)
-    cache[key] = {"ts": int(time.time()), "items": out[:40]}
+    cache[key] = {"ts": int(time.time()), "items": out[:40], "empty": not out}
     _save(cache)
     return out[:limit]

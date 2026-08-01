@@ -139,6 +139,30 @@ async def _probe_amazon(overlay: dict | None = None) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
+async def _probe_bbc(overlay: dict | None = None) -> dict:
+    """BBC Sounds — ключей не требует вовсе, и раньше проба на него отвечала
+    `400 Unsupported service: bbc`. Отсутствие учётных данных это НЕ ошибка
+    настройки, и сообщать о нём как об ошибке — вводить в заблуждение.
+
+    Заодно это канарейка: публичный API BBC может тихо умереть, и узнать об
+    этом лучше здесь, чем по молчащему радару. Ровно так однажды умер
+    RSS-эндпоинт вишлиста, и никто не замечал месяцами.
+    """
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get("https://www.bbc.co.uk/programmes/m002vbnb.json")
+    except Exception as e:
+        return {"ok": False, "error": f"BBC недоступен: {e}"}
+    if r.status_code != 200:
+        return {"ok": False,
+                "error": f"Публичный API BBC ответил {r.status_code} — "
+                         f"это не про твои настройки, ключи ему не нужны."}
+    return {"ok": True, "user": {
+        "login": "public API", "hq": True,
+        "note": "ключи не нужны — BBC Sounds открыт",
+    }}
+
+
 @router.post("/api/test-auth/{service}")
 async def test_auth(service: str, body: dict | None = None):
     """Probe a service's API with saved credentials. Returns structured info:
@@ -166,6 +190,7 @@ async def test_auth(service: str, body: dict | None = None):
         "beatport":   _probe_beatport,
         "yandex":     _probe_yandex,
         "amazon":     _probe_amazon,
+        "bbc":        _probe_bbc,
     }
     fn = probes.get(s)
     if fn is None:

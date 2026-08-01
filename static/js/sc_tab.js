@@ -1,3 +1,39 @@
+
+// Обложка под РЕАЛЬНЫЙ размер на экране, а не «как отдали».
+//
+// Замер 01.08.2026: все 31975 обложек в сторе радара — 640×640, при ширине
+// карточки ~180 px. Это 409600 декодируемых точек вместо 32400 на каждую
+// карточку, и декодирование идёт на CPU. Отсюда и рывки при прокрутке.
+//
+// Пережимать ничего не надо: сервисы отдают те же файлы меньшего размера, надо
+// лишь попросить правильный адрес.
+function relCover(url, px) {
+  if (!url) return url;
+  try {
+    // Spotify. ПРОВЕРЕНО НА ЖИВОМ CDN 01.08.2026, и результат обратен ожиданию:
+    // средний размер `e02d` (300px) отдаёт 404 — на выборке из 12 обложек НИ
+    // ОДНОЙ. Живы только `b273` (640) и `4851` (64). Поэтому уменьшаем ТОЛЬКО
+    // для мелких мест (кружки «Раскопок» — 56px, там 64px идеален и экономит
+    // ~100× пикселей), а для карточек радара оставляем как есть: подставить
+    // несуществующий адрес значит показать пустоту вместо обложки.
+    if (url.includes('i.scdn.co/image/ab67616d0000')) {
+      return px <= 96
+        ? url.replace(/ab67616d0000(b273|e02d|4851)/, 'ab67616d00004851')
+        : url;
+    }
+    // Apple: размер — настоящий сегмент пути, любые значения живы (проверено).
+    if (url.includes('mzstatic.com')) {
+      const n = px <= 96 ? 128 : (px <= 320 ? 296 : 632);
+      return url.replace(/\/\d+x\d+([a-z]{0,2})\.(jpg|png|webp)/i, `/${n}x${n}$1.$2`);
+    }
+    // Deezer: то же самое, проверено.
+    if (url.includes('dzcdn.net') || url.includes('deezer.com')) {
+      const n = px <= 96 ? 120 : (px <= 320 ? 264 : 500);
+      return url.replace(/\/\d+x\d+-/, `/${n}x${n}-`);
+    }
+  } catch (e) { /* адрес незнакомого вида — отдаём как есть */ }
+  return url;
+}
 // ======================================================================
 // SoundCloud / Lucida tab UI
 // Extracted from app.js (mechanical split — same global functions, no behaviour
@@ -197,7 +233,9 @@ function renderRelChips() {
 }
 
 function _relGroupGrid(cardsHtml) {
-  return `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px">${cardsHtml}</div>`;
+  // align-items:stretch — чтобы карточки в ряду были одной высоты: у части
+  // релизов есть селектор качества, у части нет, и ряды кнопок стояли вразнобой.
+  return `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;align-items:stretch">${cardsHtml}</div>`;
 }
 function _renderRelFlat(list) {
   return _relGroupGrid(list.map(renderReleaseCard).join(''));
@@ -310,8 +348,49 @@ function _relFilterDebounced(ms) {
 }
 
 function _relShowMore() {
+  const grid = document.getElementById('releases-grid');
+  // Отфильтрованный список уже посчитан фильтром и лежит здесь —
+  // считать его второй раз значит рисковать расхождением.
+  const data = _relFilteredData;
+  const from = _relShowing;
   _relShowing += _REL_PAGE_SIZE;
-  _applyRelFilter(false);
+  const slice = data.slice(from, _relShowing);
+  if (!grid || !slice.length || from === 0) { _applyRelFilter(); return; }
+
+  const sortSel = document.getElementById('rel-sort');
+  const grouped = (() => { const v = sortSel && sortSel.value; return v === 'date_desc' || v === 'date_asc'; })();
+
+  // Рисуем ТОЛЬКО добавку. Полная перерисовка выбрасывала и разбирала заново
+  // все уже показанные карточки вместе с их декодированными обложками.
+  const holder = document.createElement('div');
+  holder.innerHTML = grouped ? _renderRelGroups(slice) : _renderRelFlat(slice);
+
+  if (grouped) {
+    // Если добавка начинается той же датой, на которой список оборвался, её
+    // карточки переносятся в уже существующую сетку — иначе получится второй
+    // заголовок с той же датой.
+    const lastGroup = grid.lastElementChild;
+    const firstNew = holder.firstElementChild;
+    const dateOf = (el) => el && el.querySelector('span') ? el.querySelector('span').textContent.trim() : null;
+    if (lastGroup && firstNew && dateOf(lastGroup) === dateOf(firstNew)) {
+      const intoGrid = lastGroup.querySelector('div[style*="grid"]');
+      const fromGrid = firstNew.querySelector('div[style*="grid"]');
+      if (intoGrid && fromGrid) {
+        const added = fromGrid.children.length;
+        while (fromGrid.firstChild) intoGrid.appendChild(fromGrid.firstChild);
+        const cnt = lastGroup.querySelectorAll('span')[1];
+        if (cnt) {
+          const was = parseInt(cnt.textContent, 10) || 0;
+          cnt.textContent = `${was + added} ${t('w.rel_abbr')}`;
+        }
+        firstNew.remove();
+      }
+    }
+  }
+  while (holder.firstChild) grid.appendChild(holder.firstChild);
+
+  _relUpdateLoadMore(data.length);
+  _relHydrateQualitySelects();
 }
 
 function _relActiveSvcs() {
@@ -510,13 +589,13 @@ function renderReleaseCard(rel) {
   // content-visibility lets the browser skip layout+paint for cards that are
   // off-screen (the grid renders 120 at a time); contain-intrinsic-size keeps
   // the scrollbar honest for the ones it skipped.
-  return `<div class="rel-card${isNew ? ' rel-card-new' : ''}" style="background:var(--surface);border:1px solid ${baseBorder};border-radius:10px;overflow:hidden;transition:border-color .15s;content-visibility:auto;contain-intrinsic-size:auto 300px" onmouseover="this.style.borderColor='${svcClr}'" onmouseout="this.style.borderColor='${baseBorder}'">
+  return `<div class="rel-card${isNew ? ' rel-card-new' : ''}" style="background:var(--surface);border:1px solid ${baseBorder};border-radius:10px;overflow:hidden;transition:border-color .15s;content-visibility:auto;contain-intrinsic-size:auto 300px;display:flex;flex-direction:column;height:100%" onmouseover="this.style.borderColor='${svcClr}'" onmouseout="this.style.borderColor='${baseBorder}'">
     <div style="position:relative">
       ${rel.cover
-        ? `<img src="${esc(rel.cover)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" decoding="async"/>`
+        ? `<img src="${esc(relCover(rel.cover, 300))}" data-lightbox-src="${esc(rel.cover)}" onerror="if(this.src!==this.dataset.lightboxSrc){this.src=this.dataset.lightboxSrc}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" decoding="async"/>`
         : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:32px;color:var(--muted)">♪</div>`}
       <button onclick="event.stopPropagation();playRelease('${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')" title="${t('rl.listen')}"
-        style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:54px;height:54px;border-radius:50%;background:rgba(0,0,0,.5);border:2px solid rgba(255,255,255,.85);color:#fff;font-size:21px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;padding-left:4px;backdrop-filter:blur(3px);transition:transform .12s,background .12s;z-index:2" onmouseover="this.style.transform='translate(-50%,-50%) scale(1.12)';this.style.background='rgba(0,0,0,.7)'" onmouseout="this.style.transform='translate(-50%,-50%)';this.style.background='rgba(0,0,0,.5)'">▶</button>
+        class="rel-play" aria-label="${t('rl.listen')}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.5 L18 12 L9 17.5 Z"/></svg></button>
       <div style="position:absolute;top:6px;left:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${svcClr};font-weight:700;backdrop-filter:blur(4px)">${escapeHtml((rel.service||'?').toUpperCase())}</span></div>
       <div style="position:absolute;top:6px;right:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${typeClr};font-weight:700;backdrop-filter:blur(4px)">${typeTag}</span></div>
       ${isNew ? `<div style="position:absolute;bottom:6px;left:6px"><span style="font-size:8px;padding:2px 6px;border-radius:4px;background:var(--green);color:#06281f;font-weight:800;letter-spacing:.4px">${t('rl.new_badge')}</span></div>` : ''}
