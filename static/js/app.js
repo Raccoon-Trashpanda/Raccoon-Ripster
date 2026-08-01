@@ -59,6 +59,9 @@ function setLang(lang) {
   try { if(typeof _scRender         === 'function') _scRender(); }         catch {}
   try { if(typeof _applyRelFilter   === 'function') _applyRelFilter(); }   catch {}
   try { if(typeof _libApplyFilter   === 'function') _libApplyFilter(); }   catch {}
+  // Карточки «Раскопок» тоже собираются через t() в момент отрисовки: причина
+  // приходит с сервера КЛЮЧОМ, и без перерисовки на экране остаётся прежний язык.
+  try { if(typeof digsRender === 'function' && _digsData) digsRender(); } catch {}
   try { if(typeof renderAlbumPage   === 'function' && (typeof Detail !== 'undefined') && Detail.currentAlbum) renderAlbumPage(); } catch {}
   try { if(typeof renderArtistPage  === 'function' && (typeof Detail !== 'undefined') && Detail.currentArtist) renderArtistPage(); } catch {}
 }

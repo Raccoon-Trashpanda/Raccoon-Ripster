@@ -107,7 +107,9 @@ function _digsItem(it) {
     : `<div class="dg-blank">♪</div>`;
   // Причина строится как «что ты делал, ЗАПЯТАЯ, чего не хватает». Вторая
   // половина и есть ответ на «почему мне это показывают» — её и подсвечиваем.
-  const why = String(it.reason || '');
+  // Причина приходит КЛЮЧОМ и числами — иначе английский пользователь получал
+  // бы русскую фразу на каждой карточке, и перевод интерфейса её бы не достал.
+  const why = it.reason_key ? ti(it.reason_key, it.reason_args || {}) : String(it.reason || '');
   const cut = why.indexOf(', ');
   const whyHtml = cut > 0
     ? esc(why.slice(0, cut + 2)) + '<b>' + esc(why.slice(cut + 2)) + '</b>'

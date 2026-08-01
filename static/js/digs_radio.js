@@ -80,7 +80,8 @@ async function _digsRadioTopUp() {
       return;
     }
     for (const it of items) {
-      it.label = `${t('digs.radio_label')} · ${it.why || ''}`.trim();
+      const why = it.why_key ? ti(it.why_key, it.why_args || {}) : (it.why || '');
+      it.label = `${t('digs.radio_label')} · ${why}`.trim();
       Preview.queue.push(it);
       DigsRadio.played.push(it.artist);
     }

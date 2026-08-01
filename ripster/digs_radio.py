@@ -72,12 +72,12 @@ async def next_tracks(cfg: dict | None, seed: str, exclude: list[str] | None = N
     seen = {_norm(x) for x in (exclude or [])}
     seen.add(_norm(seed))
 
-    names: list[tuple[str, str]] = []          # (имя, почему)
+    names: list[tuple] = []                    # (имя, (ключ, аргументы))
     for it in await _sim.similar(seed, limit=24):
         k = _norm(it["name"])
         if k and k not in seen:
             seen.add(k)
-            names.append((it["name"], f"похож на {seed}"))
+            names.append((it["name"], ("digs.r_similar", {"name": seed})))
 
     if len(names) < limit:
         # Похожих не нашлось (у нишевых артистов данных часто нет) — играем
@@ -89,7 +89,7 @@ async def next_tracks(cfg: dict | None, seed: str, exclude: list[str] | None = N
                 k = _norm(a["name"])
                 if k and k not in seen and not a.get("is_show"):
                     seen.add(k)
-                    names.append((a["name"], "из твоих опорных"))
+                    names.append((a["name"], ("digs.r_anchor", {})))
                 if len(names) >= limit * 2:
                     break
         except Exception:
@@ -100,11 +100,12 @@ async def next_tracks(cfg: dict | None, seed: str, exclude: list[str] | None = N
         return out
     sem = asyncio.Semaphore(6)
     async with httpx.AsyncClient(timeout=12, headers=_UA) as c:
-        async def one(nm: str, why: str) -> None:
+        async def one(nm: str, why) -> None:
             async with sem:
                 tr = await _top_track(c, nm)
                 if tr:
-                    tr["why"] = why
+                    # Ключ и аргументы — фразу соберёт клиент на своём языке.
+                    tr["why_key"], tr["why_args"] = why
                     out.append(tr)
         await asyncio.gather(*(one(n, w) for n, w in names[:limit * 3]),
                              return_exceptions=True)

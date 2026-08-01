@@ -81,7 +81,7 @@ async def digs_similar(artist: str = "", limit: int = 12):
     from ripster import digs_similar as _s
     name = (artist or "").strip()
     if not name:
-        return {"ok": False, "error": "не указан артист"}
+        return {"ok": False, "error_key": "digs.e_no_artist"}
     items = await _s.similar(name, limit=limit)
     # Фото подтягиваем и для центрального артиста тоже — иначе центр круга
     # выглядит беднее собственных ответвлений.
@@ -101,7 +101,7 @@ async def digs_radio(seed: str = "", exclude: str = "", limit: int = 6):
     from ripster import digs_radio as _r
     name = (seed or "").strip()
     if not name:
-        return {"ok": False, "error": "не указан артист"}
+        return {"ok": False, "error_key": "digs.e_no_artist"}
     ex = [x for x in (exclude or "").split("|") if x.strip()]
     items = await _r.next_tracks(_cfg, name, ex, limit=max(1, min(limit, 12)))
     return {"ok": True, "seed": name, "items": items}
@@ -113,7 +113,7 @@ async def digs_exclude(body: dict):
     улик из статистики: надёжно вывести принадлежность из данных нельзя."""
     name = str((body or {}).get("artist") or "").strip()
     if not name:
-        return {"ok": False, "error": "пустое имя"}
+        return {"ok": False, "error_key": "digs.e_empty_name"}
     cur = list(_cfg.get("digs-exclude-artists") or [])
     cur.append(name)
     return {"ok": True, "excluded": _save_list("digs-exclude-artists", cur)}

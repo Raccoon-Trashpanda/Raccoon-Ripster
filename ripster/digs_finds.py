@@ -222,6 +222,8 @@ def played_not_owned(by_artist: dict, foreign: set, limit: int,
         out.append({"kind": "played_not_owned", "artist": owner, "title": title,
                     "service": stype or "", "plays": int(hits or 0),
                     "last_ts": int(ts or 0),
+                    # Ключ + числа: фразу собирает клиент на своём языке.
+                    "reason_key": "digs.r_played", "reason_args": {"n": int(hits or 0)},
                     "reason": f"включал {hits}×, а на диске нет"})
         if len(out) >= limit:
             break
@@ -255,6 +257,8 @@ def missing_releases(profile_artists: list, by_artist: dict, foreign: set,
                         "title": title, "date": rel.get("date", ""),
                         "cover": rel.get("cover", ""), "url": rel.get("url", ""),
                         "type": rel.get("type", ""), "_w": prof["score"],
+                        "reason_key": "digs.r_missed",
+                        "reason_args": {"n": int(prof["downloads"])},
                         "reason": f"качал {prof['downloads']} его релизов, этот пропустил"})
     out.sort(key=lambda r: (r["_w"], r.get("date", "")), reverse=True)
     for r in out:
@@ -283,6 +287,8 @@ def show_guests(shows: list, by_artist: dict, foreign: set, limit: int) -> list[
                     continue
                 seen.add(key)
                 out.append({"kind": "show_guest", "artist": g, "title": "",
+                            "reason_key": "digs.r_guest",
+                            "reason_args": {"show": sh["name"]},
                             "reason": f"гость «{sh['name']}», а его релизов у тебя нет"})
                 if len(out) >= limit:
                     return out
@@ -304,6 +310,8 @@ def forgotten(profile_artists: list, foreign: set, limit: int) -> list[dict]:
             continue
         out.append({"kind": "forgotten", "artist": a["name"], "title": "",
                     "days": int(days), "cover": a.get("cover", ""),
+                    "reason_key": "digs.r_forgot",
+                    "reason_args": {"n": int(a["downloads"]), "days": int(days)},
                     "reason": f"{a['downloads']} релизов, но не трогал {int(days)} дн."})
     out.sort(key=lambda r: r["days"], reverse=True)
     return out[:limit]
