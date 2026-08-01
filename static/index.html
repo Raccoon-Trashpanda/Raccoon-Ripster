@@ -135,6 +135,9 @@
     <div class="nav-item" data-view="history" onclick="showView('history',this);loadHistory()">
       <span class="icon">◷</span> <span data-i18n="nav.history">История</span>
     </div>
+    <div class="nav-item" data-view="digs" onclick="showView('digs',this);digsInit()">
+      <span class="icon" style="color:#c084a0">&#9935;</span> <span data-i18n="nav.digs">&#1056;&#1072;&#1089;&#1082;&#1086;&#1087;&#1082;&#1080;</span>
+    </div>
     <div class="nav-item owner-only" data-view="watchlist" onclick="showView('watchlist',this);loadWatchlist()">
       <span class="icon">★</span> <span data-i18n="nav.watchlist">Watchlist</span>
     </div>
@@ -208,6 +211,7 @@
 
     <!-- ══ HISTORY VIEW ══ -->
     <!-- ══ HISTORY VIEW ══ -->
+    <section class="view" id="view-digs" style="overflow:auto"></section>
     <section class="view" id="view-history">
     </section>
 
@@ -436,8 +440,8 @@
   <button type="button" onclick="closeLightbox()" style="position:absolute;top:16px;right:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:none;cursor:pointer;font-size:16px;backdrop-filter:blur(4px)">✕</button>
 </div>
 
-<script src="/static/js/i18n.js?v=10075"></script>
-<script src="/static/js/views.js?v=10062"></script>
+<script src="/static/js/i18n.js?v=10078"></script>
+<script src="/static/js/views.js?v=10066"></script>
 <script src="/static/js/app.js?v=10116"></script>
 <script src="/static/js/wrapper.js?v=6"></script>
 <script src="/static/js/coder.js?v=5"></script>
@@ -460,8 +464,9 @@
 <script src="/static/js/sc_tab.js?v=14"></script>
 <script src="/static/js/cookies_ui.js?v=13"></script>
 <script src="/static/js/lightbox.js?v=10"></script>
-<script src="/static/js/urlbar_detect.js?v=10"></script>
+<script src="/static/js/urlbar_detect.js?v=11"></script>
 <script src="/static/js/auth_ui.js?v=11"></script>
+<script src="/static/js/digs.js?v=5"></script>
 <script src="/static/js/player_lib.js?v=3"></script>
 <script src="/static/js/remote_ui.js?v=3"></script>
 <script src="/static/js/service_colors_ui.js?v=11"></script>

@@ -119,6 +119,21 @@ function showStab(id, btn) {
     loadTokenExpiry('tidal');
   }
   if(id==='spotify') { setVal('s-sp-cid',c['spotify-client-id']||''); setVal('s-sp-csecret',c['spotify-client-secret']||''); _setSecret('s-sp-dc',c['spotify-sp-dc']); setVal('s-orp-path',c['orpheus-save-path']||''); setChk('s-orp-mp3',c['orpheus-convert-mp3']===true); setVal('s-orp-quality',c['orpheus-quality']||'hifi'); _renderSpotifySavedTarget(); loadSpotifyStatus(); loadOrpheusStatus(); testAuth('spotify'); }
+  if(id==='digs') {
+    setVal('s-dg-shape',   c['digs-shape']   || 'circle');
+    setVal('s-dg-size',    String(c['digs-size'] || 44));
+    setVal('s-dg-bg',      c['digs-bg']      || 'earth');
+    setVal('s-dg-density', c['digs-density'] || 'normal');
+    setVal('s-dg-motion',  c['digs-motion']  || 'full');
+    setVal('s-dg-perkind', String(c['digs-per-kind'] || 12));
+    setVal('s-dg-click',   c['digs-click']   || 'play');
+    setVal('s-dg-dbl',     c['digs-dblclick']|| 'bubbles');
+    const fd = document.getElementById('s-dg-forgot');
+    if(fd) fd.value = c['digs-forgotten-days'] || 45;
+    setChk('s-dg-covers', c['digs-covers'] !== false);
+    setChk('s-dg-coon',   c['digs-coon']   !== false);
+    try { digsBuildSettingChips?.(); } catch(e) {}
+  }
   if(id==='apple')   {
     updateEngineUI(c['engine']||'zhaarey');
     setVal('s-wrapper-email',c['wrapper-apple-id']||'');

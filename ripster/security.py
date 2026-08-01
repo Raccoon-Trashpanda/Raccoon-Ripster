@@ -85,6 +85,12 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     # change WHERE updates come from, only whether a fixed repo is reachable.
     "ripster-repo-token",
     "telemetry-",     # diagnostics forwarding (telemetry-forward/url/level/token/...)
+    # «Раскопки»: что человек сам объявил своим (digs-favorite-artists /
+    # digs-favorite-genres) и что явно отверг (digs-exclude-artists). Секретов
+    # тут нет, а без записи из интерфейса вкус нечем задать — и профиль
+    # остаётся на одних догадках по статистике, которая содержит ещё и чужие
+    # загрузки (гости бота).
+    "digs-",
 )
 
 
@@ -105,9 +111,6 @@ def config_key_allowed(k: str) -> bool:
 # until someone remembers to add it here. This blocklist still exists as a
 # belt-and-suspenders early-exit for the known-sensitive types (checked
 # before the per-type branches), not because the fan-out depends on it.
-# (This mirror doesn't ship ripster/routes/guest.py — no guest session can
-# ever exist here — but the shared app.py/security.py logic stays aligned
-# with the owner build for maintainability.)
 GUEST_BLOCKED_WS_TYPES: frozenset[str] = frozenset({
     "history_updated",
     "queue_started", "queue_stopped", "queue_paused", "queue_resumed",

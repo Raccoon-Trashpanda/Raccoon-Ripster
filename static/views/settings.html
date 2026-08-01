@@ -13,6 +13,7 @@
           <button class="stab owner-only" data-stab="beatport"   onclick="showStab('beatport',this)"  style="color:#01f49c">Beatport</button>
           <button class="stab svc-tab" data-stab="yandex"   onclick="showStab('yandex',this)" style="color:#ffcc00" data-i18n="st.yandex">Яндекс</button>
           <button class="stab svc-tab" data-stab="amazon"   onclick="showStab('amazon',this)" style="color:#25d1da">🅰️ Amazon</button>
+          <button class="stab" data-stab="digs" onclick="showStab('digs',this)" style="color:#c084a0" data-i18n="st.digs">&#9935; &#1056;&#1072;&#1089;&#1082;&#1086;&#1087;&#1082;&#1080;</button>
           <button class="stab" data-stab="releases"   onclick="showStab('releases',this)" data-i18n="st.releases">Релизы</button>
           <button class="stab" data-stab="about"      onclick="showStab('about',this)" data-i18n="st.about">О сервисе</button>
         </div>
@@ -2036,6 +2037,126 @@
         </div><!-- end stab-yandex -->
 
         <!-- ══════════ RELEASES TAB ══════════ -->
+        <!-- ══════════ РАСКОПКИ ══════════
+             Настройки живут ЗДЕСЬ, а не во вкладке «Раскопки»: там должен
+             остаться сам раскоп, без панелей управления над ним. -->
+        <div class="stab-panel" id="stab-digs">
+
+          <div class="block mt12">
+            <div class="block-title" style="color:#c084a0" data-i18n="dg.look">Вид</div>
+            <div class="settings-grid">
+              <div class="field-group">
+                <label class="lbl" data-i18n="dg.shape">Фигура находки</label>
+                <select id="s-dg-shape" onchange="saveSetting('digs-shape',this.value);digsApplyLook()">
+                  <option value="circle" data-i18n="dg.sh_circle">Круг</option>
+                  <option value="squircle" data-i18n="dg.sh_squircle">Скруглённый квадрат</option>
+                  <option value="square" data-i18n="dg.sh_square">Квадрат</option>
+                  <option value="hex" data-i18n="dg.sh_hex">Шестиугольник</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="lbl" data-i18n="dg.size">Размер</label>
+                <select id="s-dg-size" onchange="saveSetting('digs-size',parseInt(this.value));digsApplyLook()">
+                  <option value="36">36 px</option><option value="44">44 px</option>
+                  <option value="56">56 px</option><option value="72">72 px</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="lbl" data-i18n="dg.bg">Фон пластов</label>
+                <select id="s-dg-bg" onchange="saveSetting('digs-bg',this.value);digsApplyLook()">
+                  <option value="earth" data-i18n="dg.bg_earth">Порода (тон жанра)</option>
+                  <option value="flat" data-i18n="dg.bg_flat">Однотонный</option>
+                  <option value="none" data-i18n="dg.bg_none">Без фона</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="lbl" data-i18n="dg.density">Плотность</label>
+                <select id="s-dg-density" onchange="saveSetting('digs-density',this.value);digsApplyLook()">
+                  <option value="tight" data-i18n="dg.d_tight">Плотно</option>
+                  <option value="normal" data-i18n="dg.d_normal">Обычно</option>
+                  <option value="airy" data-i18n="dg.d_airy">Просторно</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="lbl" data-i18n="dg.motion">Движение</label>
+                <select id="s-dg-motion" onchange="saveSetting('digs-motion',this.value);digsApplyLook()">
+                  <option value="full" data-i18n="dg.m_full">Полностью</option>
+                  <option value="hover" data-i18n="dg.m_hover">Только при наведении</option>
+                  <option value="off" data-i18n="dg.m_off">Выключить</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <div class="toggle-label" data-i18n="dg.covers">Показывать обложки</div>
+                <div class="toggle-sub" data-i18n="dg.covers_sub">Без них список читается быстрее, но менее наглядно</div>
+              </div>
+              <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-dg-covers"
+                onchange="saveSetting('digs-covers',this.checked);digsApplyLook()"><div class="toggle-slider"></div></label>
+            </div>
+            <div class="toggle-row">
+              <div class="toggle-info">
+                <div class="toggle-label" data-i18n="dg.coon">Енот и счётчики в шапке</div>
+                <div class="toggle-sub" data-i18n="dg.coon_sub">Копающий енот, число находок, пластов и того, что уже у тебя</div>
+              </div>
+              <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-dg-coon"
+                onchange="saveSetting('digs-coon',this.checked);digsApplyLook()"><div class="toggle-slider"></div></label>
+            </div>
+          </div>
+
+          <div class="block mt12">
+            <div class="block-title" style="color:#c084a0" data-i18n="dg.what">Что искать</div>
+            <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:10px" data-i18n="dg.svc_sub">
+              Сервисы, из которых предлагать. Пусто — из всех. Смысл в том, чтобы не показывать то, что ты всё равно не заберёшь.
+            </div>
+            <div id="dg-svc-list" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px"></div>
+
+            <div class="settings-grid">
+              <div class="field-group">
+                <label class="lbl" data-i18n="dg.per_kind">Находок в разделе</label>
+                <select id="s-dg-perkind" onchange="saveSetting('digs-per-kind',parseInt(this.value))">
+                  <option value="6">6</option><option value="12">12</option>
+                  <option value="20">20</option><option value="40">40</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="lbl" data-i18n="dg.forgot_days">Забытое — от скольких дней</label>
+                <input id="s-dg-forgot" type="number" min="7" max="720" step="1"
+                  onchange="saveSetting('digs-forgotten-days',parseInt(this.value)||45)"/>
+              </div>
+            </div>
+
+            <div style="font-size:11px;color:var(--muted);margin:12px 0 8px" data-i18n="dg.sections">Разделы</div>
+            <div id="dg-sec-list" style="display:flex;flex-wrap:wrap;gap:8px"></div>
+          </div>
+
+          <div class="block mt12">
+            <div class="block-title" style="color:#c084a0" data-i18n="dg.behave">Поведение</div>
+            <div class="settings-grid">
+              <div class="field-group">
+                <label class="lbl" data-i18n="dg.click">Клик по находке</label>
+                <select id="s-dg-click" onchange="saveSetting('digs-click',this.value)">
+                  <option value="play" data-i18n="dg.c_play">Играть нашим плеером</option>
+                  <option value="open" data-i18n="dg.c_open">Открыть релиз</option>
+                  <option value="none" data-i18n="dg.c_none">Ничего</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label class="lbl" data-i18n="dg.dblclick">Двойной клик</label>
+                <select id="s-dg-dbl" onchange="saveSetting('digs-dblclick',this.value)">
+                  <option value="bubbles" data-i18n="dg.b_on">Дерево похожих артистов</option>
+                  <option value="off" data-i18n="dg.b_off">Выключено</option>
+                </select>
+              </div>
+            </div>
+            <div style="font-size:10px;color:var(--muted);line-height:1.6;margin-top:10px" data-i18n="dg.play_note">
+              Играет наш плеер и нашими токенами — никаких чужих превью. Похожие артисты берутся из MusicBrainz и ListenBrainz: бесплатно и без ключей.
+            </div>
+          </div>
+
+        </div><!-- end stab-digs -->
+
         <div class="stab-panel" id="stab-releases">
         <div class="block mt12">
           <div class="block-title"><span data-i18n="s.rel_radar">📡 Радар релизов</span></div>
