@@ -91,6 +91,22 @@ async def digs_similar(artist: str = "", limit: int = 12):
     return {"ok": True, "artist": name, "pic": pics.get(name, ""), "items": items}
 
 
+@router.get("/api/digs/radio")
+async def digs_radio(seed: str = "", exclude: str = "", limit: int = 6):
+    """Следующие треки для самодополняющейся очереди.
+
+    `exclude` — имена, уже прозвучавшие, через `|`: без этого радио начинает
+    ходить по кругу из трёх артистов, и «копание» превращается в повтор.
+    """
+    from ripster import digs_radio as _r
+    name = (seed or "").strip()
+    if not name:
+        return {"ok": False, "error": "не указан артист"}
+    ex = [x for x in (exclude or "").split("|") if x.strip()]
+    items = await _r.next_tracks(_cfg, name, ex, limit=max(1, min(limit, 12)))
+    return {"ok": True, "seed": name, "items": items}
+
+
 @router.post("/api/digs/exclude")
 async def digs_exclude(body: dict):
     """«Это не моё» — вычеркнуть артиста из профиля. Слово владельца выше любых
