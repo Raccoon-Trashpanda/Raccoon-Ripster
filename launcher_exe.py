@@ -241,6 +241,74 @@ def minimize_to_tray() -> bool:
         return False
 
 
+def apply_webview_acceleration() -> str:
+    """Разогнать окно программы средствами самого движка WebView2.
+
+    Окно Ripster — это встроенный Chromium (WebView2), и по умолчанию Windows
+    делает с ним две неприятные вещи, которые выглядят как «тормозит наш код»:
+
+    1. **Расчёт перекрытия окна.** Когда сверху лежит другое полноэкранное
+       окно (у владельца это игра), Chromium считает наше окно невидимым и
+       перестаёт рисовать. Возврат к Ripster показывает застывший кадр, пока
+       страница не перерисуется, а анимации в этот момент «прыгают».
+    2. **Торможение фоновых таймеров.** Свёрнутому/перекрытому окну Chromium
+       режет таймеры до одного тика в секунду — а на них держатся прогресс
+       очереди, плеер и опрос WebSocket.
+
+    Плюс включаем растеризацию и композитинг на видеокарте: у сеток обложек
+    это самая тяжёлая часть кадра.
+
+    Ничего не зашито намертво. Порядок: env `RIPSTER_WEBVIEW_ARGS` (польностью
+    заменяет строку) → config.yaml `webview-browser-args` → набор по умолчанию.
+    Отдельный выключатель `webview-hw-accel: false` (env `RIPSTER_HW_ACCEL=0`)
+    переводит окно на программную отрисовку — это путь отхода для машин, где
+    драйвер видеокарты бракованный и ускорение даёт чёрный экран.
+
+    Возвращает итоговую строку аргументов (для лога)."""
+    # Аргументы читает сам WebView2 при создании браузерного процесса, поэтому
+    # переменную надо выставить ДО создания окна — позже она уже ни на что не влияет.
+    env_args = os.environ.get("RIPSTER_WEBVIEW_ARGS")
+    if env_args is not None:
+        args = env_args.strip()
+        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = args
+        return args
+
+    cfg = {}
+    try:
+        import yaml
+        cfg = yaml.safe_load((BASE / "config.yaml").read_text(encoding="utf-8")) or {}
+    except Exception:
+        pass
+
+    accel_env = os.environ.get("RIPSTER_HW_ACCEL")
+    if accel_env is not None:
+        accel = accel_env.strip() not in ("0", "false", "False", "")
+    else:
+        accel = bool(cfg.get("webview-hw-accel", True))
+
+    override = str(cfg.get("webview-browser-args", "") or "").strip()
+    if override:
+        args = override
+    elif accel:
+        args = " ".join([
+            # Не переставать рисовать, когда окно перекрыто игрой или другим окном.
+            "--disable-features=CalculateNativeWinOcclusion",
+            "--disable-backgrounding-occluded-windows",
+            # Держать таймеры живыми: на них прогресс очереди, плеер и WebSocket.
+            "--disable-background-timer-throttling",
+            "--disable-renderer-backgrounding",
+            # Растеризация и композитинг силами видеокарты.
+            "--enable-gpu-rasterization",
+            "--enable-zero-copy",
+        ])
+    else:
+        # Явный отказ от ускорения — окно рисуется процессором.
+        args = "--disable-gpu --disable-gpu-compositing"
+
+    os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = args
+    return args
+
+
 def _tray_image():
     """A PIL image for the tray icon — the shipped ripster.ico, or a drawn dot."""
     try:
@@ -411,6 +479,12 @@ def open_window(url: str, port: int, win_open, title: str = "Ripster", ready: bo
     config (learned the hard way — v3.0.30/31 shipped that broken)."""
     try:
         import threading
+        # Строго ДО импорта/старта webview: WebView2 читает аргументы из окружения
+        # в момент создания браузерного процесса, позже они уже не действуют.
+        try:
+            _log(f"[launcher] webview args: {apply_webview_acceleration()}")
+        except Exception as _e:
+            _log(f"[launcher] webview args skipped: {_e}")
         import webview
         _log(f"[launcher] opening webview window -> {url} (ready={ready})")
         geo = _load_win_state()

@@ -197,6 +197,59 @@ def local_wrapper_session_alive(config: dict | None = None, timeout: float = 4.0
         return False
 
 
+_wrapper_sf_cache: tuple[float, str] = (0.0, "")
+
+
+def local_wrapper_storefront(config: dict | None = None, timeout: float = 6.0) -> str:
+    """Витрина аккаунта ВНУТРИ локального враппера — та, где у него есть права.
+
+    Нужна, потому что «Invalid CKC при живой сессии» почти всегда означает не
+    «релиза нет», а «ссылка указывает на ЧУЖУЮ витрину». 01.08.2026: аккаунт
+    враппера в `ca`, ссылка была на `gb` — Apple отказал в ключе, хотя тот же
+    альбом в канадской витрине есть. Публичный wrapper в этот момент лежал
+    («Deadline Exceeded»), и владелец резонно спросил: зачем он вообще, если
+    живой аккаунт свой.
+
+    Спрашиваем сам Apple, а не конфиг: аккаунт-API враппера отдаёт и
+    developer-token, и media-user-token, а `/v1/me/account?meta=subscription`
+    возвращает витрину и заодно доказывает, что подписка активна. Возраст файлов
+    и сроки кук этого не показывают (см. [[project_gamdl_cookies_vs_subscription_2026-08-01]]).
+
+    Пустая строка — «не смог узнать»; вызывающий тогда ничего не переписывает.
+    """
+    global _wrapper_sf_cache
+    ts, val = _wrapper_sf_cache
+    if val and (time.time() - ts) < 900:
+        return val
+    cfg = config if config is not None else globals().get("config") or {}
+    url = str((cfg or {}).get("gamdl-wrapper-account-url") or "http://127.0.0.1:30020").strip()
+    try:
+        r = httpx.get(url, timeout=timeout)
+        if r.status_code != 200:
+            return ""
+        d = r.json() or {}
+        mut, dev = str(d.get("music_token") or ""), str(d.get("dev_token") or "")
+        if len(mut) < 50 or len(dev) < 50:
+            return ""
+        rr = httpx.get("https://amp-api.music.apple.com/v1/me/account",
+                       params={"meta": "subscription"},
+                       headers={"Authorization": f"Bearer {dev}",
+                                "Media-User-Token": mut,
+                                "Origin": "https://music.apple.com"},
+                       timeout=timeout)
+        if rr.status_code != 200:
+            return ""
+        sub = ((rr.json() or {}).get("meta") or {}).get("subscription") or {}
+        if not sub.get("active"):
+            return ""          # подписки нет — переписывать витрину бессмысленно
+        sf = str(sub.get("storefront") or "").lower()
+        if sf:
+            _wrapper_sf_cache = (time.time(), sf)
+        return sf
+    except Exception:
+        return ""
+
+
 def mark_local_wrapper_unhealthy(ttl: float = 900.0) -> None:
     """Flag the local docker wrapper as unable to decrypt (bad/expired Apple
     session) for ``ttl`` seconds — the router will skip it meanwhile."""
@@ -347,17 +400,29 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
                 "note": f"{q.upper()} · wrapper в очереди — ждём lossless"}
 
     # ── AAC / lossy ──────────────────────────────────────────────────────────
-    # Cookies (gamdl) for the account's own region; AMD's multi-region public
-    # wrapper for foreign-region links the cookies-account can't see yet.
+    # РАНЬШЕ AAC жёстко уходил в gamdl (cookies) — а куки могут быть от аккаунта
+    # БЕЗ подписки: файл на месте, `active=false`, gamdl дохнет «подписка не
+    # видна», хотя рядом живой локальный wrapper с подписанным аккаунтом.
+    # Локальный wrapper (zhaarey) умеет AAC (aac / aac-lc) и декодит через свой
+    # премиум-аккаунт — его и берём первым. Публичный wrapper из AAC-пути убран
+    # осознанно: он ненадёжен и в этой сборке владельцем не используется.
     if q in ("aac", "aac-legacy", ""):
-        if foreign and pub_ok:
-            return {"engine": "amd", "quality": "aac", "degraded": False,
-                    "note": f"AAC · публичный wrapper · регион {url_sf} (вне аккаунта '{acct_sf}')"}
+        pref = (config.get("apple-wrapper") or "auto").strip().lower()
+        local_ok = _local_wrapper_ok(config)
+        # Локальный wrapper — первый выбор: подписка на его аккаунте живая, и он
+        # не зависит от cookies. Чужой регион он не видит — там нужен gamdl/куки.
+        if local_ok and not foreign and pref != "public":
+            return {"engine": "zhaarey", "quality": q or "aac", "degraded": False,
+                    "note": "AAC · локальный wrapper"}
+        # Враппер лёг или ссылка чужого региона — пробуем gamdl (его витрина = регион
+        # cookies-аккаунта). Это фолбэк, не основной путь.
         if cookies:
-            return {"engine": "gamdl", "quality": q or "aac", "degraded": False, "note": ""}
-        if pub_ok:
-            return {"engine": "amd", "quality": "aac", "degraded": False, "note": "AAC · AMD"}
-        return {"engine": "gamdl", "quality": q or "aac", "degraded": False, "note": ""}
+            return {"engine": "gamdl", "quality": q or "aac", "degraded": False,
+                    "note": (f"AAC · gamdl · регион {url_sf}" if foreign else "")}
+        # Ни враппера, ни куков в своей витрине нет — отдаём в локальный wrapper,
+        # пусть очередит и дождётся; публичный НЕ трогаем.
+        return {"engine": "zhaarey", "quality": q or "aac", "degraded": False,
+                "note": "AAC · локальный wrapper (в очереди)"}
 
     # ── Unknown quality id — keep the configured engine, no override ─────────
     return {"engine": config.get("engine", "zhaarey"), "quality": quality,

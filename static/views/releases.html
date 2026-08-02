@@ -38,6 +38,22 @@
           </div>
         </div>
 
+        <!-- Как работает кросс-сервисный радар: объясняем киллер-фичу словами.
+             Часовые зоны сознательно НЕ называем — говорим про «разные аккаунты
+             в разных сервисах», а не про конкретную географию. -->
+        <div id="rel-xsvc-note" style="display:none;background:rgba(201,162,39,.08);
+             border:1px solid rgba(201,162,39,.28);border-radius:10px;
+             padding:10px 12px;margin-bottom:10px;font-size:11.5px;line-height:1.6;color:var(--muted)">
+          <div style="display:flex;align-items:flex-start;gap:8px">
+            <span style="font-size:14px;line-height:1.2">🌍</span>
+            <div style="flex:1">
+              <b style="color:var(--text)" data-i18n="rel.xsvc_title">Один радар на все твои аккаунты</b><br>
+              <span data-i18n="rel.xsvc_body">Витрины сервисов наполняются вразнобой, и один и тот же релиз в разных сервисах появляется не одновременно. Радар следит за артистами из всех твоих подписок сразу и ищет каждый релиз во всех подключённых сервисах — а не только там, где ты подписан на артиста. Как только релиз доступен хоть где-то, ты видишь его здесь и можешь забрать из того сервиса, где он уже вышел, не дожидаясь остальных. Разные аккаунты в разных сервисах усиливают друг друга: чем их больше, тем раньше радар ловит новинку.</span>
+              <button onclick="_relDismissXsvc()" style="display:block;margin-top:6px;background:none;border:none;color:#c9a227;font-size:11px;cursor:pointer;font-family:var(--font);padding:0" data-i18n="rel.xsvc_got">Понятно, скрыть</button>
+            </div>
+          </div>
+        </div>
+
         <!-- Filter chips: view (all/new/fav) + release types -->
         <div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
           <div id="rel-view-chips" style="display:flex;gap:5px"></div>

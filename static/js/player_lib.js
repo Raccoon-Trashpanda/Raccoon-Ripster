@@ -185,6 +185,11 @@ function _buildAlbumStreamQueue() {
       artist:  t.artist || album.artist || '',
       cover:   album.cover || '',
       full:    true,
+      // Длительность теряли прямо здесь: в трек-листе она есть только у
+      // играющего трека (её знает сам <audio>), у остальных стояло «—», хотя
+      // Deezer, Qobuz и Tidal отдают её вместе с треком. Переносим — тогда
+      // время видно у всех сразу, ещё до проигрывания.
+      duration: Number(t.duration || t.dur || t.length || 0) || 0,
       label:   `${_svcLabel(service)} · ${album.title || t('card.album')}`,
       posKey:  `${service}:${t.id}`,
     }));

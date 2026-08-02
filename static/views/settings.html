@@ -103,6 +103,14 @@
           </div>
           <div class="toggle-row">
             <div class="toggle-info">
+              <div class="toggle-label" data-i18n="s.nudges_label">💡 Подсказки в простое</div>
+              <div class="toggle-sub" data-i18n="s.nudges_hint">Когда ничего не играет и ты не за Ripster, он изредка предложит забытого артиста или релиз в твоих жанрах. Чем реже пригождается — тем реже появляется.</div>
+            </div>
+            <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-nudges-enabled"
+              onchange="saveSetting('nudges-enabled',this.checked)"><div class="toggle-slider"></div></label>
+          </div>
+          <div class="toggle-row">
+            <div class="toggle-info">
               <div class="toggle-label" data-i18n="s.tray_label">🗕 Закрытие прячет в трей</div>
               <div class="toggle-sub" data-i18n="s.tray_sub">Нажатие «✕» прячет Ripster в системный трей вместо выхода — загрузки продолжаются. Значок в трее вернёт окно, «Выход» закроет программу. Применяется после перезапуска.</div>
             </div>
@@ -722,6 +730,7 @@
           <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
             <button class="btn-sm" onclick="saveTokens()" data-i18n="s.save_tokens" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">💾 Сохранить</button>
             <button class="btn-sm" onclick="testAuth('apple')" data-i18n="s.check" style="padding:6px 12px;background:rgba(252,60,68,.08);color:#fc3c44;border:1px solid rgba(252,60,68,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🔑 Проверить</button>
+              <button class="btn-sm" onclick="logoutService('apple',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
             <div id="test-auth-apple" class="test-auth-out" data-svc="apple" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
           </div>
 
@@ -1138,6 +1147,7 @@
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('apple')" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="as.save">💾 Сохранить</button>
               <button class="btn-sm" onclick="testAuth('apple')" style="padding:6px 12px;background:rgba(252,60,68,.08);color:#fc3c44;border:1px solid rgba(252,60,68,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="as.check">🔑 Проверить</button>
+              <button class="btn-sm" onclick="logoutService('apple',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
               <div class="test-auth-out" data-svc="apple" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
             </div>
           </div>
@@ -1171,6 +1181,7 @@
             <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('qobuz')" data-i18n="s.save_btn" style="padding:6px 12px;background:rgba(27,104,211,.18);color:#1b68d3;border:1px solid rgba(27,104,211,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">💾 Сохранить</button>
               <button class="btn-sm" onclick="testAuth('qobuz')" data-i18n="s.check" style="padding:6px 12px;background:rgba(27,104,211,.08);color:#1b68d3;border:1px solid rgba(27,104,211,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🔑 Проверить</button>
+              <button class="btn-sm" onclick="logoutService('qobuz',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
               <div id="test-auth-qobuz" style="font-size:11px;color:var(--muted);flex:1;min-width:180px"></div>
             </div>
           </div>
@@ -1289,6 +1300,7 @@
             <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('deezer')" data-i18n="s.save_btn" style="padding:6px 12px;background:rgba(162,56,255,.18);color:#a238ff;border:1px solid rgba(162,56,255,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">💾 Сохранить</button>
               <button class="btn-sm" onclick="testAuth('deezer')" data-i18n="s.check" style="padding:6px 12px;background:rgba(162,56,255,.08);color:#a238ff;border:1px solid rgba(162,56,255,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🔑 Проверить</button>
+              <button class="btn-sm" onclick="logoutService('deezer',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
               <div id="test-auth-deezer" style="font-size:11px;color:var(--muted);flex:1;min-width:180px"></div>
             </div>
           </div>
@@ -1440,6 +1452,7 @@
             <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('tidal')" data-i18n="s.save_btn" style="padding:6px 12px;background:rgba(0,212,179,.18);color:#00d4b3;border:1px solid rgba(0,212,179,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">💾 Сохранить</button>
               <button class="btn-sm" onclick="testAuth('tidal')" data-i18n="s.check" style="padding:6px 12px;background:rgba(0,212,179,.08);color:#00d4b3;border:1px solid rgba(0,212,179,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🔑 Проверить</button>
+              <button class="btn-sm" onclick="logoutService('tidal',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
               <button class="btn-sm" onclick="toggleTidalImport()" data-i18n="s.tidal_import" style="padding:6px 12px;background:rgba(0,212,179,.08);color:#00d4b3;border:1px solid rgba(0,212,179,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">📂 Импорт из token.json</button>
               <div id="test-auth-tidal" style="font-size:11px;color:var(--muted);flex:1;min-width:180px"></div>
             </div>
@@ -1601,6 +1614,7 @@
 
                 <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
                   <button class="btn-sm" onclick="testAuth('spotify')" style="padding:5px 11px;background:rgba(29,185,84,.18);color:#1db954;border:1px solid rgba(29,185,84,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.check_token">🔑 Проверить токен</button>
+              <button class="btn-sm" onclick="logoutService('spotify',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
                   <div id="test-auth-spotify" class="test-auth-out" data-svc="spotify" style="font-size:11px;color:var(--muted);flex:1;min-width:160px"></div>
                 </div>
 
@@ -1735,6 +1749,7 @@
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('spotify')" style="padding:6px 12px;background:rgba(29,185,84,.18);color:#1db954;border:1px solid rgba(29,185,84,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.save_btn">💾 Сохранить</button>
               <button class="btn-sm" onclick="testAuth('spotify')" style="padding:6px 12px;background:rgba(29,185,84,.08);color:#1db954;border:1px solid rgba(29,185,84,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.check">🔑 Проверить</button>
+              <button class="btn-sm" onclick="logoutService('spotify',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
               <div class="test-auth-out" data-svc="spotify" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
             </div>
           </div>
@@ -1865,6 +1880,7 @@
             <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('soundcloud')" style="padding:6px 12px;background:rgba(255,85,0,.18);color:#ff5500;border:1px solid rgba(255,85,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.save_btn">💾 Сохранить</button>
               <button class="btn-sm" onclick="testAuth('soundcloud')" style="padding:6px 12px;background:rgba(255,85,0,.08);color:#ff5500;border:1px solid rgba(255,85,0,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.check">🔑 Проверить</button>
+              <button class="btn-sm" onclick="logoutService('soundcloud',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
               <div id="test-auth-soundcloud" style="font-size:11px;color:var(--muted);flex:1;min-width:180px"></div>
             </div>
           </div>
@@ -1933,6 +1949,7 @@
                 style="padding:6px 12px;background:rgba(1,244,156,.08);color:#01f49c;border:1px solid rgba(1,244,156,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">
                 🔑 Проверить
               </button>
+              <button class="btn-sm" onclick="logoutService('beatport',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
               <div id="test-auth-beatport" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
             </div>
           </div>
@@ -2031,6 +2048,7 @@
           <div style="display:flex;gap:8px;margin-top:14px;align-items:center;flex-wrap:wrap;border-top:1px solid var(--border);padding-top:12px">
             <button class="btn-sm" onclick="saveAndTestAuth('yandex')" style="padding:6px 14px;background:rgba(255,204,0,.18);color:#ffcc00;border:1px solid rgba(255,204,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.save_btn">💾 Сохранить</button>
             <button class="btn-sm" onclick="testAuth('yandex')" style="padding:6px 12px;background:rgba(255,204,0,.08);color:#ffcc00;border:1px solid rgba(255,204,0,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.check">🔑 Проверить</button>
+              <button class="btn-sm" onclick="logoutService('yandex',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
             <div id="test-auth-yandex" style="font-size:11px;color:var(--muted);flex:1;min-width:180px"></div>
           </div>
         </div>

@@ -10,16 +10,20 @@
 function relCover(url, px) {
   if (!url) return url;
   try {
-    // Spotify. ПРОВЕРЕНО НА ЖИВОМ CDN 01.08.2026, и результат обратен ожиданию:
-    // средний размер `e02d` (300px) отдаёт 404 — на выборке из 12 обложек НИ
-    // ОДНОЙ. Живы только `b273` (640) и `4851` (64). Поэтому уменьшаем ТОЛЬКО
-    // для мелких мест (кружки «Раскопок» — 56px, там 64px идеален и экономит
-    // ~100× пикселей), а для карточек радара оставляем как есть: подставить
-    // несуществующий адрес значит показать пустоту вместо обложки.
+    // Spotify. 01.08.2026 здесь стоял вывод «300px отдаёт 404, живы только 640
+    // и 64», и карточки радара грузили 640×640. Вывод был ОШИБОЧНЫМ: проверяли
+    // код `e02d`, которого у Spotify не существует вовсе — настоящий средний
+    // размер кодируется как `1e02`. Перепроверено 02.08.2026 на живом CDN:
+    // 8 обложек из 8 отдают и 640, и 300, и 64.
+    //
+    // Цена ошибки была не косметическая: карточка шириной ~180px декодировала
+    // 409600 точек вместо 90000, и именно это владелец видел как рывки при
+    // прокрутке радара.
     if (url.includes('i.scdn.co/image/ab67616d0000')) {
-      return px <= 96
-        ? url.replace(/ab67616d0000(b273|e02d|4851)/, 'ab67616d00004851')
-        : url;
+      const code = px <= 96 ? 'ab67616d00004851'
+                 : px <= 400 ? 'ab67616d00001e02'
+                 : 'ab67616d0000b273';
+      return url.replace(/ab67616d0000(b273|1e02|4851)/, code);
     }
     // Apple: размер — настоящий сегмент пути, любые значения живы (проверено).
     if (url.includes('mzstatic.com')) {
@@ -148,17 +152,45 @@ function toggleRelType(t) {
   if (_relTypeOff.has(t)) _relTypeOff.delete(t); else _relTypeOff.add(t);
   _relSavePrefs(); _applyRelFilter();
 }
+// Избранное хранится НА СЕРВЕРЕ. localStorage привязан к браузерному профилю, а
+// у Ripster их минимум два — окно программы (WebView2) и запасной ярлык в
+// браузере; в каждом был свой список, и любая чистка данных сайта стирала звёзды
+// молча. Владелец так и сказал: «жму в избранное не первый раз, не помнит»
+// (01.08.2026). Локальная копия осталась как мгновенный отклик и запасной путь,
+// если сервер не ответил.
 function toggleRelFav(uid) {
   const i = _relFavs.findIndex(f => _relUID(f) === uid);
-  if (i >= 0) {
+  let rel = null, removing = i >= 0;
+  if (removing) {
+    rel = _relFavs[i];
     _relFavs.splice(i, 1);
   } else {
-    const rel = (_relCache.data || []).concat(_relFilteredData).find(r => _relUID(r) === uid);
+    rel = (_relCache.data || []).concat(_relFilteredData).find(r => _relUID(r) === uid);
     if (rel) _relFavs.unshift(rel);
     if (_relFavs.length > 500) _relFavs.length = 500;
   }
   _relSaveJSON(_REL_FAV_KEY, _relFavs);
   _applyRelFilter(false);
+  // Ответ сервера не ждём: карточка должна отзываться мгновенно, а сеть здесь
+  // локальная. Ошибку глотаем — локальная копия уже верна.
+  api('POST', '/api/rel-favs', { uid, item: rel || undefined, remove: removing })
+    .catch(() => {});
+}
+
+// Подтянуть избранное с сервера при открытии радара — и один раз перелить туда
+// то, что осталось в браузере от прежних версий.
+async function _relSyncFavs() {
+  try {
+    const local = _relFavs.slice();
+    if (local.length) {
+      const m = await api('POST', '/api/rel-favs', { merge: true, items: local });
+      if (m && m.items) _relFavs = m.items;
+    } else {
+      const r = await api('GET', '/api/rel-favs');
+      if (r && r.items) _relFavs = r.items;
+    }
+    _relSaveJSON(_REL_FAV_KEY, _relFavs);
+  } catch (e) { /* сервер молчит — работаем на локальной копии */ }
 }
 let _relSeenUndo = null;   // snapshot for undo of the last "mark all seen"
 function markAllRelSeen() {
@@ -510,6 +542,10 @@ function _syncReleasePillsFromConfig() {
 // Called from nav — show persisted data instantly, then refresh if stale
 function loadReleasesIfStale() {
   _relRestorePrefs();
+  // Избранное берём с сервера (и один раз переливаем туда старое из браузера).
+  // Не ждём: список звёзд не должен задерживать показ карточек — придёт и
+  // перерисует.
+  _relSyncFavs().then(() => { if (_relView === 'fav') _applyRelFilter(false); });
   const key = _relCacheKey();
   const age = Date.now() - _relCache.ts;
 
@@ -596,13 +632,15 @@ function renderReleaseCard(rel) {
         : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:32px;color:var(--muted)">♪</div>`}
       <button onclick="event.stopPropagation();playRelease('${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')" title="${t('rl.listen')}"
         class="rel-play" aria-label="${t('rl.listen')}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.5 L18 12 L9 17.5 Z"/></svg></button>
-      <div style="position:absolute;top:6px;left:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${svcClr};font-weight:700;backdrop-filter:blur(4px)">${escapeHtml((rel.service||'?').toUpperCase())}</span></div>
-      <div style="position:absolute;top:6px;right:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${typeClr};font-weight:700;backdrop-filter:blur(4px)">${typeTag}</span></div>
+      <div style="position:absolute;top:6px;left:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${svcClr};font-weight:700">${escapeHtml((rel.service||'?').toUpperCase())}</span></div>
+      <div style="position:absolute;top:6px;right:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${typeClr};font-weight:700">${typeTag}</span></div>
       ${isNew ? `<div style="position:absolute;bottom:6px;left:6px"><span style="font-size:8px;padding:2px 6px;border-radius:4px;background:var(--green);color:#06281f;font-weight:800;letter-spacing:.4px">${t('rl.new_badge')}</span></div>` : ''}
       ${isLive ? `<div style="position:absolute;bottom:6px;right:6px" title="${t('rl.live_title')}"><span class="rel-live-badge"><span class="rel-live-dot"></span>${t('rl.live_badge')}</span></div>` : ''}
     </div>
     <div style="padding:8px 10px">
-      <div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(rel.title)}">${esc(rel.title)}${hiresBadge}</div>
+      <div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" title="${esc(rel.title)} — ${t('rl.listen')}"
+        onclick="playRelease('${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')"
+        onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text)'">${esc(rel.title)}${hiresBadge}</div>
       <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap${rel.artist_id ? ';cursor:pointer' : ''}" title="${esc(rel.artist)}"
         ${rel.artist_id ? `onclick="event.stopPropagation();openArtistPage('${esc(rel.service)}','${escJ(rel.artist_id)}')" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"` : ''}>${esc(rel.artist)}</div>
       ${rel.label ? `<div style="font-size:10px;color:var(--muted);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7" title="${esc(rel.label)}">${esc(rel.label)}</div>` : ''}
@@ -619,6 +657,7 @@ function renderReleaseCard(rel) {
           style="flex:1 1 100%;padding:5px 0;background:rgba(192,132,160,.12);border:1px solid rgba(192,132,160,.2);border-radius:7px;font-size:10px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--font)">${t('btn.download')}</button>
         <button onclick="smartDownloadRelease(this,'${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}')"
           style="padding:5px 8px;background:transparent;border:1px solid rgba(255,214,10,.35);border-radius:7px;font-size:11px;color:#ffd60a;cursor:pointer;font-family:var(--font)" title="${t('rl.auto_src')}">⚡</button>
+        ${typeof afButton === 'function' ? afButton(rel.artist, 'padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;font-family:var(--font)') : ''}
         <button onclick="toggleRelFav('${escJ(uid)}')" style="padding:5px 8px;background:transparent;border:1px solid ${isFav?'var(--orange)':'var(--border)'};border-radius:7px;font-size:11px;color:${isFav?'var(--orange)':'var(--muted)'};cursor:pointer;font-family:var(--font)" title="${isFav?t('sc2.unfav'):t('sc2.fav')}">${isFav?'★':'☆'}</button>
         <button onclick="navigator.clipboard.writeText('${escJ(rel.url)}');toast(t('toast.link_copied'))" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font)" title="${t('ck.copy_link')}">⎘</button>
         <a href="${esc(rel.url)}" target="_blank" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);text-decoration:none;display:flex;align-items:center" title="${t('ck.open_on')} ${escapeHtml(rel.service)}">↗</a>
@@ -654,7 +693,21 @@ function _relSetQuality(sel) {
     beatport: 'beatport-quality', yandex: 'yandex-quality', amazon: 'amazon-quality',
     apple: 'quality',
   };
-  saveSetting(keyMap[svc] || 'quality', sel.value);
+  const key = keyMap[svc];
+  // Запасной путь `|| 'quality'` был миной: глобальный ключ `quality` — это
+  // качество APPLE. Карточка сервиса без собственного ключа (BBC, SoundCloud,
+  // Spotify, да и любая новая) переписывала им настройку Apple, и следующая
+  // загрузка Apple уходила с чужим качеством. Со стороны это выглядело как
+  // «просил один сервис, поехало другим» (разбор 01.08.2026: задача с Apple-
+  // ссылкой и качеством `27` из Qobuz).
+  //
+  // Нет своего ключа — ничего не сохраняем: выбор действует на эту загрузку,
+  // а глобальную настройку молча не трогает.
+  if (!key) {
+    if (typeof toast === 'function') toast(ti('rl.q_not_saved', { svc: svc || '?' }), 'var(--muted)');
+    return;
+  }
+  saveSetting(key, sel.value);
 }
 
 // Selects render with just the currently-resolved quality as a single option
@@ -717,6 +770,17 @@ async function smartDownloadRelease(btn, url, title, artist) {
 // the engine and queues all tracks for sequential playback through the preview
 // player. Works for any service whose engine exposes get_album.
 async function playRelease(service, url, title, artist, cover) {
+  // BBC — не «релиз из треков», а одна многочасовая передача: играется по своему
+  // пути (HLS-поток по pid), и трек-лист у неё появляется отдельно, из описания.
+  // Общий разворот релиза её не знает и честно отвечал «Unsupported service: bbc»
+  // — с точки зрения владельца это выглядело как «BBC не играет» (01.08.2026).
+  if (service === 'bbc') {
+    const pid = (url.match(/programmes\/([a-z0-9]+)/i) || [])[1];
+    if (!pid) { toast(t('b.no_stream_url'), 'var(--red)'); return; }
+    if (typeof bbcPlay !== 'function') { toast(t('t.error'), 'var(--red)'); return; }
+    bbcPlay(pid, '', title, artist, cover || '');
+    return;
+  }
   toast('⏳ ' + title, 'var(--muted)', '', 1800);
   try {
     const r = await fetch(`/api/release/expand?service=${encodeURIComponent(service)}&url=${encodeURIComponent(url)}`);
@@ -736,6 +800,11 @@ async function playRelease(service, url, title, artist, cover) {
     // resolved each track by ISRC to a Deezer/Qobuz copy that CAN actually be
     // streamed. Drop tracks without a match; the player still shows "Spotify",
     // never the real source, per the whole point of this workaround.
+    // ТОЛЬКО Spotify. Apple сюда добавлять НЕЛЬЗЯ, пока его движок не отдаёт
+    // штрихкод релиза: подбор копии без UPC не находит ничего, фильтр вычищает
+    // все треки, и Apple-карточка перестаёт играть ВООБЩЕ — вместо превью
+    // получается тишина. Поймано проверкой сразу после правки (02.08.2026):
+    // «треков 4, с играбельной копией 0, UPC альбома: None».
     if (service === 'spotify') {
       const total = tracks.length;
       tracks = tracks.filter(tr => tr.playable_service && tr.playable_id != null);
@@ -761,6 +830,9 @@ async function playRelease(service, url, title, artist, cover) {
       cover:     tr.artwork || cover || '',
       permalink: tr.url || url,
       full:      true,
+      // Длительность из ответа /api/release/expand — иначе в трек-листе время
+      // было только у играющего трека, у остальных «—» (бэкенд его отдаёт).
+      duration:  Number(tr.duration || tr.length || 0) || 0,
       label:     `${service[0].toUpperCase()+service.slice(1)} · ${title}`,
       posKey:    `${service}:${tr.id}`,
     }));

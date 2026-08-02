@@ -2,6 +2,19 @@
 Multi-service release radar — Qobuz and Tidal.
 
 Uses asyncio concurrency (semaphore) so 200 artists scan in ~15s instead of hours.
+
+Каждый источник читает подписки СВОЕГО аккаунта — и ровно из-за этого артист
+виден только тому сервису, в котором на него подписаны. Витрины наполняются
+вразнобой, аккаунты у владельца в разных странах, и та витрина, где релиз
+появляется РАНЬШЕ всех, до ленты не доходила вовсе: в служебном Tidal-аккаунте
+0 подписок, поэтому Tidal-источник всегда отдавал пустоту, хотя новозеландская
+пятница наступает раньше всех остальных (разбор 29.07.2026, Sultan + Shepard —
+«Centuries»: релиз лежал в Tidal NZ за сутки до мировой даты).
+
+Поэтому список артистов каждого источника — это подписки его аккаунта ПЛЮС те,
+за кем следят в других сервисах, найденные в этом каталоге по имени
+(`ripster.artist_xref`, сверка только по точному совпадению). Выключается
+ключом `radar-cross-service: false`.
 """
 from __future__ import annotations
 
@@ -13,9 +26,12 @@ from datetime import datetime, timedelta
 import httpx
 from fastapi import APIRouter
 
+from ripster import artist_xref as _xref
+
 router     = APIRouter()
 _config: dict = {}
 _broadcast    = None
+_watchlist: list = []
 
 _TIDAL_API   = "https://api.tidal.com/v1"
 _QOBUZ_API   = "https://www.qobuz.com/api.json/0.2"
@@ -24,9 +40,11 @@ _TIMEOUT     = httpx.Timeout(connect=10, read=20, write=10, pool=5)
 
 
 def install(app, ctx) -> None:
-    global _config, _broadcast
+    global _config, _broadcast, _watchlist
     _config    = ctx.config
     _broadcast = ctx.broadcast
+    _watchlist = ctx.watchlist
+    _xref.configure(ctx.config, ctx.base_dir)
     app.include_router(router)
 
 
@@ -61,6 +79,43 @@ def _decode_jwt(token: str) -> dict:
         return json.loads(base64.urlsafe_b64decode(padded))
     except Exception:
         return {}
+
+async def _watchlist_artists(service: str, artists: list) -> list[dict]:
+    """Дополнить подписки сервиса теми, за кем следят в ДРУГИХ сервисах.
+
+    Смысл ровно один: релиз должен искаться там, где он появляется раньше, а не
+    только там, где на артиста подписан аккаунт. Пока этого не было, Tidal-
+    источник с нулём подписок отдавал пустоту, и новозеландское опережение на
+    полсуток пропадало впустую.
+
+    Имена берём из вишлиста — это то, чего владелец действительно ждёт, и это
+    десятки записей, а не тысячи: полный кросс-обход всех подписок Spotify стоил
+    бы часов запросов и бана. Лейблы и SoundCloud пропускаем — там артиста нет.
+    Найденное кэшируется на диск, так что платим только за первый проход.
+    """
+    if (_config or {}).get("radar-cross-service") is False:
+        return []
+    if not _xref.has_credentials(service):
+        return []
+
+    have = {str(a.get("id")) for a in (artists or [])}
+    names = sorted({
+        str(e.get("name") or "").strip()
+        for e in (_watchlist or [])
+        if e.get("kind") != "label" and str(e.get("name") or "").strip()
+        and (e.get("service") or "apple") != service
+    })
+    if not names:
+        return []
+
+    found = await _xref.resolve_many(names, service)
+    extra = [{"id": v["id"], "name": v.get("name") or nm, "via_xref": True}
+             for nm, v in found.items() if str(v.get("id")) not in have]
+    if extra:
+        print(f"[radar] {service}: подписок {len(artists)}, из вишлиста добавлено "
+              f"{len(extra)} (из {len(names)} имён)", flush=True)
+    return extra
+
 
 async def _tidal_user_id() -> str:
     token = _tidal_token()
@@ -105,6 +160,7 @@ async def _qobuz_fetch_artist(sem: asyncio.Semaphore, c: httpx.AsyncClient,
                     "label":   label, "cover": cover,
                     "url":     alb.get("url", "") or f"https://open.qobuz.com/album/{alb_id}",
                     "hires":   alb.get("hires", False),
+                    "artist_id": str(artist.get("id", "")),   # чтобы имя было кликабельно → страница артиста
                     "service": "qobuz",
                 })
             return out
@@ -143,6 +199,7 @@ async def qobuz_releases(days: int = 30):
                     break
                 offset += 50
 
+        artists += await _watchlist_artists("qobuz", artists)
         if not artists:
             return {"ok": True, "releases": [], "artists_checked": 0}
 
@@ -234,7 +291,13 @@ async def _tidal_fetch_artist(sem: asyncio.Semaphore, c: httpx.AsyncClient,
                     "label":   "",
                     "cover":   _tidal_cover(alb.get("cover", "")),
                     "url":     f"https://listen.tidal.com/album/{alb_id}",
+                    "artist_id": str(artist.get("id", "")),   # чтобы имя было кликабельно → страница артиста
                     "service": "tidal",
+                    # Дата у Tidal бывает завтрашней, а файл уже отдаётся — это и
+                    # есть новозеландское опережение. Отличить «уже можно взять»
+                    # от анонса позволяет только этот флаг, поэтому несём его
+                    # дальше вместо того, чтобы резать всё будущее по дате.
+                    "stream_ready": bool(alb.get("streamReady", True)),
                 })
             return out
         except Exception:
@@ -278,6 +341,9 @@ async def tidal_releases(days: int = 30):
                     break
                 offset += 100
 
+        # Служебный Tidal-аккаунт держат ради новозеландской витрины, а не ради
+        # подписок — их там ноль. Без этой строки источник всегда пуст.
+        artists += await _watchlist_artists("tidal", artists)
         if not artists:
             return {"ok": True, "releases": [], "artists_checked": 0}
 
@@ -412,6 +478,7 @@ async def deezer_releases(days: int = 30):
                     break
                 index += 100
 
+        artists += await _watchlist_artists("deezer", artists)
         if not artists:
             return {"ok": True, "releases": [], "artists_checked": 0}
 

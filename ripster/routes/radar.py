@@ -49,9 +49,165 @@ def install(app, ctx) -> None:
         "config":    ctx.config,
         "watchlist": ctx.watchlist,
         "cache_file": ctx.base_dir / "radar_cache.json",
+        "favs_file":  ctx.base_dir / "rel_favorites.json",
+        "store_file": ctx.base_dir / "radar_store.json",
     })
     _load_cache()
     app.include_router(router)
+
+
+# ── Избранные релизы: живут на сервере, а не в браузере ─────────────────────
+# Звезда на карточке писалась в localStorage — то есть в конкретный браузерный
+# профиль. У Ripster таких профилей минимум два: окно программы (WebView2) и
+# запасной ярлык в обычном браузере, и списки у них разные. Плюс любая чистка
+# данных сайта стирала избранное молча. Со стороны владельца это выглядело как
+# «жму в избранное не первый раз, Ripster не помнит» (01.08.2026).
+#
+# Храним на сервере: одно избранное на всю программу, переживает перезапуск,
+# смену оболочки и переустановку браузера.
+_FAV_CAP = 1000
+
+
+def _favs_load() -> list:
+    f = _s.get("favs_file")
+    if not f or not f.exists():
+        return []
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        return d if isinstance(d, list) else (d.get("items") or [])
+    except Exception as e:
+        print(f"[radar] favorites load error: {e}", flush=True)
+        return []
+
+
+def _favs_save(items: list) -> None:
+    f = _s.get("favs_file")
+    if not f:
+        return
+    try:
+        f.write_text(json.dumps(items[:_FAV_CAP], ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        print(f"[radar] favorites save error: {e}", flush=True)
+
+
+def _fav_uid(rel: dict) -> str:
+    """Тот же ключ, что считает интерфейс, иначе списки разъедутся."""
+    return (str(rel.get("service") or "") + "|"
+            + str(rel.get("id") or rel.get("url")
+                  or f"{rel.get('title') or ''}~{rel.get('artist') or ''}"))
+
+
+# ── Долговременный склад релизов не-Spotify источников ──────────────────────
+# У Spotify есть склад по артистам и снимки уже отданных лент, поэтому находка
+# там переживает и перезапуск, и сбой сети. У BBC/SoundCloud/Apple не было
+# ничего, кроме 15-минутного кэша: источник отдаёт только своё недавнее окно, и
+# всё, что из него выпало, исчезало НАВСЕГДА — вернуть было неоткуда.
+#
+# Для владельца это выглядело как «карточка была и пропала»: релиз, найденный
+# 24 июля, к августу выпадал из окна источника и не возвращался никаким
+# обновлением (01.08.2026, разбор пропавшей карточки PROFF).
+#
+# Склад чинит именно это: всё once-увиденное складывается на диск и подмешивается
+# к свежей выдаче. Источник замолчал — записи остаются; вернулся — обновляются.
+_STORE_WINDOW_DAYS = 400          # столько храним; дальше запись не нужна никому
+_STORE_CAP = 4000                 # на источник — чтобы файл не пух бесконечно
+
+
+def _rel_uid(r: dict) -> str:
+    return (str(r.get("service") or "") + "|"
+            + str(r.get("id") or r.get("url")
+                  or f"{r.get('artist') or ''}~{r.get('title') or ''}"))
+
+
+def _durable_load() -> dict:
+    f = _s.get("store_file")
+    if not f or not f.exists():
+        return {}
+    try:
+        d = json.loads(f.read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception as e:
+        print(f"[radar] store load error: {e}", flush=True)
+        return {}
+
+
+def _durable_save(store: dict) -> None:
+    f = _s.get("store_file")
+    if not f:
+        return
+    try:
+        f.write_text(json.dumps(store, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        print(f"[radar] store save error: {e}", flush=True)
+
+
+def _durable_merge(source: str, fresh: list, days: int) -> list:
+    """Слить свежую выдачу источника со складом и отдать окно в `days`.
+
+    Свежие записи ОБНОВЛЯЮТ складские (у релиза могла уточниться дата или
+    обложка), но никогда их не удаляют: отсутствие в текущем ответе означает
+    лишь «источник больше не показывает», а не «релиза не было».
+    """
+    store = _durable_load()
+    bucket = store.get(source) or {}
+    for r in (fresh or []):
+        if r.get("date"):
+            bucket[_rel_uid(r)] = r
+
+    keep = _cutoff(_STORE_WINDOW_DAYS)
+    bucket = {k: v for k, v in bucket.items() if (v.get("date") or "") >= keep}
+    if len(bucket) > _STORE_CAP:
+        newest = sorted(bucket.items(), key=lambda kv: kv[1].get("date", ""), reverse=True)
+        bucket = dict(newest[:_STORE_CAP])
+
+    store[source] = bucket
+    _durable_save(store)
+
+    cut = _cutoff(days)
+    out = [r for r in bucket.values() if (r.get("date") or "") >= cut]
+    out.sort(key=lambda x: x.get("date", ""), reverse=True)
+    restored = len(out) - sum(1 for r in (fresh or []) if (r.get("date") or "") >= cut)
+    if restored > 0:
+        print(f"[radar] {source}: источник дал {len(fresh or [])}, из склада добавлено "
+              f"{restored} (окно {days}д)", flush=True)
+    return out
+
+
+@router.get("/api/rel-favs")
+async def rel_favs_get():
+    return {"ok": True, "items": _favs_load()}
+
+
+@router.post("/api/rel-favs")
+async def rel_favs_post(body: dict):
+    """Добавить/убрать релиз, либо влить список целиком.
+
+    `merge` нужен ровно один раз на человека: старое избранное лежит в
+    localStorage, и при первом запуске новой версии интерфейс переливает его
+    сюда. Слияние идёт по ключу и ничего не затирает.
+    """
+    items = _favs_load()
+    have = {_fav_uid(r) for r in items}
+
+    if body.get("merge"):
+        added = 0
+        for rel in (body.get("items") or []):
+            u = _fav_uid(rel)
+            if u not in have:
+                have.add(u)
+                items.append(rel)
+                added += 1
+        _favs_save(items)
+        return {"ok": True, "items": items, "added": added}
+
+    rel = body.get("item") or {}
+    uid = body.get("uid") or _fav_uid(rel)
+    if body.get("remove"):
+        items = [r for r in items if _fav_uid(r) != uid]
+    elif uid not in have and rel:
+        items.insert(0, rel)
+    _favs_save(items)
+    return {"ok": True, "items": items}
 
 
 # ── Cache: survives a restart, and never makes the user wait ─────────────────
@@ -173,7 +329,8 @@ async def releases_bbc(days: int = Query(90, ge=1, le=365),
     results = await asyncio.gather(*(_one(b) for b in BRANDS),
                                    return_exceptions=True)
     releases = [r for res in results if isinstance(res, list) for r in res]
-    releases.sort(key=lambda x: x["date"], reverse=True)
+    # Склад: то, что источник уже не показывает, всё равно остаётся.
+    releases = _durable_merge("bbc", releases, days)
     return _store(key, {"ok": True, "releases": releases,
                         "sources": len(BRANDS)})
 
@@ -240,7 +397,8 @@ async def releases_soundcloud(days: int = Query(90, ge=1, le=365),
     results = await asyncio.gather(*(_one(e) for e in entries),
                                    return_exceptions=True)
     releases = [r for res in results if isinstance(res, list) for r in res]
-    releases.sort(key=lambda x: x["date"], reverse=True)
+    # Склад: то, что источник уже не показывает, всё равно остаётся.
+    releases = _durable_merge("soundcloud", releases, days)
     return _store(key, {"ok": True, "releases": releases,
                         "sources": len(entries)})
 
@@ -317,4 +475,6 @@ async def releases_apple(days: int = Query(90, ge=1, le=365),
         seen.add(r["id"])
         uniq.append(r)
     uniq.sort(key=lambda x: x["date"], reverse=True)
+    # Склад: то, что источник уже не показывает, всё равно остаётся.
+    uniq = _durable_merge("apple", uniq, days)
     return _store(key, {"ok": True, "releases": uniq, "sources": len(entries)})

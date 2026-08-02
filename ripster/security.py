@@ -11,6 +11,16 @@ from __future__ import annotations
 # injection or overwriting internal-only keys.
 
 CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
+    # Пользовательский тюнинг, добавленный 01–02.08.2026. Без записи в этот
+    # список переключатель в настройках молча ничего не делает: POST /api/config
+    # отбрасывает всё, чего здесь нет.
+    # Найдено самопроверкой 02.08.2026: эти переключатели есть в настройках,
+    # но их ключи не проходили белый список — нажатие молча не сохранялось.
+    "main-go-path", "save-cover-to-folder", "save-lrc-file",
+    "radio-autostart",      # продолжать очередь самой
+    "nudges-",              # подсказки в простое
+    "webview-hw-accel", "webview-browser-args",   # ускорение окна
+    "apple-local-only-strict",                     # запрет AMD-подхвата при local-only
     "quality", "engine", "language", "font", "theme",
     "embed-", "save-path", "cover-", "lrc-", "lyric",
     "truncate",
@@ -57,6 +67,12 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "yandex-accounts",   # multi-account Yandex pool (load-balanced) — list of {token,label}
     "amazon-token", "amazon-quality", "amazon-save-path", "amazon-cli-path",
     "releases-services", "releases-days", "releases-types",
+    # Кросс-сервисный радар (02.08.2026): источник ищет релизы артистов, за
+    # которыми следят в ДРУГИХ сервисах, и вишлист опрашивает ранние витрины.
+    # Без записи из интерфейса выключить это было бы нечем.
+    "radar-cross-service",
+    "watchlist-early-services", "watchlist-early-download",
+    "watchlist-compilations",
     "queue-autostart", "max-parallel",
     "minimize-to-tray",
     "minimize-to",      # where a plain minimize goes: taskbar (default) / tray
@@ -91,6 +107,8 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     # остаётся на одних догадках по статистике, которая содержит ещё и чужие
     # загрузки (гости бота).
     "digs-",
+    # Ключ Last.fm для «похожих артистов» в Раскопках (бесплатный, необязательный).
+    "lastfm-api-key",
 )
 
 

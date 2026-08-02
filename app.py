@@ -287,7 +287,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "3.4.0"
+RELEASE_VERSION = "3.5.0"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -646,6 +646,13 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_startup_sync_orpheus())
     asyncio.create_task(_soundcloud_routes._prewarm_client_id())
+    # Сторож самоподъёма — см. ripster/watchdog.py.
+    try:
+        from ripster import watchdog as _wd
+        _wd.install(config, broadcast)
+        asyncio.create_task(_wd.run())
+    except Exception as _e:
+        print(f'[сторож] не запущен: {type(_e).__name__}: {_e}', flush=True)
     # Start the stdout→WS pump so every print() reaches the UI console.
     asyncio.create_task(_stdout_pump())
     # Periodic WS heartbeat so the client watchdog doesn't false-trip on an idle
@@ -1209,6 +1216,12 @@ if __name__ == "__main__":
     print("─" * 52)
     Path(config.get("save-path", "downloads")).mkdir(parents=True, exist_ok=True)
     save_config(config)
+    # Самопроверка связей — см. ripster/selfcheck.py.
+    try:
+        from ripster import selfcheck as _sc
+        _sc.run(verbose=True)
+    except Exception as _e:
+        print(f"[самопроверка] не выполнилась: {type(_e).__name__}: {_e}", flush=True)
     if not _takeover_stale_server(host, port):
         sys.exit(0)                       # a same/newer Ripster already owns the port
     uvicorn.run(app, host=host, port=port, log_level="warning")

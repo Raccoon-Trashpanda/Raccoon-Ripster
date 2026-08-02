@@ -14,10 +14,13 @@
 <link rel="apple-touch-icon" href="/static/apple-touch-icon.png"/>
 <link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png"/>
 <link rel="icon" type="image/svg+xml" href="/static/favicon-32.svg"/>
-<script src="https://cdn.jsdelivr.net/npm/hls.js@1.5.20/dist/hls.min.js"></script>
+<!-- hls.js — плеер BBC. Лежит локально СОЗНАТЕЛЬНО: раньше тянулся с jsdelivr,
+     и при любом провале DNS/сети (01.08.2026 — ровно это) `Hls` оказывался
+     undefined, а BBC молча переставал играть, хотя бэкенд отдавал поток. -->
+<script src="/static/vendor/hls.min.js?v=1520"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&family=Atkinson+Hyperlegible:wght@400;700&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/css/main.css?v=78"/>
+<link rel="stylesheet" href="/static/css/main.css?v=91"/>
 </head>
 <body>
 <div id="net-progress"></div>
@@ -322,6 +325,8 @@
         <button id="pp-prev" onclick="previewPrev()" data-i18n-title="pp.prev_hint" data-i18n-title="pp.prev_hint" title="Предыдущий (или перемотать в начало)" class="pp-transport">⏮</button>
         <button id="pp-play" onclick="previewToggle()" data-i18n-title="pp.play_pause" data-i18n-title="pp.play_pause" title="Воспроизведение / Пауза" style="width:42px;height:42px;border-radius:50%;background:var(--red);color:#fff;border:none;cursor:pointer;font-size:17px;flex-shrink:0;padding:0">▶</button>
         <button id="pp-next" onclick="previewNext()" data-i18n-title="pp.next_track" data-i18n-title="pp.next_track" title="Следующий трек" class="pp-transport">⏭</button>
+        <button id="pp-queue-btn" onclick="event.stopPropagation();togglePlayerQueue()" data-i18n-title="pq.title" title="Трек-лист" class="pp-transport">☰</button>
+        <button id="pp-fav-btn" onclick="event.stopPropagation();ppFollowCurrent()" data-i18n-title="af.follow" title="В любимые артисты" class="pp-transport">♡</button>
       </div>
 
       <!-- ── RIGHT: quality + volume + extras ── -->
@@ -401,6 +406,9 @@
       <button id="fp-speed-btn" class="fp-pill" onclick="fpCycleSpeed()" data-i18n-title="fp.speed" data-i18n-title="fp.speed" title="Скорость воспроизведения">
         <span id="fp-speed-val">1×</span>
       </button>
+      <button id="fp-queue-btn" class="fp-pill" onclick="togglePlayerQueue()" data-i18n-title="pq.title" title="Трек-лист">
+        <span>☰</span> <span data-i18n="pq.title">Трек-лист</span>
+      </button>
       <button id="fp-radio-btn" class="fp-pill" onclick="digsRadioToggle()" data-i18n-title="fp.radio_title" title="Радио по вкусу — очередь дополняется сама">
         <span>◈</span> <span data-i18n="fp.radio">Радио</span>
       </button>
@@ -443,9 +451,15 @@
   <button type="button" onclick="closeLightbox()" style="position:absolute;top:16px;right:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:none;cursor:pointer;font-size:16px;backdrop-filter:blur(4px)">✕</button>
 </div>
 
-<script src="/static/js/i18n.js?v=10085"></script>
-<script src="/static/js/views.js?v=10070"></script>
-<script src="/static/js/app.js?v=10118"></script>
+<script src="/static/js/i18n.js?v=10091"></script>
+<script src="/static/js/boot_splash.js?v=1"></script>
+<script src="/static/js/views.js?v=10071"></script>
+<script src="/static/js/scrolltop.js?v=1"></script>
+<script src="/static/js/cover_tint.js?v=2"></script>
+<script src="/static/js/artist_follow.js?v=1"></script>
+<script src="/static/js/render_perf.js?v=1"></script>
+<script src="/static/js/nudges.js?v=1"></script>
+<script src="/static/js/app.js?v=10119"></script>
 <script src="/static/js/wrapper.js?v=6"></script>
 <script src="/static/js/coder.js?v=5"></script>
 <script src="/static/js/guest.js?v=1"></script>
@@ -461,23 +475,25 @@
      function search.js defined already exists in cookies_ui.js — it was pure
      dead weight. Do not re-add it. -->
 <script src="/static/js/console_ui.js?v=5"></script>
-<script src="/static/js/stats_ui.js?v=3"></script>
+<script src="/static/js/stats_ui.js?v=5"></script>
 <script src="/static/js/orpheus_ui.js?v=8"></script>
 <script src="/static/js/service_login.js?v=4"></script>
-<script src="/static/js/sc_tab.js?v=17"></script>
-<script src="/static/js/cookies_ui.js?v=13"></script>
+<script src="/static/js/sc_tab.js?v=26"></script>
+<script src="/static/js/cookies_ui.js?v=15"></script>
 <script src="/static/js/lightbox.js?v=11"></script>
 <script src="/static/js/urlbar_detect.js?v=12"></script>
-<script src="/static/js/auth_ui.js?v=12"></script>
-<script src="/static/js/digs.js?v=12"></script>
+<script src="/static/js/auth_ui.js?v=14"></script>
+<script src="/static/js/digs.js?v=13"></script>
 <script src="/static/js/player_lib.js?v=3"></script>
 <script src="/static/js/remote_ui.js?v=3"></script>
 <script src="/static/js/service_colors_ui.js?v=11"></script>
 <script src="/static/js/deps_ui.js?v=3"></script>
 <script src="/static/js/tokens_ui.js?v=1"></script>
 <script src="/static/js/config_yaml_ui.js?v=1"></script>
-<script src="/static/js/player.js?v=10040"></script>
-<script src="/static/js/digs_radio.js?v=2"></script>
+<script src="/static/js/player.js?v=10044"></script>
+<script src="/static/js/digs_radio.js?v=3"></script>
+<script src="/static/js/digs_tour.js?v=4"></script>
+<script src="/static/js/player_queue.js?v=10"></script>
 <script src="/static/js/player_fps.js?v=12"></script>
 <script src="/static/js/bbc.js?v=10009"></script>
 <script src="/static/js/sc.js?v=10019"></script>

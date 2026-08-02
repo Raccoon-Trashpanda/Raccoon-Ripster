@@ -5,7 +5,7 @@
             style="flex:1;padding:9px 13px;background:var(--surface);border:1px solid var(--border);border-radius:9px;font-size:13px;color:var(--text);outline:none;font-family:var(--font)"
             onkeydown="if(event.key==='Enter')doSearch()"/>
           <button onclick="doSearch()" data-i18n="search.find"
-            style="padding:9px 20px;background:var(--red);color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font);flex-shrink:0">Найти</button>
+            style="padding:9px 20px;background:var(--red);color:#fff;border:none;border-radius:9px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font);flex-shrink:0"><span data-i18n="s.find">Найти</span></button>
         </div>
         <!-- Row 2: service + type selectors -->
         <div style="display:flex;gap:8px;margin-bottom:10px;align-items:center">
@@ -14,9 +14,13 @@
             <option value="apple">🍎 Apple Music</option>
             <option value="deezer">🎵 Deezer</option>
             <option value="qobuz">🎼 Qobuz</option>
+            <!-- Tidal умеет искать с самого начала (_search_tidal в discovery.py),
+                 просто в этот список его забыли добавить — сервис есть, движок
+                 есть, качество своё, а из поиска он был недоступен. -->
+            <option value="tidal">🌊 Tidal</option>
             <option value="spotify">🟢 Spotify</option>
             <option value="beatport">🎧 Beatport</option>
-            <option value="yandex">🟡 Яндекс.Музыка</option>
+            <option value="yandex" data-i18n="s.yandex">🟡 Яндекс.Музыка</option>
           </select>
           <select id="search-type"
             style="padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);cursor:pointer;outline:none;width:auto;flex:0 0 auto">

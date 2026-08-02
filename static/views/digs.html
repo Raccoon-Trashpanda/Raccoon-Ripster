@@ -152,6 +152,11 @@
     -webkit-box-orient:vertical;line-height:1.15;word-break:break-word}
   #dg-bubbles .dg-bb-core{background:rgba(192,132,160,.2);border-color:rgba(192,132,160,.6);
     font-size:13px;font-weight:700}
+  /* Знакомый артист — не находка. Не прячем (у нишевого артиста похожих может
+     быть трое, и все знакомые), но приглушаем, чтобы новое читалось первым.
+     На наведении возвращаем в полную силу: это по-прежнему рабочий пузырь. */
+  #dg-bubbles .dg-bb-known{opacity:.42;filter:saturate(.55)}
+  #dg-bubbles .dg-bb-known:hover{opacity:1;filter:none}
   @keyframes dgBb{to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
   #dg-bubbles .dg-bb-close{position:absolute;right:-4px;top:-30px;background:none;border:none;
     color:#9a9aa4;font-size:26px;cursor:pointer;font-family:var(--font);line-height:1}
@@ -208,11 +213,34 @@
   :root[data-theme="light"] #view-digs .dg-why b{color:#8c5314}
 </style>
 
-<div style="padding:14px 16px 0">
+<!-- Заголовок ПРИЛИПАЕТ к верху. Раньше он жил внутри прокручиваемой области
+     и уезжал вместе с находками: владелец сказал «слово Раскопки сверху
+     вообще не видно» (02.08.2026). В измерении он был цел — значит дело
+     было не в обрезке, а в прокрутке. -->
+<!-- flex:0 0 auto — то, из-за чего слово «Раскопки» срезалось второй раз.
+     Секция вкладки это flex-колонка, и шапка как её первый ребёнок сжималась
+     до 22 px при собственном содержимом в 40 px (14 px отступа + строка), а
+     `overflow:auto` этот излишек отрезал. Замер: clientH 22, scrollH 40.
+     Прошлая правка (sticky) лечила другую болезнь — уезжание при прокрутке —
+     и на обрезку не влияла вовсе. -->
+<div style="padding:14px 16px 0;position:sticky;top:0;z-index:5;background:var(--bg);
+            backdrop-filter:none;flex:0 0 auto;overflow:visible">
   <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
     <div style="font-size:14px;font-weight:700;color:var(--text)"
          title="Не «что послушать», а что забрать: только то, чего у тебя ещё нет — и почему именно тебе"
          data-i18n="digs.title" data-i18n-title="digs.sub">Раскопки</div>
+    <!-- Повторный проход тура. В правом верхнем углу, потому что там его ищут,
+         и потому что объяснение должно быть доступно всегда, а не только при
+         первом заходе: вкладка предлагает, а не выполняет команду. -->
+    <button id="dg-tour-btn" onclick="digsTourStart()" data-i18n-title="digs.tour_btn"
+            title="Как это работает"
+            style="margin-left:auto;width:26px;height:26px;flex-shrink:0;border-radius:50%;
+                   background:rgba(201,162,39,.1);border:1px solid rgba(201,162,39,.34);
+                   color:#c9a227;font-size:12px;font-weight:700;cursor:pointer;
+                   font-family:var(--font);line-height:1;padding:0;
+                   transition:background .16s ease,transform .18s cubic-bezier(.34,1.56,.64,1)"
+            onmouseover="this.style.background='rgba(201,162,39,.22)'"
+            onmouseout="this.style.background='rgba(201,162,39,.1)'">?</button>
   </div>
 </div>
 

@@ -38,7 +38,7 @@ def _view(overlay: dict | None) -> dict:
 async def _probe_yandex(overlay: dict | None = None) -> dict:
     token = (_view(overlay).get("yandex-token") or "").strip()
     if not token:
-        return {"ok": False, "error": "Токен не задан — Settings → Яндекс."}
+        return {"ok": False, "error_key": "pr.ya_no_token", "error": "Токен не задан — Settings → Яндекс."}
     from fastapi.concurrency import run_in_threadpool
 
     def _do():
@@ -52,6 +52,7 @@ async def _probe_yandex(overlay: dict | None = None) -> dict:
             "country":  getattr(a, "region", "") or "",
             "lossless": plus,        # Plus = FLAC доступен
             "hq":       not plus,
+            "note_key": "pr.ya_plus" if plus else "pr.ya_noplus",
             "note":     "Яндекс Плюс ✓" if plus else "без Плюс — только превью",
         }}
 
@@ -74,7 +75,7 @@ async def _probe_amazon(overlay: dict | None = None) -> dict:
     Apple decrypt-path health check."""
     token = (_view(overlay).get("amazon-token") or "").strip()
     if not token:
-        return {"ok": False, "error": "Токен не задан — Settings → 🅰️ Amazon (amz.dezalty.com/login)."}
+        return {"ok": False, "error_key": "pr.amz_no_token", "error": "Токен не задан — Settings → 🅰️ Amazon (amz.dezalty.com/login)."}
     from fastapi.concurrency import run_in_threadpool
 
     def _do():
@@ -91,7 +92,7 @@ async def _probe_amazon(overlay: dict | None = None) -> dict:
             ok_exe, detail = (importlib.util.find_spec("amz") is not None), "amz module"
         if not ok_exe:
             return {"ok": False,
-                    "error": "CLI `amz` не найден — pip install amazon-music "
+                    "error_key": "pr.amz_no_cli", "error": "CLI `amz` не найден — pip install amazon-music "
                              "(или задай amazon-cli-path)."}
 
         # Real token check — cheap single GET, same client the actual downloader uses.
@@ -101,16 +102,16 @@ async def _probe_amazon(overlay: dict | None = None) -> dict:
             api_url = (_cfg.get("amazon-api-url") or "https://amz.dezalty.com").strip()
             info = _AmzAPI(api_url, token).get_account_info()
         except InvalidAccessToken:
-            return {"ok": False, "error": "Токен Amazon протух — обнови в Settings → 🅰️ Amazon "
+            return {"ok": False, "error_key": "pr.amz_expired", "error": "Токен Amazon протух — обнови в Settings → 🅰️ Amazon "
                                           "(amz.dezalty.com/login)."}
         except UserBanned:
-            return {"ok": False, "error": "Amazon-аккаунт заблокирован/забанен — токен не поможет, нужен другой."}
+            return {"ok": False, "error_key": "pr.amz_banned", "error": "Amazon-аккаунт заблокирован/забанен — токен не поможет, нужен другой."}
         except RateLimitExceeded:
             # A real, transient rate-limit (429) — the account/token themselves are
             # fine, just throttled right now. Don't flip the whole service red.
             return {"ok": True, "user": {
                 "login": "token ✓", "lossless": True, "hq": True,
-                "note": "Токен задан, но проверка сейчас rate-limited (429) — не про токен.",
+                "note_key": "pr.amz_429", "note": "Токен задан, но проверка сейчас rate-limited (429) — не про токен.",
             }}
         except ApiConnectionError as e:
             # amz.fetch() raises this for BOTH real network drops AND a bad HTTP
@@ -121,15 +122,16 @@ async def _probe_amazon(overlay: dict | None = None) -> dict:
             # exactly what misled everyone into trying and failing — say so
             # honestly instead (found 2026-07-22, amz.dezalty.com was returning
             # a Heroku "Application Error" page at the time).
-            return {"ok": False, "error": f"amz.dezalty.com сейчас недоступен ({e}) — "
+            return {"ok": False, "error_key": "pr.amz_down", "error_args": {"e": str(e)}, "error": f"amz.dezalty.com сейчас недоступен ({e}) — "
                                           f"не проблема токена, сторонний сервис лежит, попробуй позже."}
         except Exception as e:
-            return {"ok": False, "error": f"Не удалось проверить токен: {type(e).__name__}: {e}"}
+            return {"ok": False, "error_key": "pr.amz_check_fail", "error_args": {"e": f"{type(e).__name__}: {e}"}, "error": f"Не удалось проверить токен: {type(e).__name__}: {e}"}
 
         return {"ok": True, "user": {
             "login":    (info.get("email") or info.get("username") or "token ✓"),
             "lossless": True,         # Master/HD при наличии Unlimited
             "hq":       True,
+            "note_key": "pr.amz_ok", "note_args": {"detail": detail},
             "note":     f"Токен проверен вживую, CLI: {detail} ✓",
         }}
 
@@ -152,14 +154,14 @@ async def _probe_bbc(overlay: dict | None = None) -> dict:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get("https://www.bbc.co.uk/programmes/m002vbnb.json")
     except Exception as e:
-        return {"ok": False, "error": f"BBC недоступен: {e}"}
+        return {"ok": False, "error_key": "pr.bbc_down", "error_args": {"e": str(e)}, "error": f"BBC недоступен: {e}"}
     if r.status_code != 200:
         return {"ok": False,
-                "error": f"Публичный API BBC ответил {r.status_code} — "
+                "error_key": "pr.bbc_http", "error_args": {"code": r.status_code}, "error": f"Публичный API BBC ответил {r.status_code} — "
                          f"это не про твои настройки, ключи ему не нужны."}
     return {"ok": True, "user": {
         "login": "public API", "hq": True,
-        "note": "ключи не нужны — BBC Sounds открыт",
+        "note_key": "pr.bbc_ok", "note": "ключи не нужны — BBC Sounds открыт",
     }}
 
 
@@ -309,13 +311,14 @@ async def _probe_qobuz(overlay: dict | None = None) -> dict:
         if not res.get("ok") and email and password:
             fresh = await _qobuz_probe_password(email, password, app_id)
             if fresh.get("ok"):
+                fresh["note_key"] = "pr.qb_relogged"
                 fresh["note"] = "токен протух — перевошёл по паролю и обновил его"
                 return fresh
         return res
     if email and password:
         return await _qobuz_probe_password(email, password, app_id)
     return {"ok": False,
-            "error": "Заполни user-id + user-auth-token ИЛИ email + пароль "
+            "error_key": "pr.qb_need_creds", "error": "Заполни user-id + user-auth-token ИЛИ email + пароль "
                      "в Settings → Qobuz."}
 
 
@@ -331,27 +334,28 @@ async def _qobuz_probe_token(user_id: str, auth_token: str, app_id: str) -> dict
                 },
             )
     except Exception as e:
-        return {"ok": False, "error": f"Сеть: {e}"}
+        return {"ok": False, "error_key": "pr.net", "error_args": {"e": str(e)}, "error": f"Сеть: {e}"}
 
     try:
         data = r.json()
     except Exception:
         return {"ok": False,
-                "error": f"Qobuz ответил {r.status_code}, но не JSON (возможно блокировка)."}
+                "error_key": "pr.qb_not_json", "error_args": {"code": r.status_code}, "error": f"Qobuz ответил {r.status_code}, но не JSON (возможно блокировка)."}
 
     if r.status_code == 401:
         qerr = (data.get("message") or "Invalid credentials").strip()
         return {"ok": False,
-                "error": f"401 от Qobuz: {qerr}. "
+                "error_key": "pr.qb_401", "error_args": {"msg": qerr}, "error": f"401 от Qobuz: {qerr}. "
                          "Проверь что user-auth-token из cookies на play.qobuz.com "
                          "и что токен не протух (обнови страницу и сними заново)."}
     if r.status_code == 400:
         return {"ok": False,
-                "error": "400 от Qobuz: неверный app_id. "
+                "error_key": "pr.qb_400", "error": "400 от Qobuz: неверный app_id. "
                          "Очисти поле App ID в Settings → Qobuz → advanced, "
                          "чтобы использовать дефолтный streamrip."}
     if r.status_code != 200:
         return {"ok": False,
+                "error_key": "pr.qb_http", "error_args": {"code": r.status_code, "body": str(data)[:120]},
                 "error": f"Qobuz вернул HTTP {r.status_code}: {data}"}
 
     user_block = _qobuz_user_block(data.get("user") or {}, user_id)
@@ -379,31 +383,33 @@ async def _qobuz_probe_password(email: str, password: str, app_id: str) -> dict:
                 headers={"X-App-Id": app_id},
             )
     except Exception as e:
-        return {"ok": False, "error": f"Сеть: {e}"}
+        return {"ok": False, "error_key": "pr.net", "error_args": {"e": str(e)}, "error": f"Сеть: {e}"}
 
     try:
         data = r.json()
     except Exception:
         return {"ok": False,
-                "error": f"Qobuz ответил {r.status_code}, но не JSON "
+                "error_key": "pr.qb_not_json2", "error_args": {"code": r.status_code}, "error": f"Qobuz ответил {r.status_code}, но не JSON "
                          "(возможно блокировка или капча)."}
 
     if r.status_code == 401:
         qerr = (data.get("message") or "").strip()
         return {"ok": False,
-                "error": f"401 от Qobuz: неверный email или пароль{(' — ' + qerr) if qerr else ''}."}
+                "error_key": "pr.qb_401_pw", "error_args": {"msg": qerr}, "error": f"401 от Qobuz: неверный email или пароль{(' — ' + qerr) if qerr else ''}."}
     if r.status_code == 400:
         return {"ok": False,
-                "error": "400 от Qobuz: неверный app_id — очисти поле App ID "
+                "error_key": "pr.qb_400b", "error": "400 от Qobuz: неверный app_id — очисти поле App ID "
                          "в Settings → Qobuz → advanced."}
     if r.status_code != 200:
-        return {"ok": False, "error": f"Qobuz вернул HTTP {r.status_code}: {data}"}
+        return {"ok": False,
+                "error_key": "pr.qb_http", "error_args": {"code": r.status_code, "body": str(data)[:120]},
+                "error": f"Qobuz вернул HTTP {r.status_code}: {data}"}
 
     token = (data.get("user_auth_token") or "").strip()
     user  = data.get("user") or {}
     if not token or not user.get("id"):
         return {"ok": False,
-                "error": "Qobuz принял вход, но не вернул токен — "
+                "error_key": "pr.qb_no_token", "error": "Qobuz принял вход, но не вернул токен — "
                          "возможно у аккаунта нет активной подписки."}
 
     # Auto-promote: persist user-id + token so downloads use the reliable
@@ -420,12 +426,13 @@ async def _qobuz_probe_password(email: str, password: str, app_id: str) -> dict:
     ineligible = _qobuz_eligibility_error(user_block)
     if ineligible:
         ineligible["app_id_used"] = app_id
+        ineligible["note_key"] = "pr.qb_no_sub"
         ineligible["note"] = "email/пароль приняты, но подписка не активна"
         return ineligible
     return {
         "ok": True,
         "user": user_block,
-        "note": "email/пароль приняты — user-id и токен сохранены автоматически",
+        "note_key": "pr.qb_saved", "note": "email/пароль приняты — user-id и токен сохранены автоматически",
         "app_id_used": app_id,
     }
 
@@ -514,10 +521,11 @@ async def _probe_tidal(overlay: dict | None = None) -> dict:
     except Exception:
         _orph_ready = False
 
-    def _ok_via_orpheus(reason: str) -> dict:
+    def _ok_via_orpheus(reason: str, key: str) -> dict:
         return {
             "ok": True,
             "via": "orpheus",
+            "note_key": key,
             "note": reason,
             "user": {"id": user_id or "?", "login": "OrpheusDL session",
                      "country": country, "name": "Tidal (OrpheusDL)"},
@@ -528,9 +536,10 @@ async def _probe_tidal(overlay: dict | None = None) -> dict:
         token = "" if candidate else await _tidal_refresh_token()
         if not token:
             if _orph_ready:
-                return _ok_via_orpheus("access_token не задан — качаю через OrpheusDL-сессию")
+                return _ok_via_orpheus("access_token не задан — качаю через OrpheusDL-сессию",
+                                       "pr.td_orpheus_notoken")
             return {"ok": False,
-                    "error": "Не заполнен access_token в Settings → Tidal."}
+                    "error_key": "pr.td_no_token", "error": "Не заполнен access_token в Settings → Tidal."}
 
     async def _do_probe(t: str) -> "tuple[int, dict|str]":
         try:
@@ -569,15 +578,16 @@ async def _probe_tidal(overlay: dict | None = None) -> dict:
 
     # Metadata token failed, but OrpheusDL session can still download → available.
     if code != 200 and _orph_ready:
-        return _ok_via_orpheus("metadata-токен истёк, но качаю через OrpheusDL-сессию")
+        return _ok_via_orpheus("metadata-токен истёк, но качаю через OrpheusDL-сессию",
+                               "pr.td_orpheus_stale")
 
     if code == -1:
-        return {"ok": False, "error": f"Сеть: {payload}"}
+        return {"ok": False, "error_key": "pr.net", "error_args": {"e": str(payload)}, "error": f"Сеть: {payload}"}
     if code == 0:
-        return {"ok": False, "error": "Не удалось получить user_id из сессии."}
+        return {"ok": False, "error_key": "pr.td_no_user", "error": "Не удалось получить user_id из сессии."}
     if code == 401:
         return {"ok": False,
-                "error": "401 от Tidal: access_token истёк, refresh не сработал. "
+                "error_key": "pr.td_401", "error": "401 от Tidal: access_token истёк, refresh не сработал. "
                          "Обнови токены на listen.tidal.com → DevTools → Local Storage."}
     if code != 200:
         return {"ok": False, "error": f"Tidal HTTP {code}: {payload}"}
@@ -597,7 +607,7 @@ async def _probe_tidal(overlay: dict | None = None) -> dict:
 async def _probe_deezer(overlay: dict | None = None) -> dict:
     arl = (_view(overlay).get("deezer-arl") or "").strip()
     if not arl:
-        return {"ok": False, "error": "Не заполнен ARL в Settings → Deezer."}
+        return {"ok": False, "error_key": "pr.dz_no_arl", "error": "Не заполнен ARL в Settings → Deezer."}
 
     try:
         async with httpx.AsyncClient(timeout=10, cookies={"arl": arl}) as c:
@@ -606,18 +616,18 @@ async def _probe_deezer(overlay: dict | None = None) -> dict:
                 params={"method": "deezer.getUserData", "api_version": "1.0", "api_token": ""},
             )
     except Exception as e:
-        return {"ok": False, "error": f"Сеть: {e}"}
+        return {"ok": False, "error_key": "pr.net", "error_args": {"e": str(e)}, "error": f"Сеть: {e}"}
 
     try:
         data = r.json()
     except Exception:
-        return {"ok": False, "error": f"Deezer вернул не-JSON: {r.text[:200]}"}
+        return {"ok": False, "error_key": "pr.dz_not_json", "error_args": {"body": r.text[:200]}, "error": f"Deezer вернул не-JSON: {r.text[:200]}"}
 
     results = data.get("results") or {}
     user    = results.get("USER") or {}
     if not user.get("USER_ID"):
         return {"ok": False,
-                "error": "ARL недействителен или истёк. "
+                "error_key": "pr.dz_bad_arl", "error": "ARL недействителен или истёк. "
                          "Обнови ARL в cookies на deezer.com."}
 
     # Options live under results.USER.OPTIONS (the top-level USER_OPTIONS key is
@@ -683,7 +693,9 @@ async def _probe_spotify(overlay: dict | None = None) -> dict:
                 + (" · web-токен свежий" if bearer_fresh else ""))
         return {"ok": True, "via": "librespot",
                 "user": {"login": "Spotify session", "subscription": "Premium (OGG)",
-                         "hq": True, "note": note}}
+                         "hq": True,
+                         "note_key": "pr.sp_blob_fresh" if bearer_fresh else "pr.sp_blob",
+                         "note": note}}
 
     if kind == "oauth":
         # Signed in, but with the WEAK credential: metadata-grade OAuth, no
@@ -691,6 +703,7 @@ async def _probe_spotify(overlay: dict | None = None) -> dict:
         # when Spotify revokes the token. Say so instead of a flat green ✓.
         return {"ok": True, "via": "pkce", "user": {
             "login": "PKCE-сессия", "hq": True,
+            "note_key": "pr.sp_pkce_weak",
             "note": ("вход есть, но это слабая PKCE-сессия — Spotify её периодически "
                      "отзывает. Нажми «🎧 Войти в Spotify» (первый блок вкладки) в Settings → Spotify, "
                      "чтобы получить постоянную сессию."),
@@ -699,13 +712,13 @@ async def _probe_spotify(overlay: dict | None = None) -> dict:
     if bearer_fresh:
         return {"ok": True, "via": "web-token", "user": {
             "login": "web-токен", "hq": True,
-            "note": "качать нечем (нет сессии), но метаданные и радар работают",
+            "note_key": "pr.sp_meta_only", "note": "качать нечем (нет сессии), но метаданные и радар работают",
         }}
 
     if (cfg.get("spotify-sp-dc") or "").strip():
         return {"ok": True, "via": "sp_dc", "user": {
             "login": "sp_dc", "hq": True,
-            "note": "есть только кука sp_dc — хватает радару, для загрузок нужен вход",
+            "note_key": "pr.sp_spdc_only", "note": "есть только кука sp_dc — хватает радару, для загрузок нужен вход",
         }}
 
     # 3. Last resort: the optional Developer-App OAuth. Nothing downloads through
@@ -713,12 +726,12 @@ async def _probe_spotify(overlay: dict | None = None) -> dict:
     try:
         from ripster.routes.spotify import get_access_token as _sp_token
     except ImportError:
-        return {"ok": False, "error": "Модуль Spotify не загружен."}
+        return {"ok": False, "error_key": "pr.sp_no_module", "error": "Модуль Spotify не загружен."}
 
     token = await _sp_token()
     if not token:
         return {"ok": False,
-                "error": "Нет входа в Spotify. Settings → Spotify → «🎧 Войти в Spotify» (первый блок вкладки) "
+                "error_key": "pr.sp_no_login", "error": "Нет входа в Spotify. Settings → Spotify → «🎧 Войти в Spotify» (первый блок вкладки) "
                          "(логин/пароль Spotify, Developer App и Client ID НЕ нужны)."}
 
     try:
@@ -728,11 +741,11 @@ async def _probe_spotify(overlay: dict | None = None) -> dict:
                 headers={"Authorization": f"Bearer {token}"},
             )
     except Exception as e:
-        return {"ok": False, "error": f"Сеть: {e}"}
+        return {"ok": False, "error_key": "pr.net", "error_args": {"e": str(e)}, "error": f"Сеть: {e}"}
 
     if r.status_code == 401:
         return {"ok": False,
-                "error": "Токен Spotify истёк — переподключись в Settings → Spotify."}
+                "error_key": "pr.sp_expired", "error": "Токен Spotify истёк — переподключись в Settings → Spotify."}
     if r.status_code in (403, 429):
         return {"ok": False, "error": _spotify_devapi_hint(r)}
     if r.status_code != 200:
@@ -780,7 +793,7 @@ async def _probe_soundcloud(overlay: dict | None = None) -> dict:
     token = (_view(overlay).get("soundcloud-oauth-token") or "").strip()
     if not token:
         return {"ok": False,
-                "error": "Не заполнен OAuth токен в Settings → SoundCloud."}
+                "error_key": "pr.sc_no_token", "error": "Не заполнен OAuth токен в Settings → SoundCloud."}
 
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -789,11 +802,11 @@ async def _probe_soundcloud(overlay: dict | None = None) -> dict:
                 headers={"Authorization": f"OAuth {token}"},
             )
     except Exception as e:
-        return {"ok": False, "error": f"Сеть: {e}"}
+        return {"ok": False, "error_key": "pr.net", "error_args": {"e": str(e)}, "error": f"Сеть: {e}"}
 
     if r.status_code == 401:
         return {"ok": False,
-                "error": "OAuth токен недействителен или истёк. Обнови в DevTools → Local Storage."}
+                "error_key": "pr.sc_bad_token", "error": "OAuth токен недействителен или истёк. Обнови в DevTools → Local Storage."}
     if r.status_code != 200:
         return {"ok": False, "error": f"SoundCloud API → HTTP {r.status_code}"}
 
@@ -838,7 +851,7 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
 
     if not mut:
         return {"ok": False,
-                "error": "Не заполнен media-user-token в Settings → Apple Music → Токены."}
+                "error_key": "pr.ap_no_mut", "error": "Не заполнен media-user-token в Settings → Apple Music → Токены."}
     if not bearer:
         # Try server-side auto-fetch from music.apple.com JS — no browser needed.
         try:
@@ -853,7 +866,7 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
             pass
         if not bearer:
             return {"ok": False,
-                    "error": "Bearer не получен авто-фетчем. "
+                    "error_key": "pr.ap_no_bearer", "error": "Bearer не получен авто-фетчем. "
                              "Открой /apple/login и проверь токен вручную."}
 
     try:
@@ -870,14 +883,14 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
                 },
             )
     except Exception as e:
-        return {"ok": False, "error": f"Сеть: {e}"}
+        return {"ok": False, "error_key": "pr.net", "error_args": {"e": str(e)}, "error": f"Сеть: {e}"}
 
     if r.status_code == 401:
         return {"ok": False,
-                "error": "Токены недействительны. Обнови MUT и Bearer в Settings → Apple Music."}
+                "error_key": "pr.ap_bad_tokens", "error": "Токены недействительны. Обнови MUT и Bearer в Settings → Apple Music."}
     if r.status_code == 403:
         return {"ok": False,
-                "error": "403 от Apple — MUT протух или неверный storefront."}
+                "error_key": "pr.ap_403", "error": "403 от Apple — MUT протух или неверный storefront."}
     if r.status_code != 200:
         return {"ok": False, "error": f"Apple Music API → HTTP {r.status_code}"}
 
@@ -893,9 +906,13 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
     # error. Check both decrypt paths the router can pick between; either one
     # being healthy is enough (zhaarey uses the local docker wrapper, AMD
     # uses the public wm.wol.moe-style wrapper).
-    decrypt_ok, decrypt_note = await _apple_decrypt_path_ok()
+    decrypt_ok, decrypt_note, (why_key, why_args) = await _apple_decrypt_path_ok()
     if not decrypt_ok:
         return {"ok": False,
+                # Причина вложена в общую фразу, поэтому у неё свой ключ — иначе
+                # переводу достался бы только каркас, а суть осталась русской.
+                "error_key": "pr.ap_no_decrypt",
+                "error_args": {"why_key": why_key, "why_args": why_args, "why": decrypt_note},
                 "error": f"Метаданные доступны, но расшифровка недоступна: {decrypt_note}"}
 
     return {
@@ -904,16 +921,20 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
             "country": sf_id,
             "lossless": True,
             "hires":    True,
+            "note_key": why_key, "note_args": why_args,
             "note": decrypt_note,
         },
     }
 
 
-async def _apple_decrypt_path_ok() -> tuple[bool, str]:
+async def _apple_decrypt_path_ok() -> tuple[bool, str, tuple[str, dict]]:
     """True if AT LEAST ONE Apple decrypt path (local zhaarey wrapper OR the
     public AMD wrapper) looks usable right now. Best-effort — any internal
     error here counts as "can't confirm", not a hard failure of the probe
-    itself, so a broken health-check never masks otherwise-working tokens."""
+    itself, so a broken health-check never masks otherwise-working tokens.
+
+    Returns `(ok, русский текст, (ключ, аргументы))`. Текст остаётся для бота и
+    healthcheck, ключ — для интерфейса, который говорит на своём языке."""
     local_ok = False
     try:
         from ripster.amd import check_wrapper_running
@@ -921,7 +942,7 @@ async def _apple_decrypt_path_ok() -> tuple[bool, str]:
     except Exception:
         pass
     if local_ok:
-        return True, "локальный wrapper готов"
+        return True, "локальный wrapper готов", ("pr.ap_wrap_local", {})
 
     try:
         from ripster.amd import amd_wrapper_status
@@ -929,12 +950,16 @@ async def _apple_decrypt_path_ok() -> tuple[bool, str]:
         secure   = _cfg.get("amd-instance-secure", True)
         r = await amd_wrapper_status(instance, secure)
         if r.get("ready"):
-            return True, f"публичный AMD-wrapper готов ({r.get('client_count', 0)} клиентов)"
+            n = r.get("client_count", 0)
+            return True, f"публичный AMD-wrapper готов ({n} клиентов)", ("pr.ap_wrap_pub", {"n": n})
         if "error" in r:
-            return False, f"локальный wrapper не отвечает, публичный: {r['error']}"
-        return False, "локальный wrapper не отвечает, публичный не готов (0 клиентов/регионов)"
+            return (False, f"локальный wrapper не отвечает, публичный: {r['error']}",
+                    ("pr.ap_wrap_pub_err", {"e": str(r["error"])}))
+        return (False, "локальный wrapper не отвечает, публичный не готов (0 клиентов/регионов)",
+                ("pr.ap_wrap_none", {}))
     except Exception as e:
-        return False, f"локальный wrapper не отвечает, публичный не проверить: {type(e).__name__}"
+        return (False, f"локальный wrapper не отвечает, публичный не проверить: {type(e).__name__}",
+                ("pr.ap_wrap_unknown", {"e": type(e).__name__}))
 
 
 async def _probe_beatport(overlay: dict | None = None) -> dict:
@@ -943,7 +968,7 @@ async def _probe_beatport(overlay: dict | None = None) -> dict:
     password = (cfg.get("beatport-password") or "").strip()
     if not username or not password:
         return {"ok": False,
-                "error": "Не заполнены email/пароль в Settings → Beatport."}
+                "error_key": "pr.bp_no_creds", "error": "Не заполнены email/пароль в Settings → Beatport."}
 
     API         = "https://api.beatport.com/v4/"
     CLIENT_ID   = "Zy2K9Wvy6DkUds7g8s1GNMHfk17E5Ch2BWHlyaGY"  # Serato DJ Lite
@@ -987,7 +1012,7 @@ async def _probe_beatport(overlay: dict | None = None) -> dict:
 
             loc = r.headers.get("location", "")
             if "code=" not in loc:
-                return {"ok": False, "error": "Beatport: code не получен из redirect"}
+                return {"ok": False, "error_key": "pr.bp_no_code", "error": "Beatport: code не получен из redirect"}
             code = loc.split("code=")[1].split("&")[0]
 
             # Step 4: exchange code for tokens
@@ -1000,7 +1025,7 @@ async def _probe_beatport(overlay: dict | None = None) -> dict:
 
             token = r.json().get("access_token", "")
             if not token:
-                return {"ok": False, "error": "Beatport: токен не найден в ответе"}
+                return {"ok": False, "error_key": "pr.bp_no_token", "error": "Beatport: токен не найден в ответе"}
 
             # Step 5: get account info
             subscription = "OK"
@@ -1013,7 +1038,7 @@ async def _probe_beatport(overlay: dict | None = None) -> dict:
                 pass
 
     except Exception as e:
-        return {"ok": False, "error": f"Beatport сеть: {e}"}
+        return {"ok": False, "error_key": "pr.bp_net", "error_args": {"e": str(e)}, "error": f"Beatport сеть: {e}"}
 
     return {
         "ok": True,
@@ -1122,3 +1147,107 @@ async def import_token(service: str, body: dict):
             "expiry_unix":   expiry_unix,
         },
     }
+
+
+# ── Выход из аккаунта сервиса ────────────────────────────────────────────────
+# Выхода не было вовсе: войти можно, выйти — нет. Это не косметика, а рабочая
+# нехватка, и 01.08.2026 она стоила вечера. У Apple ID кончились слоты устройств
+# («device limit»), и единственным способом что-то изменить было лезть руками в
+# docker и config.yaml — при том, что рядом лежал живой второй аккаунт.
+#
+# ЧТО ИМЕННО ЧИСТИМ. Для каждого сервиса — ровно те ключи, по которым он себя
+# опознаёт, и ничего сверх: путь загрузок, качество, шаблоны имён и прочие
+# настройки человек терять не должен. Отдельно от ключей стоит Apple: у него
+# сессия живёт не в конфиге, а внутри контейнера и его identity-папки.
+#
+# ЧЕГО ЗДЕСЬ СОЗНАТЕЛЬНО НЕТ — «выйти отовсюду». Одна кнопка, стирающая все
+# входы разом, слишком легко нажимается по ошибке, а восстановление стоит часов.
+_LOGOUT_KEYS: dict[str, tuple[str, ...]] = {
+    "yandex":     ("yandex-token",),
+    "amazon":     ("amazon-token",),
+    "deezer":     ("deezer-arl",),
+    "soundcloud": ("soundcloud-oauth-token",),
+    "tidal":      ("tidal-token", "tidal-token-expiry", "tidal-user-id"),
+    "qobuz":      ("qobuz-auth-token", "qobuz-token", "qobuz-user-id",
+                   "qobuz-email", "qobuz-password"),
+    "beatport":   ("beatport-email", "beatport-password", "beatport-token"),
+    "spotify":    ("spotify-sp-dc",),
+    "apple":      ("media-user-token", "authorization-token"),
+}
+
+
+def _logout_files(service: str) -> list:
+    """Файлы сессии, которые конфигом не стираются."""
+    from pathlib import Path
+    base = Path(__file__).resolve().parent.parent.parent
+    if service == "spotify":
+        # Долговременный librespot-блоб и минтованные токены: без них Spotify
+        # действительно разлогинен, а не «до первого обновления токена».
+        cfgdir = base / "orpheus" / "config"
+        return [cfgdir / ".librespot_cache" / "reusable_credentials.json",
+                cfgdir / "credentials.json",
+                cfgdir / "spotify-token.txt",
+                cfgdir / "spotify-client-token.txt"]
+    return []
+
+
+@router.post("/api/logout/{service}")
+async def logout_service(service: str, body: dict | None = None):
+    """Выйти из аккаунта сервиса.
+
+    Возвращает, что именно очищено — чтобы человек видел последствие, а не
+    получал молчаливое «готово».
+    """
+    svc = (service or "").strip().lower()
+    if svc not in _LOGOUT_KEYS and svc != "apple":
+        raise HTTPException(400, f"Unsupported service: {svc}")
+
+    cleared, removed = [], []
+    for k in _LOGOUT_KEYS.get(svc, ()):
+        if (_cfg.get(k) or "") != "":
+            _cfg[k] = ""
+            cleared.append(k)
+
+    for p in _logout_files(svc):
+        try:
+            if p.exists():
+                p.unlink()
+                removed.append(p.name)
+        except Exception as e:
+            print(f"[logout] {p}: {e}", flush=True)
+
+    wrapper = ""
+    if svc == "apple":
+        # У Apple сессия живёт в контейнере и его identity-папке. Контейнер
+        # гасим ВСЕГДА: пока он поднят, он держит вход. Identity сносим только
+        # по явной просьбе — она привязана к устройству на аккаунте, и лишний
+        # снос заводит НОВОЕ устройство, а слоты у Apple ID конечны
+        # ([[project_apple_device_limit_exhausted_2026-08-01]]).
+        try:
+            from ripster import amd as _amd
+            ok, dp = _amd.check_docker_installed()
+            if ok:
+                import subprocess
+                subprocess.run([dp, "rm", "-f", _amd.WRAPPER_CONTAINER_NAME],
+                               capture_output=True, timeout=20)
+                wrapper = "stopped"
+        except Exception as e:
+            wrapper = f"error: {type(e).__name__}"
+        if (body or {}).get("forget_device"):
+            try:
+                import shutil
+                from ripster import amd as _amd
+                d = _amd._rootfs_data(_amd._wrapper_mode())
+                if d.exists():
+                    shutil.rmtree(d, ignore_errors=True)
+                    removed.append(str(d))
+                    wrapper = (wrapper or "") + " +identity"
+            except Exception as e:
+                print(f"[logout] apple identity: {e}", flush=True)
+
+    if cleared and _save_config:
+        _save_config(_cfg)
+    print(f"[logout] {svc}: ключей {len(cleared)}, файлов {len(removed)}"
+          + (f", wrapper {wrapper}" if wrapper else ""), flush=True)
+    return {"ok": True, "service": svc, "cleared": cleared,
+            "removed": removed, "wrapper": wrapper}

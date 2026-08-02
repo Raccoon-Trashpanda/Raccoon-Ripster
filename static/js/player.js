@@ -17,7 +17,12 @@ const _Pre = { idx: -1, url: '', resolving: false };
 function _effSvc(item) { return item._streamService || item.service; }
 function _effId(item)  { return item._streamId != null ? item._streamId : item.id; }
 
-const _HLS_JS_CDN = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js';
+// hls.js — ЛОКАЛЬНЫЙ. Здесь лежала вторая, независимая от разметки ссылка на
+// jsdelivr: плеер подгружал свою копию сам. При медленной или отсутствующей
+// сети это ожидание приходится ровно на начало микса — владелец слышал это
+// как «третий трек грузился, никакой плавности» (02.08.2026). Файл уже лежит
+// в static/vendor с тех пор, как та же зависимость убила плеер BBC.
+const _HLS_JS_CDN = '/static/vendor/hls.min.js';
 async function _ensureHlsJs() {
   if (window.Hls) return true;
   await new Promise((res, rej) => {
@@ -171,7 +176,9 @@ function _scDrmSkip(reason) {
 }
 
 async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
-  const HLS_JS_CDN = 'https://cdn.jsdelivr.net/npm/hls.js@1.5.15/dist/hls.min.js';
+  // Локальный, как и вторая копия выше: две независимые ссылки на один и тот
+  // же чужой CDN — и обе били по миксам.
+  const HLS_JS_CDN = '/static/vendor/hls.min.js';
   const licToken   = item.license_token || '';
 
   // ── CBC = FairPlay (Safari / iOS only) ───────────────────────────────────
@@ -541,15 +548,25 @@ function _audioHasNativeHls(audioEl) {
 function _waCanPlay(item) {
   if (!item) return false;
   const _svc = _effSvc(item);
-  // SC streams are large (mixes 1-2h) — buffer-decode-before-play takes forever.
-  // <audio> path via same-origin /api/proxy still gets EQ + visualizer.
-  if (_svc === 'soundcloud') return false;
-  if ((item.posKey || '').startsWith('soundcloud:')) return false;
-  // Deezer too: the Web Audio buffer path must download AND decode the WHOLE
-  // track before a single sample plays — many seconds of "hang" on long DJ-mix
-  // tracks, and arbitrary track jumps re-decode from scratch. Stream it via
-  // <audio> instead: instant start, Range-seek, gapless-enough auto-advance.
-  if (_svc === 'deezer') return false;
+  // Сэмпл-точный gapless (движок Web Audio) требует скачать и раскодировать
+  // трек ЦЕЛИКОМ до первого сэмпла. У часового микса это минуты ожидания,
+  // поэтому SoundCloud и Deezer были исключены — но исключены ЦЕЛИКОМ, вместе
+  // с обычными четырёхминутными треками, которые декодируются мгновенно.
+  //
+  // Из-за этого большая часть прослушивания шла через <audio> с резким стыком,
+  // хотя могла идти без единого зазора. Отсекаем теперь по ДЛИНЕ, а не по
+  // сервису: длинное — потоком, короткое — сэмпл-точно.
+  //
+  // 12 минут: обычный трек и даже длинный прог-эпик укладываются, а DJ-микс и
+  // радиошоу — нет. Длительности не знаем — считаем длинным: лучше потерять
+  // gapless на одном треке, чем заставить человека ждать минуту.
+  const _WA_MAX_SEC = 12 * 60;
+  const _heavy = (_svc === 'soundcloud' || _svc === 'deezer'
+                  || (item.posKey || '').startsWith('soundcloud:'));
+  if (_heavy) {
+    const dur = Number(item.duration || item.dur || item.length || 0);
+    if (!dur || dur > _WA_MAX_SEC) return false;
+  }
   if (!item.url) return true;       // lazy resolve → will hit our same-origin /api/stream/<svc>
   try {
     const u = new URL(item.url, location.origin);
@@ -1690,6 +1707,17 @@ function _setupAudioEvents() {
 
 async function _playPreviewAt(idx) {
   const item  = Preview.queue[idx];
+  // Событие «пошёл новый трек». Его СЛУШАЮТ трек-лист (подсветить и прокрутить
+  // к играющему) и радио (добрать треков, если переход случился не через
+  // previewNext — обрыв потока, пропуск DRM-трека). Раньше слушателей было двое,
+  // а отправителя ни одного: панель показывала старую позицию после
+  // переключения, и это выглядело как «трек сменился, а список не двигается»
+  // (02.08.2026). Шлём отсюда — это единственная точка, через которую проходит
+  // ЛЮБОЙ запуск трека.
+  try {
+    document.dispatchEvent(new CustomEvent('ripster:track-start',
+                                           { detail: { idx, item } }));
+  } catch (e) { /* старый движок без CustomEvent — не повод не играть */ }
   console.log('[_playAt]', idx, {hasItem: !!item, hasUrl: !!item?.url, svc: item?.service, id: item?.id});
   if (!item) return;
   // Play-generation guard: resolving a stream URL is async (await fetch). If the
@@ -2251,6 +2279,14 @@ function _playerSetChapters(chapters) {
 }
 
 // Tick marks at chapter boundaries on every seek bar (needs known duration).
+// Трек-лист показывает эти же метки под играющим миксом — держим его в
+// согласии с плеером, иначе подсветка «где мы внутри микса» отстаёт.
+function _pqSyncChapters() {
+  if (typeof _ppRenderQueue === 'function' && document.getElementById('pp-queue')) {
+    _ppRenderQueue();
+  }
+}
+
 function _renderChapterTicks() {
   const chapters = Preview._chapters || [];
   const dur = _playerDuration();
@@ -2280,6 +2316,9 @@ function _updateCurrentChapter(curSec) {
   }
   if (idx === Preview._curChap) return;
   Preview._curChap = idx;
+  // Трек-лист показывает эти же метки под играющим миксом — без этого его
+  // подсветка «где мы внутри микса» отставала бы от плеера.
+  _pqSyncChapters();
   const list = document.getElementById('pp-chapters');
   if (list) {
     list.querySelectorAll('.pp-chap').forEach(el => {

@@ -977,7 +977,20 @@ async def api_release_expand(service: str, url: str):
         raise HTTPException(502, "Bad engine response")
     if d.get("error"):
         raise HTTPException(502, d["error"])
-    if service == "spotify":
+    # Играбельная копия по UPC нужна не только Spotify.
+    #
+    # У APPLE своего потока нет и быть не может: полный трек требует
+    # расшифровки, а враппер работает на скачивание, не на живой поток. Поэтому
+    # Apple-карточка играла 30-секундным превью — включая mixed-релизы, где
+    # сегменты по минуте-две и превью бессмысленно.
+    #
+    # Тот же разрешитель по штрихкоду находит ту же самую физическую запись в
+    # Deezer, и релиз играет ЦЕЛИКОМ. Интерфейс по-прежнему показывает Apple —
+    # человеку важно, откуда релиз, а не через что он звучит.
+    #
+    # Эксклюзивы Apple этим не лечатся — копии нет нигде; для них отдельный путь
+    # «скачать и включить».
+    if service in ("spotify", "apple"):
         await _attach_playable_sources(d.get("tracks") or [], (d.get("album") or {}).get("upc", ""))
     return {"ok": True, **d}
 

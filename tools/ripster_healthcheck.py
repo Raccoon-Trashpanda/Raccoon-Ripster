@@ -21,6 +21,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -271,10 +272,25 @@ def check_gamdl_cookies():
         warn(f"gamdl: в {p.name} нет media-user-token — экспортируй заново "
              f"из залогиненного music.apple.com")
         return
-    st, data = _api_raw_30020()
-    dev = (data.get("dev_token") or "").strip() if isinstance(data, dict) else ""
+    dev, dev_src = _apple_dev_token()
     if not dev:
-        return  # без dev_token проверить нечем; враппер уже отмечен выше
+        # Без ЗАВЕДОМО живого dev_token любой ответ 401 неотличим от «протухли
+        # куки» — а это ровно тот ложный совет, ради которого проверка писалась.
+        # Молчим честно вместо того, чтобы гадать.
+        warn("gamdl: не удалось получить действующий Apple dev_token "
+             "(враппер отдал протухший, со страницы Apple добыть не вышло) — "
+             "состояние cookies.txt НЕ проверено, выводов не делаем")
+        return
+    # gamdl в wrapper-режиме ходит на 30020 САМ и подстраховаться скрейпом не
+    # умеет: если токен враппера протух, этот путь отдаст 401 на любом качестве.
+    # _cfg_get отдаёт СТРОКУ: "false" тоже истинна, сравниваем по значению.
+    if (dev_src != "с враппера 30020"
+            and _cfg_get("gamdl-use-wrapper").lower() in ("true", "yes", "1", "on")):
+        warn("gamdl wrapper-режим: dev_token на 30020 протух (враппер выдаёт его "
+             "один раз при старте, живёт он 5 минут) — качества, идущие через "
+             "--wrapper-account-url, получат 401. Лечится только перезапуском "
+             "враппера, а он стоит слота устройства: трогать, только если "
+             "gamdl реально нужен")
     try:
         req = urllib.request.Request(
             "https://amp-api.music.apple.com/v1/me/account?meta=subscription",
@@ -284,8 +300,11 @@ def check_gamdl_cookies():
             body = json.loads(r.read().decode("utf-8", "ignore"))
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
-            warn(f"gamdl: сессия в {p.name} протухла ({e.code}) — экспортируй "
-                 f"cookies.txt заново из браузера с активной подпиской")
+            # dev_token заведомо жив (проверен на публичном каталоге), значит
+            # отказ действительно про media-user-token из cookies.txt.
+            warn(f"gamdl: сессия в {p.name} протухла ({e.code}, dev_token "
+                 f"проверен и жив — {dev_src}) — экспортируй cookies.txt заново "
+                 f"из браузера с активной подпиской")
         return
     except Exception:
         return  # сеть — не наша поломка, молчим
@@ -306,6 +325,76 @@ def _api_raw_30020():
             return r.status, json.loads(r.read().decode("utf-8", "ignore"))
     except Exception as e:
         return 0, str(e)
+
+
+def _dev_token_works(tok):
+    """Единственный честный признак живого dev_token — публичный каталог отвечает."""
+    if not tok:
+        return False
+    try:
+        req = urllib.request.Request(
+            "https://amp-api.music.apple.com/v1/catalog/us/artists/909253",
+            headers={"Authorization": f"Bearer {tok}", "Origin": "https://music.apple.com"})
+        with urllib.request.urlopen(req, timeout=12) as r:
+            return r.status == 200
+    except Exception:
+        return False
+
+
+_dev_token_cache = None
+
+
+def _apple_dev_token():
+    """Действующий Apple developer token + откуда он взят.
+
+    02.08.2026: враппер на 30020 генерирует dev_token ОДИН раз при старте, срок
+    жизни у него 300 секунд, а отдаёт он его потом сутками. Через пять минут
+    после запуска контейнера любой запрос с этим токеном получает 401 — и
+    проверка cookies.txt, опиравшаяся на 30020, снова начала печатать «сессия
+    протухла, экспортируй куки заново». Ровно тот ложный совет, который
+    01.08.2026 уже опровергли живьём (сессия отвечала 200, мертва была подписка).
+
+    Поэтому: токен с враппера сначала ПРОВЕРЯЕМ на публичном каталоге и, если он
+    протух, берём свежий со страницы music.apple.com (тот живёт ~2 месяца).
+    Возвращает ("", "") если действующего токена нет — тогда вызывающий обязан
+    промолчать, а не гадать о причине 401."""
+    global _dev_token_cache
+    if _dev_token_cache is not None:
+        return _dev_token_cache
+    st, data = _api_raw_30020()
+    tok = (data.get("dev_token") or "").strip() if isinstance(data, dict) else ""
+    if _dev_token_works(tok):
+        _dev_token_cache = (tok, "с враппера 30020")
+        return _dev_token_cache
+    _dev_token_cache = (_scrape_dev_token(), "со страницы music.apple.com")
+    if not _dev_token_cache[0]:
+        _dev_token_cache = ("", "")
+    return _dev_token_cache
+
+
+def _scrape_dev_token():
+    """Достать web-player dev_token из JS-бандла music.apple.com.
+
+    В бандле лежит несколько JWT; годится не всякий (у одного из трёх iss своя,
+    и каталог отвечает ему 401), поэтому берём первый, который РЕАЛЬНО ответил."""
+    ua = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+    try:
+        req = urllib.request.Request("https://music.apple.com/us/browse", headers=ua)
+        with urllib.request.urlopen(req, timeout=20) as r:
+            html = r.read().decode("utf-8", "ignore")
+        m = re.search(r"/assets/index~[^\"']*\.js", html)
+        if not m:
+            return ""
+        req = urllib.request.Request("https://music.apple.com" + m.group(0), headers=ua)
+        with urllib.request.urlopen(req, timeout=25) as r:
+            body = r.read().decode("utf-8", "ignore")
+    except Exception:
+        return ""
+    for tok in sorted(set(re.findall(
+            r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{20,}\.[A-Za-z0-9_-]{20,}", body))):
+        if _dev_token_works(tok):
+            return tok
+    return ""
 
 
 _healed_wrapper = False
@@ -512,8 +601,13 @@ def check_watchlist():
         return
     st, res = _api("/api/watchlist/repair", method="POST", timeout=90)
     if st == 200 and isinstance(res, dict) and res.get("ok"):
-        fixed(f"Вишлист починен: artist_id восстановлен у {res.get('fixed', 0)}, "
-              f"удалено дублей {res.get('dropped', 0)}")
+        msg = (f"Вишлист починен: artist_id восстановлен у {res.get('fixed', 0)}, "
+               f"удалено дублей {res.get('dropped', 0)}")
+        # Склейка соавторов («A, B, C») в имени записи — с 02.08.2026 репейр
+        # разбирает её на отдельных артистов вместо вечно мёртвой записи.
+        if res.get("split"):
+            msg += f", склеек соавторов разобрано {res['split']}"
+        fixed(msg)
     else:
         warn(f"Авто-починка вишлиста не удалась: {str(res)[:80]}")
 

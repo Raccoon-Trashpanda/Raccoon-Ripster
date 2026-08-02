@@ -219,6 +219,8 @@ function handleMessage(msg) {
   }
   switch(msg.type) {
     case 'init':
+      // Первый кадр данных пришёл — заставке больше нечего прикрывать.
+      if (typeof bootSplashHide === 'function') bootSplashHide();
       S.config  = msg.config  || {};
       S.queue   = msg.queue   || [];
       S.running = msg.running || false;
@@ -718,6 +720,13 @@ function showView(name, el) {
   if(name==='history')   loadHistory();
   if(name==='watchlist') loadWatchlist();
   if(name==='releases')  { loadSpotifyStatus(); _syncReleasePillsFromConfig(); loadReleasesIfStale(); }
+  // Список сервисов поиска строится по /api/services/status, но раньше это
+  // делалось ТОЛЬКО при init по вебсокету — а в тот момент вкладка поиска ещё не
+  // загружена (фрагменты тянутся лениво), элемента нет, и функция молча выходила.
+  // Человек всю жизнь видел статический список из разметки: там не было Tidal,
+  // хотя и движок, и поиск по нему работают (найдено 01.08.2026). Обновляем при
+  // открытии вкладки — тогда любой новый сервис появляется сам.
+  if(name==='search')    { if(typeof _refreshSearchSvcSelect==='function') _refreshSearchSvcSelect(); }
   if(name==='bbc')       { bbcInit(); }
   if(name==='soundcloud') scInit();
   if(name==='coder')     { coderInit(); coderFmtChange(); }
@@ -1996,8 +2005,22 @@ function _relShowAuthHint(err) {
   try { toast(t('t.sp_c') + err + ' — Settings → Spotify', 'var(--orange)', 9000); } catch {}
 }
 
+// Пояснение про кросс-сервисный радар: показываем, пока владелец не скроет.
+// Признак — в конфиге (`show-` уже в белом списке), не в localStorage: у Ripster
+// две оболочки, и localStorage разошёлся бы между ними.
+function _relDismissXsvc() {
+  const n = document.getElementById('rel-xsvc-note');
+  if (n) n.style.display = 'none';
+  try { S.config['show-radar-xsvc-note'] = false; api('POST', '/api/config', { 'show-radar-xsvc-note': false }); } catch (_) {}
+}
+function _relMaybeShowXsvc() {
+  const n = document.getElementById('rel-xsvc-note');
+  if (n) n.style.display = (S.config?.['show-radar-xsvc-note'] === false) ? 'none' : '';
+}
+
 async function loadReleases(force = false) {
   _renderRelActiveSvcs();
+  _relMaybeShowXsvc();
 
   const days  = document.getElementById('rel-days')?.value  || (S.config?.['releases-days'] || '90');
   const grid  = document.getElementById('releases-grid');

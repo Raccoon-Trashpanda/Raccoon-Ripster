@@ -111,3 +111,31 @@ async function _digsRadioTopUp() {
     if (DigsRadio.on) _digsRadioTopUp();
   });
 })();
+
+// ── Очередь не должна кончаться сама собой ───────────────────────────────────
+//
+// Замысел был такой: включил один трек — дальше подкладывается само. На деле
+// радио надо было включить вручную, и человек, запустивший одиночный трек,
+// получал трек-лист из одной строки и тишину после него (02.08.2026: «трек-лист
+// 1 почему-то написано»).
+//
+// Теперь радио заводится САМО, когда очередь вот-вот кончится: играет трек,
+// впереди пусто — берём его за затравку и продолжаем. Ровно один раз на
+// иссякание, поэтому лишних запросов нет.
+//
+// Отключается `radio-autostart: false` — кому нужна ровно та очередь, что он
+// собрал, тот её и получит.
+document.addEventListener('ripster:track-start', () => {
+  if (DigsRadio.on) return;
+  try {
+    const off = (typeof S !== 'undefined' && S.config
+                 && S.config['radio-autostart'] === false);
+    if (off) return;
+    if (typeof Preview === 'undefined' || !Preview.queue) return;
+    const left = Preview.queue.length - 1 - Preview.idx;
+    if (left > 0) return;                       // впереди ещё есть что играть
+    const cur = Preview.queue[Preview.idx];
+    if (!cur || !cur.artist) return;            // без затравки продолжать нечем
+    digsRadioOn(cur.artist);
+  } catch (e) { /* не смогли — просто не продолжаем, это не повод падать */ }
+});

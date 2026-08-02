@@ -402,6 +402,7 @@ async def api_watchlist_repair():
         unique.append(it)
 
     fixed = 0
+    split_out: list[dict] = []   # записи, отпочкованные от склейки соавторов
     for it in unique:
         # Labels have no artist_id by design — never try to "repair" them into
         # an artist. Doing so rewrote the label's name/url to a same-named
@@ -420,6 +421,30 @@ async def api_watchlist_repair():
                 it["url"] = r.get("url", "")
             if aid and r.get("name"):
                 it["name"] = r["name"]
+        # Склейка соавторов в имени. Кнопка ♥ на карточке релиза передаёт ту
+        # строку кредитов, что нарисована на карточке, а у совместного релиза
+        # это «A, B, C» — как артиста iTunes такое не находит НИКОГДА, и запись
+        # ложилась в список мёртвой навсегда (02.08.2026: «A Vision of Panorama,
+        # Meora, Café del Mar», «Mystific, Talk Jungle»). Разбираем на людей:
+        # первый живой становится этой записью, остальные — отдельными.
+        if not aid and "," in (it.get("name") or ""):
+            for part in [p.strip() for p in it["name"].split(",") if p.strip()]:
+                r = await _wls.resolve_apple_artist(part)
+                pid = r.get("artist_id", "")
+                if not pid:
+                    continue
+                if not aid:
+                    aid = pid
+                    it["name"] = r.get("name") or part
+                    it["url"] = r.get("url", "") or it.get("url", "")
+                else:
+                    split_out.append({**it,
+                                      "id": f"wl_{int(datetime.now().timestamp()*1000)}_{pid}",
+                                      "name": r.get("name") or part,
+                                      "url": r.get("url", ""),
+                                      "artist_id": pid,
+                                      "last_check": None,
+                                      "last_release": None})
         if aid:
             it["artist_id"] = aid
             fixed += 1
@@ -430,6 +455,8 @@ async def api_watchlist_repair():
     # Deezer, — это две разные подписки (разные источники скачивания), и после
     # того как artist_id стал появляться у всех сервисов, общий ключ молча
     # удалял бы одну из них.
+    # Отпочкованные проходят тот же de-dup: соавтор вполне может быть уже подписан.
+    unique.extend(split_out)
     by_id: set[tuple] = set()
     final: list[dict] = []
     for it in unique:
@@ -446,7 +473,8 @@ async def api_watchlist_repair():
 
     items[:] = final
     _s["save"](items)
-    return {"ok": True, "fixed": fixed, "dropped": dropped, "total": len(items)}
+    return {"ok": True, "fixed": fixed, "dropped": dropped, "total": len(items),
+            "split": len(split_out)}
 
 
 @router.delete("/api/watchlist/{item_id}")
@@ -838,6 +866,174 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
     return u
 
 
+# ── Ранние витрины ────────────────────────────────────────────────────────────
+# Наблюдение шло ТОЛЬКО через каталог Apple. Пока релиз не появлялся там, вишлист
+# о нём не знал вовсе — даже если файл уже полсуток отдавался в другой витрине.
+#
+# Разбор 29.07.2026 (Sultan + Shepard — «Centuries»): релиз лежал в Tidal NZ с
+# датой 30.07 и `streamReady=True`, в Apple его не было, артист в вишлисте записан
+# со службой apple — и вишлист честно молчал. Владелец скачал релиз руками за
+# сутки до даты. Ровно ради этих полусуток и заведён новозеландский аккаунт.
+#
+# Поэтому опрашиваем ещё и ранние витрины: артист ищется в их каталогах по имени
+# (`ripster.artist_xref`, сверка только по точному совпадению), а найденный релиз
+# идёт общим путём — уведомление и, если включено авто-скачивание, очередь.
+
+_EARLY_WINDOW_DAYS = 14    # проверка раз в 6ч; окна с запасом хватает
+_SEEN_CAP = 80             # столько ключей релизов помним на артиста
+
+# Витрина одного релиза называет его по-разному: Apple любит «- Single», Tidal
+# пишет голое название. Сравнивать надо то, что осталось после этого мусора,
+# иначе один и тот же релиз уведомит дважды — сегодня из Tidal, завтра из Apple.
+import re as _re
+
+
+def _rel_key(title: str) -> str:
+    from ripster.artist_xref import norm
+    t = _re.sub(r"\s*[-–—]\s*(single|ep)\s*$", "", str(title or ""), flags=_re.I)
+    t = _re.sub(r"\s*\((single|ep)\)\s*$", "", t, flags=_re.I)
+    return norm(t)
+
+
+def _seen_add(entry: dict, title: str) -> None:
+    seen = entry.get("seen")
+    if not isinstance(seen, list):
+        seen = []
+    k = _rel_key(title)
+    if k and k not in seen:
+        seen.insert(0, k)
+    entry["seen"] = seen[:_SEEN_CAP]
+
+
+def _seen_has(entry: dict, title: str) -> bool:
+    return _rel_key(title) in (entry.get("seen") or [])
+
+
+def _early_services(cfg: dict) -> list:
+    """Какие витрины опрашивать раньше Apple.
+
+    По умолчанию Tidal — единственный аккаунт, живущий в зоне, которая входит в
+    пятницу раньше всех. Остальные не запрещены, но и не навязаны: каждый лишний
+    сервис — это ещё один проход по всем артистам каждые 6 часов.
+    """
+    from ripster import artist_xref as _xref
+    raw = cfg.get("watchlist-early-services")
+    if raw is None:
+        raw = "tidal"
+    names = [s.strip() for s in str(raw).split(",") if s.strip()]
+    return [s for s in names if s in _xref.SERVICES and _xref.has_credentials(s)]
+
+
+async def _early_artist_releases(client, service: str, artist: dict,
+                                 cutoff: str, cfg: dict) -> list:
+    """Свежие релизы артиста в одной витрине — теми же функциями, что и радар."""
+    from ripster.routes import releases as _rel
+    sem = asyncio.Semaphore(1)
+    if service == "tidal":
+        hdr = {"Authorization": f"Bearer {str(cfg.get('tidal-token') or '').strip()}"}
+        cc = str(cfg.get("tidal-country") or "US").strip().upper() or "US"
+        return await _rel._tidal_fetch_artist(sem, client, artist, cc, hdr, cutoff)
+    if service == "qobuz":
+        app_id = str(cfg.get("qobuz-app-id") or "").strip() or "312369995"
+        hdr = {"X-User-Auth-Token": str(cfg.get("qobuz-auth-token") or "").strip(),
+               "X-App-Id": app_id}
+        return await _rel._qobuz_fetch_artist(sem, client, artist, app_id, hdr, cutoff)
+    if service == "deezer":
+        return await _rel._deezer_fetch_artist(sem, client, artist, cutoff)
+    return []
+
+
+async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
+                               snapshot) -> int:
+    """Опросить ранние витрины по всем артистам вишлиста.
+
+    Первый проход для записи — только baseline: помечаем всё, что видно в окне,
+    и молчим. Иначе добавление источника выглядело бы как «вышло 14 релизов
+    сразу» и, при включённом авто-скачивании, обрушило бы в очередь чужой
+    бэк-каталог. Ровно та же осторожность, что и у Apple-ветки с `prev is None`.
+    """
+    from ripster import artist_xref as _xref
+
+    services = _early_services(cfg)
+    if not services:
+        return 0
+
+    cutoff = (datetime.now() - timedelta(days=_EARLY_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    early_dl = cfg.get("watchlist-early-download") is not False
+    found = 0
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        for service in services:
+            names = [str(e.get("name") or "").strip() for e in targets
+                     if str(e.get("name") or "").strip()]
+            xref = await _xref.resolve_many(names, service, client)
+            if not xref:
+                continue
+            print(f"[watchlist] {service}: опрашиваю {len(xref)} из {len(names)} артистов",
+                  flush=True)
+
+            for entry in targets:
+                nm = str(entry.get("name") or "").strip()
+                hit = xref.get(nm)
+                if not hit:
+                    continue
+                try:
+                    rels = await _early_artist_releases(
+                        client, service, {"id": hit["id"], "name": nm}, cutoff, cfg)
+                except Exception as e:                              # noqa: BLE001
+                    print(f"[watchlist] {service} {nm}: {e}", flush=True)
+                    continue
+
+                # Дата у Tidal бывает завтрашней при уже отдающемся файле — это и
+                # есть опережение, резать будущее по дате нельзя. Зато анонс без
+                # `streamReady` брать нельзя тем более: качать там нечего.
+                rels = [r for r in rels if r.get("stream_ready", True)]
+
+                baseline = not isinstance(entry.get("seen"), list)
+                if baseline:
+                    entry["seen"] = []
+                    for r in rels:
+                        _seen_add(entry, r.get("title", ""))
+                    continue
+
+                for r in rels:
+                    title = r.get("title", "")
+                    if not title or _seen_has(entry, title):
+                        continue
+                    _seen_add(entry, title)
+                    found += 1
+                    await broadcast({"type": "watchlist_new_release",
+                                     "artist": nm, "release": title,
+                                     "compilation": False,
+                                     "early": service,
+                                     "url": r.get("url", "")})
+                    _notify_release(nm, f"{title} (уже доступен в {service})",
+                                    False, bool(entry.get("auto_download")), r)
+                    print(f"[watchlist] ⚡ «{title}» ({nm}) уже в {service} — "
+                          f"в Apple ещё нет", flush=True)
+
+                    if not (entry.get("auto_download") and early_dl):
+                        continue
+                    # Куда стрелять — решает доступность, а не подписка. Если в
+                    # любимом сервисе релиза ещё нет, берём ту витрину, где он
+                    # уже лежит: потерять полсуток хуже, чем скачать не оттуда.
+                    dl_url = await _pick_download_url(
+                        r, entry.get("service", "apple"), "", cfg, title
+                    ) or r.get("url", "")
+                    if not dl_url:
+                        continue
+                    task = _make_task(dl_url, entry.get("quality", ""), cfg,
+                                      "watchlist-early")
+                    _enrich_soon(task)
+                    queue.append(task)
+                    await broadcast({"type": "queue_update", "queue": snapshot()})
+
+    # Сохраняем всегда: baseline первого прохода тоже надо пережить перезапуск,
+    # иначе следующий запуск снова примет весь бэк-каталог за новинки.
+    save(_s["items"])
+    return found
+
+
 async def _check_watchlist():
     items      = _s["items"]
     broadcast  = _s["broadcast"]
@@ -869,6 +1065,14 @@ async def _check_watchlist():
     if sc_count:
         new_found += await _check_soundcloud_targets(items, broadcast, save, cfg, queue, snapshot)
 
+    # Ранние витрины опрашиваем ДО Apple: в них релиз появляется раньше, и смысл
+    # прохода именно в том, чтобы узнать первым.
+    try:
+        new_found += await _check_early_targets(targets, broadcast, save, cfg,
+                                                queue, snapshot)
+    except Exception as e:                                          # noqa: BLE001
+        print(f"[watchlist] ранние витрины: {e}", flush=True)
+
     storefront = cfg.get("storefront", "us") or "us"
     # Compilations cost one extra lookup per artist; on by default because a
     # label compilation is exactly the release people miss.
@@ -893,8 +1097,17 @@ async def _check_watchlist():
                 release_url  = latest["url"]
                 release_name = latest["name"]
                 prev = entry.get("last_release")
+                # Тот же релиз мог прийти раньше из ранней витрины под другой
+                # ссылкой — уведомлять о нём второй раз нельзя. `last_release`
+                # для этого не годится: он хранит URL, а URL у каждой витрины свой.
+                if release_url and release_url != prev and _seen_has(entry, release_name):
+                    entry["last_release"] = release_url
+                    save(items)
+                    continue
                 if release_url and release_url != prev:
                     entry["last_release"] = release_url
+                    if isinstance(entry.get("seen"), list):
+                        _seen_add(entry, release_name)
                     # First ever check just records a baseline: otherwise adding
                     # an artist would instantly "discover" their whole current
                     # back catalogue and queue it.

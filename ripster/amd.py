@@ -529,10 +529,30 @@ def _dist_dir(mode: str) -> Path:
 
 
 def _rootfs_data(mode: str) -> Path:
-    """Путь к rootfs/data для хранения сессии Apple Music."""
-    if mode == "docker-remote":
-        return _base_dir / "rootfs" / "data"
-    return _dist_dir(mode) / "rootfs" / "data"
+    """Путь к rootfs/data для хранения сессии Apple Music.
+
+    У КАЖДОГО Apple ID своя папка. Причина не в аккуратности, а в отказах: образ
+    несёт вшитую device-identity, общую для всех, и Apple видит её как одно
+    перегруженное устройство — «You have reached your device limit» приходит
+    мгновенно и одинаково разным аккаунтам (22.07.2026). Своя папка = своя
+    identity, и вход проходит.
+
+    Но identity — тоже устройство на аккаунте, и слоты у Apple ID кончаются
+    (01.08.2026: у первого аккаунта не помогла уже никакая, даже пустая). Поэтому
+    папка ПРИВЯЗАНА К ЛОГИНУ и переиспользуется: один аккаунт — одно устройство,
+    а не новое на каждый запуск. См. [[project_apple_device_limit_exhausted_2026-08-01]].
+    """
+    base = _base_dir if mode == "docker-remote" else _dist_dir(mode)
+    aid = ""
+    try:
+        aid = str((_cfg or {}).get("wrapper-apple-id") or "").strip().lower()
+    except Exception:
+        pass
+    if aid:
+        safe = re.sub(r"[^a-z0-9_.-]", "_", aid.split("@")[0])[:40]
+        if safe:
+            return base / "rootfs_id" / safe / "data"
+    return base / "rootfs" / "data"
 
 
 def _wrapper_bin() -> Path:
@@ -641,6 +661,31 @@ async def _monitor_wrapper_logs() -> None:
                         pass
                 if "[+] logging in" in low:
                     _login_tries += 1
+                # Лимит устройств Apple ID — отдельная беда, и совет «перелогинь»
+                # тут ВРЕДЕН: каждый новый вход занимает ещё один слот, а Apple
+                # освобождает их только со временем (порядка 90 дней на
+                # устройство). 22.07.2026 это лечилось чистой identity — образ
+                # раздавал всем одну и ту же. 01.08.2026 не вылечилось уже ничем:
+                # даже полностью пустая identity получила тот же отказ, то есть
+                # слоты кончились у самого аккаунта. Останавливаемся и говорим
+                # правду, вместо того чтобы жечь слоты дальше.
+                if ("device limit" in low
+                        or "concurrent playing devices" in low
+                        or "lease code 3062" in low):
+                    if _broadcast:
+                        await _broadcast({"type": "wrapper_login_failed",
+                            "msg": "Apple: у аккаунта исчерпан лимит устройств "
+                                   "(«device limit»). Перелогин НЕ поможет — каждый "
+                                   "вход занимает ещё один слот, а Apple освобождает "
+                                   "их только со временем. Нужен другой Apple ID "
+                                   "либо переждать. Пока качай lossless через Qobuz "
+                                   "или Deezer.",
+                            "reason": "device_limit"})
+                    ok3, dp3 = check_docker_installed()
+                    if ok3:
+                        subprocess.run([dp3, "rm", "-f", WRAPPER_CONTAINER_NAME],
+                                       capture_output=True, timeout=10, creationflags=_CNW)
+                    return
                 # Hard-stop on failure OR a retry loop — never spin forever (it
                 # risks an Apple lock and spams 2FA).
                 if ("[!] login failed" in low

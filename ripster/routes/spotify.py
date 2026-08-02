@@ -245,6 +245,52 @@ def _save_artist_state() -> None:
             print(f"[spotify] artist-state save error: {e}", flush=True)
 
 
+def _carry_over(prev_releases: list, cutoff: str) -> list:
+    """Записи артиста, которые обход дискографии воспроизвести НЕ может.
+
+    Пере-обход заменяет список релизов артиста целиком, поэтому всё, что пришло
+    не из дискографии, надо перенести руками. Источников два:
+
+    * полка и сборники (`alb_artist`) — артист там не альбомный, в его
+      собственной дискографии такого релиза нет;
+    * живая лента «Что нового» (`live`) — отдаёт релиз в минуту выхода, задолго
+      до появления в дискографии, а ремикс на чужом релизе туда и не попадёт.
+
+    01.08.2026: условие учитывало только полку, и все находки ленты (на тот
+    момент 337) стирались при первом же пере-обходе артиста. Для владельца это
+    выглядело как «карточка была и после перезапуска исчезла».
+
+    Функция чистая — её проверяет `tools/test_radar_persistence.py`.
+    """
+    return [r for r in (prev_releases or [])
+            if (r.get("alb_artist") is not None or r.get("live"))
+            and r.get("date", "") >= cutoff]
+
+
+def _merge_followed(existing: list, fetched: list, paged_ok: bool) -> list:
+    """Долговременный список подписок после прохода по /me/following.
+
+    По нему строится вся лента, поэтому усохший список = пропавшие карточки.
+
+    * Пагинация дошла до конца — список авторитетный, берём его целиком: только
+      так уходят те, от кого владелец отписался.
+    * Пагинация оборвалась (429/401/сеть) — собранное это ПОДМНОЖЕСТВО, поэтому
+      лишь ДОБАВЛЯЕМ из него новых и ничего не убираем.
+
+    01.08.2026: подмножество затирало полный список и сохранялось на диск —
+    после перезапуска пропадала часть радара.
+    """
+    seen: set = set()
+    out: list = []
+    for src in ((existing, fetched) if not paged_ok else (fetched,)):
+        for a in (src or []):
+            aid = a.get("id")
+            if aid and aid not in seen:
+                seen.add(aid)
+                out.append({"id": aid, "name": a.get("name", "")})
+    return out
+
+
 def _build_feed(days: int, types: str) -> dict:
     """Pure, network-free: build the releases feed from the durable per-artist
     store, filtered to the currently-followed artists + day window + types."""
@@ -1135,6 +1181,10 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
         else:
             url = "https://api.spotify.com/v1/me/following?type=artist&limit=50"
         _429_hits = 0
+        # Дошла ли пагинация до конца. Любой выход по ошибке снимает флаг:
+        # тогда собранное — ПОДМНОЖЕСТВО подписок, и заменять им
+        # долговременный список нельзя (радар потеряет артистов).
+        paged_ok = True
         while url:
             try:
                 r = await client.get(url)
@@ -1172,6 +1222,7 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
                         print(f"[spotify] /me/following 429 ×{_429_hits} after {len(artists)} artists — "
                               f"ban {int(_sp_banned_until - datetime.now().timestamp())}s, using what we have",
                               flush=True)
+                        paged_ok = False
                         break
                     wait = min(ra, 30)
                     print(f"[spotify] /me/following 429 after {len(artists)} artists — wait {wait}s "
@@ -1186,26 +1237,27 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
                     _save_artist_state()
                     print(f"[spotify] /me/following 401 (token expired) after {len(artists)} "
                           f"artists — stop pass, short cooldown", flush=True)
+                    paged_ok = False
                     break
                 if r.status_code != 200:
                     print(f"[spotify] /me/following returned {r.status_code}: {r.text[:200]}", flush=True)
+                    paged_ok = False
                     break
                 blk = r.json().get("artists") or {}
                 artists.extend(blk.get("items") or [])
                 url = blk.get("next") or None
             except Exception as e:
                 print(f"[spotify] following fetch error after {len(artists)}: {e}", flush=True)
+                paged_ok = False
                 break
 
         if artists:
-            # Refresh the durable followed-artist list (only on a good response, so
-            # a transient 429/error never wipes it). The feed is built from this.
-            _seen_fa, _fa = set(), []
-            for a in artists:
-                _aid = a.get("id")
-                if _aid and _aid not in _seen_fa:
-                    _seen_fa.add(_aid)
-                    _fa.append({"id": _aid, "name": a.get("name", "")})
+            # Оборвавшаяся пагинация не должна усекать список — см. _merge_followed.
+            _was = len(_sp_followed_cache.get("artists") or [])
+            _fa = _merge_followed(_sp_followed_cache.get("artists") or [], artists, paged_ok)
+            if not paged_ok:
+                print(f"[spotify] /me/following оборвалась — список подписок не "
+                      f"усекаю: было {_was}, стало {len(_fa)}", flush=True)
             _sp_followed_cache = {
                 "artists": _fa,
                 "market":  market or _sp_followed_cache.get("market", ""),
@@ -1476,14 +1528,10 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
                             if r["id"] in old_live_ids:
                                 r["live"] = True
                     prev_st = _sp_artist_state.get(aid) or {}
-                    # Carry over shelf-sourced entries: this assignment replaces
-                    # the artist's release list, and without this every
-                    # compilation found for them would be silently dropped.
-                    _comps.merge_releases(rels, [
-                        r for r in prev_st.get("releases", [])
-                        if r.get("alb_artist") is not None
-                        and r.get("date", "") >= state_cutoff
-                    ])
+                    # Присваивание ниже заменяет список релизов артиста целиком,
+                    # поэтому всё, что пришло не из дискографии, переносим руками.
+                    _comps.merge_releases(
+                        rels, _carry_over(prev_st.get("releases", []), state_cutoff))
                     _sp_artist_state[aid] = {"name": name, "releases": rels,
                                               "ts": now_ts,
                                               "ao_ts": prev_st.get("ao_ts", 0)}

@@ -135,6 +135,20 @@ async def add_to_queue(body: dict, request: Request):
 
     svc     = _detect_service(url) if _detect_service else "apple"
 
+    # След для разбора «просил один сервис, поехало в другой». 01.08.2026 задача
+    # приехала с качеством Qobuz (`27`) на Apple-ссылке, и восстановить, откуда
+    # она пришла, было уже нечем: в журнале постановки не оставалось ничего.
+    # Пишем ровно нужное для разбора и только когда качество ЯВНО чужое сервису,
+    # чтобы не засорять журнал на каждой загрузке.
+    try:
+        _q = str((body or {}).get("quality") or "")
+        if (svc == "apple" and _q.isdigit()) or (svc != "apple" and _q.startswith("alac")):
+            print(f"[queue] РАСХОЖДЕНИЕ: сервис по ссылке '{svc}', качество '{_q}' "
+                  f"(источник: {(body or {}).get('source') or 'не указан'}) — {url[:110]}",
+                  flush=True)
+    except Exception:
+        pass
+
     # Apple radio stations / DJ-mix episodes (/station/.../ra.<id>) are a
     # DRM-protected RADIO STREAM (playParams.kind=radioStation, hasDrm=true), NOT
     # a catalog track/album — none of the engines (gamdl/zhaarey/amd) can download

@@ -60,6 +60,47 @@ def _under_root(d: Path, roots: list[Path]) -> bool:
     return False
 
 
+def prune_empty_artist_dir(album_dir: Path, roots: list) -> Path | None:
+    """Снести опустевшую папку АРТИСТА над удалённым альбомом.
+
+    Раскладка библиотеки — `<сервис>/<качество>/<Артист>/<Артист> - <Альбом>/`.
+    Удаляли только папку альбома, и от каждой вычищенной загрузки оставался
+    пустой каталог с именем артиста. Владелец: «папку сервиса и качества ладно,
+    но папку артиста тоже удаляй».
+
+    Три ограничения, и каждое обязательное:
+
+    * **ровно один уровень вверх.** Выше лежит качество, а его делят все
+      альбомы; подниматься дальше — это тот самый «дошли до общего родителя»,
+      от которого предостерегает комментарий ниже;
+    * **только если папка ПУСТА** — иначе снесём соседние альбомы того же
+      артиста;
+    * **только внутри библиотеки** — та же защита, что и у самого удаления.
+
+    Возвращает удалённую папку или None.
+    """
+    try:
+        parent = album_dir.parent
+        if not parent or parent == album_dir:
+            return None
+        if not _under_root(parent, roots):
+            return None
+        # Сама папка-корень (или уровень качества, если он же корень) — не трогаем.
+        for r in roots:
+            try:
+                if parent.samefile(r):
+                    return None
+            except Exception:
+                if str(parent).rstrip("\\/") == str(r).rstrip("\\/"):
+                    return None
+        if not parent.exists() or any(parent.iterdir()):
+            return None
+        parent.rmdir()
+        return parent
+    except Exception:
+        return None
+
+
 async def run(config: dict) -> None:
     """Background loop — start once at app startup. Reads the retention minutes
     fresh each tick so the UI slider takes effect without a restart."""
@@ -110,6 +151,10 @@ async def run(config: dict) -> None:
                 await asyncio.to_thread(shutil.rmtree, d, ignore_errors=True)
                 removed.append(tid)
                 print(f"[autodelete] removed {d} (older than {mins}m)", flush=True)
+                # Папка артиста после этого обычно пуста — её тоже сносим.
+                gone = await asyncio.to_thread(prune_empty_artist_dir, d, roots)
+                if gone:
+                    print(f"[autodelete] removed empty artist dir {gone}", flush=True)
             except Exception as e:
                 print(f"[autodelete] failed {d}: {e}", flush=True)
         if removed:

@@ -2581,12 +2581,63 @@ async def run_task(task: dict) -> None:
                     _sess_alive = await asyncio.to_thread(local_wrapper_session_alive)
                 except Exception:
                     _sess_alive = False
-                await _broadcast(_i18n.log_event(
-                    "console.wrapper_local_region_fail" if _sess_alive
-                    else "console.wrapper_local_drm_fail",
-                    level="error", task_id=task.get("id", "")))
-                task["log"].append("─── local-only: AMD-фолбэк подавлен ───")
-                _try_advance_task(task, TaskStatus.ERROR)
+
+                # Два разных случая, и подавлять фолбэк осмысленно только в одном.
+                #
+                # Сессия МЕРТВА — уход на публичный wrapper замаскировал бы поломку,
+                # которую владелец должен починить: подавляем, как и раньше.
+                #
+                # Сессия ЖИВА, а ключа нет — у контента просто нет прав в регионе
+                # аккаунта. Локальный wrapper этот релиз не достанет НИКОГДА:
+                # ни перелогин, ни ожидание не помогут. Раньше здесь всё равно
+                # была ошибка, а в сообщении стоял совет сделать руками ровно то,
+                # что код делать отказывался — переключиться на AMD с его
+                # несколькими регионами. Владелец упёрся в это дважды за минуту
+                # (01.08.2026). Теперь спасаем сами и честно говорим почему.
+                _strict = bool((_config or {}).get("apple-local-only-strict", False))
+                if _sess_alive and not _strict:
+                    # СНАЧАЛА своя витрина, и только потом чужой публичный wrapper.
+                    # «Нет прав в регионе» почти всегда значит, что ссылка ведёт в
+                    # ЧУЖУЮ витрину: 01.08.2026 аккаунт враппера был в `ca`, а
+                    # ссылка на `gb` — и тот же альбом в канадской витрине есть.
+                    # Гонять это через публичный wrapper бессмысленно вдвойне:
+                    # он в те минуты лежал («Deadline Exceeded»), а живой
+                    # оплаченный аккаунт стоял рядом без дела.
+                    _retried_sf = False
+                    if not task.get("_sf_retried"):
+                        try:
+                            from ripster.apple_router import (_rewrite_storefront,
+                                                              local_wrapper_storefront,
+                                                              url_storefront)
+                            _acct_sf = await asyncio.to_thread(local_wrapper_storefront)
+                            _url_sf = url_storefront(url)
+                            if _acct_sf and _url_sf and _acct_sf != _url_sf:
+                                task["_sf_retried"] = True
+                                _new_url = _rewrite_storefront(url, _acct_sf)
+                                await _broadcast(_i18n.log_event(
+                                    "console.wrapper_local_sf_retry", level="warn",
+                                    frm=_url_sf, to=_acct_sf, task_id=task.get("id", "")))
+                                task["log"].append(
+                                    f"─── витрина '{_url_sf}' → '{_acct_sf}' (свой аккаунт) ───")
+                                await _run_engine_task(task, engine, _new_url, qid)
+                                _retried_sf = True
+                        except _NeedAMDFallback:
+                            _retried_sf = False      # и своя витрина не дала ключа
+                        except Exception:
+                            _retried_sf = False
+                    if not _retried_sf:
+                        await _broadcast(_i18n.log_event(
+                            "console.wrapper_local_region_amd", level="warn",
+                            task_id=task.get("id", "")))
+                        task["log"].append("─── local-only: нет прав в регионе → спасаю через AMD ───")
+                        await _run_engine_task(task, "amd", url, qid)
+                else:
+                    await _broadcast(_i18n.log_event(
+                        "console.wrapper_local_region_fail" if _sess_alive
+                        else "console.wrapper_local_drm_fail",
+                        level="error", task_id=task.get("id", "")))
+                    task["log"].append("─── local-only: AMD-фолбэк подавлен ───")
+                    _try_advance_task(task, TaskStatus.ERROR)
             else:
                 await _broadcast(_i18n.log_event("console.drm_retry_amd", level="warn"))
                 task["log"].append("─── AMD auto-fallback ───")

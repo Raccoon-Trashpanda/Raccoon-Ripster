@@ -159,6 +159,7 @@ const _SEARCH_SVCS = [
   {value: 'qobuz',    label: '🎼 Qobuz',         key: 'qobuz'},
   {value: 'tidal',    label: '🌊 Tidal',         key: 'tidal'},
   {value: 'spotify',  label: '🟢 Spotify',       key: 'spotify'},
+  {value: 'soundcloud', label: '☁️ SoundCloud',  key: 'soundcloud'},
   {value: 'beatport', label: '🎧 Beatport',      key: 'beatport'},
   {value: 'yandex',   label: '🟡 Яндекс.Музыка', key: 'yandex'},
 ];
@@ -221,6 +222,13 @@ function _renderSearchGrid(grid, items) {
   grid.innerHTML = items.map(item => _renderSearchCard(item, svc)).join('');
   const cnt = document.getElementById('search-count');
   if(cnt) cnt.textContent = ti('ck.n_results',{n:items.length});
+  // Панель поиска — в тон первого результата: видно, чей результат на экране.
+  // Первый, а не «средний по выдаче»: он и есть ответ на запрос, остальные —
+  // хвост. Нет обложки или нет цвета — панель остаётся обычной.
+  if (typeof tintSearchPanel === 'function') {
+    const first = items && items[0];
+    tintSearchPanel(first && (first.cover || first.artwork || first.artworkUrl) || '');
+  }
 }
 
 async function doSearch() {
@@ -347,7 +355,7 @@ function _qualityBadges(item) {
                  : '#c8c8d0';
   const chip = q => `<span style="background:rgba(0,0,0,.72);color:${col(q)};font-size:8px;`
     + `font-weight:800;padding:2px 5px;border-radius:3px;letter-spacing:.4px;`
-    + `backdrop-filter:blur(4px)">${q}</span>`;
+    + `backdrop-filter:blur(4px)">${escapeHtml(q)}</span>`;
   return `<div style="position:absolute;top:6px;right:6px;display:flex;flex-direction:column;`
     + `gap:3px;align-items:flex-end;z-index:2;pointer-events:none">${tags.map(chip).join('')}</div>`;
 }
@@ -361,7 +369,7 @@ function _renderSearchCard(item, svc) {
     const dateStr = item.date || '';
     const dateFmt = dateStr.length >= 10
       ? new Date(dateStr + 'T00:00:00').toLocaleDateString(_dateLoc(), {day:'numeric', month:'short', year:'numeric'})
-      : (item.year || '');
+      : escapeHtml(item.year || '');
     const hiresBadge = item.hires ? `<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(255,214,10,.15);color:#ffd60a;font-weight:700;margin-left:3px">HI-RES</span>` : '';
 
     const linkBtn = item.url
@@ -369,6 +377,11 @@ function _renderSearchCard(item, svc) {
       : '';
     const copyBtn = item.url
       ? `<button onclick="event.stopPropagation();navigator.clipboard.writeText('${escJ(item.url)}');toast(t('toast.link_copied'),'var(--green)')" title="${t('ck.copy_link')}" style="padding:5px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);cursor:pointer;flex-shrink:0">⎘</button>`
+      : '';
+    // «В любимые артисты» — тем же жестом, что и в радаре. Артист берётся из
+    // самой находки, поэтому имя не приходится набирать руками в другой вкладке.
+    const followBtn = (typeof afButton === 'function' && item.artist)
+      ? afButton(item.artist, 'padding:5px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer;flex-shrink:0')
       : '';
 
 
@@ -381,7 +394,7 @@ function _renderSearchCard(item, svc) {
         const previewBtn = previewUrl
           ? `<button onclick="event.stopPropagation();playPreview('${escJ(previewUrl)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.cover||item.artworkUrl||'')}')" style="padding:4px 7px;background:rgba(1,244,156,.15);color:#01f49c;border:1px solid rgba(1,244,156,.4);border-radius:6px;font-size:11px;cursor:pointer" title="${t('ck.listen')}">▶</button>`
           : '';
-        const bpmLabel = item.bpm ? `<span style="font-size:9px;color:var(--muted2)">${item.bpm} BPM</span>` : '';
+        const bpmLabel = item.bpm ? `<span style="font-size:9px;color:var(--muted2)">${escapeHtml(item.bpm)} BPM</span>` : '';
         const genreLabel = item.genre ? `<span style="font-size:9px;background:rgba(1,244,156,.12);color:#01f49c;padding:1px 5px;border-radius:3px;flex-shrink:0">${esc(item.genre)}</span>` : '';
         const mixLabel = item.mix ? ` <span style="color:var(--muted2);font-weight:400">(${esc(item.mix)})</span>` : '';
         return `
@@ -397,7 +410,7 @@ function _renderSearchCard(item, svc) {
               </div>
               <div style="display:flex;gap:4px">
                 <button onclick="searchAddToQueue('${escJ(item.url)}','${escJ(item.title)}','${escJ(item.artist)}')" style="flex:1;padding:4px 0;background:#01f49c;color:#000;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
-                ${previewBtn}${linkBtn}${copyBtn}
+                ${previewBtn}${followBtn}${linkBtn}${copyBtn}
               </div>
             </div>
           </div>`;
@@ -406,7 +419,7 @@ function _renderSearchCard(item, svc) {
       // ── Beatport release card ────────────────────────────────────
       // Same scope-fix as the track branch above.
       if(item.type === 'release' && item.service === 'beatport') {
-        const tcLabel = item.trackCount ? `<span style="font-size:10px;color:var(--muted2);flex-shrink:0">${item.trackCount} ${t('p.trk_abbr')}</span>` : '';
+        const tcLabel = item.trackCount ? `<span style="font-size:10px;color:var(--muted2);flex-shrink:0">${escapeHtml(item.trackCount)} ${t('p.trk_abbr')}</span>` : '';
         const labelRow = item.label ? `<div style="font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${esc(item.label)}</div>` : '';
         const upcomingBadge = item.is_upcoming ? `<span style="font-size:8px;background:rgba(255,214,10,.15);color:#ffd60a;padding:1px 4px;border-radius:3px;font-weight:700">PRE</span>` : '';
         return `
@@ -423,7 +436,7 @@ function _renderSearchCard(item, svc) {
               </div>
               <div style="display:flex;gap:4px">
                 <button onclick="searchAddToQueue('${escJ(item.url)}','${escJ(item.title)}','${escJ(item.artist)}')" style="flex:1;padding:5px 0;background:#01f49c;color:#000;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
-                ${linkBtn}${copyBtn}
+                ${followBtn}${linkBtn}${copyBtn}
               </div>
             </div>
           </div>`;
@@ -436,11 +449,11 @@ function _renderSearchCard(item, svc) {
             ${cover}
             <div style="position:absolute;top:6px;right:6px;background:rgba(0,0,0,.7);color:#fff;font-size:9px;font-weight:700;padding:2px 6px;border-radius:4px;letter-spacing:.5px">${t('ck.artist_badge')}</div>
             <div style="padding:8px 9px">
-              <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escJ(item.title)}">${item.title||'—'}</div>
-              <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:7px">${item.artist||''}</div>
+              <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escJ(item.title)}">${escapeHtml(item.title)||'—'}</div>
+              <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:7px">${escapeHtml(item.artist)||''}</div>
               <div style="display:flex;gap:5px">
-                <button onclick="openArtistPage('${item.service}','${escJ(item.id)}')" style="flex:1;padding:5px 0;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)">→ ${t('ck.discography')}</button>
-                ${linkBtn}${copyBtn}
+                <button onclick="openArtistPage('${escJ(item.service)}','${escJ(item.id)}')" style="flex:1;padding:5px 0;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)">→ ${t('ck.discography')}</button>
+                ${followBtn}${linkBtn}${copyBtn}
               </div>
             </div>
           </div>`;
@@ -448,7 +461,7 @@ function _renderSearchCard(item, svc) {
 
       // ── Standard album / playlist card ──────────────────────────
       if(item.type === 'album' || item.type === 'playlist') {
-        const tcLabel = item.tracks ? `<span style="font-size:10px;color:var(--muted2);flex-shrink:0">${item.tracks} ${t('p.trk_abbr')}</span>` : '';
+        const tcLabel = item.tracks ? `<span style="font-size:10px;color:var(--muted2);flex-shrink:0">${escapeHtml(item.tracks)} ${t('p.trk_abbr')}</span>` : '';
         const typeTag = item.type === 'playlist' ? t('card.playlist') : t('card.album');
         const labelRow = item.label ? `<div style="font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px" title="${escJ(item.label)}">${esc(item.label)}</div>` : '';
         const canStream = (item.service === 'qobuz' || item.service === 'tidal' || item.service === 'deezer');
@@ -460,9 +473,9 @@ function _renderSearchCard(item, svc) {
             <div style="position:relative">${cover}${playOverlay}${_qualityBadges(item)}</div>
             <div style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,.65);color:rgba(255,255,255,.65);font-size:8px;font-weight:700;padding:2px 5px;border-radius:3px;letter-spacing:.4px">${typeTag}</div>
             <div style="padding:8px 9px">
-              <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escJ(item.title)}">${item.title||'—'}${hiresBadge}</div>
+              <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escJ(item.title)}">${escapeHtml(item.title)||'—'}${hiresBadge}</div>
               <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px${item.artist_id ? ';cursor:pointer' : ''}"
-                ${item.artist_id ? `onclick="event.stopPropagation();openArtistPage('${esc(item.service)}','${escJ(item.artist_id)}')" title="${t('ck.discography')}" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"` : ''}>${item.artist||''}</div>
+                ${item.artist_id ? `onclick="event.stopPropagation();openArtistPage('${esc(item.service)}','${escJ(item.artist_id)}')" title="${t('ck.discography')}" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"` : ''}>${escapeHtml(item.artist)||''}</div>
               ${labelRow}
               <div style="display:flex;align-items:center;gap:4px;margin-top:2px;margin-bottom:7px">
                 <div style="font-size:10px;color:var(--muted2);flex:1">${dateFmt}</div>
@@ -470,8 +483,8 @@ function _renderSearchCard(item, svc) {
               </div>
               <div style="display:flex;gap:4px">
                 <button onclick="searchAddToQueue('${escJ(item.url)}','${escJ(item.title)}','${escJ(item.artist)}')" style="flex:1;padding:5px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
-                <button onclick="openAlbumPage('${item.service}','${escJ(item.id)}')" style="padding:5px 8px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('btn.tracks')}">≡</button>
-                ${linkBtn}${copyBtn}
+                <button onclick="openAlbumPage('${escJ(item.service)}','${escJ(item.id)}')" style="padding:5px 8px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('btn.tracks')}">≡</button>
+                ${followBtn}${linkBtn}${copyBtn}
               </div>
             </div>
           </div>`;
@@ -482,7 +495,7 @@ function _renderSearchCard(item, svc) {
       const svcLabel = (item.service || '').toUpperCase();
       const canStream = (item.service === 'qobuz' || item.service === 'tidal' || item.service === 'deezer');
       const playFull = canStream && item.id
-        ? `<button onclick="event.stopPropagation();playStreamTrack('${item.service}','${item.id}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.artworkUrl||item.cover||'')}')" style="padding:4px 7px;background:rgba(${item.service==='qobuz'?'24,112,245':item.service==='tidal'?'0,212,179':'162,56,255'},.12);color:${svcColor};border:1px solid rgba(${item.service==='qobuz'?'24,112,245':item.service==='tidal'?'0,212,179':'162,56,255'},.25);border-radius:6px;font-size:11px;cursor:pointer" title="${t('ck.full_play')}">▶</button>`
+        ? `<button onclick="event.stopPropagation();playStreamTrack('${item.service}','${escJ(item.id)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.artworkUrl||item.cover||'')}')" style="padding:4px 7px;background:rgba(${item.service==='qobuz'?'24,112,245':item.service==='tidal'?'0,212,179':'162,56,255'},.12);color:${svcColor};border:1px solid rgba(${item.service==='qobuz'?'24,112,245':item.service==='tidal'?'0,212,179':'162,56,255'},.25);border-radius:6px;font-size:11px;cursor:pointer" title="${t('ck.full_play')}">▶</button>`
         : '';
       const previewBtn = item.preview
         ? `<button onclick="event.stopPropagation();playPreview('${escJ(item.preview)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.cover||item.artworkUrl||'')}')" style="padding:4px 7px;background:rgba(255,255,255,.08);color:var(--text);border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer" title="${t('ck.sec30')}">▶30</button>`
@@ -494,13 +507,13 @@ function _renderSearchCard(item, svc) {
             ${_qualityBadges(item)}
           </div>
           <div style="padding:8px 9px">
-            <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer" onclick="searchAddToQueue('${escJ(item.url)}','${escJ(item.title)}','${escJ(item.artist)}')" title="${escJ(item.title)}">${item.title||'—'}</div>
+            <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer" onclick="searchAddToQueue('${escJ(item.url)}','${escJ(item.title)}','${escJ(item.artist)}')" title="${escJ(item.title)}">${escapeHtml(item.title)||'—'}</div>
             <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-bottom:6px">${item.artist_id
-              ? `<span style="cursor:pointer" onclick="event.stopPropagation();openArtistPage('${esc(item.service)}','${escJ(item.artist_id)}')" title="${t('ck.discography')}" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${item.artist||''}</span>`
-              : (item.artist||'')}${dateFmt ? ' · '+dateFmt : ''}</div>
+              ? `<span style="cursor:pointer" onclick="event.stopPropagation();openArtistPage('${esc(item.service)}','${escJ(item.artist_id)}')" title="${t('ck.discography')}" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${escapeHtml(item.artist)||''}</span>`
+              : escapeHtml(item.artist||'')}${dateFmt ? ' · '+dateFmt : ''}</div>
             <div style="display:flex;gap:4px">
               <button onclick="searchAddToQueue('${escJ(item.url)}','${escJ(item.title)}','${escJ(item.artist)}')" style="flex:1;padding:4px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
-              ${playFull}${previewBtn}${linkBtn}${copyBtn}
+              ${playFull}${previewBtn}${followBtn}${linkBtn}${copyBtn}
             </div>
           </div>
         </div>`;
@@ -613,6 +626,12 @@ async function openArtistPage(service, artistId){
 
 function renderArtistPage(){
   const {artist, releases, filter} = Detail.currentArtist;
+  // Дискография в тон артиста — тем же способом, что карточки радара. Цвет
+  // берётся из его же обложки и уходит ТОЛЬКО в окантовку: заливать им фон
+  // страницы нельзя, под ним лежит текст.
+  if (typeof tintDetailPanel === 'function') {
+    tintDetailPanel(artist.picture || artist.cover || (releases[0] || {}).cover || '');
+  }
   const counts = releases.reduce((acc, r) => {
     acc.all = (acc.all||0)+1;
     acc[r.type] = (acc[r.type]||0)+1;
@@ -629,14 +648,14 @@ function renderArtistPage(){
 
   const header = `
     <div style="display:flex;gap:20px;margin-bottom:24px;align-items:flex-start;flex-wrap:wrap">
-      ${artist.picture ? `<img src="${artist.picture}" data-lightbox style="width:140px;height:140px;border-radius:50%;object-fit:cover;flex-shrink:0;cursor:zoom-in" onerror="this.style.display='none'"/>` : ''}
+      ${artist.picture ? `<img src="${escapeHtml(artist.picture)}" data-lightbox style="width:140px;height:140px;border-radius:50%;object-fit:cover;flex-shrink:0;cursor:zoom-in" onerror="this.style.display='none'"/>` : ''}
       <div style="flex:1;min-width:260px">
-        <div style="font-size:11px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;font-family:var(--display)">${t('card.artist')} · ${artist.service}</div>
+        <div style="font-size:11px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;font-family:var(--display)">${t('card.artist')} · ${escapeHtml(artist.service)}</div>
         <div style="font-family:var(--display);font-size:32px;font-weight:800;color:var(--text);margin-top:4px;line-height:1.1">${esc(artist.name||'—')}</div>
         <div style="font-size:12px;color:var(--muted);margin-top:8px">
-          ${artist.albums_total ? `${artist.albums_total} ${t('ck.releases_word')} · ` : ''}${artist.fans ? artist.fans.toLocaleString('ru')+' '+t('ck.listeners_word')+' · ' : ''}${artist.genre ? esc(artist.genre) : ''}
+          ${artist.albums_total ? `${escapeHtml(artist.albums_total)} ${t('ck.releases_word')} · ` : ''}${artist.fans ? escapeHtml(artist.fans.toLocaleString('ru'))+' '+t('ck.listeners_word')+' · ' : ''}${artist.genre ? esc(artist.genre) : ''}
         </div>
-        ${artist.url ? `<a href="${artist.url}" target="_blank" style="font-size:11px;color:var(--red);margin-top:6px;display:inline-block">↗ ${t('ck.open_on')} ${artist.service}</a>` : ''}
+        ${artist.url ? `<a href="${escapeHtml(artist.url)}" target="_blank" style="font-size:11px;color:var(--red);margin-top:6px;display:inline-block">↗ ${t('ck.open_on')} ${escapeHtml(artist.service)}</a>` : ''}
       </div>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px">
@@ -664,17 +683,17 @@ function renderArtistPage(){
     : `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:12px">
         ${filtered.map(r => `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s" onmouseover="this.style.borderColor='var(--red)'" onmouseout="this.style.borderColor='var(--border)'">
-            ${r.cover ? `<img src="${r.cover}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" onerror="this.style.display='none'"/>` : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:26px">♪</div>`}
+            ${r.cover ? `<img src="${escapeHtml(r.cover)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" onerror="this.style.display='none'"/>` : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:26px">♪</div>`}
             <div style="padding:8px 10px">
               <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.title)}">${esc(r.title)}</div>
               <div style="font-size:10px;color:var(--muted);margin-top:3px;display:flex;justify-content:space-between;gap:4px;margin-bottom:${r.label?'2px':'7px'}">
-                <span>${r.year||''}</span>
-                <span style="text-transform:uppercase;letter-spacing:.4px;background:rgba(255,255,255,.06);padding:1px 5px;border-radius:3px;font-size:9px">${r.type||'?'}</span>
+                <span>${escapeHtml(r.year||'')}</span>
+                <span style="text-transform:uppercase;letter-spacing:.4px;background:rgba(255,255,255,.06);padding:1px 5px;border-radius:3px;font-size:9px">${escapeHtml(r.type||'?')}</span>
               </div>
               ${r.label ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.label)}">${esc(r.label)}</div>` : ''}
               <div style="display:flex;gap:5px">
-                <button onclick="artistReleaseDownload('${r.service}','${esc(r.id)}','${escJ(r.title)}','${escJ(artist.name)}')" style="flex:1;padding:5px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
-                <button onclick="openAlbumPage('${r.service}','${esc(r.id)}')" style="padding:5px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('btn.tracks')}">≡</button>
+                <button onclick="artistReleaseDownload('${escJ(r.service)}','${esc(r.id)}','${escJ(r.title)}','${escJ(artist.name)}')" style="flex:1;padding:5px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
+                <button onclick="openAlbumPage('${escJ(r.service)}','${esc(r.id)}')" style="padding:5px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('btn.tracks')}">≡</button>
               </div>
             </div>
           </div>`).join('')}
@@ -743,7 +762,7 @@ function renderAlbumPage(){
   const bc = document.getElementById('detail-breadcrumb');
   if(bc) bc.textContent = `${album.artist||''} — ${album.title||''}`.replace(/^— /, '');
   const coverHtml = album.cover
-    ? `<img src="${album.cover}" data-lightbox style="width:220px;height:220px;border-radius:8px;object-fit:cover;flex-shrink:0;cursor:zoom-in" onerror="this.style.display='none'"/>`
+    ? `<img src="${escapeHtml(album.cover)}" data-lightbox style="width:220px;height:220px;border-radius:8px;object-fit:cover;flex-shrink:0;cursor:zoom-in" onerror="this.style.display='none'"/>`
     : `<div style="width:220px;height:220px;border-radius:8px;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:48px;flex-shrink:0">♪</div>`;
 
   const meta = [
@@ -751,21 +770,21 @@ function renderAlbumPage(){
     album.date ? `${t('ck.lbl_release')}: <span style="color:var(--text)">${esc(album.date)}</span>` : '',
     album.genre ? `${t('ck.lbl_genre')}: <span style="color:var(--text)">${esc(album.genre)}</span>` : '',
     album.upc ? `UPC: <span style="color:var(--text);font-family:var(--mono);font-size:11px">${esc(album.upc)}</span>` : '',
-    album.tracks ? `${t('ck.lbl_tracks')}: <span style="color:var(--text)">${album.tracks}</span>` : '',
+    album.tracks ? `${t('ck.lbl_tracks')}: <span style="color:var(--text)">${escapeHtml(album.tracks)}</span>` : '',
   ].filter(Boolean).join(' · ');
 
   const header = `
     <div style="display:flex;gap:24px;margin-bottom:24px;flex-wrap:wrap">
       ${coverHtml}
       <div style="flex:1;min-width:280px">
-        <div style="font-size:11px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;font-family:var(--display)">${t('card.album')} · ${album.service}</div>
+        <div style="font-size:11px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;font-family:var(--display)">${t('card.album')} · ${escapeHtml(album.service)}</div>
         <div style="font-family:var(--display);font-size:28px;font-weight:800;color:var(--text);margin-top:4px;line-height:1.15">${esc(album.title||'—')}</div>
         <div style="font-size:14px;color:var(--muted2);margin-top:4px">${esc(album.artist||'')}</div>
         <div style="font-size:11px;color:var(--muted);margin-top:12px;line-height:1.7">${meta}</div>
         <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
           <button onclick="albumAddAll()" style="padding:8px 16px;background:var(--red);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">${t('btn.download_album')}</button>
           ${canStream ? `<button onclick="playAlbumAll()" style="padding:8px 16px;background:rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.16);color:${streamColor};border:1px solid rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.4);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">${t('btn.play_album')}</button>` : ''}
-          ${album.url ? `<a href="${album.url}" target="_blank" style="padding:8px 14px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;font-family:var(--font)">↗ ${t('ck.open_on')} ${album.service}</a>` : ''}
+          ${album.url ? `<a href="${escapeHtml(album.url)}" target="_blank" style="padding:8px 14px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;font-family:var(--font)">↗ ${t('ck.open_on')} ${escapeHtml(album.service)}</a>` : ''}
         </div>
       </div>
     </div>`;

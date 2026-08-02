@@ -1783,3 +1783,271 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 /* Нижний блок карточки прижат к низу — иначе строки действий в ряду стоят
    на разной высоте у карточек с селектором качества и без него. */
 .rel-card > div:last-child{margin-top:auto}
+
+/* ── Кнопка «наверх» ───────────────────────────────────────────────────────
+   Появляется только когда возврат колесом уже долог, и не занимает места до
+   этого. Прижата над нижним плеером, чтобы не спорить с ним за угол. */
+#scroll-top-btn{position:fixed;right:18px;bottom:96px;z-index:900;
+  width:40px;height:40px;border-radius:50%;display:grid;place-items:center;
+  background:var(--surface);border:1px solid var(--border);color:var(--muted);
+  cursor:pointer;font-family:var(--font);
+  box-shadow:0 6px 20px rgba(0,0,0,.35);
+  opacity:0;visibility:hidden;transform:translateY(10px) scale(.9);
+  transition:opacity .18s ease,transform .18s ease,visibility .18s,
+             border-color .15s,color .15s}
+#scroll-top-btn.on{opacity:1;visibility:visible;transform:none}
+#scroll-top-btn:hover{color:var(--text);border-color:var(--red)}
+#scroll-top-btn:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+#scroll-top-btn svg{width:18px;height:18px;fill:none;stroke:currentColor;
+  stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+/* Человеку, который выключил анимацию в системе, ничего не ездит. */
+@media (prefers-reduced-motion:reduce){
+  #scroll-top-btn{transition:opacity .01s,visibility .01s;transform:none}
+}
+
+/* ── Цвет обложки на карточке ──────────────────────────────────────────────
+   Цвет идёт в КОЛЬЦО вокруг карточки, а не в рамку. Рамку карточка задаёт
+   инлайном (и меняет на наведении своими обработчиками) — инлайн бьёт класс, и
+   попытка красить рамку отсюда просто ничего не даёт: в проверке 01.08.2026
+   вместо тона обложки оставалась зелёная рамка «новинки».
+   Ни текст, ни фон цветом не красятся: акцент рядом с содержимым читается,
+   заливка под содержимым — нет. Переход мягкий, но быстрый — цвет приезжает
+   вместе с обложкой, а не заметно позже. */
+.rel-card{--tint:transparent;transition:box-shadow .22s ease}
+.rel-card.tinted{
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--tint) 62%,transparent),
+             0 6px 22px color-mix(in srgb,var(--tint) 16%,transparent)}
+.rel-card.tinted:hover{
+  box-shadow:0 0 0 2px var(--tint),
+             0 10px 30px color-mix(in srgb,var(--tint) 28%,transparent)}
+/* Движок без color-mix (старый WebView2) — сплошное кольцо в тон. */
+@supports not (color:color-mix(in srgb,red 50%,blue)){
+  .rel-card.tinted{box-shadow:0 0 0 2px var(--tint)}
+}
+
+/* Панель поиска в тон артиста — видно, чей результат сейчас на экране. */
+#view-search{--tint:transparent;transition:box-shadow .3s ease}
+#view-search.tinted .view-head,
+#view-search.tinted .search-panel{
+  box-shadow:inset 0 2px 0 0 var(--tint),0 8px 26px color-mix(in srgb,var(--tint) 12%,transparent)}
+
+@media (prefers-reduced-motion:reduce){
+  .rel-card,#view-search{transition:none}
+}
+
+/* ── «В любимые артисты» ───────────────────────────────────────────────────
+   Одна кнопка и в радаре, и в поиске: жест должен быть один. Пока не нажата —
+   контур сердца в приглушённом цвете, после — залитое и в акценте. Цвет тут
+   несёт состояние, поэтому дублируется формой (♡/♥), а не только оттенком. */
+.af-btn{color:var(--muted);transition:color .15s,border-color .15s,transform .12s}
+.af-btn:hover{color:var(--red);transform:scale(1.12)}
+.af-btn.on{color:var(--red);border-color:rgba(255,69,58,.45)!important}
+.af-btn:disabled{opacity:.5;cursor:default;transform:none}
+.af-btn:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+@media (prefers-reduced-motion:reduce){ .af-btn,.af-btn:hover{transition:none;transform:none} }
+
+/* ── Пропуск отрисовки того, что за экраном ────────────────────────────────
+   `content-visibility:auto` разрешает браузеру не считать раскладку и не
+   рисовать элемент, пока он не подъехал к вьюпорту. Для длинных списков это
+   самая крупная экономия из доступных без виртуализации — и она бесплатна:
+   ни строчки JS, ни изменения разметки.
+
+   `contain-intrinsic-size` обязателен рядом: без него у пропущенного элемента
+   высота равна нулю, полоса прокрутки скачет при листании, и «оптимизация»
+   превращается в дёрганье. Значение — примерная высота строки; точность не
+   важна, важно чтобы она была.
+
+   Замер 01.08.2026: в радаре это уже стояло (120 карточек из 120), а в истории
+   было 300 элементов и НИ ОДНОГО — там и лежала оставшаяся стоимость. */
+.hist-row{content-visibility:auto;contain-intrinsic-size:auto 64px}
+.qi{content-visibility:auto;contain-intrinsic-size:auto 58px}
+#search-results > *{content-visibility:auto;contain-intrinsic-size:auto 240px}
+#view-digs .dg-item{content-visibility:auto;contain-intrinsic-size:auto 74px}
+
+/* Обложки: декодирование вне главного потока и никакой работы для того, что за
+   экраном. Атрибуты проставляются в разметке, но часть карточек рисуется в
+   местах, куда их не добавляли, — CSS-подстраховки для этого нет, поэтому за
+   ними следит render_perf.js. Здесь — только чтобы картинка не тянула раскладку
+   до загрузки. */
+.rel-card img,.hist-row img,.qi img,#search-results img{contain:paint}
+
+/* ── Подсказки в простое ───────────────────────────────────────────────────
+   Правый нижний угол, НАД плеером: подсказка не должна закрывать управление
+   тем, что играет. Появляется мягко и небольшая — это предложение, а не
+   модальное окно, и работу оно не перекрывает. */
+#ng-pop{position:fixed;right:18px;bottom:152px;z-index:940;width:min(320px,86vw);
+  background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  padding:11px 12px 9px;box-shadow:0 10px 34px rgba(0,0,0,.42);
+  font-family:var(--font);
+  opacity:0;transform:translateY(12px);transition:opacity .22s ease,transform .22s ease}
+#ng-pop.on{opacity:1;transform:none}
+#ng-pop .ng-head{font-size:10px;letter-spacing:.6px;text-transform:uppercase;
+  color:var(--muted);margin-bottom:7px}
+#ng-pop .ng-body{display:flex;gap:10px;align-items:center;cursor:pointer}
+#ng-pop .ng-art{width:44px;height:44px;border-radius:8px;object-fit:cover;flex-shrink:0;
+  background:rgba(255,255,255,.05);display:grid;place-items:center;color:var(--muted);font-size:18px}
+#ng-pop .ng-txt{min-width:0}
+#ng-pop .ng-name{font-size:12.5px;font-weight:600;color:var(--text);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#ng-pop .ng-why{font-size:10.5px;color:var(--muted);margin-top:2px;
+  overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+#ng-pop .ng-acts{display:flex;gap:6px;align-items:center;margin-top:9px}
+#ng-pop .ng-go{flex:1;padding:6px 0;background:rgba(192,132,160,.14);
+  border:1px solid rgba(192,132,160,.28);border-radius:8px;
+  font-size:11px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--font)}
+#ng-pop .ng-go:hover{background:rgba(192,132,160,.22)}
+#ng-pop .ng-x,#ng-pop .ng-off{background:transparent;border:1px solid var(--border);
+  border-radius:8px;color:var(--muted);cursor:pointer;font-family:var(--font);font-size:10px;
+  padding:6px 8px}
+#ng-pop .ng-x{font-size:14px;line-height:1;padding:5px 9px}
+#ng-pop .ng-x:hover,#ng-pop .ng-off:hover{color:var(--text);border-color:var(--red)}
+@media (prefers-reduced-motion:reduce){ #ng-pop{transition:none;transform:none} }
+
+/* ── Заставка запуска ──────────────────────────────────────────────────────
+   Перекрывает пустой экран между открытием окна и первым кадром данных.
+   Анимация ЖИВАЯ намеренно: по ней видно, что процесс идёт, а не завис. */
+#boot-splash{position:fixed;inset:0;z-index:9990;display:grid;place-items:center;
+  background:var(--bg,#0e0e12);opacity:1;transition:opacity .4s ease}
+#boot-splash.off{opacity:0;pointer-events:none}
+#boot-splash .bs-card{display:flex;flex-direction:column;align-items:center;gap:14px}
+#boot-splash .bs-disc{position:relative;width:108px;height:108px}
+#boot-splash .bs-vinyl{position:absolute;inset:0;border-radius:50%;
+  background:radial-gradient(circle at 50% 50%,#2a2a33 0 26%,#17171c 27% 100%);
+  box-shadow:0 8px 30px rgba(0,0,0,.5),inset 0 0 0 1px rgba(255,255,255,.05);
+  animation:bs-spin 3.4s linear infinite}
+#boot-splash .bs-groove{position:absolute;border-radius:50%;
+  border:1px solid rgba(255,255,255,.055)}
+#boot-splash .bs-groove.g1{inset:12px}
+#boot-splash .bs-groove.g2{inset:20px}
+#boot-splash .bs-groove.g3{inset:28px}
+#boot-splash .bs-label{position:absolute;inset:38px;border-radius:50%;
+  background:linear-gradient(135deg,var(--red,#c084a0),#8d5f78)}
+/* Игла: опускается один раз и остаётся — как на настоящем проигрывателе. */
+#boot-splash .bs-arm{position:absolute;right:-6px;top:8px;width:56px;height:3px;
+  background:linear-gradient(90deg,rgba(255,255,255,.5),rgba(255,255,255,.15));
+  border-radius:2px;transform-origin:right center;transform:rotate(-32deg);
+  animation:bs-arm 1.1s cubic-bezier(.3,.8,.3,1) forwards}
+#boot-splash .bs-wave{display:flex;align-items:flex-end;gap:3px;height:20px}
+#boot-splash .bs-wave i{width:3px;height:5px;border-radius:2px;
+  background:var(--red,#c084a0);opacity:.75;animation:bs-wave 1s ease-in-out infinite}
+#boot-splash .bs-wave i:nth-child(2){animation-delay:.08s}
+#boot-splash .bs-wave i:nth-child(3){animation-delay:.16s}
+#boot-splash .bs-wave i:nth-child(4){animation-delay:.24s}
+#boot-splash .bs-wave i:nth-child(5){animation-delay:.32s}
+#boot-splash .bs-wave i:nth-child(6){animation-delay:.40s}
+#boot-splash .bs-wave i:nth-child(7){animation-delay:.48s}
+#boot-splash .bs-wave i:nth-child(8){animation-delay:.56s}
+#boot-splash .bs-wave i:nth-child(9){animation-delay:.64s}
+#boot-splash .bs-name{font-family:var(--font);font-size:19px;font-weight:800;
+  letter-spacing:.4px;color:var(--text,#e8e8f8)}
+#boot-splash .bs-sub{font-family:var(--font);font-size:11.5px;color:var(--muted,#9a9aa4)}
+@keyframes bs-spin{to{transform:rotate(360deg)}}
+@keyframes bs-arm{from{transform:rotate(-32deg)}to{transform:rotate(-6deg)}}
+@keyframes bs-wave{0%,100%{height:5px;opacity:.55}50%{height:19px;opacity:1}}
+/* Кому анимация мешает — та же карточка, но ничего не двигается. */
+@media (prefers-reduced-motion:reduce){
+  #boot-splash .bs-vinyl,#boot-splash .bs-arm,#boot-splash .bs-wave i{animation:none}
+  #boot-splash .bs-arm{transform:rotate(-6deg)}
+  #boot-splash .bs-wave i{height:12px}
+}
+
+/* ── Трек-лист плеера ──────────────────────────────────────────────────────
+   Колонками, как в AIMP: номер, название, артист, время. Панель стоит НАД
+   плеером и не перекрывает его управление — из неё нужно уметь поставить на
+   паузу, не закрывая список. */
+#pp-queue{position:fixed;right:16px;bottom:96px;z-index:9520;
+  width:min(600px,94vw);max-height:min(68vh,620px);display:flex;flex-direction:column;
+  background:var(--surface);border:1px solid var(--border);border-radius:12px;
+  box-shadow:0 14px 44px rgba(0,0,0,.5);font-family:var(--font);overflow:hidden}
+#pp-queue .pq-head{display:flex;align-items:center;justify-content:space-between;
+  padding:9px 12px;border-bottom:1px solid var(--border);
+  font-size:11px;letter-spacing:.5px;text-transform:uppercase;color:var(--muted)}
+#pp-queue .pq-x{background:none;border:none;color:var(--muted);font-size:19px;
+  line-height:1;cursor:pointer;font-family:var(--font);padding:0 2px}
+#pp-queue .pq-x:hover{color:var(--text)}
+#pp-queue .pq-list{overflow-y:auto;scrollbar-width:thin}
+#pp-queue .pq-empty{padding:20px;text-align:center;font-size:12px;color:var(--muted)}
+#pp-queue .pq-row{display:grid;grid-template-columns:24px 1fr 46px;gap:10px;
+  align-items:center;padding:6px 12px;cursor:pointer;font-size:12px;
+  border-bottom:1px solid rgba(255,255,255,.03);
+  content-visibility:auto;contain-intrinsic-size:auto 30px}
+#pp-queue .pq-row:hover{background:rgba(255,255,255,.04)}
+#pp-queue .pq-row.on{background:rgba(192,132,160,.12)}
+#pp-queue .pq-n{color:var(--muted);font-size:11px;text-align:right;font-variant-numeric:tabular-nums}
+#pp-queue .pq-row.on .pq-n{color:var(--red)}
+#pp-queue .pq-t{color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#pp-queue .pq-row.on .pq-t{font-weight:600}
+#pp-queue .pq-a{color:var(--muted);font-size:11px;max-width:34%;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Время — моноширинными цифрами, иначе колонка «дышит» при смене трека. */
+#pp-queue .pq-d{color:var(--muted);font-size:11px;text-align:right;
+  font-variant-numeric:tabular-nums}
+/* Причина, по которой трек попал в очередь (подкладывает радио). */
+#pp-queue .pq-why{display:block;font-size:9.5px;color:var(--muted);opacity:.75;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* Заголовок альбома — граница релиза в очереди (как в AIMP). Прилипает к верху
+   при прокрутке, чтобы всегда было видно, к какому альбому относятся треки. */
+#pp-queue .pq-group{position:sticky;top:0;z-index:1;display:flex;align-items:baseline;gap:8px;
+  padding:8px 12px 5px;background:var(--panel,#1c1e2a);
+  border-bottom:1px solid rgba(201,162,39,.28)}
+#pp-queue .pq-group-name{font-size:11px;font-weight:800;color:#c9a227;letter-spacing:-.1px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+:root[data-theme="light"] #pp-queue .pq-group-name{color:#8c5314}
+#pp-queue .pq-group-artist{font-size:10px;color:var(--muted);overflow:hidden;
+  text-overflow:ellipsis;white-space:nowrap;margin-left:auto;flex-shrink:0;max-width:45%}
+
+/* Качество — одной короткой меткой. Приглушённая рамка вместо цвета: это
+   подсказка, а не то, за чем глаз должен бежать по списку. */
+#pp-queue .pq-q{font-size:9px;letter-spacing:.3px;color:var(--muted);text-align:center;
+  border:1px solid var(--border);border-radius:4px;padding:1px 0;opacity:.8}
+#pp-queue .pq-q:empty{border:none}
+#pp-queue .pq-row.on .pq-q{color:var(--red);border-color:rgba(192,132,160,.4);opacity:1}
+
+/* Название и артист — в две строки, а не в две колонки.
+   В панели шириной 460 px пять колонок зажимали и то и другое: владелец так и
+   сказал — «не видно толком что играет и кто артист» (02.08.2026). Две строки
+   дают названию всю ширину, а артисту — свою, и читаются они мгновенно. */
+#pp-queue .pq-row{align-items:center;padding:7px 12px}
+#pp-queue .pq-t{display:flex;flex-direction:column;gap:1px;min-width:0}
+#pp-queue .pq-title{font-size:12.5px;color:var(--text);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#pp-queue .pq-sub{font-size:10.5px;color:var(--muted);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#pp-queue .pq-sub .pq-q{margin-left:7px;font-weight:600;font-size:9px;opacity:.85;
+  border:none;padding:0}
+/* Играющий трек: полоса акцента слева и полновесное название — видно с одного
+   взгляда, не вчитываясь. */
+#pp-queue .pq-row.on{box-shadow:inset 3px 0 0 0 var(--red)}
+#pp-queue .pq-row.on .pq-title{color:var(--text);font-weight:700}
+#pp-queue .pq-row.on .pq-sub{color:var(--red);opacity:.9}
+
+/* Панель была узкой (~330px на экране владельца), артист сжимался до «Ro…», а
+   метка качества занимала треть строки. Ширина увеличена, колонок осталось три:
+   номер — название с подстрочником — время. Всё остальное живёт в подстрочнике,
+   где места хватает. */
+#pp-queue .pq-row{grid-template-columns:24px 1fr 46px}
+#pp-queue .pq-sub{font-size:10.5px}
+#pp-queue .pq-sub .pq-q{margin-left:6px;font-weight:600;font-size:9.5px;opacity:.7}
+
+/* Треки внутри играющего микса. Отступ слева и приглушённый тон — это
+   содержимое строки, а не соседи по очереди; спутать их нельзя. */
+#pp-queue .pq-chaps{padding:2px 0 6px 34px;border-bottom:1px solid rgba(255,255,255,.04)}
+#pp-queue .pq-chap{display:grid;grid-template-columns:44px 1fr;gap:8px;align-items:baseline;
+  padding:3px 12px 3px 0;cursor:pointer;border-radius:5px}
+#pp-queue .pq-chap:hover{background:rgba(255,255,255,.04)}
+#pp-queue .pq-chap-t{font-family:var(--mono);font-size:9.5px;color:var(--blue);
+  font-variant-numeric:tabular-nums}
+#pp-queue .pq-chap-l{font-size:11px;color:var(--muted);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#pp-queue .pq-chap.on .pq-chap-l{color:var(--text);font-weight:600}
+#pp-queue .pq-chap.on .pq-chap-t{color:var(--red)}
+
+/* Дискография в тон артиста: полоса сверху и мягкий ореол. Фон не красим —
+   под ним весь текст страницы. */
+#sc-detail,.detail-panel{--tint:transparent;transition:box-shadow .3s ease}
+#sc-detail.tinted,.detail-panel.tinted{
+  box-shadow:inset 0 3px 0 0 var(--tint),
+             0 10px 34px color-mix(in srgb,var(--tint) 14%,transparent)}
+@supports not (color:color-mix(in srgb,red 50%,blue)){
+  #sc-detail.tinted,.detail-panel.tinted{box-shadow:inset 0 3px 0 0 var(--tint)}
+}

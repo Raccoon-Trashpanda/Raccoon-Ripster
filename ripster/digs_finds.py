@@ -241,10 +241,30 @@ def missing_releases(profile_artists: list, by_artist: dict, foreign: set,
         artists = (json.loads(p.read_text(encoding="utf-8")).get("artists") or {})
     except Exception:
         return []
+
+    # Склад НЕ-Spotify источников (Apple/BBC/SoundCloud) появился 02.08.2026.
+    # Без него шаг «знакомое, но не в фонотеке» видел только четверть радара:
+    # релиз, найденный Apple-источником, для копателя не существовал вовсе —
+    # ровно та же слепота, что мы чинили в самом радаре. Приводим записи к виду
+    # склада Spotify и складываем в общий котёл.
+    extra: dict = {}
+    try:
+        rs = _BASE / "radar_store.json"
+        if rs.exists():
+            for bucket in (json.loads(rs.read_text(encoding="utf-8")) or {}).values():
+                for rel in (bucket or {}).values():
+                    nm = rel.get("artist") or ""
+                    if not nm:
+                        continue
+                    slot = extra.setdefault(_norm(nm), {"name": nm, "releases": []})
+                    slot["releases"].append(rel)
+    except Exception:
+        pass
+
     wanted = {_norm(a["name"]): a for a in profile_artists
               if not a.get("is_show") and _norm(a["name"]) not in foreign}
     out = []
-    for rec in artists.values():
+    for rec in list(artists.values()) + list(extra.values()):
         key = _norm(rec.get("name", ""))
         prof = wanted.get(key)
         if not prof:
@@ -308,12 +328,29 @@ def forgotten(profile_artists: list, foreign: set, limit: int) -> list[dict]:
         # стоял пустым. 45 дней — это уже «давно не возвращался», а не «забыл».
         if days < 45:
             continue
+        # ЛЮБОВЬ × ОТСУТСТВИЕ, а не одна давность.
+        #
+        # Раньше список сортировался по `days`, и наверх лез тот, кого не трогали
+        # дольше всех — даже если у него четыре релиза и он никогда толком не
+        # нравился. «Забытый любимый» — это пересечение двух условий: его МНОГО
+        # качали И к нему давно не возвращались. Одно без другого даёт либо
+        # случайных знакомых, либо тех, кого и так слушаешь.
+        #
+        # Тот же принцип независимо нашли в Longplay (оценка × время с последнего
+        # прослушивания) — он и считается сейчас лучшим для этой задачи.
+        #
+        # Корень у давности намеренно: без него полгода молчания перевешивают
+        # любую любовь, и раздел снова вырождается в «самое старое».
+        love = float(a["downloads"]) + float(a.get("plays") or 0) * 0.5
+        score = love * (days ** 0.5)
         out.append({"kind": "forgotten", "artist": a["name"], "title": "",
-                    "days": int(days), "cover": a.get("cover", ""),
+                    "days": int(days), "cover": a.get("cover", ""), "_w": score,
                     "reason_key": "digs.r_forgot",
                     "reason_args": {"n": int(a["downloads"]), "days": int(days)},
                     "reason": f"{a['downloads']} релизов, но не трогал {int(days)} дн."})
-    out.sort(key=lambda r: r["days"], reverse=True)
+    out.sort(key=lambda r: r["_w"], reverse=True)
+    for r in out:
+        r.pop("_w", None)
     return out[:limit]
 
 
@@ -363,6 +400,90 @@ def apply_favorites(prof: dict, cfg: dict | None) -> dict:
     return prof
 
 
+
+def anniversary(foreign: set, limit: int) -> list[dict]:
+    """«В этот день» — что качалось ровно год, полгода, три месяца назад.
+
+    ЗАЧЕМ. У конкурентов самой цепляющей механикой оказалась не «похожее на то,
+    что ты слушал», а напоминание о собственном прошлом: узнавание сильнее
+    рекомендации, и никакая чужая лента такого не покажет — она не помнит твоей
+    истории. Внешних источников не нужно ни одного.
+
+    ПОЧЕМУ НЕ ТОЛЬКО ГОДЫ. Первая версия смотрела ровно на год назад и на этой
+    установке давала НОЛЬ: истории всего 76 дней (02.08.2026). Раздел, который
+    пуст у нового человека и наполнится через год, бесполезен. Поэтому вехи
+    начинаются с трёх месяцев и растут вместе с историей — сначала месяцы,
+    потом годы.
+
+    ПОЧЕМУ БАЗА, А НЕ history.json. Файл хранит последние 500 записей — у
+    активного человека это недели. В базе статистики лежит вся история загрузок.
+
+    Окно ±3 дня: качают не каждый день, и жёсткая дата оставляла бы раздел
+    пустым почти всегда.
+    """
+    if not _DB.exists():
+        return []
+    # Кого владелец слушал сам — независимое подтверждение принадлежности.
+    _mine = set()
+    try:
+        for nm, _st, _ts, _hits in owner_plays():
+            parts = _STREAM_SPLIT.split((nm or "").strip(), 1)
+            if len(parts) == 2:
+                for a in _split_credit(parts[0].strip()):
+                    k = _norm(a)
+                    if k:
+                        _mine.add(k)
+    except Exception:
+        pass
+    now = int(time.time())
+    DAY = 86_400
+    # (сдвиг в днях, ключ подписи, число для подписи)
+    # Начинаем с МЕСЯЦА: на свежей установке истории мало (здесь — 77 дней), и
+    # даже трёхмесячная веха пуста. Месяц даёт находки сразу, а дальше вехи
+    # включаются сами по мере накопления — раздел растёт вместе с человеком.
+    marks = [(30, "digs.r_anniv_m", 1), (90, "digs.r_anniv_m", 3),
+             (182, "digs.r_anniv_m", 6),
+             (365, "digs.r_anniv_y", 1), (730, "digs.r_anniv_y", 2)]
+    out, seen = [], set()
+    try:
+        db = sqlite3.connect(f"file:{_DB}?mode=ro", uri=True)
+        for days, key, n in marks:
+            lo, hi = now - (days + 3) * DAY, now - (days - 3) * DAY
+            for artist, album, title, svc, url, ts in db.execute(
+                    "SELECT artist, album, title, service, url, ts FROM downloads "
+                    "WHERE status='done' AND ts BETWEEN ? AND ? ORDER BY ts DESC",
+                    (lo, hi)):
+                artist = (artist or "").strip()
+                name = (album or title or "").strip()
+                if not artist or _norm(artist) in foreign:
+                    continue
+                # Одного «не в списке чужих» здесь мало. Кэш бота знает не все
+                # гостевые загрузки, и первый же прогон вынес в «твой этот день»
+                # болливудские саундтреки гостей (02.08.2026). Для ЭТОГО раздела
+                # требование строже: артист должен иметь независимый след
+                # владельца — он есть в профиле вкуса. Раздел про твоё прошлое,
+                # и чужому здесь не место даже ценой меньшего числа находок.
+                if _norm(artist) not in _mine:
+                    continue
+                k = (_norm(artist), _norm_title(name))
+                if k in seen:
+                    continue
+                seen.add(k)
+                out.append({"kind": "anniversary", "artist": artist, "title": name,
+                            "service": svc or "", "url": url or "",
+                            "date": time.strftime("%Y-%m-%d", time.localtime(ts)),
+                            "reason_key": key, "reason_args": {"n": n},
+                            "reason": (f"качал ровно {n} мес. назад" if key.endswith("_m")
+                                       else f"качал ровно {n} г. назад")})
+                if len(out) >= limit:
+                    db.close()
+                    return out
+        db.close()
+    except sqlite3.Error:
+        return out
+    return out
+
+
 async def find_all(cfg: dict | None = None, per_kind: int = 12) -> dict:
     prof = await build_profile(limit=60, with_genres=True)
     foreign = foreign_artists(cfg)
@@ -398,6 +519,8 @@ async def find_all(cfg: dict | None = None, per_kind: int = 12) -> dict:
         "profile": prof,
         "foreign_filtered": len(foreign),
         "digs": {
+            # «Год назад» стоит ПЕРВЫМ по смыслу: узнавание сильнее рекомендации.
+            "anniversary":      keep(anniversary(foreign, per_kind * 2))[:per_kind],
             "played_not_owned": keep(played_not_owned(by_artist, foreign, per_kind * 2, show_keys))[:per_kind],
             "missing_release":  keep(missing_releases(prof["artists"], by_artist, foreign, per_kind * 3))[:per_kind],
             "show_guest":       show_guests(prof["shows"], by_artist, foreign, per_kind),

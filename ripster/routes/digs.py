@@ -34,6 +34,12 @@ def install(app, ctx) -> None:
     global _cfg, _save_cfg
     _cfg = ctx.config
     _save_cfg = ctx.save_config
+    # Похожим артистам нужен конфиг: там лежит ключ Last.fm (если задан).
+    try:
+        from ripster import digs_similar as _ds
+        _ds.configure(ctx.config)
+    except Exception:
+        pass
     app.include_router(router)
 
 
@@ -71,24 +77,58 @@ async def digs_favorites(body: dict):
 
 
 @router.get("/api/digs/similar")
-async def digs_similar(artist: str = "", limit: int = 12):
+async def digs_similar(artist: str = "", limit: int = 12, exclude: str = "",
+                        known: str = "last"):
     """Похожие артисты — для дерева пузырей.
 
     Источник: MusicBrainz (MBID по имени) + ListenBrainz. Бесплатно, без ключей.
     Deezer `/artist/{id}/related` для этого НЕ годится: отвечает 200 и `total: 0`
     даже у крупных артистов — выглядит рабочим, отдаёт пустоту.
+
+    СНАЧАЛА НЕЗНАКОМЫЕ. Рейтинг похожести устойчив: на один запрос приходит один
+    и тот же список, и наверху в нём те, кого владелец давно слушает и на кого
+    подписан. Копатель показывал знакомое под видом находки (01.08.2026: «одни и
+    те же, включая тех, на кого я уже подписался»). Поэтому берём кандидатов с
+    запасом, помечаем знакомых и ставим их в конец.
+
+    `known`: `last` — знакомые в конце (по умолчанию), `hide` — не показывать
+    вовсе, `keep` — не трогать порядок.
+    `exclude` — имена, уже висящие в дереве, через `|`: без этого следующий
+    уровень повторяет предыдущий.
     """
+    from ripster import digs_known as _k
     from ripster import digs_similar as _s
     name = (artist or "").strip()
     if not name:
         return {"ok": False, "error_key": "digs.e_no_artist"}
-    items = await _s.similar(name, limit=limit)
+
+    # Кандидатов берём с запасом: после отсева знакомых и уже показанных из
+    # `limit` штук осталась бы горстка.
+    cand = await _s.similar(name, limit=max(limit * 4, 40))
+    _k.mark(cand)
+
+    skip = {_k._norm(x) for x in (exclude or "").split("|") if x.strip()}
+    skip.add(_k._norm(name))
+    cand = [c for c in cand if _k._norm(c["name"]) not in skip]
+
+    fresh = [c for c in cand if not c["known"]]
+    seen  = [c for c in cand if c["known"]]
+    if known == "hide":
+        items = fresh[:limit]
+    elif known == "keep":
+        items = cand[:limit]
+    else:
+        # Знакомыми добираем хвост: у нишевого артиста похожих может быть трое, и
+        # все знакомые — пустое дерево хуже знакомого.
+        items = (fresh + seen)[:limit]
+
     # Фото подтягиваем и для центрального артиста тоже — иначе центр круга
     # выглядит беднее собственных ответвлений.
     pics = await _s.artist_pics([name] + [i["name"] for i in items])
     for it in items:
         it["pic"] = pics.get(it["name"], "")
-    return {"ok": True, "artist": name, "pic": pics.get(name, ""), "items": items}
+    return {"ok": True, "artist": name, "pic": pics.get(name, ""), "items": items,
+            "fresh_count": len(fresh), "known_count": len(seen)}
 
 
 @router.get("/api/digs/radio")
@@ -146,3 +186,101 @@ async def digs_profile(limit: int = 40, genres: int = 1, force: int = 0):
     data = await _digs.build_profile(limit=limit, with_genres=bool(genres))
     _cache.update({"data": data, "ts": now, "key": key})
     return {**data, "cached": False}
+
+
+# ── Подсказки в простое («мы знакомы» / «послушай») ──────────────────────────
+# Смысл не в том, чтобы напоминать о себе, а в том, чтобы простой не пропадал
+# впустую: когда ничего не играет, фонотека молчит — хотя в ней лежит то, что
+# человек любил и забыл, и выходят релизы в его жанрах.
+#
+# ДВА ВИДА, и они отвечают на разные вопросы:
+#   artist  — «мы знакомы»: артист из собственного профиля вкуса, которого давно
+#             не слушали. Клик открывает его дискографию.
+#   release — «послушай»: свежий релиз в любимом жанре. У него есть кнопка
+#             воспроизведения прямо в подсказке, чтобы согласие стоило одного
+#             движения.
+#
+# ЧЕГО ЗДЕСЬ НЕТ — случайного «популярного». Подсказка без видимого основания
+# читается как реклама, поэтому каждая несёт причину (`why_key`) и строится
+# только по собственным данным владельца.
+_nudge_seen: dict = {}          # что уже показывали — чтобы не повторяться
+_NUDGE_REPEAT = 12 * 3600       # столько не повторяем одну и ту же подсказку
+
+
+def _svc_from_url(url: str) -> str:
+    """Сервис по ссылке. Находки Раскопок поля `service` не несут, а кнопке
+    воспроизведения оно нужно, чтобы знать, каким движком разворачивать релиз."""
+    u = (url or "").lower()
+    for needle, svc in (("open.spotify.com", "spotify"), ("deezer.com", "deezer"),
+                        ("music.apple.com", "apple"), ("qobuz.com", "qobuz"),
+                        ("tidal.com", "tidal"), ("soundcloud.com", "soundcloud"),
+                        ("bbc.co.uk", "bbc"), ("music.yandex", "yandex")):
+        if needle in u:
+            return svc
+    return ""
+
+
+@router.get("/api/nudge")
+async def digs_nudge(kind: str = "auto"):
+    """Одна подсказка. `{"ok": False}` — сейчас предложить нечего, и это
+    нормальный ответ: выдумывать повод нельзя."""
+    import random
+
+    now = time.time()
+    for k, ts in list(_nudge_seen.items()):
+        if now - ts > _NUDGE_REPEAT:
+            _nudge_seen.pop(k, None)
+
+    want = kind if kind in ("artist", "release") else random.choice(("artist", "release"))
+    for attempt in (want, "release" if want == "artist" else "artist"):
+        try:
+            if attempt == "artist":
+                from ripster import digs_finds as _f
+                prof = await _digs.build_profile(limit=40, with_genres=False)
+                # Чужих сюда пускать нельзя. В базе лежат ещё и загрузки гостей
+                # бота, и без этого фильтра подсказка «мы знакомы» показывает
+                # артиста, которого владелец никогда не слушал (первый же прогон
+                # 02.08.2026 выдал именно такого). Порог по счётчику — вторая
+                # страховка: одна случайная загрузка знакомством не является.
+                alien = _f.foreign_artists(_cfg)
+
+                def _weight(a: dict) -> int:
+                    # Профиль НЕ несёт поля `count` — в нём `plays`, `downloads`
+                    # и сводный `score`. Первый заход 02.08.2026 фильтровал по
+                    # `count`, тот везде None, и пул схлопывался в ноль: вид
+                    # «мы знакомы» не показывался ни разу, молча уступая релизам.
+                    return int(a.get("plays") or 0) + int(a.get("downloads") or 0)
+
+                pool = [a for a in (prof.get("artists") or [])
+                        if a.get("name") and not a.get("is_show")
+                        and _weight(a) >= 1
+                        and _digs._norm(a["name"]) not in alien
+                        and f"a:{a['name']}" not in _nudge_seen]
+                if pool:
+                    a = random.choice(pool[:30])
+                    _nudge_seen[f"a:{a['name']}"] = now
+                    return {"ok": True, "kind": "artist", "name": a["name"],
+                            "genre": a.get("genre") or "",
+                            "cover": a.get("cover") or "",
+                            "why_key": "nudge.why_known",
+                            "why_args": {"n": _weight(a)}}
+            else:
+                from ripster import digs_finds as _f
+                data = await _f.find_all(_cfg, per_kind=6)
+                items = [it for grp in (data.get("digs") or {}).values()
+                         for it in (grp or []) if it.get("url")
+                         and f"r:{it.get('url')}" not in _nudge_seen]
+                if items:
+                    it = random.choice(items)
+                    _nudge_seen[f"r:{it.get('url')}"] = now
+                    return {"ok": True, "kind": "release",
+                            "title": it.get("title") or "", "artist": it.get("artist") or "",
+                            "cover": it.get("cover") or "", "url": it.get("url") or "",
+                            # Без сервиса кнопка «включить» не знает, чем играть,
+                            # а находки Раскопок его не несут — выводим из ссылки.
+                            "service": it.get("service") or _svc_from_url(it.get("url") or ""),
+                            "why_key": it.get("reason_key") or "nudge.why_taste",
+                            "why_args": it.get("reason_args") or {}}
+        except Exception:
+            continue
+    return {"ok": False}

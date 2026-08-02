@@ -1,28 +1,30 @@
 """Похожие артисты для «Раскопок» — дерево пузырей.
 
-ИСТОЧНИК И ПОЧЕМУ ИМЕННО ОН
----------------------------
-Проверено живьём 01.08.2026:
+ИСТОЧНИКИ — НЕ ОДИН, А ВСЕ, ЧТО ОТДАЮТ ПО ДЕЛУ
+----------------------------------------------
+Одного ресурса мало: у каждого свои пробелы, и «похожих нет» чаще означает
+«этот источник не знает артиста», а не «похожих не существует». Поэтому
+опрашиваем несколько и сливаем, а имя чистим ПЕРЕД поиском — половина промахов
+была не в источнике, а в мусорной строке («Артист — Трек», «A / B», сборники).
 
-* **Deezer `/artist/{id}/related` — мёртв.** HTTP 200, но `total: 0` даже у
-  крупных артистов. Выглядит рабочим, отдаёт пустоту — на такое легко купиться.
-* **Last.fm `artist.getSimilar`** — лучший по качеству, но требует ключ, которого
-  у нас нет (заведение ключа висит на владельце).
-* **ListenBrainz `/similar-artists/json`** — бесплатно, без ключа, 100 похожих на
-  запрос. На Bonobo отдал Boards of Canada, Massive Attack, Tycho, Air,
-  Thievery Corporation, Zero 7 — по делу. Его и берём.
+  * **ListenBrainz** `/similar-artists/json` — бесплатно, без ключа, ~100 похожих.
+    На Bonobo отдаёт Boards of Canada, Massive Attack, Tycho, Air — по делу.
+    Ловушка: алгоритмов несколько, имя нужно точное; `…days_7500…` даёт 400,
+    рабочий — `…days_9000…skip_30`. Перебираем по списку.
+  * **Last.fm** `artist.getSimilar` — лучший по качеству. Работает при заданном
+    `lastfm-api-key` (бесплатный, 2 минуты на регистрацию). Нет ключа — просто
+    не участвует, остальные всё равно отвечают.
+  * **Deezer** `/artist/{id}/related` — часто пуст (`total:0`), но у мейнстрима
+    иногда отдаёт; берём как ДОПОЛНЕНИЕ, а не основу, и только если что-то есть.
 
-Ловушка алгоритма: у ListenBrainz их несколько, и имя нужно точное. Первый же
-опробованный (`…days_7500…`) отвечает **400**, рабочий — `…days_9000…skip_30`.
-Перебираем по списку, а не полагаемся на один.
-
-Вход — имя артиста, поэтому сначала MusicBrainz даёт MBID. Обе службы просят
-осмысленный User-Agent и не любят шквал, поэтому результат кладётся на диск
-надолго: похожесть артистов не меняется от недели к неделе.
+Вход — имя артиста, поэтому для ListenBrainz сначала MusicBrainz даёт MBID.
+Службы просят осмысленный User-Agent и не любят шквал, поэтому результат кладётся
+на диск надолго: похожесть артистов не меняется от недели к неделе.
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 
@@ -34,6 +36,51 @@ _TTL = 30 * 86_400          # похожесть артистов — велич
 # месяц вперёд. Так «Max Cooper» — у которого в ListenBrainz 88 похожих — на
 # месяц стал в интерфейсе артистом без данных. Промах живёт час, не месяц.
 _TTL_EMPTY = 3600
+
+_LASTFM_URL = "https://ws.audioscrobbler.com/2.0/"
+_DZ_RELATED = "https://api.deezer.com/artist/{id}/related"
+
+# Конфиг для ключа Last.fm прокидывается из app.py при старте.
+_cfg: dict = {}
+
+
+def configure(cfg: dict) -> None:
+    global _cfg
+    _cfg = cfg or {}
+
+
+def _name_candidates(name: str) -> list[str]:
+    """Из сырой строки достать реальные имена артистов для поиска.
+
+    В «Раскопки» имя приходит как есть: «Артист — Трек», «A feat. B», «A / B»,
+    «A, B & C», названия сборников. Ни один сервис такое целиком не находит —
+    отсюда «большинство не ищется». Режем на кандидатов: сначала пробуем строку
+    целиком (вдруг это и есть имя), потом первого автора, потом остальных.
+    Порядок = приоритет: первый живой ответ и берём.
+    """
+    raw = (name or "").strip()
+    if not raw:
+        return []
+    cands: list[str] = []
+
+    def _add(x: str) -> None:
+        x = x.strip(" -–—·|/.,").strip()
+        if x and x.lower() not in {c.lower() for c in cands} and len(x) > 1:
+            cands.append(x)
+
+    _add(raw)
+    # «Артист — Трек» / «Артист - Трек»: слева артист, справа название.
+    head = re.split(r"\s[–—-]\s", raw, 1)[0]
+    if head != raw:
+        _add(head)
+    # Разбить соавторов и брать каждого отдельным кандидатом.
+    base = head if head != raw else raw
+    parts = re.split(r"\s*(?:,|/|&|\bfeat\.?\b|\bft\.?\b|\bvs\.?\b|\bx\b|\bpres\.?\b|\band\b|\bwith\b)\s*",
+                     base, flags=re.I)
+    for p in parts:
+        _add(p)
+    return cands[:5]
+
 
 _MB_URL = "https://musicbrainz.org/ws/2/artist"
 _LB_URL = "https://labs.api.listenbrainz.org/similar-artists/json"
@@ -140,9 +187,92 @@ async def artist_pics(names: list[str]) -> dict:
     return {n: (cache.get(n.lower()) or {}).get("pic", "") for n in names}
 
 
+async def _listenbrainz(c, name: str, key: str) -> list[dict]:
+    """MusicBrainz → MBID → ListenBrainz similar. Лучший keyless-источник."""
+    out: list[dict] = []
+    for mbid in (await _mbids(c, name))[:3]:
+        for algo in _LB_ALGOS:
+            try:
+                r = await c.get(_LB_URL, params={"artist_mbids": mbid, "algorithm": algo})
+            except Exception:
+                continue
+            if r.status_code != 200:
+                continue
+            try:
+                data = r.json()
+            except Exception:
+                continue
+            items = data if isinstance(data, list) else (data.get("data") or [])
+            for it in items:
+                nm = (it.get("name") or it.get("artist_name") or "").strip()
+                if nm and nm.lower() != key:
+                    out.append({"name": nm, "score": int(it.get("score", 0) or 0) or 50,
+                                "mbid": it.get("artist_mbid", ""), "src": "lb"})
+            if out:
+                return out
+    return out
+
+
+async def _lastfm(c, name: str, key: str) -> list[dict]:
+    """Last.fm artist.getSimilar — лучший по качеству, но нужен бесплатный ключ."""
+    api_key = str((_cfg or {}).get("lastfm-api-key") or "").strip()
+    if not api_key:
+        return []
+    try:
+        r = await c.get(_LASTFM_URL, params={
+            "method": "artist.getsimilar", "artist": name, "autocorrect": 1,
+            "limit": 50, "api_key": api_key, "format": "json"})
+        if r.status_code != 200:
+            return []
+        arr = ((r.json() or {}).get("similarartists") or {}).get("artist") or []
+    except Exception:
+        return []
+    out = []
+    for a in arr:
+        nm = (a.get("name") or "").strip()
+        if nm and nm.lower() != key:
+            # match — доля 0..1; переводим в шкалу очков, сравнимую с LB.
+            try:
+                sc = int(float(a.get("match") or 0) * 100)
+            except (TypeError, ValueError):
+                sc = 40
+            out.append({"name": nm, "score": sc or 40,
+                        "mbid": a.get("mbid", ""), "src": "lastfm"})
+    return out
+
+
+async def _deezer_related(c, name: str, key: str) -> list[dict]:
+    """Deezer /related — часто пуст, но у мейнстрима иногда отдаёт. Дополнение."""
+    try:
+        s = await c.get(_DZ_SEARCH, params={"q": name, "limit": 1})
+        if s.status_code != 200:
+            return []
+        d0 = ((s.json() or {}).get("data") or [{}])[0]
+        if (d0.get("name") or "").strip().lower() != name.strip().lower() or not d0.get("id"):
+            return []
+        r = await c.get(_DZ_RELATED.format(id=d0["id"]))
+        if r.status_code != 200:
+            return []
+        arr = (r.json() or {}).get("data") or []
+    except Exception:
+        return []
+    out = []
+    for a in arr:
+        nm = (a.get("name") or "").strip()
+        if nm and nm.lower() != key:
+            out.append({"name": nm, "score": 30, "mbid": "", "src": "deezer"})
+    return out
+
+
 async def similar(name: str, limit: int = 12) -> list[dict]:
-    """Похожие на `name`. Пустой список — это НЕ ошибка: у малоизвестного артиста
-    данных может не быть вовсе, и врать выдуманными именами хуже, чем молчать."""
+    """Похожие на `name` из НЕСКОЛЬКИХ источников сразу.
+
+    Имя чистим до реальных кандидатов (сборники и «Артист — Трек» иначе не
+    находятся вовсе), затем опрашиваем все источники и сливаем по имени. Пустой
+    список — не ошибка: у совсем нишевого артиста данных может не быть нигде, а
+    врать выдуманными именами хуже, чем молчать.
+    """
+    import asyncio as _aio
     import httpx
 
     key = (name or "").strip().lower()
@@ -156,31 +286,42 @@ async def similar(name: str, limit: int = 12) -> list[dict]:
         if age < ttl:
             return hit.get("items", [])[:limit]
 
-    out: list[dict] = []
+    merged: dict[str, dict] = {}
     async with httpx.AsyncClient(timeout=20, headers=_UA, follow_redirects=True) as c:
-        for mbid in (await _mbids(c, name))[:3]:
-            for algo in _LB_ALGOS:
-                try:
-                    r = await c.get(_LB_URL, params={"artist_mbids": mbid, "algorithm": algo})
-                except Exception:
+        # Кандидаты по приоритету: как только на очередном что-то нашлось у всех
+        # источников — останавливаемся (не тащим соавторов, если основной ответил).
+        for cand in _name_candidates(name):
+            ck = cand.strip().lower()
+            results = await _aio.gather(
+                _listenbrainz(c, cand, ck),
+                _lastfm(c, cand, ck),
+                _deezer_related(c, cand, ck),
+                return_exceptions=True,
+            )
+            for res in results:
+                if not isinstance(res, list):
                     continue
-                if r.status_code != 200:
-                    continue
-                try:
-                    data = r.json()
-                except Exception:
-                    continue
-                items = data if isinstance(data, list) else (data.get("data") or [])
-                for it in items:
-                    nm = (it.get("name") or it.get("artist_name") or "").strip()
-                    if nm and nm.lower() != key:
-                        out.append({"name": nm, "score": int(it.get("score", 0) or 0),
-                                    "mbid": it.get("artist_mbid", "")})
-                if out:
-                    break
-            if out:
+                for it in res:
+                    k = it["name"].strip().lower()
+                    if k == key or k == ck:
+                        continue
+                    prev = merged.get(k)
+                    # Один и тот же артист из двух источников — суммируем вес:
+                    # согласие источников = более уверенная похожесть.
+                    if prev:
+                        prev["score"] = prev.get("score", 0) + it.get("score", 0)
+                        prev.setdefault("srcs", set()).add(it.get("src", ""))
+                    else:
+                        it = dict(it)
+                        it["srcs"] = {it.get("src", "")}
+                        merged[k] = it
+            if len(merged) >= max(limit, 12):
                 break
-    out.sort(key=lambda x: x["score"], reverse=True)
+
+    out = sorted(merged.values(), key=lambda x: x.get("score", 0), reverse=True)
+    for it in out:
+        it.pop("srcs", None)              # set не сериализуется в JSON
+        it.pop("src", None)
     cache[key] = {"ts": int(time.time()), "items": out[:40], "empty": not out}
     _save(cache)
     return out[:limit]

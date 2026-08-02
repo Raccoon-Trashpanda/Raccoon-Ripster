@@ -37,6 +37,7 @@ const _DIGS_RAMP_DARK  = ['#f3d08a', '#e8b45c', '#d9962e', '#c07a1c', '#9c6015',
 const _DIGS_RAMP_LIGHT = ['#e0a746', '#c9862a', '#ab6b1b', '#8c5314', '#6d3f0f', '#4e2c0a'];
 
 const _DIGS_SECTIONS = [
+  { key: 'anniversary',      t: 'digs.s_anniv'  },
   { key: 'played_not_owned', t: 'digs.s_played' },
   { key: 'missing_release',  t: 'digs.s_missing' },
   { key: 'show_guest',       t: 'digs.s_guest'  },
@@ -211,6 +212,9 @@ async function digsLoad(force) {
   try {
     _digsData = await api('GET', '/api/digs/finds' + (force ? '?force=1' : ''));
     digsRender();
+    // Тур при первом заходе — после отрисовки: подсвечивать нечего, пока
+    // находки не на экране.
+    try { digsTourMaybeAuto(); } catch (e) {}
   } catch (e) {
     const el = _dg('digs-loading');
     if (el) { el.style.display = ''; el.textContent = '✗ ' + (e.message || e); }
@@ -483,21 +487,30 @@ async function digsPickedMine(btn) {
   if (btn) btn.disabled = false;
 }
 
+// Путь по дереву: артисты, чьи пузыри уже раскрывали. Без этого второй уровень
+// повторяет первый, и «копание» ходит по кругу из тех же имён.
+let _dgTrail = [];
+
 async function digsBubbles(artist) {
   if (!artist) return;
+  if (!_dgTrail.includes(artist)) _dgTrail.push(artist);
   let ov = document.getElementById('dg-bubbles');
   if (!ov) {
     ov = document.createElement('div');
     ov.id = 'dg-bubbles';
-    ov.onclick = (e) => { if (e.target === ov) { ov.remove(); _dgPicked.clear(); } };
+    ov.onclick = (e) => { if (e.target === ov) digsBubblesClose(); };
     document.body.appendChild(ov);
   }
   ov.innerHTML = `<div class="dg-bb-wrap"><div class="dg-bb-load">${t('digs.bb_loading')}</div></div>`;
-  let items = [], corePic = '';
+  let items = [], corePic = '', freshN = 0;
   try {
-    const r = await api('GET', '/api/digs/similar?artist=' + encodeURIComponent(artist) + '&limit=12');
+    // Уже пройденные — в исключения; знакомые сервер сам уводит в конец.
+    const ex = encodeURIComponent(_dgTrail.slice(-30).join('|'));
+    const r = await api('GET', '/api/digs/similar?artist=' + encodeURIComponent(artist)
+                              + '&limit=12&exclude=' + ex);
     items = (r && r.items) || [];
     corePic = (r && r.pic) || '';
+    freshN = (r && r.fresh_count) || 0;
   } catch (e) { /* пусто — покажем честное «не нашёл» */ }
 
   if (!items.length) {
@@ -512,10 +525,13 @@ async function digsBubbles(artist) {
     // Размер несёт похожесть — пузырь остаётся данными, а не украшением.
     const sz = 54 + Math.round(34 * ((it.score || 1) / max));
     const enc = encodeURIComponent(it.name);
-    return `<div class="dg-bb${_dgPicked.has(it.name) ? ' on' : ''}"
+    // Знакомых не прячем, но и не выдаём за находку — приглушаем и подписываем.
+    const kn = it.known ? ' dg-bb-known' : '';
+    const ttl = esc(it.name) + (it.known ? ' — ' + t('digs.bb_known') : '');
+    return `<div class="dg-bb${_dgPicked.has(it.name) ? ' on' : ''}${kn}"
       style="left:calc(50% + ${Math.cos(ang) * R}px);top:calc(50% + ${Math.sin(ang) * R}px);
       width:${sz}px;height:${sz}px;animation-delay:${(i * 0.045).toFixed(2)}s"
-      title="${esc(it.name)}"
+      title="${ttl}"
       ondblclick="digsBubbles(decodeURIComponent('${enc}'))">
       ${_dgBubbleFace(it.name, it.pic, sz)}
       <span class="dg-bb-cap">${esc(it.name)}</span>
@@ -525,7 +541,7 @@ async function digsBubbles(artist) {
   }).join('');
   const encA = encodeURIComponent(artist);
   ov.innerHTML = `<div class="dg-bb-wrap">
-      <button class="dg-bb-close" onclick="document.getElementById('dg-bubbles').remove()">×</button>
+      <button class="dg-bb-close" onclick="digsBubblesClose()">×</button>
       <div class="dg-bb dg-bb-core" style="left:50%;top:50%;width:112px;height:112px">
         ${_dgBubbleFace(artist, corePic, 112)}
         <span class="dg-bb-cap">${esc(artist)}</span>
@@ -542,8 +558,17 @@ async function digsBubbles(artist) {
         <button class="dg-bb-act" onclick="digsPickedMine(this)">${t('digs.bb_mine')}</button>
         <button class="dg-bb-act" onclick="_dgPicked.clear();digsBubbles(decodeURIComponent('${encA}'))">${t('digs.picked_clear')}</button>
       </div>
-      <div class="dg-bb-hint">${t('digs.bb_hint')}</div>
+      <div class="dg-bb-hint">${ti('digs.bb_fresh', { n: freshN })} · ${t('digs.bb_hint')}</div>
     </div>`;
+}
+
+// Закрыли дерево — путь пройден заново. Иначе следующее открытие сразу
+// исключает всех, кого смотрели полчаса назад, и выдаёт пустоту.
+function digsBubblesClose() {
+  const ov = document.getElementById('dg-bubbles');
+  if (ov) ov.remove();
+  _dgTrail = [];
+  _dgPicked.clear();
 }
 
 // ── Действия над найденным артистом ───────────────────────────────────────

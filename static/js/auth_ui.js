@@ -158,6 +158,33 @@ async function showGuestServiceInfo() {
   document.body.appendChild(ov);
 }
 
+// Сообщение пробы на языке интерфейса.
+//
+// `auth.py` отвечает парой: `error`/`note` — готовый русский текст (его читают
+// телеграм-бот и healthcheck, они живут в русской среде) и `error_key`/`note_key`
+// с аргументами. Интерфейсу нужен ключ; русский текст остаётся запасным путём для
+// старого бэкенда и для ключа, которого ещё нет в словаре — `ti()` в этом случае
+// возвращает сам ключ, и показывать человеку `pr.qb_401` вместо фразы нельзя.
+// Аргумент сам может быть ключом: «расшифровка недоступна: {why}», где {why} —
+// отдельная фраза («локальный wrapper не отвечает…»). Без разворота переведён
+// был бы только каркас, а суть осталась бы русской.
+function _probeMsg(d, field){
+  const key = d && d[field + '_key'];
+  if (key) {
+    const args = Object.assign({}, d[field + '_args'] || {});
+    for (const k of Object.keys(args)) {
+      if (!k.endsWith('_key')) continue;
+      const base = k.slice(0, -4);
+      const sub = ti(args[k], args[base + '_args'] || {});
+      if (sub && sub !== args[k]) args[base] = sub;
+      delete args[k]; delete args[base + '_args'];
+    }
+    const s = ti(key, args);
+    if (s && s !== key) return s;
+  }
+  return (d && d[field]) || '';
+}
+
 // ── Token probe: show live auth status for Qobuz/Tidal/Deezer ─────────────
 async function testAuth(service){
   // Apple и Spotify показывают результат пробы в ДВУХ местах (внутри блока
@@ -204,14 +231,15 @@ async function testAuth(service){
         const left = (dl!=null) ? (u.sub_expired ? ` ${t('s.sub_expired')}` : ` · ${ti('s.sub_days',{n:dl})}`) : '';
         parts.push(`<span style="color:${col};font-weight:600">${ti('s.sub_until',{date:esc(u.sub_end)})}${left}</span>`);
       }
-      if(u.note) parts.push(`<span style="color:var(--muted)">${esc(u.note)}</span>`);
+      const _note = _probeMsg(u, 'note');
+      if(_note) parts.push(`<span style="color:var(--muted)">${esc(_note)}</span>`);
       const tag = parts.length ? ' &nbsp;' + parts.join(' · ') : '';
       const _lbl = (typeof _svcLabel === 'function' ? _svcLabel(service) : service);
       const html = `<span style="color:var(--green);font-weight:700">✓ ${esc(_lbl)} ${t('s.works')}</span>` + tag;
       if(out){ out.innerHTML = html; }
       if(liveOut){ liveOut.innerHTML = html; }
     } else {
-      const html = '<span style="color:var(--red)">✗ ' + esc(d.error || t('s.unknown_error')) + '</span>';
+      const html = '<span style="color:var(--red)">✗ ' + esc(_probeMsg(d, 'error') || t('s.unknown_error')) + '</span>';
       if(out){ out.innerHTML = html; }
       if(liveOut){ liveOut.innerHTML = html; }
     }
@@ -273,7 +301,7 @@ async function qobuzPasswordLogin() {
         + (tier ? ' · ' + esc(tier) : '') + t('au.saved_uid_token') + '</span>';
       loadTokensToUI();   // probe auto-promoted email/pass → token; refresh fields
     } else {
-      if (out) out.innerHTML = '<span style="color:var(--danger)">✗ ' + esc(d.error || t('err.generic')) + '</span>';
+      if (out) out.innerHTML = '<span style="color:var(--danger)">✗ ' + esc(_probeMsg(d, 'error') || t('err.generic')) + '</span>';
     }
   } catch(e) {
     if (out) out.innerHTML = '<span style="color:var(--danger)">' + t('au.net_pfx') + esc(e.message) + '</span>';
@@ -783,3 +811,28 @@ async function removeYandexAccount(slot) {
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(run, 1200));
   else setTimeout(run, 1200);
 })();
+
+// Выход из аккаунта сервиса. Спрашиваем подтверждение: восстановление входа
+// стоит времени (а у Apple ещё и слота устройства), поэтому случайное нажатие
+// не должно ничего стирать.
+async function logoutService(svc, btn) {
+  const name = (typeof _svcLabel === 'function' ? _svcLabel(svc) : svc);
+  if (!confirm(ti('s.logout_confirm', { name }))) return;
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const r = await api('POST', '/api/logout/' + encodeURIComponent(svc), {});
+    if (r && r.ok) {
+      toast(ti('s.logout_done', { name, n: (r.cleared || []).length }), 'var(--green)');
+      if (typeof loadTokensToUI === 'function') loadTokensToUI();
+      // Показать новое состояние сразу — иначе рядом висит старое зелёное «✓».
+      if (typeof testAuth === 'function') setTimeout(() => testAuth(svc), 300);
+    } else {
+      toast(t('t.error'), 'var(--red)');
+    }
+  } catch (e) {
+    toast('✗ ' + (e && e.message || e), 'var(--red)');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old || '🚪'; }
+  }
+}

@@ -29,21 +29,25 @@ async function loadStats(period) {
   } catch (_) { d = null; }
 
   if (httpStatus === 401 || (d && d.error === 'unauthorized')) {
-    note(window.t('st.unauth'));
+    note(t('st.unauth'));
     return;
   }
   if (!d || d.error) {
-    note(`${window.t('st.unavail')}${d && d.error ? ': ' + esc(d.error) : ''}`);
+    note(`${t('st.unavail')}${d && d.error ? ': ' + esc(d.error) : ''}`);
     return;
   }
-  const t = d.totals || {};
+  // ВАЖНО: не называть это `t` — глобальная i18n-функция тоже `t` (app.js), и
+  // локальная переменная её затеняла: все t('st…') звали объект → «t is not a
+  // function», и вся статистика падала в пустоту (была сломана с рождения:
+  // раньше это обходили через `window.t`, которого не существует).
+  const tot = d.totals || {};
 
   // ── Hero cards ──
   const hero = [
-    { icon: '⬇',  label: window.t('st.h_downloads'),     val: t.downloads,       color: 'var(--green)'  },
-    { icon: '♪',  label: window.t('st.h_tracks'),        val: t.tracks,          color: 'var(--blue)'   },
-    { icon: '🎧', label: window.t('st.h_streams'), val: t.stream_sessions, color: 'var(--red)'    },
-    { icon: '👤', label: window.t('st.h_guests'),        val: t.guests,          color: 'var(--purple)' },
+    { icon: '⬇',  label: t('st.h_downloads'),     val: tot.downloads,       color: 'var(--green)'  },
+    { icon: '♪',  label: t('st.h_tracks'),        val: tot.tracks,          color: 'var(--blue)'   },
+    { icon: '🎧', label: t('st.h_streams'), val: tot.stream_sessions, color: 'var(--red)'    },
+    { icon: '👤', label: t('st.h_guests'),        val: tot.guests,          color: 'var(--purple)' },
   ];
   set('stats-hero', hero.map(c => `
     <div class="card" style="padding:14px 16px;display:flex;align-items:center;gap:12px">
@@ -62,7 +66,7 @@ async function loadStats(period) {
     const color    = opts.color    || 'var(--green)';
     const lw       = opts.labelWidth || 120;
     if (!items || !items.length)
-      return '<div style="color:var(--muted);font-size:11px;padding:3px 0">' + window.t('st.no_data') + '</div>';
+      return '<div style="color:var(--muted);font-size:11px;padding:3px 0">' + t('st.no_data') + '</div>';
     const max = opts.max || Math.max(...items.map(r => r[countKey] || 0), 1);
     return items.map(r => {
       const pct  = Math.round((r[countKey] || 0) / max * 100);
@@ -81,12 +85,12 @@ async function loadStats(period) {
   }
 
   const STREAM_COLOR = { qobuz:'#1870f5', tidal:'#00d4b3', deezer:'#a238ff', bbc:'#e4003b', generic:'var(--muted2)' };
-  const STREAM_LABEL = { qobuz:'Qobuz', tidal:'Tidal', deezer:'Deezer', bbc:'BBC', generic:window.t('st.other') };
+  const STREAM_LABEL = { qobuz:'Qobuz', tidal:'Tidal', deezer:'Deezer', bbc:'BBC', generic:t('st.other') };
 
   // ── Listening: split tiles ──
   const splitTiles = [
-    { label: window.t('st.previews'), val: t.preview_sessions || 0, color: 'var(--green)' },
-    { label: 'BBC Sounds',    val: t.bbc_sessions || 0,     color: '#e4003b'      },
+    { label: t('st.previews'), val: tot.preview_sessions || 0, color: 'var(--green)' },
+    { label: 'BBC Sounds',    val: tot.bbc_sessions || 0,     color: '#e4003b'      },
   ].map(c => `
     <div style="background:var(--surface2);border-radius:9px;padding:10px 12px">
       <div style="font-size:20px;font-weight:800;color:${c.color};font-family:var(--mono)">${_fmt(c.val)}</div>
@@ -102,7 +106,7 @@ async function loadStats(period) {
   // ── Listening: top played ──
   const topL = d.top_streams || [];
   set('stats-listen-top', topL.length
-    ? '<div style="font-size:11px;color:var(--muted);margin-bottom:7px">' + window.t('st.top_played') + '</div>' +
+    ? '<div style="font-size:11px;color:var(--muted);margin-bottom:7px">' + t('st.top_played') + '</div>' +
       bars(topL, {
         color: r => STREAM_COLOR[r.stream_type] || 'var(--green)',
         badge: r => {
@@ -111,12 +115,12 @@ async function loadStats(period) {
           return `<div style="font-size:8px;font-weight:700;text-transform:uppercase;letter-spacing:.4px;color:${c};background:${c}22;border-radius:4px;padding:2px 6px;flex-shrink:0">${STREAM_LABEL[st] || esc(st)}</div>`;
         },
       })
-    : '<div style="color:var(--muted);font-size:11px">' + window.t('st.nothing_played') + '</div>');
+    : '<div style="color:var(--muted);font-size:11px">' + t('st.nothing_played') + '</div>');
 
   // ── Listening history — recent plays, newest first ──
   const recent = d.recent_listens || [];
   set('stats-listen-recent', recent.length
-    ? '<div style="font-size:11px;color:var(--muted);margin-bottom:7px">' + window.t('st.listen_history') + '</div>' +
+    ? '<div style="font-size:11px;color:var(--muted);margin-bottom:7px">' + t('st.listen_history') + '</div>' +
       recent.slice(0, 40).map(e => {
         const st  = e.type || 'generic';
         const c   = STREAM_COLOR[st] || 'var(--muted2)';
@@ -147,7 +151,7 @@ async function loadStats(period) {
         const pct = Math.max(Math.round((r.count || 0) / tlMax * 100), 2);
         return `<div title="${esc(r.date || '')}: ${_fmt(r.count || 0)}" style="flex:1;min-width:11px;max-width:30px;background:var(--green);border-radius:3px 3px 0 0;height:${pct}%;min-height:2px;opacity:.85"></div>`;
       }).join('')
-    : '<div style="color:var(--muted);font-size:11px">' + window.t('st.no_data') + '</div>');
+    : '<div style="color:var(--muted);font-size:11px">' + t('st.no_data') + '</div>');
   const tlStep = days.length > 30 ? Math.ceil(days.length / 10) : (days.length > 14 ? 3 : 1);
   set('stats-tl-labels', days.map((r, i) =>
     `<div style="flex:1;min-width:11px;max-width:30px;text-align:center;overflow:hidden">${i % tlStep === 0 ? esc((r.date || '').slice(5)) : ''}</div>`).join(''));
@@ -174,15 +178,15 @@ async function loadStats(period) {
   // ── Guests ──
   set('stats-guests', `
     <div style="display:flex;gap:28px;flex-wrap:wrap">
-      <div><span style="font-size:20px;font-weight:800;color:var(--purple);font-family:var(--mono)">${_fmt(t.guests || 0)}</span>
-        <span style="font-size:12px;color:var(--muted);margin-left:6px">${window.t('st.uniq_guests')}</span></div>
-      <div><span style="font-size:20px;font-weight:800;color:var(--orange);font-family:var(--mono)">${_fmt(Math.round(t.guest_minutes || 0))}</span>
-        <span style="font-size:12px;color:var(--muted);margin-left:6px">${window.t('st.min_online')}</span></div>
+      <div><span style="font-size:20px;font-weight:800;color:var(--purple);font-family:var(--mono)">${_fmt(tot.guests || 0)}</span>
+        <span style="font-size:12px;color:var(--muted);margin-left:6px">${t('st.uniq_guests')}</span></div>
+      <div><span style="font-size:20px;font-weight:800;color:var(--orange);font-family:var(--mono)">${_fmt(Math.round(tot.guest_minutes || 0))}</span>
+        <span style="font-size:12px;color:var(--muted);margin-left:6px">${t('st.min_online')}</span></div>
     </div>`);
 
   const footEl = document.getElementById('stats-footer');
-  if (footEl) footEl.textContent = window.t('st.data_for') +
-    ({ day:window.t('st.p_day'), week:window.t('st.p_week'), month:window.t('st.p_month'), year:window.t('st.p_year'), all:window.t('st.p_all') }[_statsPeriod] || _statsPeriod);
+  if (footEl) footEl.textContent = t('st.data_for') +
+    ({ day:t('st.p_day'), week:t('st.p_week'), month:t('st.p_month'), year:t('st.p_year'), all:t('st.p_all') }[_statsPeriod] || _statsPeriod);
 }
 
 function _fmt(n) {
