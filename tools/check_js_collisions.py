@@ -32,6 +32,38 @@ _INDEXES = ("static/index.html", "github_setup/static/index.html")
 _DECL = re.compile(r"^(?:let|const|class)\s+([A-Za-z_$][\w$]*)", re.M)
 _SCRIPT = re.compile(r'<script src="/static/(js/[^"?]+)')
 
+# views.js fetches a fragment for every name in _VIEW_FILES that has a matching
+# `id="view-<name>"` container in index.html. A container without a file on disk
+# is a 404 at boot — and until 08.08.2026 that killed the WHOLE app for public
+# users (Promise.all rejected → the first await in app.js's load handler threw →
+# no WebSocket, no version, black content area). Гейт против повтора.
+_VIEW_LIST = re.compile(r"_VIEW_FILES\s*=\s*\[(.*?)\]", re.S)
+_VIEW_NAME = re.compile(r"'([a-z0-9-]+)'")
+_VIEW_SLOT = re.compile(r'id="view-([a-z0-9-]+)"')
+
+
+def scan_views(index_path: Path) -> list[str]:
+    """Каждый контейнер view-* в этом index.html должен иметь файл фрагмента."""
+    problems: list[str] = []
+    root = index_path.parent
+    views_js = root / "js" / "views.js"
+    if not views_js.exists():
+        return [f"{index_path}: нет js/views.js — фрагменты не проверены"]
+    m = _VIEW_LIST.search(views_js.read_text(encoding="utf-8"))
+    if not m:
+        return [f"{views_js}: не разобрал _VIEW_FILES — фрагменты не проверены"]
+    known = set(_VIEW_NAME.findall(m.group(1)))
+    slots = _VIEW_SLOT.findall(index_path.read_text(encoding="utf-8"))
+    for name in slots:
+        if name not in known:
+            continue  # контейнер есть, но views.js его не грузит — не наша забота
+        if not (root / "views" / f"{name}.html").exists():
+            problems.append(
+                f"{index_path}: есть контейнер view-{name}, но НЕТ файла "
+                f"views/{name}.html — 404 на старте (см. ripster-frontend-file-drift)"
+            )
+    return problems
+
 
 def scan(index_path: Path) -> list[str]:
     problems: list[str] = []
@@ -58,13 +90,20 @@ def scan(index_path: Path) -> list[str]:
 
 
 def main() -> int:
+    # Вывод содержит ✗ и кириллицу: под cp1251-консолью Windows print падал
+    # UnicodeEncodeError и прятал НАЙДЕННЫЕ проблемы за трейсбеком.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     all_problems: list[str] = []
     for rel in _INDEXES:
         p = _REPO / rel
         if not p.exists():
             print(f"пропуск: нет {rel}")
             continue
-        found = scan(p)
+        found = scan(p) + scan_views(p)
         print(f"{rel}: {'ПРОБЛЕМЫ' if found else 'чисто'}")
         all_problems += found
     for line in all_problems:

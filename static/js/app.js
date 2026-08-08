@@ -673,10 +673,19 @@ window.addEventListener('load', async () => {
     try { navigator.serviceWorker.register('/static/sw.js'); } catch (e) {}
   }
   S.lang = localStorage.getItem('ripster-lang') || 'ru';
-  await _loadAllViews();
-  applyLang();
-  await loadQualities();
-  await checkSessionMode();
+  // Everything up to connectWS() runs step-guarded. These calls reach into other
+  // script files, and the public build ships fewer of them than the owner build —
+  // a single missing module or view fragment used to abort this whole handler, so
+  // the WebSocket never opened and the app sat there with a rendered sidebar, an
+  // empty body and "v—" as the version. Boot as far as possible; log what failed.
+  // (see views.js, skill ripster-frontend-file-drift)
+  const _bootStep = async (name, fn) => {
+    try { await fn(); } catch (e) { console.error('[boot] step failed:', name, e); }
+  };
+  await _bootStep('views', () => _loadAllViews());
+  await _bootStep('lang', () => applyLang());
+  await _bootStep('qualities', () => loadQualities());
+  await _bootStep('session', () => checkSessionMode());
   connectWS();
   // Seed queue from REST while WS establishes (critical on HTTPS/ngrok where
   // WSS handshake may lag, leaving the queue empty until the first init message)

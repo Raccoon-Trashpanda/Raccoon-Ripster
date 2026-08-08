@@ -287,7 +287,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "3.5.0"
+RELEASE_VERSION = "3.5.1"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -776,6 +776,17 @@ _app_auth.add_public_path("/api/ping")
 @app.get("/api/ping")
 async def _ping():
     return {"app": "ripster", "version": RELEASE_VERSION}
+
+
+@app.get("/api/selfcheck")
+async def _selfcheck(force: int = 0):
+    """Результат самопроверки связей — тот же, что печатается в консоль при
+    запуске. Интерфейс показывает его в своей консоли: отчёт, который видит
+    только тот, кто запускал из терминала, половине пользователей недоступен."""
+    from ripster import selfcheck as _sc
+    res = _sc.run(verbose=False) if force else (_sc.last() or _sc.run(verbose=False))
+    return {"ok": all(ok for _, ok, _ in res),
+            "checks": [{"name": n, "ok": ok, "detail": d} for n, ok, d in res]}
 
 
 @app.get("/api/logs/download")
