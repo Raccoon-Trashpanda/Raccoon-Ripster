@@ -7,7 +7,7 @@
 // ── Dependency updates (owner-only, Settings → О сервисе) ──────────────────
 async function loadDeps() {
   const box = document.getElementById('deps-list');
-  if (box) box.innerHTML = '⏳ Проверяю pip (может занять до минуты)…';
+  if (box) box.innerHTML = t('deps.checking');
   try {
     const r = await api('GET', '/api/admin/deps');
     const pkgs = r.packages || [];
@@ -38,11 +38,11 @@ async function loadDeps() {
 }
 async function updateDep(pkg) {
   const box = document.getElementById('deps-list');
-  if (box) box.innerHTML = '⏳ Обновляю ' + esc(pkg) + '… (до 10 мин)';
+  if (box) box.innerHTML = ti('deps.updating', {pkg: esc(pkg)});
   try {
     const r = await api('POST', '/api/admin/deps/update', { package: pkg });
     if (r.pinned) { alert(r.msg); loadDeps(); return; }
-    alert((r.ok ? '✅ ' : '⚠️ ') + pkg + ' — ' + (r.ok ? 'обновлён. Нужен рестарт app.py.' : 'не удалось, см. консоль.'));
+    alert((r.ok ? '✅ ' : '⚠️ ') + pkg + ' — ' + (r.ok ? t('deps.updated_ok') : t('deps.update_fail')));
     loadDeps();
   } catch (e) { alert('⛔ ' + (e.message || e)); loadDeps(); }
 }

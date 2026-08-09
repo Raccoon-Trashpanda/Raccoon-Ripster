@@ -89,6 +89,61 @@ def scan(index_path: Path) -> list[str]:
     return problems
 
 
+def scan_versions() -> list[str]:
+    """В ЗЕРКАЛЕ: файл изменился с последнего релиза, а `?v=` остался прежним.
+
+    Тогда у публичных пользователей в кэше останется СТАРЫЙ скрипт, правка до
+    них не доедет, и по логам это неотличимо от «не помогло».
+
+    Сравниваем каждое дерево САМО С СОБОЙ во времени (рабочая копия против
+    опубликованного HEAD), а не одно дерево с другим: публичная и owner-сборка
+    намеренно расходятся (в публичке нет ключей бота, гостей и админки), и
+    сверка их содержимого давала бы вечный красный — а вечно красную проверку
+    перестают читать.
+    """
+    import subprocess
+
+    mir = _REPO / "github_setup"
+    idx = mir / "static/index.html"
+    if not (mir / ".git").exists() or not idx.exists():
+        return []
+
+    def head(path_rel: str) -> bytes | None:
+        try:
+            r = subprocess.run(["git", "-C", str(mir), "show", f"HEAD:{path_rel}"],
+                               capture_output=True, timeout=30)
+            return r.stdout if r.returncode == 0 else None
+        except Exception:
+            return None
+
+    rx = re.compile(r"/static/(js|css)/([\w.]+)\?v=(\d+)")
+    now_idx = idx.read_text(encoding="utf-8")
+    old_idx_b = head("static/index.html")
+    if old_idx_b is None:
+        return []
+    old_idx = old_idx_b.decode("utf-8", "replace")
+    old_v = {m.group(2): m.group(3) for m in rx.finditer(old_idx)}
+
+    problems: list[str] = []
+    for m in rx.finditer(now_idx):
+        kind, name, v = m.group(1), m.group(2), m.group(3)
+        rel = f"static/{kind}/{name}"
+        cur = (mir / rel).read_bytes() if (mir / rel).exists() else None
+        was = head(rel)
+        if cur is None or was is None:
+            continue
+        # Сравниваем БЕЗ учёта перевода строк. На Windows autocrlf хранит blob с
+        # LF, а рабочее дерево — с CRLF, и побайтовое сравнение объявляло КАЖДЫЙ
+        # файл «изменённым» → 18 из 20 флагов были ложными (09.08.2026). Кэш
+        # публичных пользователей от CRLF не зависит: файл идентичен по
+        # содержанию. Нормализуем, иначе прибор врёт про каждый релиз.
+        if cur.replace(b"\r\n", b"\n") != was.replace(b"\r\n", b"\n") and old_v.get(name) == v:
+            problems.append(
+                f"зеркало/{name}: файл изменён с прошлого релиза, а ?v={v} тот же — "
+                f"у публичных пользователей останется старый из кэша")
+    return problems
+
+
 def main() -> int:
     # Вывод содержит ✗ и кириллицу: под cp1251-консолью Windows print падал
     # UnicodeEncodeError и прятал НАЙДЕННЫЕ проблемы за трейсбеком.
@@ -106,6 +161,7 @@ def main() -> int:
         found = scan(p) + scan_views(p)
         print(f"{rel}: {'ПРОБЛЕМЫ' if found else 'чисто'}")
         all_problems += found
+    all_problems += scan_versions()
     for line in all_problems:
         print("  ✗ " + line)
     if all_problems:

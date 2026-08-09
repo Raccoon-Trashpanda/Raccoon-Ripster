@@ -233,7 +233,7 @@ async function cxRun(){
   if(!dir){ toast(t('cd.pick_or'),'var(--red)'); return; }
   const act = cxAction(), fmt = cxFmt();
   const btn = document.getElementById('coder-run'), out = document.getElementById('coder-result');
-  btn.disabled = true; const _t = btn.textContent; btn.textContent = (window.t?t('cd.working'):'Работаю…'); out.textContent='';
+  btn.disabled = true; const _t = btn.textContent; btn.textContent = (window.t?t('cd.working'):'Working…'); out.textContent='';
   const _stopBtn = document.getElementById('coder-stop'); if(_stopBtn) _stopBtn.disabled = false;
   try{
     let r;
@@ -265,7 +265,7 @@ async function cxRun(){
       out.innerHTML = `<span style="color:var(--green)">✓ ${t('cd.retagged_word')} ${r.retagged}</span> · <span style="color:var(--muted)">${ti('cd.checked_skipped',{c:r.checked,s:r.skipped})}</span>`;
     }
     if(r && r.cancelled){
-      const msg = window.t ? t('cd.stopped') : 'Остановлено';
+      const msg = window.t ? t('cd.stopped') : 'Stopped';
       out.innerHTML = `<span style="color:var(--orange)">⏹ ${esc(msg)}</span>` +
         (r.converted ? ` · ${r.converted} ${t('cd.done_before_cancel')}` : '');
       toast(t('cd.stop_c')+msg,'var(--orange)');
@@ -286,8 +286,8 @@ async function cxStop(){
   try{ await api('POST','/api/coder/cancel',{}); }
   catch(e){ /* no-op: nothing running is fine */ }
   const lbl = document.getElementById('coder-plabel');
-  if(lbl) lbl.textContent = window.t ? t('cd.stopped') : 'Остановлено';
-  setTimeout(()=>{ if(sb){ sb.disabled=false; sb.textContent = window.t?t('cd.stop'):'⏹ Стоп'; } }, 1500);
+  if(lbl) lbl.textContent = window.t ? t('cd.stopped') : 'Stopped';
+  setTimeout(()=>{ if(sb){ sb.disabled=false; sb.textContent = window.t?t('cd.stop'):'⏹ Stop'; } }, 1500);
 }
 function coderFmtChange() {
   const fmt = document.getElementById('coder-fmt').value;
@@ -401,7 +401,7 @@ async function coderPickFolder() {
     const p = await api('POST','/api/coder/preview',{dir});
     if(p.ok){
       document.getElementById('coder-srcinfo').innerHTML =
-        `${p.count} ${t('cd.tracks_word')} · ${p.codec||p.source_ext} ${p.lossless?'<span style="color:var(--green)">lossless</span>':'<span style="color:var(--orange)">lossy</span>'}`;
+        `${p.count} ${t('cd.tracks_word')} · ${escapeHtml(p.codec||p.source_ext)} ${p.lossless?'<span style="color:var(--green)">lossless</span>':'<span style="color:var(--orange)">lossy</span>'}`;
       const nm = document.getElementById('coder-name'); if(nm) nm.value = p.name||'';
     }
   } catch(e){}
@@ -486,13 +486,13 @@ function taggerPickFolder() {
   if(f) document.getElementById('tag-path').value = f.dir;
 }
 function _tagCell(v, minw=90) {
-  return `<input value="${(v||'').replace(/"/g,'&quot;')}" style="width:100%;min-width:${minw}px;background:transparent;border:1px solid transparent;border-radius:4px;color:var(--text);font-size:12px;padding:3px 5px" onfocus="this.style.borderColor='var(--border2)'" onblur="this.style.borderColor='transparent'"/>`;
+  return `<input value="${escapeHtml(v||'')}" style="width:100%;min-width:${minw}px;background:transparent;border:1px solid transparent;border-radius:4px;color:var(--text);font-size:12px;padding:3px 5px" onfocus="this.style.borderColor='var(--border2)'" onblur="this.style.borderColor='transparent'"/>`;
 }
 function _tagRender() {
   const tb = document.getElementById('tag-tbody');
   if(!_tagRows.length){ tb.innerHTML = '<tr><td colspan="9" style="padding:18px;text-align:center;color:var(--muted)">'+t('cd.empty_word')+'</td></tr>'; return; }
   tb.innerHTML = _tagRows.map((r,i)=>`<tr data-i="${i}" style="border-top:1px solid var(--border)">
-    <td style="padding:3px 8px;color:var(--muted)">${r.track||i+1}</td>
+    <td style="padding:3px 8px;color:var(--muted)">${escapeHtml(r.track||i+1)}</td>
     <td style="padding:3px 8px;color:var(--muted);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc((r.subdir?r.subdir+'/':'')+r.file)}">${r.subdir?`<span style="color:#5ec8e0">${esc(r.subdir)}/</span>`:''}${esc(r.file)}</td>
     <td style="padding:3px 4px" class="tc-title">${_tagCell(r.title)}</td>
     <td style="padding:3px 4px" class="tc-artist">${_tagCell(r.artist)}</td>
@@ -533,7 +533,7 @@ async function taggerFetchAlbum() {
            ${mism?`<span style="color:var(--orange)">⚠ ${ti('cd.files_loaded',{n:_tagRows.length})}</span>`:`<span style="color:var(--green)">✓ ${ti('cd.matches_files',{n:_tagRows.length})}</span>`}
          </div>` +
         tracks.map(t=>`<div style="display:flex;gap:8px;padding:3px 10px;font-size:11px;border-top:1px solid var(--border)">
-          <span style="color:var(--muted);min-width:22px;text-align:right">${t.num||''}</span>
+          <span style="color:var(--muted);min-width:22px;text-align:right">${escapeHtml(t.num||'')}</span>
           <span style="color:var(--text);flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.title||'')}</span>
           <span style="color:var(--muted);max-width:42%;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;text-align:right">${esc(t.artist||'')}</span>
         </div>`).join('');

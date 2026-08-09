@@ -508,7 +508,7 @@ async function downloadAndPlayApple(url, album, artist, cover, total) {
     }
     if (tries > 60) {           // ~3 мин ждём папку — дальше сдаёмся молча
       _liveOverlay(null);
-      toast(t('lib.mix_fail') + 'папка не появилась', 'var(--orange)', '', 4000);
+      toast(t('lib.mix_fail') + t('lib.mix_no_folder'), 'var(--orange)', '', 4000);
       return;
     }
     setTimeout(waitFolder, 3000);
@@ -939,7 +939,7 @@ async function uploadToCloud(taskId, btn) {
         document.body.appendChild(el);
         return el;
       })();
-      bar.innerHTML = `☁ <span style="word-break:break-all">${esc(res.url)}</span> <button onclick="navigator.clipboard.writeText('${esc(res.url)}').then(()=>{this.textContent='✓'});this.textContent='📋'" style="background:#2a3550;border:1px solid #3a4460;border-radius:4px;color:#7c9fff;cursor:pointer;padding:3px 8px;font-size:12px">📋 Копировать</button>`;
+      bar.innerHTML = `☁ <span style="word-break:break-all">${esc(res.url)}</span> <button onclick="navigator.clipboard.writeText('${esc(res.url)}').then(()=>{this.textContent='✓'});this.textContent='📋'" style="background:#2a3550;border:1px solid #3a4460;border-radius:4px;color:#7c9fff;cursor:pointer;padding:3px 8px;font-size:12px">📋 ${t('t.copy')}</button>`;
       bar.style.display = 'flex';
       setTimeout(() => { bar.style.display = 'none'; }, 18000);
     } else {

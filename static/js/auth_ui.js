@@ -571,7 +571,7 @@ async function addDeezerAccount() {
   try {
     const r = await api('POST', '/api/deezer/accounts/add', {arl, label});
     if(r.ok) {
-      toast(r.msg || 'Добавлено', 'var(--green)');
+      toast(r.msg || t('t.added'), 'var(--green)');
       if(arlEl) arlEl.value = '';
       if(labelEl) labelEl.value = '';
       loadDeezerAccounts();
@@ -585,7 +585,7 @@ async function removeDeezerAccount(slot) {
   if(!confirm('Убрать этот аккаунт из пула?')) return;
   try {
     const r = await api('POST', `/api/deezer/accounts/${slot}/remove`);
-    toast(r.msg || (r.ok ? 'Убрано' : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
     loadDeezerAccounts();
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
 }
@@ -622,7 +622,7 @@ async function addQobuzAccount() {
   try {
     const r = await api('POST', '/api/qobuz/accounts/add', {user_id, auth_token, email, password, label});
     if(r.ok) {
-      toast(r.msg || 'Добавлено', 'var(--green)');
+      toast(r.msg || t('t.added'), 'var(--green)');
       [uidEl, tokEl, emailEl, passEl, labelEl].forEach(el => { if(el) el.value = ''; });
       loadQobuzAccounts();
     } else {
@@ -635,7 +635,7 @@ async function removeQobuzAccount(slot) {
   if(!confirm('Убрать этот аккаунт из пула?')) return;
   try {
     const r = await api('POST', `/api/qobuz/accounts/${slot}/remove`);
-    toast(r.msg || (r.ok ? 'Убрано' : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
     loadQobuzAccounts();
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
 }
@@ -673,7 +673,7 @@ async function addAppleAccount() {
   try {
     const r = await api('POST', '/api/wrapper/accounts/add', {id, password, label});
     if(r.ok) {
-      toast(r.msg || 'Добавлено', 'var(--green)');
+      toast(r.msg || t('t.added'), 'var(--green)');
       [emailEl, passEl, labelEl].forEach(el => { if(el) el.value = ''; });
       loadAppleAccounts();
     } else {
@@ -686,7 +686,7 @@ async function removeAppleAccount(slot) {
   if(!confirm('Убрать этот аккаунт из пула? Его Docker-контейнер будет остановлен.')) return;
   try {
     const r = await api('POST', `/api/wrapper/accounts/${slot}/remove`);
-    toast(r.msg || (r.ok ? 'Убрано' : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
     loadAppleAccounts();
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
 }
@@ -717,7 +717,7 @@ async function addSoundcloudAccount() {
   try {
     const r = await api('POST', '/api/soundcloud/accounts/add', {token, label});
     if(r.ok) {
-      toast(r.msg || 'Добавлено', 'var(--green)');
+      toast(r.msg || t('t.added'), 'var(--green)');
       [tokEl, labelEl].forEach(el => { if(el) el.value = ''; });
       loadSoundcloudAccounts();
     } else {
@@ -730,7 +730,7 @@ async function removeSoundcloudAccount(slot) {
   if(!confirm('Убрать этот аккаунт из пула?')) return;
   try {
     const r = await api('POST', `/api/soundcloud/accounts/${slot}/remove`);
-    toast(r.msg || (r.ok ? 'Убрано' : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
     loadSoundcloudAccounts();
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
 }
@@ -761,7 +761,7 @@ async function addYandexAccount() {
   try {
     const r = await api('POST', '/api/yandex/accounts/add', {token, label});
     if(r.ok) {
-      toast(r.msg || 'Добавлено', 'var(--green)');
+      toast(r.msg || t('t.added'), 'var(--green)');
       [tokEl, labelEl].forEach(el => { if(el) el.value = ''; });
       loadYandexAccounts();
     } else {
@@ -774,7 +774,7 @@ async function removeYandexAccount(slot) {
   if(!confirm('Убрать этот аккаунт из пула?')) return;
   try {
     const r = await api('POST', `/api/yandex/accounts/${slot}/remove`);
-    toast(r.msg || (r.ok ? 'Убрано' : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
     loadYandexAccounts();
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
 }

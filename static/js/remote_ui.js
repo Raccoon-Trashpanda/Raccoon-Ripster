@@ -17,7 +17,7 @@ function updateRemoteUI(enabled, publicUrl, activeSessions) {
     pill.style.background = enabled ? 'rgba(34,197,94,.15)' : 'rgba(252,60,68,.15)';
     pill.style.color      = enabled ? '#22c55e' : 'var(--red)';
   }
-  if (cnt) cnt.textContent = activeSessions > 0 ? `${activeSessions} ${t('remote.sessions')||'активных сессий'}` : '';
+  if (cnt) cnt.textContent = activeSessions > 0 ? `${activeSessions} ${t('remote.sessions')||'active'}` : '';
   if (startBtn) startBtn.style.display = enabled ? 'none'  : '';
   if (stopBtn)  stopBtn.style.display  = enabled ? '' : 'none';
   if (urlInput && publicUrl) urlInput.value = publicUrl;
