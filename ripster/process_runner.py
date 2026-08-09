@@ -290,6 +290,12 @@ class ProcessRunner:
                         if ev.current is not None: progress = (ev.current, progress[1])
                         if ev.total   is not None: progress = (progress[0], ev.total)
                     yield ev
+                if self._engine_wants_abort():
+                    yield Event(kind=EventKind.LINE, level=LineLevel.ERROR,
+                                message=f"⛔ Прогон прерван: {self.engine.abort_reason}",
+                                extra={"msg_key": "console.run_aborted",
+                                       "params": {"reason": self.engine.abort_reason}})
+                    break
 
             # Wait for process to actually exit, but not forever.
             await self._shutdown()
@@ -382,6 +388,12 @@ class ProcessRunner:
                         if ev.current is not None: progress = (ev.current, progress[1])
                         if ev.total   is not None: progress = (progress[0], ev.total)
                     yield ev
+                if self._engine_wants_abort():
+                    yield Event(kind=EventKind.LINE, level=LineLevel.ERROR,
+                                message=f"⛔ Прогон прерван: {self.engine.abort_reason}",
+                                extra={"msg_key": "console.run_aborted",
+                                       "params": {"reason": self.engine.abort_reason}})
+                    break
         finally:
             if self._popen and self._popen.poll() is None:
                 try:
@@ -408,6 +420,22 @@ class ProcessRunner:
                 self._popen.terminate()
             except Exception:
                 pass
+
+    def _engine_wants_abort(self) -> bool:
+        """Движок просит прекратить прогон досрочно.
+
+        Зачем понадобилось (08.08.2026): у AMD есть отсечка «в публичном пуле
+        нет живых инстансов», но она лишь помечала маршрут больным ДЛЯ СЛЕДУЮЩИХ
+        задач, а текущий прогон продолжался. Альбом Apparat молотил 19 минут,
+        оставил 553 строки «no healthy and ready» и НОЛЬ файлов — при том, что
+        исход был известен на первой минуте.
+
+        Договор простой: движок ставит себе `abort_reason` строкой, раннер
+        видит её после разбора очередной строки, объявляет причину и глушит
+        процесс штатной остановкой в `finally`. Отдельного события не заводим —
+        `FATAL` раннер генерирует сам для своих случаев, и смешивать не стоит.
+        """
+        return bool(getattr(self.engine, "abort_reason", ""))
 
     async def _shutdown(self) -> None:
         """Escalating shutdown: terminate → wait(grace) → kill → wait.

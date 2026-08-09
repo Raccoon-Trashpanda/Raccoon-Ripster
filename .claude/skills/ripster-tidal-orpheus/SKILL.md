@@ -1,3 +1,17 @@
+---
+name: ripster-tidal-orpheus
+description: >
+  Tidal в Ripster качается через вендоренный OrpheusDL, и его «сессия
+  недействительна — переавторизуйся» ВРЁТ: сообщение появляется при живой,
+  непросроченной TV-сессии, потому что модуль на старте валидирует ещё и
+  мобильные типы сессий, которых наш вход не заводит, и падение одной роняет
+  инициализацию целиком. Переавторизация не помогает — лечится настройкой
+  enable_mobile. Читать при «Tidal: сессия недействительна», «переавторизуйся, а
+  не помогает», при дублях в выдаче Tidal и перед правкой ripster/engines/tidal.py
+  или orpheus/modules/tidal. Триггеры — «Tidal не качает», «session invalid»,
+  «loginstorage.bin», «Quick Login», «enable_mobile», «OrpheusDL».
+---
+
 # Tidal (OrpheusDL) — session-invalid diagnosis
 
 Tidal downloads go through the vendored `orpheus/` OrpheusDL tree via `ripster/engines/tidal.py`.

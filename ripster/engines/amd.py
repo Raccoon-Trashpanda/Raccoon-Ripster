@@ -27,7 +27,22 @@ _RE_CONN_FAIL   = re.compile(r"Unable to connect|UNAVAILABLE|connection refused"
 # The gRPC channel to wm.wol.moe opens fine but the pool has nobody connected —
 # a volunteer-hosted-instance problem, distinct from _RE_CONN_FAIL (which means
 # we couldn't even reach the server). See apple_router.mark_public_wrapper_unhealthy.
-_RE_NO_INSTANCES = re.compile(r"no healthy and ready instances available", re.I)
+# 08.08.2026: требовать ФРАЗУ ЦЕЛИКОМ было нельзя — целиком она не приходит НИ
+# РАЗУ. AMD печатает её не сама: она приезжает внутри repr'а tenacity
+# (`RetryCallState …: attempt #8; last result: failed (WrapperManagerException no
+# healthy and ready…`), а он обрезан по фиксированной ширине ровно перед
+# «instances available». За всю историю console.log полная фраза встречается 0
+# раз, обрезанная — сотнями. Гейт не срабатывал никогда с момента написания:
+# 08.08 пул лежал, роутер продолжал слать туда, альбом молотил 24 минуты вместо
+# ~28 секунд. Ловим по устойчивому префиксу + по имени самого исключения.
+_RE_NO_INSTANCES = re.compile(
+    r"no healthy and ready instances|WrapperManagerException", re.I)
+
+# Сколько строк «пул пуст» терпим, прежде чем прекратить прогон. Одна tenacity-
+# попытка печатает несколько таких строк, восемь попыток на трек — десятки.
+# 25 — это заведомо больше одного невезучего трека, но кратно меньше тех 553,
+# что набежали за 19 минут 08.08.2026.
+_NO_INSTANCES_LIMIT = 25
 _RE_DONE        = re.compile(r"All done|Finished", re.I)
 _RE_PROGRESS    = re.compile(r"Track\s+(\d+)[/ ]+(\d+)|(\d+)[/ ]+(\d+)\s+tracks?", re.I)
 # AMD log format: "[809978] 2026-05-29 11:17:29.573 | SONG | <title> | INFO - Start ripping..."
@@ -68,6 +83,10 @@ class AMDEngine(EngineBase):
     def __init__(self):
         self._conn_hint_shown = False
         self._no_instances_hint_shown = False
+        self._no_instances_lines = 0
+        # Раннер читает это поле после каждой строки и глушит процесс, если
+        # оно непустое (см. ProcessRunner._engine_wants_abort).
+        self.abort_reason = ""
         self._song_started = 0
         self._song_saved = 0
         self._song_total = 0     # real album track count (from amd_runner tracklist)
@@ -122,6 +141,7 @@ class AMDEngine(EngineBase):
         # a ~28s guaranteed-fail retry loop. Show the hint once per task run
         # (the retry itself logs this line many times per attempt).
         if _RE_NO_INSTANCES.search(clean):
+            self._no_instances_lines += 1
             if not self._no_instances_hint_shown:
                 self._no_instances_hint_shown = True
                 from ripster.apple_router import mark_public_wrapper_unhealthy
@@ -132,6 +152,21 @@ class AMDEngine(EngineBase):
                                     "сервис) — временно исключён из роутинга",
                             level=LineLevel.WARN,
                             extra={"msg_key": "console.amd_no_instances"})
+            # Пометки маршрута мало: она бережёт СЛЕДУЮЩИЕ задачи, а текущая
+            # продолжала перебирать треки по мёртвому пулу. 08.08.2026 альбом
+            # Apparat так шёл 19 минут: 553 строки «no healthy and ready» и ноль
+            # файлов. Прерываем, но не по первой строке — пул иногда оживает
+            # посреди прогона, и убивать наполовину рабочую загрузку нельзя.
+            # Условие: порог строк И НИ ОДНОГО сохранённого трека. Как только
+            # хоть что-то скачалось, отсечка молчит до конца прогона.
+            if self._no_instances_lines >= _NO_INSTANCES_LIMIT and not self._song_saved:
+                if not self.abort_reason:
+                    self.abort_reason = (
+                        "публичный wrapper-manager пуст — за "
+                        f"{self._no_instances_lines} попыток не скачано ничего. "
+                        "Возьми релиз локальным wrapper'ом или повтори позже: "
+                        "пул поднимается сам, обычно в пределах часа."
+                    )
             return
 
         # Connection failure — show hint once per task run
@@ -163,6 +198,21 @@ class AMDEngine(EngineBase):
             return
         elif _RE_RUNNER_SAVED.search(clean) or _RE_SONG_SAVED.search(clean):
             self._song_saved += 1
+            # Публичный пул реально отдал трек — снимаем защёлку и сообщаем об
+            # этом ОДИН раз. Владелец просил именно так: выключенный по факту
+            # отказа, он должен возвращаться в строй тоже по факту, а не по
+            # таймеру, и человек должен об этом узнать.
+            if self._song_saved == 1:
+                try:
+                    from ripster.apple_router import mark_public_wrapper_healthy
+                    if mark_public_wrapper_healthy():
+                        yield Event(kind=EventKind.LINE,
+                                    message="✅ Публичный wrapper-manager снова отдаёт треки — "
+                                            "снова участвует в маршрутизации",
+                                    level=LineLevel.WARN,
+                                    extra={"msg_key": "console.amd_pool_recovered"})
+                except Exception:
+                    pass
             total = self._song_total or max(self._song_started, self._song_saved)
             if total > 0:
                 yield Event(kind=EventKind.PROGRESS, current=min(self._song_saved, total), total=total)

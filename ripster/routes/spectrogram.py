@@ -370,8 +370,53 @@ def _spec_font(size: int, bold: bool = False):
         return ImageFont.load_default()
 
 
+# ── стили спектрограммы ───────────────────────────────────────────────────────
+# Раньше вид был зашит намертво (plasma / combined / cbrt). Гостю бота больше
+# понравился «соксовый» вид — два канала раздельно, огненная палитра, — и
+# спорить тут не с чем: это дело вкуса, а не правильности. Поэтому набор
+# пресетов, из которых человек выбирает один раз, глядя на СВОЙ трек.
+#
+# SoX в системе нет, поэтому «соксовый» вид собран средствами ffmpeg:
+# mode=separate даёт два канала друг над другом, fire/magma — ту самую палитру.
+# `id` уходит в конфиг и в кнопки бота — не переименовывать без миграции.
+SPEC_STYLES: dict[str, dict] = {
+    "ripster": {
+        "label_ru": "Ripster — плазма",
+        "label_en": "Ripster — plasma",
+        "args": {"mode": "combined", "color": "plasma", "scale": "cbrt", "gain": "2"},
+    },
+    "sox": {
+        "label_ru": "SoX — два канала, огонь",
+        "label_en": "SoX — dual channel, fire",
+        "args": {"mode": "separate", "color": "fire", "scale": "log", "gain": "2"},
+        "tall": True,          # два канала — нужен двойной холст
+    },
+    "magma": {
+        "label_ru": "Магма — контрастная",
+        "label_en": "Magma — high contrast",
+        "args": {"mode": "combined", "color": "magma", "scale": "log", "gain": "3"},
+    },
+    "mono": {
+        "label_ru": "Монохром — для отлова обрезки",
+        "label_en": "Monochrome — cutoff hunting",
+        "args": {"mode": "combined", "color": "intensity", "scale": "log", "gain": "4"},
+    },
+    "cool": {
+        "label_ru": "Холодная — мягкая",
+        "label_en": "Cool — soft",
+        "args": {"mode": "combined", "color": "cool", "scale": "cbrt", "gain": "2"},
+    },
+}
+DEFAULT_STYLE = "ripster"
+
+
+def style_label(style_id: str, lang: str = "ru") -> str:
+    st = SPEC_STYLES.get(style_id) or SPEC_STYLES[DEFAULT_STYLE]
+    return st["label_ru" if lang == "ru" else "label_en"]
+
+
 def _generate_spectrogram(src_path: str, out_png: str, duration: float = 0,
-                          sample_rate_hz: int = 0) -> None:
+                          sample_rate_hz: int = 0, style: str = DEFAULT_STYLE) -> None:
     """Render the raw spectrum via ffmpeg (no built-in legend/branding), then
     draw Ripster's own axis frame around it with PIL. ffmpeg's legend=1 prints
     "CREATED BY LIBAVFILTER" into the image itself — third-party attribution
@@ -379,17 +424,21 @@ def _generate_spectrogram(src_path: str, out_png: str, duration: float = 0,
     W x H, no letterboxing) and own the chrome around them instead."""
     from PIL import Image, ImageDraw
 
+    st = SPEC_STYLES.get(style) or SPEC_STYLES[DEFAULT_STYLE]
+    a = st["args"]
     w = min(max(int((duration or 120) * 6), 800), 1400)
-    h = 512
+    # mode=separate рисует каналы друг над другом — при той же высоте каждый
+    # сжимается вдвое и картинка становится нечитаемой. Даём двойную высоту.
+    h = 1024 if st.get("tall") else 512
 
     cmd = [
         "ffmpeg", "-y", "-i", src_path,
         "-lavfi", (
             f"showspectrumpic=s={w}x{h}"
-            ":mode=combined"
-            ":color=plasma"
-            ":scale=cbrt"
-            ":gain=2"
+            f":mode={a['mode']}"
+            f":color={a['color']}"
+            f":scale={a['scale']}"
+            f":gain={a['gain']}"
             ":legend=0"
         ),
         "-frames:v", "1",
@@ -401,6 +450,7 @@ def _generate_spectrogram(src_path: str, out_png: str, duration: float = 0,
         raise RuntimeError(result.stderr.decode(errors="replace")[-400:])
 
     nyquist = (sample_rate_hz / 2) if sample_rate_hz else 0
+    separate = a["mode"] == "separate"
     pad_l, pad_t, pad_r, pad_b = 64, 20, 16, 36
 
     spectrum = Image.open(out_png).convert("RGB")
@@ -415,14 +465,34 @@ def _generate_spectrogram(src_path: str, out_png: str, duration: float = 0,
     font_wm = _spec_font(11, bold=True)
 
     # Frequency axis (left) — 0 Hz at bottom, Nyquist at top, linear.
+    #
+    # При mode=separate каналы нарисованы ДРУГ НАД ДРУГОМ, и каждый занимает
+    # свою половину высоты со своей полной шкалой 0..Nyquist. Одна сквозная
+    # шкала на всю картинку в этом случае просто врёт: подпись «5k» указывала
+    # бы в середину нижнего канала на частоту, которой там нет. Рисуем шкалу
+    # для каждой панели отдельно.
+    panels = 2 if separate else 1
     if nyquist:
-        for hz in _nice_ticks(nyquist, target_count=7):
-            y = pad_t + h - int((hz / nyquist) * h)
-            y = max(pad_t, min(pad_t + h, y))
-            gdraw.line([(pad_l, y), (pad_l + w, y)], fill=_SPEC_GRID, width=1)
-            label = "0" if hz == 0 else f"{hz/1000:g}k"
-            tw = draw.textlength(label, font=font)
-            draw.text((pad_l - tw - 8, y - 6), label, fill=_SPEC_MUTED, font=font)
+        ticks = _nice_ticks(nyquist, target_count=7 if panels == 1 else 4)
+        ph = h // panels
+        for p in range(panels):
+            top = pad_t + p * ph
+            for hz in ticks:
+                y = top + ph - int((hz / nyquist) * ph)
+                y = max(top, min(top + ph, y))
+                gdraw.line([(pad_l, y), (pad_l + w, y)], fill=_SPEC_GRID, width=1)
+                label = "0" if hz == 0 else f"{hz/1000:g}k"
+                tw = draw.textlength(label, font=font)
+                draw.text((pad_l - tw - 8, y - 6), label, fill=_SPEC_MUTED, font=font)
+        if panels == 2:
+            # Подписать, где какой канал — иначе непонятно, что это два канала,
+            # а не один растянутый.
+            for p, name in enumerate(("L", "R")):
+                draw.text((pad_l + 6, pad_t + p * ph + 6), name,
+                          fill=_SPEC_MUTED, font=font_wm)
+            # Явная граница между каналами.
+            ymid = pad_t + ph
+            draw.line([(pad_l, ymid), (pad_l + w, ymid)], fill=_SPEC_BG, width=2)
 
     # Time axis (bottom) — 0s at left, duration at right, linear.
     if duration:
@@ -445,7 +515,32 @@ def _generate_spectrogram(src_path: str, out_png: str, duration: float = 0,
     canvas.save(out_png)
 
 
-def _analyze(path: str, lang: str = "ru") -> dict:
+def _render_styles(path: str, duration: float, sr: int, styles: list[str]) -> dict:
+    """Отрисовать ОДИН и тот же трек несколькими стилями → {id: base64 PNG}.
+
+    Нужно для выбора: человек сравнивает варианты на своей музыке, а не на
+    чужом эталоне — по чужому треку непонятно, что именно ты выбираешь.
+    """
+    out: dict[str, str] = {}
+    for sid in styles:
+        if sid not in SPEC_STYLES:
+            continue
+        png = f"{path}_spec_{sid}.png"
+        try:
+            _generate_spectrogram(path, png, duration, sr, style=sid)
+            out[sid] = base64.b64encode(Path(png).read_bytes()).decode()
+        except Exception as e:
+            print(f"[spectrogram] style {sid} failed: {e}", flush=True)
+        finally:
+            try:
+                os.unlink(png)
+            except OSError:
+                pass
+    return out
+
+
+def _analyze(path: str, lang: str = "ru", style: str = DEFAULT_STYLE,
+             all_styles: bool = False) -> dict:
     info = _probe_info(path)
 
     fp: dict = {}
@@ -459,11 +554,19 @@ def _analyze(path: str, lang: str = "ru") -> dict:
         fp = {}
     verdict_key, verdict_text = _verdict_with_fingerprint(info, path, fp, lang)
 
+    dur, sr = info.get("duration_sec", 0), info.get("sample_rate_hz", 0)
+
+    # Режим выбора: отдаём ВСЕ стили на этом же треке, чтобы человек сравнил на
+    # своей музыке. Дороже (пять рендеров), поэтому только один раз — пока стиль
+    # не выбран.
+    variants: dict = {}
+    if all_styles:
+        variants = _render_styles(path, dur, sr, list(SPEC_STYLES))
+
     out_png  = path + "_spec.png"
     img_data = ""
     try:
-        _generate_spectrogram(path, out_png, info.get("duration_sec", 0),
-                              info.get("sample_rate_hz", 0))
+        _generate_spectrogram(path, out_png, dur, sr, style=style)
         img_data = base64.b64encode(Path(out_png).read_bytes()).decode()
     finally:
         try:
@@ -477,6 +580,8 @@ def _analyze(path: str, lang: str = "ru") -> dict:
         "verdict":      verdict_key,
         "verdict_text": verdict_text,
         "image":        img_data,
+        "style":        style if style in SPEC_STYLES else DEFAULT_STYLE,
+        **({"variants": variants} if variants else {}),
     }
 
 
@@ -504,8 +609,18 @@ async def analyze_by_path(req: PathRequest):
         raise HTTPException(500, str(e))
 
 
+@router.get("/api/spectrogram/styles")
+async def list_styles(lang: str = "ru"):
+    """Доступные стили — для кнопок выбора в боте и в интерфейсе."""
+    return {"default": DEFAULT_STYLE,
+            "styles": [{"id": sid, "label": style_label(sid, lang)}
+                       for sid in SPEC_STYLES]}
+
+
 @router.post("/api/spectrogram/upload")
-async def analyze_upload(file: UploadFile = File(...), lang: str = Form("ru")):
+async def analyze_upload(file: UploadFile = File(...), lang: str = Form("ru"),
+                         style: str = Form(DEFAULT_STYLE),
+                         all_styles: bool = Form(False)):
     allowed_exts = {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".wav",
                     ".aif", ".aiff", ".wv", ".opus", ".ape", ".wma"}
     ext = Path(file.filename or "").suffix.lower()
@@ -519,7 +634,7 @@ async def analyze_upload(file: UploadFile = File(...), lang: str = Form("ru")):
             raise HTTPException(413, "Файл слишком большой (лимит 200 МБ)")
         Path(dst).write_bytes(content)
         try:
-            return await asyncio.to_thread(_analyze, dst, lang)
+            return await asyncio.to_thread(_analyze, dst, lang, style, all_styles)
         except FileNotFoundError:
             raise HTTPException(500, "ffmpeg/ffprobe не найден — установи ffmpeg и добавь в PATH")
         except Exception as e:

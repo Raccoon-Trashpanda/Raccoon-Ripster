@@ -287,7 +287,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "3.5.1"
+RELEASE_VERSION = "3.6.0"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -611,12 +611,25 @@ async def _startup_sync_orpheus() -> None:
 _watchlist_check_task = None
 
 async def _watchlist_loop():
+    # The first sleep resumes the clock from the last real pass instead of
+    # restarting it — otherwise a restart every few minutes means the 6h timer
+    # never runs out and the watchlist is never checked at all.
+    first = True
     while True:
         # Usually the plain 6h interval, but wake earlier when the Auckland
         # Friday comes first — see watchlist.next_check_delay().
-        await asyncio.sleep(_watchlist.next_check_delay(config))
+        await asyncio.sleep(_watchlist.initial_check_delay(config) if first
+                            else _watchlist.next_check_delay(config))
+        first = False
         if watchlist:
-            await _watchlist._check_watchlist()
+            # One bad pass must not take the loop down with it: without this the
+            # task dies silently and the watchlist stops until the next restart.
+            try:
+                await _watchlist._check_watchlist()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:                                  # noqa: BLE001
+                print(f"[watchlist] проверка упала: {e}", flush=True)
 
 
 @asynccontextmanager
@@ -681,6 +694,15 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_sp_keeper.run(config, BASE_DIR))
     except Exception as _e:
         print(f"[sp-keeper] wiring error: {_e}", flush=True)
+
+    # Периодический обход учёток (см. ripster/accounts_watch.py): пробы живости
+    # запускались только по кнопке, из-за чего протухшую подписку замечали лишь
+    # в момент падения загрузки.
+    try:
+        from ripster import accounts_watch as _acc_watch
+        asyncio.create_task(_acc_watch.run(config, BASE_DIR))
+    except Exception as _e:
+        print(f"[accounts-watch] wiring error: {_e}", flush=True)
 
 
     yield

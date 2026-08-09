@@ -1,3 +1,16 @@
+---
+name: ripster-spotify-tokens
+description: >
+  Карта ЧЕТЫРЁХ разных токенов Spotify в Ripster (bearer из librespot-блоба,
+  client-token, sp_dc, OAuth dev-app) — что из них живо, сколько живёт и какой
+  симптом какому соответствует. Путать их = терять дни: «bearer свежий, а всё
+  равно 401» почти всегда протухший client-token, а api.spotify.com/v1 для наших
+  веб-токенов забанен НАВСЕГДА и ожиданием не лечится. Читать при любом Spotify
+  401/403/429, при «радар не сканит», перед правкой любой токен-логики Spotify.
+  Триггеры — «ORPHEUS_NOT_AUTHED», «Spotify 401», «429», «URL Blocked»,
+  «client-token», «librespot», «радар пустой», «bearer».
+---
+
 # Spotify-токены Рипстера — карта, симптомы, лечение
 
 READ THIS при любом Spotify 401/403/429, «ORPHEUS_NOT_AUTHED», «радар не сканит»,

@@ -20,7 +20,7 @@
 <script src="/static/vendor/hls.min.js?v=1520"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&family=Atkinson+Hyperlegible:wght@400;700&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/css/main.css?v=91"/>
+<link rel="stylesheet" href="/static/css/main.css?v=104"/>
 </head>
 <body>
 <div id="net-progress"></div>
@@ -311,8 +311,8 @@
       <div class="pp-zone pp-zone-left" style="display:flex;align-items:center;gap:11px;flex:1 1 0;min-width:0;max-width:320px">
         <div id="pp-art" onclick="togglePlayerExpanded()" data-i18n-title="pp.expand_player" title="Развернуть плеер" style="width:42px;height:42px;border-radius:8px;background:rgba(192,132,160,.12);color:var(--red);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;overflow:hidden;cursor:pointer">♪</div>
         <div id="pp-mini-meta" onclick="togglePlayerExpanded()" data-i18n-title="pp.expand_player" title="Развернуть плеер" style="min-width:0;line-height:1.3;cursor:pointer">
-          <div id="pp-title"  style="font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">—</div>
-          <div id="pp-artist" data-i18n="pp.preview" style="font-size:11.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Предпрослушка</div>
+          <div id="pp-title" data-mq style="font-size:13px;font-weight:600;color:var(--text)">—</div>
+          <div id="pp-artist" data-i18n="pp.preview" data-mq style="font-size:11.5px;color:var(--muted)">Предпрослушка</div>
         </div>
       </div>
 
@@ -379,6 +379,10 @@
     <div class="fp-meta">
       <div id="fp-title">—</div>
       <div id="fp-artist"></div>
+      <!-- Строка формата. Пустая пока качество неизвестно: подпись берётся из
+           _pqQuality(), которая честно возвращает пусто без сервиса, — иначе
+           получалось выдуманное «FLAC» (та же ловушка, что в трек-листе). -->
+      <div id="fp-fmt" class="fp-fmt" hidden></div>
     </div>
 
     <!-- Seek -->
@@ -451,20 +455,20 @@
   <button type="button" onclick="closeLightbox()" style="position:absolute;top:16px;right:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:none;cursor:pointer;font-size:16px;backdrop-filter:blur(4px)">✕</button>
 </div>
 
-<script src="/static/js/i18n.js?v=10091"></script>
-<script src="/static/js/boot_splash.js?v=1"></script>
-<script src="/static/js/views.js?v=10072"></script>
+<script src="/static/js/i18n.js?v=10111"></script>
+<script src="/static/js/boot_splash.js?v=2"></script>
+<script src="/static/js/views.js?v=10077"></script>
 <script src="/static/js/scrolltop.js?v=1"></script>
 <script src="/static/js/cover_tint.js?v=2"></script>
 <script src="/static/js/artist_follow.js?v=1"></script>
 <script src="/static/js/render_perf.js?v=1"></script>
 <script src="/static/js/nudges.js?v=1"></script>
-<script src="/static/js/app.js?v=10120"></script>
-<script src="/static/js/wrapper.js?v=6"></script>
-<script src="/static/js/coder.js?v=5"></script>
+<script src="/static/js/app.js?v=10125"></script>
+<script src="/static/js/wrapper.js?v=7"></script>
+<script src="/static/js/coder.js?v=6"></script>
 <script src="/static/js/guest.js?v=1"></script>
-<script src="/static/js/setup_ui.js?v=6"></script>
-<script src="/static/js/selfupdate_ui.js?v=5"></script>
+<script src="/static/js/setup_ui.js?v=7"></script>
+<script src="/static/js/selfupdate_ui.js?v=6"></script>
 <!-- search.js was merged into cookies_ui.js locally but stayed behind in the
      mirror. Both declare `let _srchItems`, so with search.js loaded first the
      browser threw "Identifier '_srchItems' has already been declared" on
@@ -474,29 +478,29 @@
      crashed with "checkAMDStatus is not defined" on every page load). Every
      function search.js defined already exists in cookies_ui.js — it was pure
      dead weight. Do not re-add it. -->
-<script src="/static/js/console_ui.js?v=5"></script>
+<script src="/static/js/console_ui.js?v=6"></script>
 <script src="/static/js/stats_ui.js?v=5"></script>
-<script src="/static/js/orpheus_ui.js?v=8"></script>
+<script src="/static/js/orpheus_ui.js?v=9"></script>
 <script src="/static/js/service_login.js?v=4"></script>
-<script src="/static/js/sc_tab.js?v=26"></script>
-<script src="/static/js/cookies_ui.js?v=15"></script>
-<script src="/static/js/lightbox.js?v=11"></script>
-<script src="/static/js/urlbar_detect.js?v=12"></script>
-<script src="/static/js/auth_ui.js?v=14"></script>
-<script src="/static/js/digs.js?v=13"></script>
-<script src="/static/js/player_lib.js?v=3"></script>
-<script src="/static/js/remote_ui.js?v=3"></script>
-<script src="/static/js/service_colors_ui.js?v=11"></script>
-<script src="/static/js/deps_ui.js?v=3"></script>
+<script src="/static/js/sc_tab.js?v=28"></script>
+<script src="/static/js/cookies_ui.js?v=19"></script>
+<script src="/static/js/lightbox.js?v=15"></script>
+<script src="/static/js/urlbar_detect.js?v=13"></script>
+<script src="/static/js/auth_ui.js?v=18"></script>
+<script src="/static/js/digs.js?v=14"></script>
+<script src="/static/js/player_lib.js?v=48"></script>
+<script src="/static/js/remote_ui.js?v=4"></script>
+<script src="/static/js/service_colors_ui.js?v=14"></script>
+<script src="/static/js/deps_ui.js?v=4"></script>
 <script src="/static/js/tokens_ui.js?v=1"></script>
 <script src="/static/js/config_yaml_ui.js?v=1"></script>
-<script src="/static/js/player.js?v=10044"></script>
-<script src="/static/js/digs_radio.js?v=3"></script>
+<script src="/static/js/player.js?v=10052"></script>
+<script src="/static/js/digs_radio.js?v=4"></script>
 <script src="/static/js/digs_tour.js?v=4"></script>
-<script src="/static/js/player_queue.js?v=10"></script>
-<script src="/static/js/player_fps.js?v=12"></script>
-<script src="/static/js/bbc.js?v=10009"></script>
-<script src="/static/js/sc.js?v=10019"></script>
+<script src="/static/js/player_queue.js?v=15"></script>
+<script src="/static/js/player_fps.js?v=13"></script>
+<script src="/static/js/bbc.js?v=10010"></script>
+<script src="/static/js/sc.js?v=10020"></script>
 <script src="/static/js/fx_ui.js?v=7"></script>
 
 <!-- Mobile sidebar drawer overlay -->

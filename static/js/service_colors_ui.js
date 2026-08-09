@@ -601,10 +601,18 @@ function buildQueueItem(task) {
         ${_countTxt?`<span class="qi-count">${_countTxt}</span>`:''}
         ${_st}
         ${logLines.length?`<button class="qi-log-toggle" onclick="toggleTaskLog('${task.id}',this)" title="${t('q.show_log')}">▶${logLines.length}</button>`:''}
-        <div class="qi-actions">${_acts}</div>
       </div>
       ${logLines.length?`<div class="qi-log-panel" id="qi-log-${task.id}">${logHtml}</div>`:''}
     </div>
+    <!-- Кнопки действий вынесены из нижней строки вправо, к крестику: владелец
+         просил «крестики справа от трека, а не снизу». Селектор
+         .qi .qi-actions .dl-cloud-btn в player_lib.js ищет по потомкам, так
+         что смена уровня вложенности его не задевает.
+         ВНИМАНИЕ: это HTML-комментарий ВНУТРИ шаблонной строки, то есть всё
+         ещё JavaScript. Обратные кавычки здесь ставить нельзя — они закрывают
+         строку, и следующий за ними текст разбирается как код. Именно так
+         08.08.2026 очередь перестала рисоваться целиком. -->
+    <div class="qi-actions">${_acts}</div>
     <button class="qi-close owner-only" onclick="removeTask('${task.id}')" title="${t('q.remove')}">✕</button>
   `;
   return el;

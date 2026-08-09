@@ -7,11 +7,24 @@
 // ── Lightbox: click-to-zoom for any cover image ─────────────────────────
 // Images with ``data-lightbox`` attribute (or a ``data-lightbox-src`` pointing
 // at a higher-res URL) open fullscreen on click. Esc or backdrop-click closes.
-function openLightbox(src){
+function openLightbox(src, fallback){
   const box = document.getElementById('lightbox');
   const img = document.getElementById('lightbox-img');
-  if(!box || !img || !src) return;
-  img.src = src;
+  if(!box || !img) return;
+  const hi   = src || fallback;
+  const thumb = fallback || src;
+  // Раньше сразу ставили крупную (1000×1000) и ждали onerror для отката. Но у
+  // части радар-обложек (Tidal 1280, Apple 1000) крупная не ОШИБАЕТСЯ, а ВИСИТ —
+  // onerror не срабатывает, и лайтбокс оставался чёрным пустым. Теперь показываем
+  // thumbnail МГНОВЕННО (пусто не будет никогда), а крупную грузим в фоне и
+  // подменяем, только когда она реально готова. Зависла/битая — остаётся thumb.
+  img.onerror = null;
+  img.src = thumb || '';
+  if (hi && hi !== thumb) {
+    const pre = new Image();
+    pre.onload = () => { if (box.style.display !== 'none') img.src = hi; };
+    pre.src = hi;
+  }
   box.style.display = 'flex';
   // Lock body scroll while open
   document.body.style.overflow = 'hidden';
@@ -35,8 +48,12 @@ document.addEventListener('click', (ev) => {
   if(!img) return;
   ev.preventDefault();
   ev.stopPropagation();
-  const src = img.dataset.lightboxSrc || img.src;
-  openLightbox(src);
+  // Правило по всему Ripster: зум открывает обложку в ~1000×1000. Сетки грузят
+  // мелкий thumbnail (трафик), а увеличение апгрейдит адрес до крупного через
+  // relCover. Если апгрейд не сработал/недоступен — показываем thumbnail.
+  const base = img.dataset.lightboxSrc || img.src;
+  const hi   = (typeof relCover === 'function') ? relCover(base, 1000) : base;
+  openLightbox(hi, img.src || base);
 });
 // Esc closes lightbox (and only lightbox — other overlays have their own handlers)
 document.addEventListener('keydown', (ev) => {
@@ -186,13 +203,63 @@ async function clearHistory() {
 }
 
 // ══ WATCHLIST ═════════════════════════════════════════════════════
+// Держим загруженные подписки здесь, чтобы поиск и переключение «артисты /
+// лейблы» перерисовывали список без похода в сеть. `var`, а не `let`: имена
+// вроде _wlItems слишком общие, а повторное объявление на верхнем уровне
+// роняет ВЕСЬ файл (см. скилл ripster-frontend-file-drift).
+var _wlItems = [];
+var _wlKind  = 'all';
+var _wlFilterTimer = null;
+
 async function loadWatchlist() {
+  wlPopulateSvc();                       // выпадашка сервисов из настроенных токенов
   const r = await api('GET','/api/watchlist');
-  const items = r.items||[];
-  const list  = document.getElementById('wl-list');
-  const emp   = document.getElementById('wl-empty');
-  if(emp) emp.style.display = items.length?'none':'';
+  _wlItems = r.items||[];
+  const emp = document.getElementById('wl-empty');
+  if(emp) emp.style.display = _wlItems.length?'none':'';
+  wlRenderList();
+  loadWlSuggestions();
+}
+
+// Поиск бьёт по innerHTML всего списка, поэтому НЕ на каждую букву: на радаре
+// это уже стоило заметных подтормаживаний на ~3600 узлах (ripster-performance).
+function wlFilterChanged() {
+  clearTimeout(_wlFilterTimer);
+  _wlFilterTimer = setTimeout(wlRenderList, 140);
+}
+
+function wlSetKind(kind, btn) {
+  _wlKind = kind;
+  document.querySelectorAll('.wl-kind-tab').forEach(b => b.classList.toggle('active', b === btn));
+  wlRenderList();
+}
+
+function _wlVisible() {
+  const q = (document.getElementById('wl-search')?.value || '').trim().toLowerCase();
+  return _wlItems.filter(w => {
+    const kind = (w.kind === 'label') ? 'label' : 'artist';
+    if (_wlKind !== 'all' && kind !== _wlKind) return false;
+    if (!q) return true;
+    // Ищем и по имени, и по ссылке: артиста иногда помнишь по адресу страницы.
+    return ((w.name || '') + ' ' + (w.url || '')).toLowerCase().includes(q);
+  });
+}
+
+function wlRenderList() {
+  const list = document.getElementById('wl-list');
   if(!list) return;
+  const items = _wlVisible();
+
+  const cnt = document.getElementById('wl-count');
+  if (cnt) {
+    const labels = _wlItems.filter(w => w.kind === 'label').length;
+    cnt.textContent = (items.length === _wlItems.length)
+      ? ti('wl.count_all',    {n: _wlItems.length, labels: labels})
+      : ti('wl.count_shown',  {n: items.length,    total: _wlItems.length});
+  }
+  const nm = document.getElementById('wl-nomatch');
+  if (nm) nm.style.display = (!items.length && _wlItems.length) ? '' : 'none';
+
   list.innerHTML = items.map(w => `
     <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:7px">
       <div style="flex:1;min-width:0">
@@ -219,7 +286,6 @@ async function loadWatchlist() {
         ✕
       </button>
     </div>`).join('');
-  loadWlSuggestions();
 }
 
 // Лейбл отслеживается по названию, ссылка ему не нужна — прячем поле, чтобы
@@ -230,6 +296,34 @@ function wlKindChanged() {
   const name = document.getElementById('wl-name');
   if(url)  url.style.display = (kind === 'label') ? 'none' : '';
   if(name) name.placeholder = (kind === 'label') ? t('wl.label_ph') : t('wl.name_ph');
+  wlPopulateSvc();
+}
+
+// Сервисы, КУДА можно качать, из реально настроенных токенов/аккаунтов. Раньше
+// выпадашка знала только apple/soundcloud/deezer — и НЗ-аккаунт Tidal (ранняя
+// витрина) в вишлисте выбрать было нельзя, прок терялся. Следим всегда через
+// Apple, а `service` = целевой сервис скачивания (см. release-availability-matrix).
+function _wlDownloadSvcs() {
+  const c = (window.S && S.config) || {};
+  // «Авто» — брать из первого доступного по порядку качества (матрица доступности
+  // на бэке сама выберет, где релиз уже отдаётся раньше всех).
+  const out = [{ v: 'auto', label: t('wl.svc_auto') }];
+  out.push({ v: 'apple', label: 'Apple Music' });                 // всегда (враппер/куки)
+  if (c['tidal-token'])                                    out.push({ v: 'tidal',  label: 'Tidal' });
+  if (c['qobuz-auth-token'] || (c['qobuz-email'] && c['qobuz-password']))
+                                                           out.push({ v: 'qobuz',  label: 'Qobuz' });
+  if (c['deezer-arl'])                                     out.push({ v: 'deezer', label: 'Deezer' });
+  if (c['soundcloud-oauth-token'])                         out.push({ v: 'soundcloud', label: 'SoundCloud' });
+  return out;
+}
+
+function wlPopulateSvc() {
+  const sel = document.getElementById('wl-svc');
+  if (!sel) return;
+  const svcs = _wlDownloadSvcs();
+  const cur  = sel.value;
+  sel.innerHTML = svcs.map(s => `<option value="${s.v}">${esc(s.label)}</option>`).join('');
+  if (svcs.some(s => s.v === cur)) sel.value = cur;   // сохранить выбор при перерисовке
 }
 
 async function wlAdd() {

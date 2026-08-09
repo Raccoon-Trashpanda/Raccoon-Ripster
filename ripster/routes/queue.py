@@ -337,6 +337,14 @@ async def add_to_queue(body: dict, request: Request):
             should_start = _qs.start()
         if should_start and _process_queue:
             asyncio.create_task(_process_queue())
+            # Сказать интерфейсу, что очередь ПОШЛА. Раньше это делал только
+            # явный /api/queue/start, а автостарт — обычный путь, им стартует
+            # каждая загрузка — молчал. Фронт не переводил S.running в true, и
+            # кнопка «■ Stop» оставалась disabled НАВСЕГДА: человек жал, а она
+            # серая и ничего не делает. Проявлялось только до перезагрузки
+            # страницы — при ней состояние приезжает в init-сообщении.
+            if _broadcast:
+                await _broadcast({"type": "queue_started"})
 
     if expanded:
         return {"ok": True, "id": added[0]["id"], "ids": [t["id"] for t in added],
@@ -535,6 +543,10 @@ async def retry_task(task_id: str, request: Request):
                 should_start = _qs.start()
             if should_start and _process_queue:
                 asyncio.create_task(_process_queue())
+                # Тот же пробел, что и в добавлении задачи: без этого «■ Stop»
+                # остаётся серой, хотя очередь уже работает.
+                if _broadcast:
+                    await _broadcast({"type": "queue_started"})
 
     # ── In-place retry: task still in the queue ──────────────────────────────
     live = next((t for t in _queue if t["id"] == task_id), None)

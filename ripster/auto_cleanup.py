@@ -145,6 +145,29 @@ async def run(config: dict) -> None:
                 continue
             if not _under_root(d, roots):    # safety net: outside the library → skip
                 continue
+
+            # 🔴 Свежее содержимое важнее просроченной записи (09.08.2026).
+            # Удалялась ПАПКА из записи манифеста, а что внутри — не смотрели.
+            # Если тот же релиз качали повторно, старая запись указывает на ту
+            # же папку и сносит только что скачанное: замер показал файл,
+            # доставленный в 15:36:45 и удалённый в 15:39:14 — через две с
+            # половиной минуты при настройке «40 минут».
+            #
+            # Проверяем ФАКТ на диске, а не срок в записи: есть ли внутри файлы
+            # моложе окна хранения. Есть — папку не трогаем, а запись убираем,
+            # чтобы она не пыталась это сделать снова.
+            try:
+                newest = max((f.stat().st_mtime for f in d.rglob("*") if f.is_file()),
+                             default=0)
+            except Exception:
+                newest = 0
+            if newest and (now - newest) < max(mins * 60, _MIN_GRACE):
+                removed.append(tid)
+                print(f"[autodelete] {d}: внутри есть свежие файлы "
+                      f"({int(now - newest)} с назад) — не удаляю, снимаю запись",
+                      flush=True)
+                continue
+
             try:
                 # Delete ONLY this task's own folder — never climb to shared
                 # parents (e.g. 'ALAC (Lossless)/' holds many tasks' content).

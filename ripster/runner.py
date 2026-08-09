@@ -38,7 +38,18 @@ _RE_NO_RETRY = _re.compile(
     # SoundCloud engine not installed / no Node (engines/soundcloud.py) — permanent.
     r'движок\s+не\s+установлен|'
     # Beatport territory restriction is permanent for this account/region.
-    r'Territory\s+Restricted|недоступен в регионе|region\s+locked',
+    r'Territory\s+Restricted|недоступен в регионе|region\s+locked|'
+    # Отказ по правам аккаунта (Beatport/Tidal: «You do not have permission»)
+    # постоянен до смены учётки или тарифа. 09.08.2026 отсечка честно обрывала
+    # прогон на 10-м отказе — но раннер повторял задачу ТРИЖДЫ, и вместо одной
+    # понятной ошибки человек получал три подряд. Повтор нужен для случайных
+    # сбоев, а не для «этому аккаунту сюда нельзя».
+    r'do\s+not\s+have\s+permission|отказал\s+в\s+правах|'
+    # Apple: каталог не отдал альбом (нет в этом магазине). Ответ детерминированный
+    # — 08.08.2026 он повторялся ТРИЖДЫ с паузами 15/45/120с, и гость три с
+    # половиной минуты ждал ровно того же «нет». Повтор осмыслен для временных
+    # отказов, а не для «в этом магазине такого релиза не существует».
+    r'каталог\s+не\s+отдал\s+этот\s+релиз|Failed\s+to\s+(get\s+album\s+response|rip\s+album)',
     _re.I,
 )
 _MAX_AUTO_RETRIES = 3
@@ -83,11 +94,18 @@ _MAX_DECRYPT_RETRIES = 2   # ~3 min, then stop — decrypt core won't self-heal 
 # real cause (public server down → use local ALAC / try later), so the owner does
 # NOT keep pulling the same Hi-Res release. Checked BEFORE _RE_DECRYPT_DOWN /
 # _RE_PATIENT (all three can mention wm.wol.moe).
+# 08.08.2026: этот список НЕ ловил самую частую форму отказа. Публичный враппер
+# чаще всего не «недоступен», а отвечает штатно и говорит, что живых инстансов у
+# него нет: `WrapperManagerException: no healthy and ready instances`. Ни одного
+# ключа отсюда в такой строке нет, поэтому быстрый отказ не срабатывал ни разу —
+# 08.08 в 18:25 один альбом молотил 24 минуты (76 треков × 8 попыток tenacity),
+# дав 830 ERROR-строк и ноль файлов. Ловим и эту форму.
 _RE_WRAPPER_DEAD = _re.compile(
     r'wrapper-manager unreachable|Wrapper-manager\s+недоступен|Deadline\s+Exceeded|'
     r'getaddrinfo|Name or service not known|Connection refused|'
     r'connection refused|Max retries exceeded|Failed to establish a new connection|'
-    r'ConnectError|ConnectTimeout|11001',
+    r'ConnectError|ConnectTimeout|11001|'
+    r'WrapperManagerException|no healthy and ready',
     _re.I,
 )
 _MAX_DEAD_RETRIES = 1   # one quick re-check, then stop with clear guidance
@@ -269,7 +287,47 @@ def install(ctx) -> None:
         pass
 
 
+# Гашение повторов в консоли. Apple качает альбом НЕСКОЛЬКИМИ воркерами сразу
+# (их число равно числу портов расшифровки — сейчас три), и каждый печатает
+# одни и те же строки уровня альбома: «Track already exists locally», «Queue 1
+# of 1: Album», предупреждения враппера. Снаружи это выглядит как троение лога,
+# хотя дублируется вывод, а не работа.
+#
+# Гасим по паре (задача, текст) в коротком окне: одинаковая строка от РАЗНЫХ
+# воркеров приходит в пределах секунды, а настоящий повтор той же строки позже
+# (следующий трек с тем же сообщением) окном не накрывается и пройдёт.
+_LOG_DEDUP_WINDOW = 2.0
+_log_seen: dict[tuple[str, str], float] = {}
+
+
+def _log_is_echo(task_id: str, text: str) -> bool:
+    import time as _t
+    now = _t.monotonic()
+    key = (task_id or "", text)
+    last = _log_seen.get(key, 0.0)
+    _log_seen[key] = now
+    if len(_log_seen) > 2000:                     # не растим словарь бесконечно
+        for k, v in list(_log_seen.items()):
+            if now - v > 30:
+                _log_seen.pop(k, None)
+    return (now - last) < _LOG_DEDUP_WINDOW
+
+
+async def _log_key(key: str, level: str = "info", task_id: str = "", **params) -> None:
+    """Строка в консоль ПО КЛЮЧУ, а не готовым текстом.
+
+    Обычный `_log()` шлёт готовую строку, и она приходит на том языке, на
+    котором написана в коде, независимо от языка интерфейса. Отсюда каша:
+    русские сообщения в английском интерфейсе и наоборот. Клиент переводит
+    только то, у чего есть ключ, поэтому всё, что видит человек, должно идти
+    отсюда.
+    """
+    await _broadcast(_i18n.log_event(key, level=level, task_id=task_id, **params))
+
+
 async def _log(text: str, level: str = "info", task_id: str = "") -> None:
+    if _log_is_echo(task_id, text):
+        return
     ts = datetime.now().strftime("%H:%M:%S")
     msg: dict = {"type": "log", "text": f"[{ts}] {text}", "level": level}
     if task_id:
@@ -744,7 +802,7 @@ async def _sc_drm_fallback(orig_task: dict) -> None:
     src_url = orig_task.get("url", "").strip()
     if not src_url:
         return
-    await _log("🔁 SC: пробую найти трек(и) на других сервисах…", "info", tid)
+    await _log_key("console.sc_fb_try", "info", tid)
 
     # Resolve SC URL → list of {title, artist, duration_s}
     async def _resolve_sc_tracks() -> list[dict]:
@@ -821,9 +879,9 @@ async def _sc_drm_fallback(orig_task: dict) -> None:
 
     tracks = await _resolve_sc_tracks()
     if not tracks:
-        await _log("🔁 SC: не удалось получить список треков для fallback", "warn", tid)
+        await _log_key("console.sc_fb_no_list", "warn", tid)
         return
-    await _log(f"🔁 SC: ищу {len(tracks)} трек(ов) на Deezer/Qobuz/Apple…", "info", tid)
+    await _log_key("console.sc_fb_search", "info", tid, n=len(tracks))
 
     # For each source track, search across services and queue best match.
     # Priority: Deezer (no auth headache) → Qobuz (HiRes if HiRes works) → Apple.
@@ -877,10 +935,9 @@ async def _sc_drm_fallback(orig_task: dict) -> None:
                 await _log(f"  fallback queue error ({svc}): {e}", "warn", tid)
                 continue
         else:
-            await _log(f"  ✗ {src['title']} — не найдено", "warn", tid)
+            await _log_key("console.sc_fb_miss", "warn", tid, title=src["title"])
     if queued:
-        await _log(f"🔁 SC fallback: {queued}/{len(tracks)} поставлено в очередь",
-                   "success", tid)
+        await _log_key("console.sc_fb_queued", "success", tid, n=queued, total=len(tracks))
         # Make sure the queue worker is running so the new tasks actually start.
         if not _qs.is_running:
             _qs.start()
@@ -1024,13 +1081,13 @@ async def _amd_preflight(task: dict, quality: str) -> bool:
     tid = task.get("id", "")
     amd_dir = _amd_mod.get_amd_dir()
     if not (amd_dir / "main.py").exists():
-        await _log("✗ AppleMusicDecrypt не установлен. Перейди в Setup → Auto-install", "error", tid)
+        await _log_key("console.amd_not_installed", "error", tid)
         _try_advance_task(task, TaskStatus.ERROR)
         return False
 
     runner_script = _BASE_DIR / "amd_runner.py"
     if not runner_script.exists():
-        await _log("✗ amd_runner.py не найден — переустанови AMD через Settings", "error", tid)
+        await _log_key("console.amd_runner_missing", "error", tid)
         _try_advance_task(task, TaskStatus.ERROR)
         return False
 
@@ -1049,44 +1106,44 @@ async def _amd_preflight(task: dict, quality: str) -> bool:
             return False
         return True
     if not _have_bento4():
-        await _log("📦 Bento4 (mp4extract/mp4decrypt) не найден — ставлю автоматически…", "info", tid)
+        await _log_key("console.bento4_installing", "info", tid)
         try:
             from ripster.setup import install_mp4decrypt_windows as _install_b4
             await _install_b4()
         except Exception as _be:
-            await _log(f"⚠ Авто-установка Bento4 не удалась: {_be}", "warn", tid)
+            await _log_key("console.bento4_failed", "warn", tid, err=str(_be))
         if not _have_bento4():
-            await _log("✗ Bento4 не установился — ALAC/AAC-декрипт невозможен. "
-                       "Открой Setup → «Bento4 (mp4decrypt)» и установи вручную "
-                       "(или проверь интернет/файрвол).", "error", tid)
+            await _log_key("console.bento4_manual", "error", tid)
             _try_advance_task(task, TaskStatus.ERROR)
             return False
-        await _log("✓ Bento4 установлен — продолжаю.", "success", tid)
+        await _log_key("console.bento4_ok", "success", tid)
 
     from ripster.engines.amd import _CODEC_MAP as _AMD_CODEC_MAP
     codec = _AMD_CODEC_MAP.get(quality, "alac")
     await _amd_mod.patch_amd_for_headless(amd_dir)
     _amd_mod.write_amd_config(amd_dir, codec=codec, lyrics_override=task.get("lyrics"))
-    await _log(f"📄 config.toml записан в {amd_dir} (codec={codec})", "info", tid)
+    await _broadcast(_i18n.log_event("console.amd_config_written", level="info",
+                                     dir=str(amd_dir), codec=codec, task_id=tid))
 
     instance = _config.get("amd-instance-url", "wm.wol.moe")
     secure   = _config.get("amd-instance-secure", True)
-    await _log(f"🌐 Проверяю wrapper-manager: {instance}…", "info", tid)
+    await _broadcast(_i18n.log_event("console.amd_wm_checking", level="info",
+                                     instance=instance, task_id=tid))
     wm = await _amd_mod.amd_wrapper_status(instance, secure)
     if wm.get("error"):
-        await _log(f"✗ Wrapper-manager недоступен: {wm['error']}", "error", tid)
+        await _broadcast(_i18n.log_event("console.amd_wm_down", level="error",
+                                         err=str(wm["error"]), task_id=tid))
         _try_advance_task(task, TaskStatus.ERROR)
         return False
     if not wm.get("ready"):
-        await _log(
-            f"⚠ Wrapper-manager «{instance}» ready=False "
-            f"(клиентов: {wm.get('client_count', 0)}, "
-            f"регионов: {len(wm.get('regions', []))}) — продолжаю",
-            "warn", tid,
-        )
+        await _broadcast(_i18n.log_event(
+            "console.amd_wm_not_ready", level="warn", instance=instance,
+            clients=wm.get("client_count", 0),
+            regions=len(wm.get("regions", [])), task_id=tid))
     else:
         regions_str = ", ".join(wm.get("regions", []))
-        await _log(f"✓ Wrapper-manager готов — регионы: {regions_str}", "success", tid)
+        await _broadcast(_i18n.log_event("console.amd_wm_ready", level="success",
+                                         regions=regions_str, task_id=tid))
 
     await _log(f"▶ AMD v2 [{codec.upper()}] — {task.get('url', '')}", "info", tid)
     return True
@@ -1110,30 +1167,27 @@ async def _soundcloud_preflight(task: dict) -> bool:
     #    runner.mjs child process picks it up.
     node_exe = _setup_mod.tool_path("node")
     if node_exe is None or _setup_mod._node_version(node_exe) < _setup_mod._MIN_NODE_MAJOR:
-        await _log("📦 SoundCloud: ставлю Node.js 20 (старый/отсутствующий Node ломает "
-                   "Lucida с 'terminated')…", "info", tid)
+        await _log_key("console.node_installing", "info", tid)
         try:
             await _setup_mod.install_node_windows()
         except Exception as e:                                       # noqa: BLE001
-            await _log(f"⚠ Авто-установка Node не удалась: {e}", "warn", tid)
+            await _log_key("console.node_failed", "warn", tid, err=str(e))
 
     # 2) Lucida built? (runner.mjs + lucida-src/build/index.js)
     if not _sc_eng.is_installed():
-        await _log("📦 SoundCloud: устанавливаю движок Lucida (один раз, ~1–2 мин)…",
-                   "info", tid)
+        await _log_key("console.lucida_installing", "info", tid)
         try:
             from ripster.routes.setup import _install_soundcloud_component
             await _install_soundcloud_component()
         except Exception as e:                                       # noqa: BLE001
-            await _log(f"⚠ Авто-установка Lucida не удалась: {e}", "warn", tid)
+            await _log_key("console.lucida_failed", "warn", tid, err=str(e))
 
     if not _sc_eng.is_installed():
-        await _log("✗ SoundCloud-движок (Lucida) не установлен. Открой Setup → SoundCloud "
-                   "и установи вручную (нужны интернет + git).", "error", tid)
+        await _log_key("console.lucida_manual", "error", tid)
         _try_advance_task(task, TaskStatus.ERROR)
         return False
     if not _sc_eng.node_available():
-        await _log("✗ Node.js не найден для SoundCloud — установка не удалась.", "error", tid)
+        await _log_key("console.node_missing", "error", tid)
         _try_advance_task(task, TaskStatus.ERROR)
         return False
     return True
@@ -1154,7 +1208,7 @@ async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
     tid = task.get("id", "")
     m = _RE_BBC_PID.search(page_url or "")
     if not m:
-        await _log(f"✗ BBC: не удалось разобрать pid из ссылки: {page_url}", "error", tid)
+        await _log_key("console.bbc_bad_pid", "error", tid, url=page_url)
         _try_advance_task(task, TaskStatus.ERROR)
         return None
     pid = m.group(1)
@@ -1163,13 +1217,13 @@ async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
         async with _httpx.AsyncClient(timeout=20) as c:
             pr = await c.get(f"https://www.bbc.co.uk/programmes/{pid}.json")
             if pr.status_code != 200:
-                await _log(f"✗ BBC: programmes API {pr.status_code} для {pid}", "error", tid)
+                await _log_key("console.bbc_api_fail", "error", tid, code=pr.status_code, pid=pid)
                 _try_advance_task(task, TaskStatus.ERROR)
                 return None
             prog = (pr.json() or {}).get("programme") or {}
             versions = prog.get("versions") or []
             if not versions:
-                await _log(f"✗ BBC: нет доступных версий для {pid}", "error", tid)
+                await _log_key("console.bbc_no_versions", "error", tid, pid=pid)
                 _try_advance_task(task, TaskStatus.ERROR)
                 return None
             vpid     = versions[0]["pid"]
@@ -1188,7 +1242,7 @@ async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
                     f"mediaset/pc/vpid/{vpid}/format/json")
             mr = await c.get(msel)
             if mr.status_code != 200:
-                await _log(f"✗ BBC: MediaSelector {mr.status_code} для {vpid}", "error", tid)
+                await _log_key("console.bbc_ms_fail", "error", tid, code=mr.status_code, vpid=vpid)
                 _try_advance_task(task, TaskStatus.ERROR)
                 return None
             best_cf = best_ak = None
@@ -1204,11 +1258,11 @@ async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
                         best_ak = href
             hls = best_cf or best_ak
             if not hls:
-                await _log(f"✗ BBC: не нашёл HLS-поток для {vpid}", "error", tid)
+                await _log_key("console.bbc_no_hls", "error", tid, vpid=vpid)
                 _try_advance_task(task, TaskStatus.ERROR)
                 return None
     except Exception as e:
-        await _log(f"✗ BBC: ошибка резолва потока: {e}", "error", tid)
+        await _log_key("console.bbc_resolve_err", "error", tid, err=str(e))
         _try_advance_task(task, TaskStatus.ERROR)
         return None
 
@@ -1545,6 +1599,37 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     _dz_acq = await asyncio.to_thread(_dz_pool.acquire)
                     if _dz_acq:
                         _dz_slot, _dz_arl, _dz_cfg_dir = _dz_acq
+                        # Пул выдаёт свободный слот, но НЕ проверяет, жив ли его
+                        # ARL. Мёртвая учётка уходила в загрузку и роняла её без
+                        # внятной причины, хотя рядом лежала рабочая. Спрашиваем
+                        # реестр (ответ кэшируется на 6 ч, так что это дёшево) и
+                        # при отказе подменяем на живую.
+                        try:
+                            from ripster import deezer_accounts as _dza
+                            _inf = await _dza.arl_info(_dz_arl)
+                            if not _inf.get("alive"):
+                                _alt = await _dza.pick_arl(_config)
+                                task["log"].append(
+                                    f"🎧 ARL слота {_dz_slot} не отвечает "
+                                    f"({_inf.get('reason')})" +
+                                    (" → беру живой" if _alt else " → живых нет"))
+                                print(f"[deezer-pool] слот {_dz_slot}: ARL мёртв "
+                                      f"({_inf.get('reason')}), замена: "
+                                      f"{'найдена' if _alt else 'НЕТ'}", flush=True)
+                                if _alt:
+                                    _dz_arl = _alt
+                            elif _inf.get("country"):
+                                _msg = (f"ARL слота {_dz_slot}: {_inf['country'].upper()}"
+                                        f", {_inf.get('plan') or 'тариф неизвестен'}")
+                                task["log"].append("🎧 " + _msg)
+                                # И в общий лог: task["log"] в консоль не идёт,
+                                # поэтому «всё хорошо» иначе неотличимо от
+                                # «код не выполнялся» — уже наступал дважды.
+                                print(f"[deezer-pool] {_msg}", flush=True)
+                        except Exception as _e_arl:
+                            # Не молча: немой except уже прятал NameError (08.08).
+                            print(f"[deezer-pool] проверка ARL не удалась: {_e_arl!r}",
+                                  flush=True)
                         _cfg_view["deezer-arl"] = _dz_arl
                         if _dz_cfg_dir is not None:
                             _cfg_view["_deezer_cfg_dir"] = str(_dz_cfg_dir)
@@ -1701,7 +1786,32 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 from ripster import wrapper_pool as _wp
                 _pool = _wp.get_pool(_config)
                 if _pool is not None:
-                    _acq = await asyncio.to_thread(_pool.acquire)
+                    # Задача может ТРЕБОВАТЬ конкретный слот: маршрутизатор
+                    # подобрал сессию в стране, где релиз доступен. Без этого
+                    # acquire() выдавал первый свободный, и повтор с британской
+                    # ссылкой снова уходил в канадский враппер — 09.08.2026
+                    # именно поэтому переключение «срабатывало», а альбом всё
+                    # равно не добирался.
+                    _forced = task.get("_force_slot")
+                    _acq = None
+                    if _forced is not None:
+                        try:
+                            _fp = _pool._ports(int(_forced))
+                            from ripster import apple_accounts as _AAp
+                            _name = "amd-wrapper" if int(_forced) == 0 else f"rip-wrapper-{int(_forced)}"
+                            if await asyncio.to_thread(_AAp.ensure_slot_up, _name, _fp[0]):
+                                _acq = (int(_forced), _fp[0], _fp[1])
+                                task["log"].append(
+                                    f"🦝 слот закреплён за задачей: {_forced} (порт {_fp[0]})")
+                                print(f"[runner] слот {_forced} закреплён, порт {_fp[0]}", flush=True)
+                            else:
+                                task["log"].append(
+                                    f"🦝 закреплённый слот {_forced} не поднялся — беру любой")
+                                print(f"[runner] закреплённый слот {_forced} НЕ поднялся", flush=True)
+                        except Exception as _e_fs:
+                            print(f"[runner] закрепление слота не удалось: {_e_fs!r}", flush=True)
+                    if _acq is None:
+                        _acq = await asyncio.to_thread(_pool.acquire)
                     if _acq:
                         _slot, _dec_p, _m3u_p = _acq
                         _pool_slot = _slot
@@ -1711,7 +1821,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                         # concurrent track gets its own CKC session). zh_cap is
                         # forced to 1 below, so no other album competes for slots.
                         _dports = ""
-                        if _config.get("apple-parallel-tracks"):
+                        # Слот закреплён по ПРАВАМ — раздавать треки по всему пулу
+                        # нельзя: часть уйдёт в контейнер другой страны и получит
+                        # Invalid CKC. 09.08.2026 именно так закреплённый британский
+                        # слот дал 10 отказов, хотя в одиночку брал альбом целиком.
+                        if _config.get("apple-parallel-tracks") and task.get("_force_slot") is None:
                             try:
                                 _plist = await asyncio.to_thread(
                                     _wp.ensure_all_decrypt_ports, _config)
@@ -1832,12 +1946,75 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             _GENERIC = ("завершился с кодом", "нет маркера", "не докачался",
                         "неожиданное", "unexpected", "0 треков", "ни один трек",
                         "нет вывода", "Exit code", "проверь")
-            if (not _err) or any(g in _err for g in _GENERIC):
+            # ── ДИСК ПЕРВИЧЕН ────────────────────────────────────────────────
+            # Проверка «а не легли ли файлы» стояла ниже и срабатывала только
+            # когда причину классифицировать НЕ удалось. Поэтому 09.08.2026
+            # альбом Apparat, у которого на диске лежало 10 треков из 11, был
+            # объявлен «контент удалён из сервиса или ссылка фантомная»:
+            # классификатор уверенно опознал `gone` по слову из чужого лога, и
+            # до диска очередь не дошла.
+            #
+            # Утверждение «контента нет» опровергается свежими файлами без
+            # всяких рассуждений, поэтому диск спрашиваем ПЕРВЫМ. Ставка на
+            # mtime (не старше начала прогона) отсекает остатки прошлых заходов.
+            _salvaged = False
+            try:
+                from ripster.routes.download import (_get_task_dir as _gtd_pre,
+                                                     _find_audio_files as _faf_pre)
+                _dd_pre = _gtd_pre(task)
+                if _dd_pre:
+                    _st_pre = float(task.get("_start_time") or 0.0) - 5.0
+                    _fresh_pre = [f for f in _faf_pre(_dd_pre)
+                                  if f.stat().st_mtime >= _st_pre]
+                    if _fresh_pre:
+                        task.setdefault("log", []).append(
+                            f"[salvage] на диске {len(_fresh_pre)} свежих файл(ов) — "
+                            f"отдаю как частичную загрузку, а не как ошибку")
+                        result.success   = True
+                        result.tracks_ok = len(_fresh_pre)
+                        result.error     = ""
+                        task["partial"]  = True
+                        _salvaged = True
+            except Exception:
+                pass
+
+            if _salvaged:
+                pass
+            elif (not _err) or any(g in _err for g in _GENERIC):
                 from ripster.engines.errors import classify_download_error
                 _cls = classify_download_error(log_text)
                 if _cls:
                     _svc = (task.get("service") or "").capitalize()
                     result.error = f"{_svc}: {_cls[1]}" if _svc else _cls[1]
+                    # «Нет в этом магазине» — половина ответа. Вторая половина
+                    # (В КАКОМ есть) выясняется одним запросом и превращает
+                    # тупик в понятное действие: взять ссылку из той страны.
+                    if _cls[0] == "storefront":
+                        try:
+                            from ripster.engines.errors import apple_storefronts_with
+                            _sf = apple_storefronts_with(task.get("url") or "")
+                        except Exception:
+                            _sf = []
+                        if _sf:
+                            import re as _re_sf
+                            _m = _re_sf.search(r"music\.apple\.com/([a-z]{2})/",
+                                               task.get("url") or "")
+                            _link_cc = (_m.group(1) if _m else "").lower()
+                            _lst = ", ".join(s.upper() for s in _sf)
+                            if _link_cc and _link_cc in _sf:
+                                # Ссылка ведёт в магазин, где релиз ЕСТЬ, — значит
+                                # ограничивает не она, а страна аккаунта, которым
+                                # расшифровываем. 08.08.2026 ровно этот случай:
+                                # ссылка /ru/ (релиз есть), аккаунт CA (релиза нет),
+                                # а текст советовал менять ссылку.
+                                result.error += (
+                                    f" Проверено: в магазине ссылки ({_link_cc.upper()}) релиз ЕСТЬ, "
+                                    f"значит ограничивает страна аккаунта Apple, а не ссылка. "
+                                    f"Доступен в: {_lst}. Нужен аккаунт одной из этих стран "
+                                    f"либо публичный wrapper (он держит несколько регионов).")
+                            else:
+                                result.error += (f" Проверено: релиз есть в магазинах {_lst} "
+                                                 f"— возьми ссылку оттуда.")
                 else:
                     # Disk-truth salvage: an engine can exit non-zero AFTER its files
                     # already landed (e.g. OrpheusDL-Spotify crashes on a trailing
@@ -1878,6 +2055,22 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             and _RE_AMD_CODEC_ERR.search(log_text)
         ):
             raise _NeedZhaareyFallback("aac")
+
+        # Сервер декрипта ЛЁГ, и не скачалось ВООБЩЕ ничего. Ветка «частичной»
+        # дозагрузки ниже исходит из того, что часть треков упала по своим
+        # причинам и второй проход их подберёт — но когда сервера нет, второй
+        # проход гарантированно повторит тот же отказ, только ещё раз по 20+
+        # минут (до 4 раз подряд). Отдаём честную ошибку сразу: причина не в
+        # релизе, ждать нечего, лечится локальным ALAC или временем.
+        _wrapper_down_empty = (
+            result.tracks_ok == 0
+            and result.tracks_err > 0
+            and bool(_RE_WRAPPER_DEAD.search(log_text))
+        )
+        if _wrapper_down_empty and not result.error:
+            result.error = ("публичный сервер Hi-Res (wrapper-manager) не отдал ни одного "
+                            "живого инстанса — это его сторона, не релиз. Возьми локальное "
+                            "качество ALAC или повтори позже")
 
         if result.success:
             _try_advance_task(task, TaskStatus.DONE)
@@ -2163,6 +2356,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 print(f"[coder] auto-mix skipped: {_e}", flush=True)
         elif (result.tracks_err > 0
               and not task.get("_auto_retry")
+              and not _wrapper_down_empty
               and not (engine_name == "soundcloud"
                        and "FairPlay" in (result.error or "")
                        and result.tracks_ok == 0)):
@@ -2606,14 +2800,19 @@ async def run_task(task: dict) -> None:
                     _retried_sf = False
                     if not task.get("_sf_retried"):
                         try:
-                            from ripster.apple_router import (_rewrite_storefront,
+                            from ripster.apple_router import (rewrite_storefront_resolved,
                                                               local_wrapper_storefront,
                                                               url_storefront)
                             _acct_sf = await asyncio.to_thread(local_wrapper_storefront)
                             _url_sf = url_storefront(url)
                             if _acct_sf and _url_sf and _acct_sf != _url_sf:
                                 task["_sf_retried"] = True
-                                _new_url = _rewrite_storefront(url, _acct_sf)
+                                # Именно ..._resolved: обычная замена страны
+                                # оставляет прежний номер альбома, а у витрин он
+                                # разный — повтор промахивался мимо существующего
+                                # релиза (08.08.2026, Apparat).
+                                _new_url = await asyncio.to_thread(
+                                    rewrite_storefront_resolved, url, _acct_sf)
                                 await _broadcast(_i18n.log_event(
                                     "console.wrapper_local_sf_retry", level="warn",
                                     frm=_url_sf, to=_acct_sf, task_id=task.get("id", "")))
@@ -2625,6 +2824,95 @@ async def run_task(task: dict) -> None:
                             _retried_sf = False      # и своя витрина не дала ключа
                         except Exception:
                             _retried_sf = False
+                    # ── ДРУГИЕ НАШИ аккаунты, прежде чем чужой публичный пул ──
+                    # 09.08.2026: у владельца пять Apple-учёток, и при отказе
+                    # канадской задача уходила в публичный wrapper-manager —
+                    # а тот лежал. Рядом простаивали ДВА британских слота, и
+                    # в GB этот альбом есть. Причина была не в логике выбора, а
+                    # в незнании: страну знал только основной слот, потому что
+                    # лишь он публикует порт учётки наружу. Теперь спрашиваем
+                    # каждый слот изнутри (ripster/apple_accounts.py).
+                    if not _retried_sf:
+                        try:
+                            from ripster import apple_accounts as _AA
+                            from ripster.engines.errors import apple_album_by_storefront
+                            # rewrite_storefront_resolved импортируется ЗДЕСЬ, а не
+                            # заимствуется из блока выше: тот блок выполняется только
+                            # на первом заходе (при повторном `_sf_retried` уже стоит),
+                            # и во втором заходе имя оказывалось несвязанным. NameError
+                            # ловил широкий `except Exception` ниже, ветка молча
+                            # проваливалась на AMD, и выглядело это как «код не
+                            # сработал» — хотя он работал и падал.
+                            from ripster.apple_router import (local_wrapper_storefront,
+                                                              rewrite_storefront_resolved)
+                            _failed_cc = (await asyncio.to_thread(local_wrapper_storefront) or "").lower()
+                            _avail = await asyncio.to_thread(apple_album_by_storefront, url)
+                            # Отказавшую витрину исключаем: она уже сказала «нет».
+                            # Исключаем и отказавшую витрину, и те, что уже
+                            # пробовали в этой задаче: раньше выбор был
+                            # одноразовым (флаг _slot_retried), и вторая наша
+                            # сессия не получала шанса вовсе. Теперь перебираем
+                            # все по очереди, пока не кончатся.
+                            _tried = set(task.get("_slots_tried") or [])
+                            _slot = await asyncio.to_thread(
+                                _AA.pick_slot_for, sorted(_avail),
+                                tuple(_tried | {_failed_cc}))
+                            if _slot and _avail.get(_slot["country"]):
+                                _cc = _slot["country"]
+                                task["_slots_tried"] = sorted(_tried | {_cc})
+                                # Поднять слот и ДОЖДАТЬСЯ порта расшифровки.
+                                # 09.08.2026: британские сессии гасил сборщик
+                                # простоя, порт 10021 не слушал, загрузчик писал
+                                # «connection refused» — а наружу выходило «нет
+                                # прав в регионе». Права были; не было живой
+                                # сессии. Поднятый вручную слот взял альбом
+                                # целиком, 11 из 11, без единого Invalid CKC.
+                                # Закрепляем слот ЗА ЗАДАЧЕЙ: иначе пул выдаст
+                                # повтору первый свободный, и вся работа по
+                                # подбору страны пропадёт впустую.
+                                task["_force_slot"] = _slot["slot"]
+                                _up = await asyncio.to_thread(
+                                    _AA.ensure_slot_up, _slot["container"],
+                                    _slot.get("port") or 0)
+                                if not _up:
+                                    task["log"].append(
+                                        f"─── слот {_slot['slot']} ({_cc}) не поднялся "
+                                        f"— пропускаю ───")
+                                    print(f"[runner] слот {_slot['container']} не поднялся",
+                                          flush=True)
+                                    raise _NeedAMDFallback()
+                                _u2 = await asyncio.to_thread(
+                                    rewrite_storefront_resolved, url, _cc)
+                                task["log"].append(
+                                    f"─── витрина '{_failed_cc or '?'}' не дала ключ → пробую свой "
+                                    f"аккаунт в '{_cc}' (слот {_slot['slot']}) ───")
+                                await _broadcast(_i18n.log_event(
+                                    "console.wrapper_other_slot", level="warn",
+                                    frm=_failed_cc or "?", to=_cc, slot=_slot["slot"],
+                                    task_id=task.get("id", "")))
+                                await _run_engine_task(task, engine, _u2, qid)
+                                _retried_sf = True
+                            else:
+                                # Третий исход, который раньше был НЕМЫМ: слот не
+                                # подобрался. Отсутствие записи неотличимо от
+                                # «код не выполнялся» — на этом я уже дважды
+                                # построил неверный вывод. Пишем в общий лог, а
+                                # не в task["log"]: последний в консоль не идёт.
+                                _all = await asyncio.to_thread(_AA.all_slots)
+                                print(f"[runner] свой слот не подобран: наши сессии="
+                                      f"{[(s['slot'], s['country']) for s in _all]}, "
+                                      f"релиз доступен в={sorted(_avail)}, "
+                                      f"исключена='{_failed_cc}'", flush=True)
+                        except _NeedAMDFallback:
+                            _retried_sf = False          # и чужой слот не дал ключа
+                        except Exception as _e_slot:
+                            # НЕ молча. Именно немой except прятал здесь NameError,
+                            # и отказ ветки был неотличим от её отсутствия.
+                            _retried_sf = False
+                            task["log"].append(
+                                f"─── выбор своего слота не состоялся: "
+                                f"{type(_e_slot).__name__}: {_e_slot} ───")
+                            print(f"[runner] slot-pick failed: {_e_slot!r}", flush=True)
                     if not _retried_sf:
                         await _broadcast(_i18n.log_event(
                             "console.wrapper_local_region_amd", level="warn",

@@ -590,6 +590,22 @@ button:focus-visible{ outline: 2px solid rgba(192,132,160,.55); outline-offset: 
 .qi-st.st-partial{color:var(--orange)}
 .qi-st.st-q{color:var(--muted)}
 .qi-actions{display:flex;gap:5px;margin-left:auto;flex-shrink:0;align-items:center}
+
+/* ── Строка очереди: состояние ПОД названием ───────────────────────────────
+   Раскладку в одну линию пробовали 08.08.2026 и владелец забраковал: строку
+   состояния он хочет видеть под названием и артистом. Заодно та версия ломала
+   счётчик треков — «· 12 треков» стоит в хвосте метастроки, а зажатая справа
+   строка обрезалась многоточием ровно по этому хвосту.
+
+   Что осталось от той попытки и признано полезным: круглые кнопки действий
+   переехали из нижней строки ВПРАВО, к крестику (об этом владелец просил
+   отдельно — «крестики справа от трека, не снизу»).
+
+   Значку качества задана постоянная ширина: без неё полосы прогресса начинались
+   на разной горизонтали (FLAC против ALAC HI-RES) и колонка не читалась. */
+.qi-l2 .qi-badge{min-width:86px;text-align:center}
+/* Ряд действий стоит рядом с крестиком, отдельным блоком строки */
+.qi > .qi-actions{flex-shrink:0;margin-left:0}
 .qi-actions .dl-action-btn,.dl-action-btn{
   --c:var(--muted);
   flex:0 0 auto;position:relative;overflow:hidden;isolation:isolate;
@@ -1218,8 +1234,15 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
       position:absolute; inset:0;
       background: radial-gradient(ellipse at center, rgba(0,0,0,.15) 0%, rgba(0,0,0,.7) 100%);
     }
-    /* All children above the bg */
-    #fullscreen-player > :not(#fp-bg):not(#fp-shade){ position:relative; z-index:1 }
+    /* Все дети — поверх фона.
+       Раньше здесь стояло `> :not(#fp-bg):not(#fp-shade)`. Аргументы :not()
+       отдают правилу свою специфичность, поэтому оно весило ТРИ
+       идентификатора, и перебить `position:relative` в раскладке ниже было
+       нечем — шапка плеера упорно оставалась в потоке сетки. Тот же результат
+       достигается двумя правилами обычного веса. */
+    #fullscreen-player > *{ position:relative; z-index:1 }
+    #fullscreen-player > #fp-bg,
+    #fullscreen-player > #fp-shade{ position:absolute; z-index:0 }
 
     .fp-top{
       display:flex; align-items:center; gap:12px;
@@ -1285,7 +1308,21 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
     }
     .fp-fill{
       position:absolute; left:0; top:50%; transform:translateY(-50%);
-      height:6px; width:0%; background:#fff; border-radius:3px;
+      height:6px; width:0%; border-radius:3px;
+      /* Фирменный градиент из референса — пурпур → голубой (замеры
+         #d571ba … #75b1e5). Растянут на всю ширину дорожки, а не на
+         заполненную часть: иначе оттенок прыгал бы при перемотке. */
+      background: linear-gradient(90deg, #d571ba 0%, #a05fc4 45%, #75b1e5 100%);
+      /* Размер градиента задан от ЭКРАНА, а не от ширины заполнения. Ширину
+         двигает JS (пять мест в player.js/player_fps.js), и при обычном
+         градиенте оттенок сжимался бы вместе с ней: на 5% дорожки был бы
+         виден весь переход целиком. При размере в vw цвет — функция
+         координаты, поэтому при воспроизведении он не переливается.
+         Значение подобрано под ширину дорожки: на телефоне она почти во весь
+         экран, на настольной раскладке — правая колонка (см. ниже). */
+      background-size: 92vw 100%;
+      background-position: left center;
+      background-repeat: no-repeat;
       pointer-events:none;
     }
     .fp-thumb{
@@ -1496,18 +1533,23 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
     }
     .fp-ctrl:active{ transform: scale(.88);
       box-shadow: inset 0 2px 4px rgba(0,0,0,.4); }
+    /* Фирменная кнопка воспроизведения. Цвета замерены с референса
+       (design/design-system-mobile.md, раздел 2): заливка #4a2958 → #462248,
+       светлая точка #7c6180, внешнее кольцо #34133e. Белый круг, стоявший
+       здесь раньше, — это кнопка «как у всех», по ней приложение не узнаётся. */
     .fp-ctrl.fp-play{
       width:72px; height:72px; font-size:30px;
-      background: linear-gradient(180deg, #ffffff 0%, #ececf2 100%);
-      color:#0e0f14; border:none;
+      background: radial-gradient(120% 130% at 50% 0%, #8a6b90 0%, #4a2958 52%, #462248 100%);
+      color:#fff; border:none;
       box-shadow:
-        inset 0 1px 0 rgba(255,255,255,.6),
-        inset 0 -2px 4px rgba(0,0,0,.08),
-        0 6px 24px rgba(0,0,0,.55),
-        0 0 0 6px rgba(255,255,255,.04);
+        inset 0 1px 0 rgba(255,255,255,.22),
+        inset 0 -2px 6px rgba(0,0,0,.28),
+        0 0 0 5px rgba(124,97,128,.16),
+        0 8px 30px -6px rgba(213,113,186,.45),
+        0 6px 24px rgba(0,0,0,.5);
     }
     .fp-ctrl.fp-play:active{ transform: scale(.94);
-      box-shadow: inset 0 2px 6px rgba(0,0,0,.18), 0 2px 8px rgba(0,0,0,.3); }
+      box-shadow: inset 0 2px 8px rgba(0,0,0,.4), 0 0 0 4px rgba(124,97,128,.12); }
 
     .fp-extra{
       display:flex; gap:10px; justify-content:center; flex-wrap:wrap;
@@ -1533,13 +1575,62 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
       color:#fff;
     }
 
-    /* Larger viewports — cap width so it doesn't look stretched */
-    @media (min-width: 700px){
+    /* Планшет: узкая колонка по центру — телефонная раскладка ещё работает. */
+    @media (min-width: 700px) and (max-width: 1019px){
       .fp-art{ width: 360px }
-      #fullscreen-player > :not(#fp-bg):not(#fp-shade){
+      #fullscreen-player > :not(#fp-bg):not(#fp-shade):not(#fp-viz):not(#fp-lyrics){
         max-width: 540px; margin-left:auto; margin-right:auto; width:100%;
       }
     }
+
+    /* ── Настольная раскладка: обложка слева, всё остальное справа ──────────
+       Раньше здесь работало то же правило max-width:540px, что и на планшете:
+       на окне 1600 точек контент стоял колодцем по центру, а по бокам была
+       пустота в половину экрана. Референс (design/design-system-mobile.md,
+       нижняя панель) показывает настольную подачу горизонтальной — обложка
+       слева, метаданные и транспорт справа по левому краю. Сетка, а не flex:
+       обложке нужно занять всю высоту второй колонки. */
+    @media (min-width: 1020px){
+      #fullscreen-player.open{
+        display:grid; align-content:center;
+        grid-template-columns: minmax(260px, 420px) minmax(0, 1fr);
+        column-gap: clamp(32px, 4vw, 64px);
+        padding: env(safe-area-inset-top, 0) clamp(32px, 5vw, 72px) env(safe-area-inset-bottom, 0);
+      }
+      /* Шапка вынута из потока сетки: align-content:center утаскивал её в
+         середину экрана вместе с остальными рядами, и кнопка «свернуть»
+         оказывалась посреди пустоты вместо верхнего угла.
+         Селектор с id обязателен: правило
+         `#fullscreen-player > :not(#fp-bg):not(#fp-shade){position:relative}`
+         весит три идентификатора и голый `.fp-top` перебить его не может —
+         шапка оставалась в потоке и уезжала в правую колонку. */
+      #fullscreen-player.open .fp-top{
+        position:absolute; top:0; left:0; right:0;
+        padding: 18px clamp(32px, 5vw, 72px) 0;
+      }
+      .fp-art-wrap{ grid-column:1; grid-row: 1 / span 4; padding:0; min-height:0 }
+      .fp-art{ width:100%; max-width:400px; border-radius:20px }
+      .fp-meta, .fp-seek-wrap, .fp-controls, .fp-extra{ grid-column:2; padding-left:0; padding-right:0 }
+      .fp-meta{ align-self:end; text-align:left; padding-bottom:18px }
+      #fp-title{ font-size: clamp(26px, 2.4vw, 38px); white-space:normal;
+                 display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical }
+      #fp-artist{ font-size:15px }
+      .fp-controls{ justify-content:flex-start; gap:26px; padding-left:0 }
+      .fp-extra{ justify-content:flex-start; padding-left:0 }
+      /* Дорожка здесь занимает правую колонку — примерно 60% ширины окна. */
+      .fp-fill{ background-size: 60vw 100% }
+    }
+
+    /* Строка формата — машинные данные, поэтому моноширинный (правило 3
+       настольной дизайн-системы). Скрыта, когда качество неизвестно. */
+    .fp-fmt{
+      margin-top:8px; font-family:var(--mono); font-size:10.5px; font-weight:700;
+      letter-spacing:.6px; text-transform:uppercase;
+      color:rgba(255,255,255,.62);
+      display:inline-block; padding:3px 9px; border-radius:6px;
+      background:rgba(255,255,255,.07); border:1px solid rgba(255,255,255,.09);
+    }
+    .fp-fmt[hidden]{ display:none }
 
     /* Tactility tweaks — physical, not flat */
     .fp-icon-btn, .fp-ctrl, .fp-pill{
@@ -1965,9 +2056,17 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 #pp-queue .pq-x{background:none;border:none;color:var(--muted);font-size:19px;
   line-height:1;cursor:pointer;font-family:var(--font);padding:0 2px}
 #pp-queue .pq-x:hover{color:var(--text)}
+#pp-queue .pq-clear{background:none;border:1px solid var(--border);border-radius:6px;
+  color:var(--muted);font-size:9px;letter-spacing:.5px;text-transform:uppercase;
+  cursor:pointer;font-family:var(--font);padding:3px 8px}
+#pp-queue .pq-clear:hover{color:var(--text);border-color:var(--muted)}
+#pp-queue .pq-rm{background:none;border:none;color:var(--muted2);font-size:16px;
+  line-height:1;cursor:pointer;padding:0;opacity:.45;transition:opacity .1s,color .1s;justify-self:center}
+#pp-queue .pq-row:hover .pq-rm{opacity:1}
+#pp-queue .pq-rm:hover{color:var(--red)}
 #pp-queue .pq-list{overflow-y:auto;scrollbar-width:thin}
 #pp-queue .pq-empty{padding:20px;text-align:center;font-size:12px;color:var(--muted)}
-#pp-queue .pq-row{display:grid;grid-template-columns:24px 1fr 46px;gap:10px;
+#pp-queue .pq-row{display:grid;grid-template-columns:24px 1fr 46px 20px;gap:10px;
   align-items:center;padding:6px 12px;cursor:pointer;font-size:12px;
   border-bottom:1px solid rgba(255,255,255,.03);
   content-visibility:auto;contain-intrinsic-size:auto 30px}
@@ -2025,7 +2124,10 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
    метка качества занимала треть строки. Ширина увеличена, колонок осталось три:
    номер — название с подстрочником — время. Всё остальное живёт в подстрочнике,
    где места хватает. */
-#pp-queue .pq-row{grid-template-columns:24px 1fr 46px}
+/* ЧЕТЫРЕ колонки, а не три: четвёртый ребёнок строки — кнопка «×». Когда
+   колонок было три, она не помещалась и переносилась на вторую неявную строку —
+   вставала СНИЗУ СЛЕВА под треком и растягивала строку до 85 px. */
+#pp-queue .pq-row{grid-template-columns:24px 1fr 46px 18px}
 #pp-queue .pq-sub{font-size:10.5px}
 #pp-queue .pq-sub .pq-q{margin-left:6px;font-weight:600;font-size:9.5px;opacity:.7}
 
@@ -2050,4 +2152,62 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
              0 10px 34px color-mix(in srgb,var(--tint) 14%,transparent)}
 @supports not (color:color-mix(in srgb,red 50%,blue)){
   #sc-detail.tinted,.detail-panel.tinted{box-shadow:inset 0 3px 0 0 var(--tint)}
+}
+
+/* Вишлист: вкладки «Все / Артисты / Лейблы» рядом с поиском по имени.
+   Список подписок перевалил за сотню, и найти в нём кого-то было нечем. */
+.wl-kind-tab{
+  padding:6px 11px;background:var(--surface);border:1px solid var(--border);
+  border-radius:8px;font-size:11px;cursor:pointer;color:var(--muted);
+  font-family:var(--font);white-space:nowrap;transition:background .12s,color .12s,border-color .12s;
+}
+.wl-kind-tab:hover{color:var(--text);border-color:var(--muted2)}
+.wl-kind-tab.active{
+  background:color-mix(in srgb,var(--red) 16%,transparent);
+  border-color:color-mix(in srgb,var(--red) 42%,transparent);
+  color:var(--red);font-weight:600;
+}
+
+/* Приписка «+N едут» в заголовке очереди, пока микс докачивается. */
+.pq-live{font-size:11px;font-weight:600;color:var(--green);margin-left:2px}
+
+/* Плашка живого микса «до старта ~N с». Цвета через токены: раньше были зашиты
+   тёмными, и на светлой теме получался чёрный прямоугольник. */
+.livemix-ov{
+  position:fixed;left:50%;bottom:96px;transform:translateX(-50%);z-index:9000;
+  background:var(--panel);color:var(--text);border:1px solid var(--border);
+  border-radius:12px;padding:12px 18px;font-family:var(--font);font-size:13px;
+  box-shadow:var(--shadow);backdrop-filter:blur(8px);text-align:center;min-width:240px;
+}
+.livemix-ov b{font-size:16px}
+.livemix-ov .lm-got{color:var(--red)}
+
+/* ── Бегущая строка для длинных названий ─────────────────────────────────────
+   Длинные названия треков и склейки артистов при коллабах не помещаются и
+   обрезались многоточием — «Above & Beyond, Justine Suissa & …» читать нечем.
+   Едет ТУДА И ОБРАТНО (alternate), а не по кругу: круг начинается с рывка от
+   конца к началу и читается хуже. На концах пауза — иначе глаз не успевает.
+
+   Включается только когда текст ДЕЙСТВИТЕЛЬНО не влез (класс ставит mqScan),
+   и только там, где это уместно: играющая строка и док плеера едут сами,
+   остальные строки — при наведении. Двадцать одновременно едущих строк — это
+   рябь, а не помощь. */
+[data-mq]{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+[data-mq] .mq-i{display:inline-block;will-change:transform}
+[data-mq].mq-on,
+#pp-queue [data-mq].mq-on,
+#pp-bar [data-mq].mq-on{text-overflow:clip}
+[data-mq].mq-on .mq-i{
+  animation:mq-slide var(--mq-dur,8s) ease-in-out infinite alternate;
+}
+/* Пауза на концах: 12% времени стоим в начале, 12% — в конце. */
+@keyframes mq-slide{
+  0%, 12%   {transform:translateX(0)}
+  88%, 100% {transform:translateX(calc(-1 * var(--mq-dx, 0px)))}
+}
+/* Строки очереди: едут только текущая и та, на которую навели. */
+#pp-queue .pq-row:not(.on):not(:hover) [data-mq].mq-on .mq-i{animation:none;transform:none}
+@media (prefers-reduced-motion: reduce){
+  [data-mq].mq-on .mq-i{animation:none;transform:none}
+  [data-mq].mq-on{text-overflow:ellipsis}
 }

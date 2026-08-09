@@ -87,11 +87,34 @@ class WrapperPool:
         project_service_gating_2026-07-22 memory). Each slot gets its own
         directory, generated fresh on first boot and then reused (not wiped)
         on restart so the wrapper doesn't have to burn a fresh device lease
-        every time it restarts."""
+        every time it restarts.
+
+        Каталог именуется по АККАУНТУ, а не по номеру слота (09.08.2026).
+        Раньше было `rootfs_pool/acct{i}` — привязка к позиции в списке. Стоило
+        переставить аккаунты местами, и два разных аккаунта получали одну и ту
+        же identity, а это ровно тот самый device-limit. Владелец просил
+        возможность менять приоритет аккаунтов вручную; с привязкой к номеру
+        такая возможность была бы миной. По имени учётки перестановка
+        безопасна: каждый аккаунт носит свою identity с собой.
+
+        Старые каталоги `rootfs_pool/acct{i}` переносятся под новое имя при
+        первом обращении — терять уже прогретую identity нельзя, её повторное
+        создание стоит слота устройства."""
         from pathlib import Path as _P
-        import os as _os
+        import os as _os, re as _re, shutil as _sh
         base = _P(_os.environ.get("RIPSTER_BASE_DIR") or _P(__file__).resolve().parent.parent)
-        d = base / "dist" / "docker" / "rootfs_pool" / f"acct{i}" / "data"
+        acct = (self.accounts[i].get("id") if i < len(self.accounts) else "") or f"slot{i}"
+        tag = _re.sub(r"[^A-Za-z0-9]+", "", acct.split("@")[0])[:24] or f"slot{i}"
+        d = base / "dist" / "docker" / "rootfs_id" / tag / "data"
+        if not d.exists():
+            old = base / "dist" / "docker" / "rootfs_pool" / f"acct{i}" / "data"
+            if old.exists() and any(old.iterdir()):
+                d.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    _sh.move(str(old), str(d))
+                    print(f"[pool] identity перенесена: acct{i} → {tag}", flush=True)
+                except Exception as e:
+                    print(f"[pool] перенос identity acct{i}→{tag} не удался: {e}", flush=True)
         d.mkdir(parents=True, exist_ok=True)
         return str(d)
 

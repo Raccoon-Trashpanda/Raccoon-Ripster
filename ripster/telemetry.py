@@ -296,7 +296,7 @@ def _index_path() -> Path:
 
 def _read_index() -> dict:
     try:
-        return json.loads(_index_path().read_text(encoding="utf-8"))
+        return json.loads(_index_path().read_text(encoding="utf-8-sig"))
     except Exception:
         return {}
 
@@ -451,7 +451,7 @@ def _bot_cfg() -> dict:
     """
     try:
         p = _base_dir / "tgbot" / "config.json"
-        d = json.loads(p.read_text(encoding="utf-8"))
+        d = json.loads(p.read_text(encoding="utf-8-sig"))
         if d.get("bot_token") and d.get("owner_id"):
             return d
     except Exception:

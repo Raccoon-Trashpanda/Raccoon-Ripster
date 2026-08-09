@@ -38,3 +38,4 @@ streamrip==2.0.5
 # Electron/QtWebEngine). ripster_launcher.py falls back to the default browser if
 # this is absent. Pulls pythonnet + clr_loader on Windows.
 pywebview==6.2.1
+tzdata

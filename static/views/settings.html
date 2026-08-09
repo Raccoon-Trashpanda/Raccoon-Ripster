@@ -25,7 +25,7 @@
           <div class="block-title" data-i18n="s.appearance">🎨 Appearance</div>
           <div class="settings-row">
             <div class="field-group flex1">
-              <label class="lbl" data-i18n="s.color_theme">Color theme</label>
+              <label class="lbl" data-i18n="s.color_theme">Цветовая тема</label>
               <!-- Each card previews its own palette: the swatch background IS the
                    scheme's --bg, so the choice is made by eye, not by name. -->
               <div style="display:flex;gap:6px;flex-wrap:wrap">
@@ -52,26 +52,33 @@
               </div>
             </div>
             <div class="field-group flex1">
-              <label class="lbl" data-i18n="s.ui_font">UI Font</label>
-              <div style="display:flex;flex-direction:column;gap:5px">
-                <select id="font-picker2" onchange="setFont(this.value)"
-                  style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 12px;color:var(--text);font-size:13px;outline:none;cursor:pointer">
-                  <option value="system">System — OS default sans-serif</option>
-                  <option value="dm">DM Sans — clean geometric</option>
-                  <option value="inter">Inter — neutral UI standard</option>
-                  <option value="geist">Geist — Vercel's modern sans</option>
-                  <option value="nunito">Nunito — rounded friendly</option>
-                  <option value="roboto">Roboto — Material Design</option>
-                  <option value="manrope">Manrope — technical editorial</option>
-                  <option value="atkinson">Atkinson Hyperlegible — max readability</option>
-                  <option value="source">Source Sans 3 — soft humanist</option>
-                </select>
-                <div id="font-preview" style="font-size:13px;color:var(--muted);padding:6px 8px;background:var(--surface2);border-radius:7px">
-                  The quick brown fox jumps over the lazy dog 0123456789
-                </div>
-              </div>
+              <label class="lbl" data-i18n="s.ui_font">Шрифт интерфейса</label>
+              <!-- Строка-пангарма («The quick brown fox…») убрана: интерфейс и так
+                   весь перед глазами и сразу перерисовывается выбранным шрифтом —
+                   отдельный образец ничего не добавлял, а место занимал и сбивал.
+                   Пояснения к названиям тоже убраны: девять строк описаний в
+                   выпадашке читать никто не будет. -->
+              <select id="font-picker2" onchange="setFont(this.value)"
+                style="background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 12px;color:var(--text);font-size:13px;outline:none;cursor:pointer;width:100%">
+                <option value="system">System</option>
+                <option value="dm">DM Sans</option>
+                <option value="inter">Inter</option>
+                <option value="geist">Geist</option>
+                <option value="nunito">Nunito</option>
+                <option value="roboto">Roboto</option>
+                <option value="manrope">Manrope</option>
+                <option value="atkinson">Atkinson Hyperlegible</option>
+                <option value="source">Source Sans 3</option>
+              </select>
             </div>
           </div>
+        </div>
+
+        <!-- ── Аккаунты: страны, часовые пояса, ранняя доступность ── -->
+        <div class="block mt12" id="accounts-overview-block">
+          <div class="block-title" data-i18n="s.accounts_section">🌍 Аккаунты — страны и часовые пояса</div>
+          <div class="toggle-sub" data-i18n="s.accounts_sub" style="margin-bottom:8px">Из какой страны каждая учётка и кто входит в новый день раньше — на этом ловятся ранние релизы (новозеландская пятница).</div>
+          <div id="accounts-overview"><div style="color:var(--muted);font-size:12px;padding:8px 0">…</div></div>
         </div>
 
         <!-- ── Queue behaviour ── -->
@@ -108,6 +115,19 @@
             </div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-nudges-enabled"
               onchange="saveSetting('nudges-enabled',this.checked)"><div class="toggle-slider"></div></label>
+          </div>
+          <div class="field-group mt8">
+            <label class="lbl" data-i18n="s.default_search_svc_label">Сервис поиска по умолчанию</label>
+            <div class="toggle-sub" data-i18n="s.default_search_svc_sub" style="margin-bottom:6px">Открывается при первом заходе на вкладку «Поиск» (и в подсказках-нуджах). После первого поиска вручную вкладка запоминает выбранный сервис сама — этот пункт нужен только для самого первого раза.</div>
+            <select id="s-default-search-svc" onchange="saveSetting('default-search-service',this.value)" style="width:auto">
+              <option value="apple">🍎 Apple Music</option>
+              <option value="deezer">🎵 Deezer</option>
+              <option value="qobuz">🎼 Qobuz</option>
+              <option value="tidal">🌊 Tidal</option>
+              <option value="spotify">🟢 Spotify</option>
+              <option value="beatport">🎧 Beatport</option>
+              <option value="yandex" data-i18n="s.yandex">🟡 Яндекс.Музыка</option>
+            </select>
           </div>
           <div class="toggle-row">
             <div class="toggle-info">
@@ -667,6 +687,7 @@
           // back to 'auto'.) applyConfig() also calls _hlAppleWrapper once config
           // arrives, so this is just an immediate best-effort on view load.
           try{ _hlAppleWrapper(((window.S && S.config) || {})['apple-wrapper'] || 'public'); }catch(e){}
+          try{ if(typeof renderAccountsOverview==='function') renderAccountsOverview(); }catch(e){}
           </script>
         </div>
 

@@ -49,7 +49,7 @@ from pathlib import Path
 
 import httpx
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, HTTPException, Request
 
 from ripster import setup as _setup
 from ripster import amd as _amd
@@ -414,6 +414,50 @@ async def wrapper_accounts_list():
     }
 
 
+@router.post("/api/wrapper/accounts/order")
+async def wrapper_accounts_order(body: dict):
+    """Переставить Apple-аккаунты: тело {"order": [2, 0, 1]} — новые позиции
+    по СТАРЫМ номерам слотов. Первый в списке становится основным.
+
+    Зачем отдельная ручка, а не правка конфига руками: основной аккаунт живёт в
+    `wrapper-apple-id`/`wrapper-password`, а остальные — в списке
+    `wrapper-accounts`. Перестановка обязана переписать И то, и другое
+    согласованно, иначе аккаунт задвоится или пропадёт.
+
+    Безопасность: каталоги device-identity с 09.08.2026 именуются по аккаунту,
+    а не по номеру слота, поэтому перестановка НЕ приводит к тому, что два
+    аккаунта делят одну identity (это давало device-limit). Контейнеры при этом
+    надо перезапустить — сделает следующий запуск пула, повторный логин
+    неизбежен.
+    """
+    from ripster import wrapper_pool as _pool
+    accounts = _pool._configured_accounts(_cfg)
+    order = body.get("order") or []
+    if sorted(order) != list(range(len(accounts))):
+        raise HTTPException(400, f"order должен быть перестановкой 0..{len(accounts)-1}, "
+                                 f"получено {order}")
+    new = [accounts[i] for i in order]
+    head, tail = new[0], new[1:]
+    _cfg["wrapper-apple-id"]  = head["id"]
+    _cfg["wrapper-password"]  = head["password"]
+    _cfg["wrapper-accounts"]  = [{"id": a["id"], "password": a["password"],
+                                  "label": a.get("label") or a["id"]} for a in tail]
+    # Именно _save_config из контекста, а не config_service.save_config: у
+    # последнего сигнатура (cfg, config_file, tokens_dir), и вызов с одним
+    # аргументом упал бы в рантайме — при синтаксической корректности файла.
+    if not _save_config:
+        raise HTTPException(500, "сохранение конфига недоступно")
+    try:
+        _save_config(_cfg)
+    except Exception as e:
+        raise HTTPException(500, f"не сохранил конфиг: {e}")
+    return {"ok": True,
+            "primary": head.get("label") or head["id"],
+            "order": [a.get("label") or a["id"] for a in new],
+            "note": "контейнеры перезапустятся при следующем запуске пула — "
+                    "каждый аккаунт останется на своей identity"}
+
+
 @router.post("/api/wrapper/accounts/add")
 async def wrapper_accounts_add(body: dict):
     """Add an additional Apple account to the pool and start its wrapper.
@@ -486,9 +530,29 @@ async def wrapper_accounts_remove(slot: int):
 #   POST /api/deezer/accounts/{slot}/remove — remove an added account (not slot 0)
 
 @router.get("/api/deezer/accounts")
-async def deezer_accounts_list():
+async def deezer_accounts_list(probe: int = 0):
+    """Учётки Deezer. С ?probe=1 — дополнительно спрашивает КАЖДЫЙ ARL о его
+    стране, тарифе и сроке.
+
+    Почему опцией, а не всегда: проба — это сетевой запрос на учётку, а список
+    открывают часто. Без пробы отдаём то же, что и раньше, мгновенно.
+
+    Зачем вообще: до 09.08.2026 страна была известна только у ОСНОВНОЙ учётки —
+    пул хранил ARL, но ничего о его владельце. Для Apple такое незнание стоило
+    целой ночи разбирательств (задача #17), поэтому закрываем ту же дыру здесь,
+    не дожидаясь повторения.
+    """
     from ripster import deezer_pool as _dzp
-    return _dzp.live_status(_cfg)
+    base = _dzp.live_status(_cfg)
+    if not probe:
+        return base
+    try:
+        from ripster import deezer_accounts as _dza
+        return {**(base if isinstance(base, dict) else {"pool": base}),
+                "probe": await _dza.survey(_cfg)}
+    except Exception as e:
+        return {**(base if isinstance(base, dict) else {"pool": base}),
+                "probe_error": f"{type(e).__name__}: {e}"}
 
 
 @router.post("/api/deezer/accounts/add")
@@ -1385,3 +1449,153 @@ async def restart_app():
 
     threading.Thread(target=_do, daemon=True).start()
     return {"ok": True}
+
+
+# ── Обзор аккаунтов: страны, часовые пояса, ранняя доступность ────────────────
+# Владелец не видел, работает ли учётка, из какой она СТРАНЫ и какой ЧАСОВОЙ ПОЯС
+# — а на этом держится стратегия ранней доступности (НЗ-Tidal ловит пятницу на
+# полсуток раньше US-Apple). Этот обзор показывает по каждому сервису страну,
+# местное время и НАСКОЛЬКО раньше он входит в новый день.
+_COUNTRY_TZ = {
+    "KI": ("Pacific/Kiritimati", "Кирибати", "🇰🇮"),
+    "NZ": ("Pacific/Auckland", "Новая Зеландия", "🇳🇿"),
+    "TO": ("Pacific/Tongatapu", "Тонга", "🇹🇴"),
+    "WS": ("Pacific/Apia", "Самоа", "🇼🇸"),
+    "FJ": ("Pacific/Fiji", "Фиджи", "🇫🇯"),
+    "AU": ("Australia/Sydney", "Австралия", "🇦🇺"),
+    "JP": ("Asia/Tokyo", "Япония", "🇯🇵"),
+    "KR": ("Asia/Seoul", "Корея", "🇰🇷"),
+    "CN": ("Asia/Shanghai", "Китай", "🇨🇳"),
+    "SG": ("Asia/Singapore", "Сингапур", "🇸🇬"),
+    "AE": ("Asia/Dubai", "ОАЭ", "🇦🇪"),
+    "IN": ("Asia/Kolkata", "Индия", "🇮🇳"),
+    "RU": ("Europe/Moscow", "Россия", "🇷🇺"),
+    "ZA": ("Africa/Johannesburg", "ЮАР", "🇿🇦"),
+    "DE": ("Europe/Berlin", "Германия", "🇩🇪"),
+    "FR": ("Europe/Paris", "Франция", "🇫🇷"),
+    "IT": ("Europe/Rome", "Италия", "🇮🇹"),
+    "GB": ("Europe/London", "Великобритания", "🇬🇧"),
+    "BR": ("America/Sao_Paulo", "Бразилия", "🇧🇷"),
+    "US": ("America/New_York", "США", "🇺🇸"),
+    "CA": ("America/Toronto", "Канада", "🇨🇦"),
+    "MX": ("America/Mexico_City", "Мексика", "🇲🇽"),
+}
+
+
+def _country_info(cc: str) -> dict:
+    from datetime import datetime, timezone as _tz
+    cc = (cc or "").strip().upper()
+    tz, name, flag = _COUNTRY_TZ.get(cc, (None, cc or "?", "🏳"))
+    off_h, local = None, ""
+    if tz:
+        try:
+            from zoneinfo import ZoneInfo
+            now = datetime.now(ZoneInfo(tz))
+            off_h = now.utcoffset().total_seconds() / 3600.0
+            local = now.strftime("%a %H:%M")
+        except Exception:
+            pass
+    # Название страны НЕ отдаём: раньше оно уезжало по-русски и в английском
+    # интерфейсе так и оставалось русским. Сервер отдаёт код и флаг, название
+    # подставляет клиент по ключу cc.<КОД>.
+    return {"country": cc, "flag": flag,
+            "timezone": tz or "", "offset": off_h, "local_time": local}
+
+
+@router.get("/api/accounts/overview")
+async def accounts_overview():
+    """Единый обзор всех учёток: страна, часовой пояс, местное время, кто раньше
+    входит в новый день (ранняя доступность). Дёшево — только из config, без
+    сетевых запросов. Срок подписки/детальный статус — в валидации каждого сервиса."""
+    from ripster import wrapper_pool as _pool
+
+    def _has(k):
+        v = _cfg.get(k)
+        return bool(v.strip()) if isinstance(v, str) else bool(v)
+
+    def _sub(svc: str) -> dict:
+        """Срок подписки, запомненный последней пробой /api/test-auth/<svc>."""
+        active = _cfg.get(f"{svc}-sub-active")
+        end = _cfg.get(f"{svc}-sub-end") or ""
+        if not end:
+            return {"sub_end": "", "sub_days_left": None, "sub_active": active,
+                    "checked_at": _cfg.get(f"{svc}-checked-at")}
+        dl = _cfg.get(f"{svc}-sub-days-left")
+        # Дни считаем от СЕГОДНЯ, а не берём число из кэша: оно было верным в
+        # день проверки и с тех пор тихо устарело бы ровно на столько же дней.
+        try:
+            from datetime import date as _date
+            y, m, d = (int(x) for x in str(end)[:10].split("-"))
+            dl = (_date(y, m, d) - _date.today()).days
+        except Exception:
+            dl = dl if isinstance(dl, int) else None
+        return {"sub_end": str(end)[:10], "sub_days_left": dl, "sub_active": active,
+                "checked_at": _cfg.get(f"{svc}-checked-at")}
+
+    def _pool_n(svc: str) -> int:
+        """Сколько учёток у сервиса: основная + пул <svc>-accounts.
+
+        Раньше всем, кроме Apple, проставлялась единица, и Deezer с двумя
+        аккаунтами выглядел как один. Считаем честно."""
+        extra = _cfg.get(f"{svc}-accounts")
+        return 1 + (len(extra) if isinstance(extra, (list, tuple)) else 0)
+
+    def _entry(svc, label, configured, accounts, cc):
+        # Страну мы знаем только у ОСНОВНОЙ учётки: пул хранит логин/ARL, но не
+        # страну, а у пулового аккаунта она вполне может быть другой — на этом и
+        # держится ранняя доступность. Помечаем, чтобы панель не выдавала страну
+        # основной за страну всего пула.
+        return {"service": svc, "label": label, "configured": configured,
+                "accounts": accounts,
+                "country_is_primary_only": accounts > 1,
+                **_country_info(cc), **_sub(svc)}
+
+    out = []
+
+    # Apple — страна ПО ПРОБЕ, если она была: config storefront это то, что
+    # человек вписал, а /v1/me/storefront отвечает, где учётка на самом деле
+    # (у владельца было записано US, а аккаунт оказался CA).
+    apple_cc = (_cfg.get("apple-country") or _cfg.get("storefront") or "us").upper()
+    pool_n = len(_pool._configured_accounts(_cfg)) if hasattr(_pool, "_configured_accounts") else 1
+    out.append(_entry("apple", "Apple Music", True, pool_n, apple_cc))
+
+    # Tidal — страна автоопределяется из аккаунта (tidal-country), ключевой для НЗ-форы
+    if _has("tidal-token") or _has("tidal-country"):
+        out.append(_entry("tidal", "Tidal", _has("tidal-token"), _pool_n("tidal"),
+                          _cfg.get("tidal-country") or ""))
+
+    # Остальные: страну кладёт проба сервиса в <svc>-country (см.
+    # routes/auth.py:_remember_probe). Пока человек ни разу не жал «проверить»,
+    # страна честно неизвестна — выдумывать её неоткуда.
+    if _has("deezer-arl"):
+        out.append(_entry("deezer", "Deezer", True, _pool_n("deezer"), _cfg.get("deezer-country") or ""))
+    if _has("qobuz-auth-token") or (_has("qobuz-email") and _has("qobuz-password")):
+        out.append(_entry("qobuz", "Qobuz", True, _pool_n("qobuz"), _cfg.get("qobuz-country") or ""))
+    if _has("spotify-client-id") or _has("spotify-sp-dc"):
+        out.append(_entry("spotify", "Spotify", True, _pool_n("spotify"),
+                          _cfg.get("spotify-country") or _cfg.get("spotify-market") or ""))
+    if _has("soundcloud-oauth-token"):
+        out.append(_entry("soundcloud", "SoundCloud", True, _pool_n("soundcloud"),
+                          _cfg.get("soundcloud-country") or ""))
+
+    # ранняя доступность: чем больше offset, тем раньше входит в новый день
+    known = [o for o in out if o.get("offset") is not None]
+    known.sort(key=lambda o: o["offset"], reverse=True)
+    for i, o in enumerate(known):
+        o["early_rank"] = i + 1
+    earliest = known[0] if known else None
+    apple_off = next((o["offset"] for o in out if o["service"] == "apple"
+                      and o["offset"] is not None), None)
+    # Подсказку отдаём РАЗОБРАННОЙ, а не готовой фразой: собранный на сервере
+    # русский текст нельзя перевести на клиенте, он так и приезжал русским в
+    # английский интерфейс. Здесь — только числа и коды, фраза собирается из
+    # ключа s.acc_hint.
+    hint = None
+    if earliest and apple_off is not None and earliest["service"] != "apple":
+        dh = earliest["offset"] - apple_off
+        if dh > 0:
+            hint = {"flag": earliest["flag"], "label": earliest["label"],
+                    "country": earliest["country"], "hours": round(dh),
+                    "vs": "Apple"}
+    return {"ok": True, "accounts": out,
+            "earliest": earliest["service"] if earliest else None, "hint": hint}

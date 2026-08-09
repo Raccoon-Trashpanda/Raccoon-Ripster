@@ -165,6 +165,92 @@ async def _probe_bbc(overlay: dict | None = None) -> dict:
     }}
 
 
+@router.get("/api/accounts/survey")
+async def accounts_survey(fresh: int = 0):
+    """Обойти ВСЕ настроенные учётки и сказать про каждую: жива или нет.
+
+    Зачем: пробы существовали для каждого сервиса, но запускались только когда
+    человек нажмёт кнопку. То есть обхода не было вовсе — была ручная проверка.
+    09.08.2026 это стоило прямых убытков: подписка gamdl кончилась, ARL и токены
+    жили неизвестно сколько, и узнавали мы об этом в момент падения загрузки.
+
+    Пробы идут ПАРАЛЛЕЛЬНО: их десяток, а каждая ждёт сеть. Последовательно
+    обход занял бы минуту и никто бы его не запускал.
+
+    Учётки, которых нет в конфиге, пропускаем молча: «не настроено» — это не
+    поломка, и мешать одно с другим нельзя.
+    """
+    import asyncio as _aio
+
+    probes = _probes()
+    # Что вообще настроено. Ключи те же, что проверяет панель настроек.
+    keys = {
+        "qobuz":      ("qobuz-auth-token", "qobuz-email"),
+        "tidal":      ("tidal-token",),
+        "deezer":     ("deezer-arl",),
+        "spotify":    ("spotify-client-id", "spotify-sp-dc"),
+        "soundcloud": ("soundcloud-oauth-token",),
+        "apple":      ("wrapper-apple-id", "media-user-token"),
+        "beatport":   ("beatport-username",),
+        "yandex":     ("yandex-token",),
+        "amazon":     ("amazon-cookies",),
+        "bbc":        (),          # без учётных данных
+    }
+
+    def _configured(svc: str) -> bool:
+        ks = keys.get(svc, ())
+        if not ks:
+            return True
+        for k in ks:
+            v = _cfg.get(k)
+            if (v.strip() if isinstance(v, str) else v):
+                return True
+        return False
+
+    todo = [s for s in probes if _configured(s)]
+
+    async def _one(svc: str) -> dict:
+        try:
+            r = await probes[svc]()
+        except Exception as e:
+            # Исключение пробы — это НЕ «учётка мертва». Разные диагнозы.
+            return {"service": svc, "ok": False, "error": f"проба упала: {type(e).__name__}: {e}"}
+        out = {"service": svc, "ok": bool(r.get("ok"))}
+        if r.get("error"):
+            out["error"] = str(r["error"])[:200]
+        u = r.get("user") or {}
+        for k in ("country", "storefront", "plan", "offer", "subscription", "expires", "name"):
+            if u.get(k):
+                out[k] = u[k]
+        return out
+
+    rows = await _aio.gather(*(_one(s) for s in todo))
+    rows = sorted(rows, key=lambda x: (x["ok"], x["service"]))
+    dead = [r["service"] for r in rows if not r["ok"]]
+    return {"checked": len(rows), "dead": dead, "accounts": rows}
+
+
+def _probes() -> dict:
+    """Все пробы сервисов одним словарём.
+
+    Вынесена из обработчика: обход учёток (`/api/accounts/survey`) обязан ходить
+    теми же пробами, что и кнопка «проверить». Две разные реализации проверки —
+    это две разные правды о том, жива ли учётка.
+    """
+    return {
+        "qobuz":      _probe_qobuz,
+        "tidal":      _probe_tidal,
+        "deezer":     _probe_deezer,
+        "spotify":    _probe_spotify,
+        "soundcloud": _probe_soundcloud,
+        "apple":      _probe_apple,
+        "beatport":   _probe_beatport,
+        "yandex":     _probe_yandex,
+        "amazon":     _probe_amazon,
+        "bbc":        _probe_bbc,
+    }
+
+
 @router.post("/api/test-auth/{service}")
 async def test_auth(service: str, body: dict | None = None):
     """Probe a service's API with saved credentials. Returns structured info:
@@ -182,19 +268,7 @@ async def test_auth(service: str, body: dict | None = None):
     (unknown service, missing httpx, etc).
     """
     s = service.lower()
-    probes = {
-        "qobuz":      _probe_qobuz,
-        "tidal":      _probe_tidal,
-        "deezer":     _probe_deezer,
-        "spotify":    _probe_spotify,
-        "soundcloud": _probe_soundcloud,
-        "apple":      _probe_apple,
-        "beatport":   _probe_beatport,
-        "yandex":     _probe_yandex,
-        "amazon":     _probe_amazon,
-        "bbc":        _probe_bbc,
-    }
-    fn = probes.get(s)
+    fn = _probes().get(s)
     if fn is None:
         raise HTTPException(400, f"Unsupported service: {service}")
     overlay: dict | None = None
@@ -212,7 +286,43 @@ async def test_auth(service: str, body: dict | None = None):
         return {"ok": False, "error": f"Probe crashed: {type(e).__name__}: {e}"}
     if not result.get("ok"):
         print(f"[{s}] probe failed: {(result.get('error') or '?')[:200]}", flush=True)
+    elif overlay is None:
+        # Каждая проба УЖЕ узнаёт страну аккаунта и окно подписки, но раньше это
+        # жило одной строчкой рядом с кнопкой и умирало вместе с ней: обзор
+        # аккаунтов писал «страна не определена» у всех, кроме Tidal (его страну
+        # сохранял фронт). Складываем в config — обзор остаётся дешёвым (без
+        # сети), а данные переживают перезагрузку. Только для СОХРАНЁННЫХ
+        # учёток: overlay — это кандидат на проверке, ему писать в конфиг нечего.
+        _remember_probe(s, result.get("user") or {})
     return result
+
+
+def _remember_probe(svc: str, user: dict) -> None:
+    """Запомнить страну и срок подписки, которые вернула проба сервиса."""
+    import time as _time
+    changed = {}
+    cc = str(user.get("country") or "").strip().upper()
+    if len(cc) == 2 and cc.isalpha():
+        changed[f"{svc}-country"] = cc
+    end = str(user.get("sub_end") or user.get("expiry") or "").strip()
+    if end:
+        changed[f"{svc}-sub-end"] = end[:10]
+    dl = user.get("sub_days_left")
+    if isinstance(dl, int):
+        changed[f"{svc}-sub-days-left"] = dl
+    if isinstance(user.get("sub_active"), bool):
+        # Apple даты окончания не отдаёт вовсе — только «активна/нет». Это тоже
+        # ответ, и он должен доезжать до обзора.
+        changed[f"{svc}-sub-active"] = user["sub_active"]
+    if changed:
+        changed[f"{svc}-checked-at"] = int(_time.time())
+        for k, v in changed.items():
+            _cfg[k] = v
+        if _save_config:
+            try:
+                _save_config(_cfg)
+            except Exception as e:
+                print(f"[{svc}] could not persist probe result: {e}", flush=True)
 
 
 def _qobuz_user_block(user: dict, fallback_id: str = "") -> dict:
@@ -915,6 +1025,29 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
                 "error_args": {"why_key": why_key, "why_args": why_args, "why": decrypt_note},
                 "error": f"Метаданные доступны, но расшифровка недоступна: {decrypt_note}"}
 
+    # Подписка. Возраст cookies.txt и сроки самих кук про неё НЕ говорят ничего —
+    # единственный источник правды у Apple это /v1/me/account?meta=subscription
+    # (01.08.2026: cookies отвечали 200, а подписка кончилась). Best-effort:
+    # ошибка здесь не должна ронять пробу, у которой всё остальное сошлось.
+    sub = {}
+    try:
+        async with httpx.AsyncClient(timeout=10) as c:
+            sr = await c.get(
+                "https://api.music.apple.com/v1/me/account?meta=subscription",
+                headers={"Authorization": f"Bearer {bearer}", "Media-User-Token": mut,
+                         "Origin": "https://music.apple.com",
+                         "Referer": "https://music.apple.com/"},
+            )
+        if sr.status_code == 200:
+            meta = (sr.json().get("meta") or {}).get("subscription") or {}
+            sub["sub_active"] = bool(meta.get("active"))
+            for k in ("expirationDate", "endDate", "expiration", "renewalDate"):
+                if meta.get(k):
+                    sub["sub_end"] = str(meta[k])[:10]
+                    break
+    except Exception as e:
+        print(f"[apple] subscription meta unavailable: {e}", flush=True)
+
     return {
         "ok": True,
         "user": {
@@ -923,6 +1056,7 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
             "hires":    True,
             "note_key": why_key, "note_args": why_args,
             "note": decrypt_note,
+            **sub,
         },
     }
 

@@ -164,12 +164,23 @@ const _SEARCH_SVCS = [
   {value: 'yandex',   label: '🟡 Яндекс.Музыка', key: 'yandex'},
 ];
 
+// Первый показ вкладки за эту загрузку страницы стартовал ВСЕГДА с Apple —
+// select собран статикой без selected, а браузер берёт первый <option>. Теперь
+// первый раз подставляем запомненный сервис (_last_svc, пишется из doSearch)
+// или дефолт из настроек (default-search-service); дальше select уже живёт
+// своей жизнью в DOM и cur ниже просто сохраняет то, что там реально стоит.
+let _searchSvcInitialized = false;
+
 async function _refreshSearchSvcSelect() {
   const sel = document.getElementById('search-svc');
   if (!sel) return;
   try {
     const status = await fetch('/api/services/status').then(r => r.json());
-    const cur = sel.value;
+    let cur = sel.value;
+    if (!_searchSvcInitialized) {
+      cur = (S.config && (S.config['_last_svc'] || S.config['default-search-service'])) || cur;
+      _searchSvcInitialized = true;
+    }
     const opts = _SEARCH_SVCS.filter(o => status[o.key] !== false && status[o.key]);
     if (!opts.length) return;
     sel.innerHTML = opts.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
@@ -199,7 +210,24 @@ function onSearchSvcChange() {
 
 let _srchItems = [];   // last raw results (relevance order)
 
+// Выбранная сортировка — предпочтение ЧЕЛОВЕКА, а не свойство запроса.
+// Жалоба пользователя с GitHub 09.08.2026: «сбрасывается сортировка при каждом
+// поиске». Так и было: после каждой выдачи кнопки принудительно возвращались
+// на «релевантность».
+//
+// Храним в браузере, а не в конфиге: во-первых, это личный выбор конкретного
+// человека за конкретным экраном (как и `_last_svc`), во-вторых — ключ
+// `_last_sort` НЕ проходит белый список записи конфига, и серверное сохранение
+// молча отвергалось бы. Проверено до правки, а не после.
+var _SRCH_SORT_KEY = 'ripster.search.sort';
+
+function _srchSortRemembered() {
+  try { return localStorage.getItem(_SRCH_SORT_KEY) || 'relevance'; }
+  catch (e) { return 'relevance'; }
+}
+
 function _searchSort(btn, key) {
+  try { localStorage.setItem(_SRCH_SORT_KEY, key); } catch (e) {}
   document.querySelectorAll('.srch-sort-btn').forEach(b => {
     const active = b === btn;
     b.style.background = active ? 'var(--surface2)' : 'var(--surface)';
@@ -239,6 +267,14 @@ async function doSearch() {
   const grid = document.getElementById('search-results');
   const sortBar = document.getElementById('search-sort-bar');
   if(!q){ toast(t('cd.enter_query')); return; }
+
+  // Запоминаем выбранный сервис после реального поиска — переживает и смену
+  // вкладки (select не пересобирается), и перезагрузку страницы (уходит в
+  // конфиг: владельцу на сервер, гостю в его localStorage через saveSetting).
+  if (svc && S.config && S.config['_last_svc'] !== svc) {
+    S.config['_last_svc'] = svc;
+    if (typeof saveSetting === 'function') saveSetting('_last_svc', svc);
+  }
 
   // If it's a direct URL — use smart service modal (same as main URL bar)
   if(q.startsWith('http')) {
@@ -308,14 +344,25 @@ async function doSearch() {
     _srchItems = items.slice();
     if(sortBar) {
       sortBar.style.display = 'flex';
+      // Восстанавливаем ПОСЛЕДНЮЮ выбранную сортировку, а не сбрасываем на
+      // «релевантность»: человек выбрал её один раз и ждёт, что она останется.
+      const _want = _srchSortRemembered();
       document.querySelectorAll('.srch-sort-btn').forEach(b => {
-        const active = b.dataset.sort === 'relevance';
+        const active = b.dataset.sort === _want;
         b.style.background = active ? 'var(--surface2)' : 'var(--surface)';
         b.style.color      = active ? 'var(--text)'     : 'var(--muted)';
         b.classList.toggle('active', active);
       });
     }
-    if(grid) { _renderSearchGrid(grid, items); }
+    // Подсветить кнопку мало — надо применить саму сортировку к данным,
+    // иначе выдача рисуется по релевантности при активной кнопке «по дате»,
+    // и это хуже честного сброса: интерфейс показывает не то, что делает.
+    if(grid) {
+      const _want = _srchSortRemembered();
+      const _btn = document.querySelector('.srch-sort-btn[data-sort="' + _want + '"]');
+      if (_want && _want !== 'relevance' && _btn) _searchSort(_btn, _want);
+      else _renderSearchGrid(grid, items);
+    }
   } catch(e) {
     if(st){ st.textContent=t('t.error_c')+e.message; st.style.display='block'; }
   }
@@ -465,8 +512,15 @@ function _renderSearchCard(item, svc) {
         const typeTag = item.type === 'playlist' ? t('card.playlist') : t('card.album');
         const labelRow = item.label ? `<div style="font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px" title="${escJ(item.label)}">${esc(item.label)}</div>` : '';
         const canStream = (item.service === 'qobuz' || item.service === 'tidal' || item.service === 'deezer');
-        const playOverlay = canStream
-          ? `<div style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer;backdrop-filter:blur(6px);transition:transform .12s,background .12s" onclick="event.stopPropagation();playAlbumById('${item.service}','${escJ(item.id)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.artworkUrl||item.cover||'')}')" onmouseover="this.style.transform='scale(1.08)';this.style.background='var(--red)'" onmouseout="this.style.transform='';this.style.background='rgba(0,0,0,.72)'" title="${t('ck.listen_album')}">▶</div>`
+        // Apple не стримится сам (DRM), но играет КРОСС-СЕРВИСНО: playRelease
+        // резолвит ту же запись по UPC на Deezer. URL берём из результата, иначе
+        // синтезируем из id (release-expand достаёт id по regex /album/_/<id>).
+        const _appleStream = (item.service === 'apple' && (item.url || item.id));
+        const _playClick = _appleStream
+          ? `playRelease('apple','${escJ(item.url || ('https://music.apple.com/us/album/_/' + item.id))}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.artworkUrl||item.cover||'')}')`
+          : `playAlbumById('${item.service}','${escJ(item.id)}','${escJ(item.title)}','${escJ(item.artist)}','${escJ(item.artworkUrl||item.cover||'')}')`;
+        const playOverlay = (canStream || _appleStream)
+          ? `<div style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer;backdrop-filter:blur(6px);transition:transform .12s,background .12s" onclick="event.stopPropagation();${_playClick}" onmouseover="this.style.transform='scale(1.08)';this.style.background='var(--red)'" onmouseout="this.style.transform='';this.style.background='rgba(0,0,0,.72)'" title="${t('ck.listen_album')}">▶</div>`
           : '';
         return `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s;position:relative" onmouseover="this.style.borderColor='var(--red)'" onmouseout="this.style.borderColor='var(--border)'">
@@ -784,6 +838,10 @@ function renderAlbumPage(){
         <div style="display:flex;gap:8px;margin-top:16px;flex-wrap:wrap">
           <button onclick="albumAddAll()" style="padding:8px 16px;background:var(--red);color:#fff;border:none;border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">${t('btn.download_album')}</button>
           ${canStream ? `<button onclick="playAlbumAll()" style="padding:8px 16px;background:rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.16);color:${streamColor};border:1px solid rgba(${service==='qobuz'?'24,112,245':service==='tidal'?'0,212,179':'162,56,255'},.4);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">${t('btn.play_album')}</button>` : ''}
+          ${canStream ? `<button onclick="pqAddItems(_buildAlbumStreamQueue())" style="padding:8px 14px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('lib.add_queue')}">＋ ${t('lib.add_queue')}</button>
+          <button onclick="pqPlayNext(_buildAlbumStreamQueue())" style="padding:8px 14px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('pq.add_next')}">↳ ${t('pq.add_next')}</button>` : ''}
+          ${service === 'apple' ? `<button onclick="playRelease('apple','${escJ(album.url || ('https://music.apple.com/us/album/_/' + album.id))}','${escJ(album.title||'')}','${escJ(album.artist||'')}','${escJ(album.cover||'')}')" style="padding:8px 16px;background:rgba(250,45,85,.14);color:#fa2d55;border:1px solid rgba(250,45,85,.4);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)" title="${t('ck.listen_album')}">▶ ${t('btn.play_album')}</button>` : ''}
+          ${service === 'apple' ? `<button onclick="downloadAndPlayApple('${escJ(album.url || ('https://music.apple.com/us/album/_/' + album.id))}','${escJ(album.title||'')}','${escJ(album.artist||'')}','${escJ(album.cover||'')}',${Number(album.tracks)||0})" style="padding:8px 16px;background:rgba(192,132,160,.16);color:#c084a0;border:1px solid rgba(192,132,160,.4);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)" title="${t('btn.dl_play_hint')}">⬇▶ ${t('btn.dl_play')}</button>` : ''}
           ${album.url ? `<a href="${escapeHtml(album.url)}" target="_blank" style="padding:8px 14px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;font-family:var(--font)">↗ ${t('ck.open_on')} ${escapeHtml(album.service)}</a>` : ''}
         </div>
       </div>

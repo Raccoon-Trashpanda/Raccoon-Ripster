@@ -1165,6 +1165,17 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             me_r = await client.get("https://api.spotify.com/v1/me")
             if me_r.status_code == 200:
                 market = (me_r.json().get("country") or "").strip()
+                # Единственное место, где Spotify вообще называет свою страну:
+                # проба сервиса намеренно не ходит в /v1 (там вечный 429). Раз уж
+                # узнали — запоминаем, иначе обзор аккаунтов вечно пишет
+                # «страна не определена» у одного лишь Spotify.
+                if len(market) == 2 and _cfg.get("spotify-country") != market.upper():
+                    _cfg["spotify-country"] = market.upper()
+                    if _save_config_fn:
+                        try:
+                            _save_config_fn(_cfg)
+                        except Exception as e:
+                            print(f"[spotify] could not persist country: {e}", flush=True)
         except Exception:
             pass
 

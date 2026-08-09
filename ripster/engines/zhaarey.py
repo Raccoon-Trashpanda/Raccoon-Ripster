@@ -22,6 +22,9 @@ _QUALITIES = [
 _FLAGS = {q["id"]: q["flag"] for q in _QUALITIES}
 
 _RE_DONE    = re.compile(r"Completed:\s*(\d+)/(\d+)")
+# Итоговая сводка Go-загрузчика: «… Errors: N …». Ловим САМО ЧИСЛО, чтобы
+# отличать «ошибок ноль» от настоящей ошибки — по слову их не различить.
+_RE_SUMMARY = re.compile(r"Completed:\s*\d+/\d+.*?Errors:\s*(\d+)", re.I)
 _RE_TRACK   = re.compile(r"Track\s+(\d+)\s+of\s+(\d+)")
 _RE_CODEC   = re.compile(r"no codec found", re.I)
 _RE_TOKEN   = re.compile(r"Failed to get token", re.I)
@@ -199,6 +202,14 @@ class ZhaereyEngine(EngineBase):
 
     def classify_line(self, line: str) -> str:
         l = line.lower()
+        # ИТОГОВАЯ СВОДКА — сначала. Go-загрузчик заканчивает прогон строкой
+        # «Completed: 10/10 | Warnings: 0 | Errors: 0», и в ней есть слово
+        # «Errors» — из-за чего успешное завершение окрашивалось в КРАСНОЕ и
+        # попадало в счётчик ошибок (09.08.2026: единственная «ошибка» часа
+        # оказалась сообщением об успехе). Смотрим на ЧИСЛО, а не на слово.
+        m = _RE_SUMMARY.search(line)
+        if m:
+            return "error" if int(m.group(1)) > 0 else "success"
         if any(k in l for k in ("error","panic","fatal","exception")): return "error"
         if "warning" in l or "no codec found" in l:                    return "warn"
         if any(k in l for k in ("completed","saved","done")):          return "success"
@@ -310,6 +321,91 @@ class ZhaereyEngine(EngineBase):
         except Exception as e:
             return {"error": str(e), "releases": []}
 
+    async def _amp_album_upc(self, album_id: str, region: str, config: dict) -> str:
+        """Album barcode (UPC) from amp-api — the exact key that resolves the
+        SAME physical release on Deezer/Qobuz for cross-service playback (Apple
+        itself can't stream). iTunes lookup never returns it. Empty on any
+        failure (no bearer, 401, etc.) → cross-service play simply stays off."""
+        import httpx as _httpx
+        bearer = (config.get("authorization-token") or "").strip()
+        if not bearer or bearer == "your-authorization-token":
+            return ""
+        mut = (config.get("media-user-token") or "").strip()
+        sf = (region or "US").lower()
+        headers = {"Authorization": f"Bearer {bearer}",
+                   "Origin": "https://music.apple.com"}
+        if mut:
+            headers["media-user-token"] = mut
+        try:
+            async with _httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(
+                    f"https://amp-api.music.apple.com/v1/catalog/{sf}/albums/{album_id}",
+                    headers=headers)
+                if r.status_code != 200:
+                    return ""
+                data = (r.json().get("data") or [])
+                if not data:
+                    return ""
+                return str((data[0].get("attributes") or {}).get("upc") or "").strip()
+        except Exception:
+            return ""
+
+    async def _amp_album_tracks(self, album_id: str, region: str, config: dict) -> list:
+        """Full tracklist from the tokened amp-api (music.apple.com catalog).
+
+        The free iTunes lookup omits songs for continuous DJ-mixes; amp-api
+        returns them via the album→tracks relationship. Needs the developer
+        bearer (`authorization-token`) + `media-user-token` from config; on any
+        failure returns [] so the caller keeps the (empty) iTunes result.
+        """
+        import httpx as _httpx
+        bearer = (config.get("authorization-token") or "").strip()
+        if not bearer or bearer == "your-authorization-token":
+            return []
+        mut = (config.get("media-user-token") or "").strip()
+        sf = (region or "US").lower()
+        headers = {"Authorization": f"Bearer {bearer}",
+                   "Origin": "https://music.apple.com"}
+        if mut:
+            headers["media-user-token"] = mut
+        out: list = []
+        try:
+            async with _httpx.AsyncClient(timeout=12) as c:
+                url = (f"https://amp-api.music.apple.com/v1/catalog/{sf}"
+                       f"/albums/{album_id}/tracks")
+                # Follow pagination so long mixes (40+ segments) come back whole.
+                params = {"limit": 100}
+                for _ in range(6):
+                    r = await c.get(url, params=params, headers=headers)
+                    if r.status_code != 200:
+                        break
+                    data = r.json()
+                    for it in data.get("data") or []:
+                        a = it.get("attributes") or {}
+                        out.append({
+                            "id":       str(it.get("id", "")),
+                            "title":    a.get("name", ""),
+                            "artist":   a.get("artistName", ""),
+                            "duration": (a.get("durationInMillis") or 0) // 1000,
+                            "track_no": a.get("trackNumber"),
+                            "disc":     a.get("discNumber"),
+                            "preview":  ((a.get("previews") or [{}])[0].get("url", "")),
+                            "explicit": (a.get("contentRating") == "explicit"),
+                            "url":      a.get("url", ""),
+                        })
+                    nxt = data.get("next")
+                    if not nxt:
+                        break
+                    # `next` is a path like /v1/catalog/.../tracks?offset=100
+                    url = "https://amp-api.music.apple.com" + nxt.split("?")[0]
+                    off = ""
+                    if "offset=" in nxt:
+                        off = nxt.split("offset=")[-1].split("&")[0]
+                    params = {"limit": 100, "offset": off} if off else {"limit": 100}
+        except Exception:
+            return out
+        return out
+
     async def get_album(self, album_id: str, config: dict) -> dict:
         import httpx as _httpx
         lang = config.get("language", "en-US")
@@ -320,6 +416,7 @@ class ZhaereyEngine(EngineBase):
         regions = [cc] + [r for r in ("NZ", "US", "AU", "CA", "JP", "DE", "GB") if r != cc]
         try:
             results = []
+            matched_rc = cc
             async with _httpx.AsyncClient(timeout=10) as c:
                 for rc in regions:
                     try:
@@ -330,6 +427,7 @@ class ZhaereyEngine(EngineBase):
                     except Exception:
                         results = []
                     if results:
+                        matched_rc = rc
                         break
             if not results:
                 return {"error": "Album not found"}
@@ -350,6 +448,17 @@ class ZhaereyEngine(EngineBase):
                     "explicit": (s.get("trackExplicitness") == "explicit"),
                     "url":      s.get("trackViewUrl", ""),
                 })
+            # DJ-mixes / continuous mixes: the free iTunes lookup returns the
+            # collection but ZERO song rows (trackCount>0, songs=[]). The tokened
+            # amp-api DOES expose them (same source mp3tag reads) — pull the
+            # tracklist from there so the card isn't a dead "no tracklist" wall.
+            if not tracks and (album_rec.get("trackCount") or 0) > 0:
+                amp = await self._amp_album_tracks(album_id, matched_rc, config)
+                if amp:
+                    tracks = amp
+            # Album barcode → lets the album play cross-service (same release on
+            # Deezer by UPC); Apple has no stream of its own. Best-effort.
+            upc = await self._amp_album_upc(album_id, matched_rc, config)
             return {
                 "album": {
                     "id":     str(album_rec.get("collectionId", "")),
@@ -362,6 +471,7 @@ class ZhaereyEngine(EngineBase):
                     "genre":  album_rec.get("primaryGenreName", ""),
                     "tracks": album_rec.get("trackCount"),
                     "url":    album_rec.get("collectionViewUrl", ""),
+                    "upc":    upc,
                     "service":"apple",
                 },
                 "tracks": tracks,

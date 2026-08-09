@@ -836,3 +836,73 @@ async function logoutService(svc, btn) {
     if (btn) { btn.disabled = false; btn.textContent = old || '🚪'; }
   }
 }
+
+
+// ── Обзор аккаунтов: страны, часовые пояса, ранняя доступность ───────────────
+// Показывает по каждой настроенной учётке страну и местное время, и КТО входит
+// в новый день раньше — на этом строится ловля ранних релизов (НЗ-Tidal).
+async function renderAccountsOverview() {
+  const box = document.getElementById('accounts-overview');
+  if (!box) return;
+  let d;
+  try {
+    d = await (await fetch('/api/accounts/overview')).json();
+  } catch (e) { box.innerHTML = ''; return; }
+  if (!d || !d.ok) { box.innerHTML = ''; return; }
+  // Страну и подсказку собираем ЗДЕСЬ. Сервер присылает код страны и числа —
+  // готовый русский текст оттуда не переводился и приезжал русским даже в
+  // английский интерфейс.
+  const cname = cc => (cc && t('cc.' + cc) !== 'cc.' + cc) ? t('cc.' + cc) : (cc || '');
+  const hint = d.hint
+    ? `<div style="background:rgba(0,212,179,.1);border:1px solid rgba(0,212,179,.35);border-radius:8px;padding:8px 11px;font-size:12px;color:#8fe3d4;margin-bottom:8px">⚡ ${esc(ti('s.acc_hint', {
+        flag: d.hint.flag, label: d.hint.label, country: cname(d.hint.country),
+        h: d.hint.hours, vs: d.hint.vs}))}</div>`
+    : '';
+  const rows = (d.accounts || []).map(a => {
+    const known = a.offset != null;
+    const rank = a.early_rank;
+    const badge = rank === 1
+      ? `<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;background:rgba(0,212,179,.16);color:#00d4b3;letter-spacing:.4px">${esc(t('s.acc_earliest'))}</span>`
+      : (known ? `<span style="font-size:11px;color:var(--muted2);font-family:var(--mono)">UTC${a.offset>=0?'+':''}${a.offset}</span>` : '');
+    // У сервиса с пулом страна известна только по ОСНОВНОЙ учётке — остальные
+    // могут стоять в других странах, а на этом держится ранняя доступность.
+    // Молчать нельзя: панель выдала бы страну основной за страну всего пула.
+    const only = (known && a.country_is_primary_only)
+      ? ` <span style="font-size:10px;color:var(--muted2)" title="${esc(t('s.acc_primary_only_t'))}">${esc(t('s.acc_primary_only'))}</span>` : '';
+    const geo = known
+      ? `<span style="color:var(--text)">${a.flag} ${esc(cname(a.country))}</span>${only} · <span style="color:var(--muted)">${esc(a.local_time)}</span>`
+      : `<span style="color:var(--muted2)">${esc(t('s.acc_unknown_country'))}</span>`;
+    const acc = a.accounts > 1
+      ? ` <span style="font-size:10px;color:var(--muted2)">· ${esc(ti('s.acc_count', {n: a.accounts}))}</span>` : '';
+    // Срок подписки: его знает проба сервиса, и с этого захода он переживает
+    // перезагрузку — раньше жил одной строкой у кнопки «проверить» и пропадал.
+    let sub = '';
+    if (a.sub_active === false) {
+      sub = ` · <span style="color:var(--red)">${esc(t('s.sub_inactive'))}</span>`;
+    } else if (!a.sub_end && a.sub_active === true) {
+      // Apple отвечает только «активна», без даты — показываем что есть.
+      sub = ` · <span style="color:var(--green)">${esc(t('s.sub_active'))}</span>`;
+    }
+    if (a.sub_end) {
+      const dl = a.sub_days_left;
+      const col = (dl != null && dl < 0) ? 'var(--red)'
+                : (dl != null && dl <= 14) ? 'var(--orange)' : 'var(--green)';
+      const left = (dl == null) ? ''
+                 : (dl < 0 ? ' ' + t('s.sub_expired') : ' · ' + ti('s.sub_days', {n: dl}));
+      sub = ` · <span style="color:${col}">${esc(ti('s.sub_until', {date: a.sub_end}) + left)}</span>`;
+    }
+    const st = a.configured
+      ? `<span style="color:var(--green);font-size:11px">✓</span>`
+      : `<span style="color:var(--red);font-size:11px">✗</span>`;
+    return `<div style="display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px">
+      ${st}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600;color:var(--text)">${esc(a.label)}${acc}</div>
+        <div style="font-size:11px;margin-top:1px">${geo}${sub}</div>
+      </div>
+      ${badge}
+    </div>`;
+  }).join('');
+  box.innerHTML = hint + rows +
+    `<div style="font-size:10px;color:var(--muted2);margin-top:4px">${esc(t('s.acc_note'))}</div>`;
+}

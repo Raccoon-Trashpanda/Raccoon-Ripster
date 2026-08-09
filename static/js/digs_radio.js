@@ -59,6 +59,12 @@ function _digsRadioBadge() {
 async function _digsRadioTopUp() {
   if (!DigsRadio.on || DigsRadio.loading) return;
   if (typeof Preview === 'undefined' || !Preview.queue) return;
+  // Локальный микс (скачанный альбом / play-while-download) — это КОНКРЕТНЫЙ
+  // выбор человека, а не радио-контекст. Радио не должно дописывать в него
+  // «похожие»: превращало микс в кашу (1 трек + 6 радио). Гейт самоочищается —
+  // как только играет обычный стрим-трек, радио снова работает.
+  const _cur = Preview.queue[Preview.idx];
+  if (_cur && _cur.local) return;
   const left = Preview.queue.length - 1 - Preview.idx;
   if (left > _DR_PREFETCH_AT) return;
 

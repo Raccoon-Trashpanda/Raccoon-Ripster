@@ -590,7 +590,7 @@ def _bot_overview() -> dict:
     base = _ctx.base_dir if _ctx and _ctx.base_dir else Path.cwd()
     users_file = base / "tgbot" / "users.json"
     try:
-        raw = _json.loads(users_file.read_text(encoding="utf-8"))
+        raw = _json.loads(users_file.read_text(encoding="utf-8-sig"))
     except Exception:
         raw = {}
 
@@ -694,7 +694,7 @@ async def admin_bot_user(body: dict, request: Request):
     base = _ctx.base_dir if _ctx and _ctx.base_dir else Path.cwd()
     users_file = base / "tgbot" / "users.json"
     try:
-        data = _json.loads(users_file.read_text(encoding="utf-8"))
+        data = _json.loads(users_file.read_text(encoding="utf-8-sig"))
     except Exception:
         data = {}
     if not isinstance(data, dict):
@@ -785,7 +785,7 @@ def _append_outbox(cmd: dict) -> None:
     import json as _json
     p = _tgbot_dir() / "outbox.json"
     try:
-        cur = _json.loads(p.read_text(encoding="utf-8")) if p.exists() else []
+        cur = _json.loads(p.read_text(encoding="utf-8-sig")) if p.exists() else []
         if not isinstance(cur, list):
             cur = []
     except Exception:
@@ -803,7 +803,7 @@ async def admin_bot_user_detail(request: Request, uid: str):
     _require_owner(request)
     import json as _json
     try:
-        users = _json.loads((_tgbot_dir() / "users.json").read_text(encoding="utf-8"))
+        users = _json.loads((_tgbot_dir() / "users.json").read_text(encoding="utf-8-sig"))
     except Exception:
         users = {}
     info = users.get(uid) or users.get(str(uid)) or {}
@@ -882,7 +882,7 @@ async def admin_bot_cache_get(request: Request):
     _require_owner(request)
     import json as _json
     try:
-        c = _json.loads((_tgbot_dir() / "config.json").read_text(encoding="utf-8"))
+        c = _json.loads((_tgbot_dir() / "config.json").read_text(encoding="utf-8-sig"))
     except Exception:
         c = {}
     return {"enabled": bool(c.get("cache_owner_enabled", False)),
@@ -897,7 +897,7 @@ async def admin_bot_cache_set(body: dict, request: Request):
     import json as _json
     p = _tgbot_dir() / "config.json"
     try:
-        c = _json.loads(p.read_text(encoding="utf-8"))
+        c = _json.loads(p.read_text(encoding="utf-8-sig"))
     except Exception:
         c = {}
     c["cache_owner_enabled"] = bool(body.get("enabled"))
@@ -929,7 +929,7 @@ async def admin_bot_config_get(request: Request):
     _require_owner(request)
     import json as _json
     try:
-        c = _json.loads((_tgbot_dir() / "config.json").read_text(encoding="utf-8"))
+        c = _json.loads((_tgbot_dir() / "config.json").read_text(encoding="utf-8-sig"))
     except Exception:
         c = {}
     out: dict = {}
@@ -951,7 +951,7 @@ async def admin_bot_config_set(body: dict, request: Request):
     import json as _json
     p = _tgbot_dir() / "config.json"
     try:
-        c = _json.loads(p.read_text(encoding="utf-8"))
+        c = _json.loads(p.read_text(encoding="utf-8-sig"))
     except Exception:
         c = {}
     if not isinstance(c, dict):
@@ -1198,7 +1198,7 @@ async def admin_bot_quota(body: dict, request: Request):
     quota = body.get("quota")
     users_file = _tgbot_dir() / "users.json"
     try:
-        data = _json.loads(users_file.read_text(encoding="utf-8"))
+        data = _json.loads(users_file.read_text(encoding="utf-8-sig"))
     except Exception:
         data = {}
     if not isinstance(data, dict):

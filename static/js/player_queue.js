@@ -84,6 +84,57 @@ function togglePlayerQueue() {
   _ppRenderQueue(true);
 }
 
+// Приписка в заголовке, пока микс ещё докачивается: «+5 едут». Без неё панель
+// показывает три трека из восемнадцати и выглядит так, будто это весь микс.
+//
+// `_liveMix` объявлен через `let` на верхнем уровне player_lib.js — на `window`
+// его НЕТ, поэтому обращаемся голым именем через typeof (тот же случай, что с
+// DigsRadio: проверка через window молча не срабатывала). См. скилл
+// ripster-frontend-file-drift.
+function _pqLiveNote() {
+  try {
+    if (typeof _liveMix !== 'object' || !_liveMix || !_liveMix.timer) return '';
+    const have = (typeof Preview !== 'undefined' && Preview.queue) ? Preview.queue.length : 0;
+    const left = (_liveMix.total || 0) - have;
+    if (left <= 0) return '';
+    return `<span class="pq-live">${ti('pq.live_more', { n: left })}</span>`;
+  } catch (e) { return ''; }
+}
+
+// ── Бегущая строка для того, что не влезло ───────────────────────────────────
+// Оборачиваем текст во внутренний span САМИ, а не в разметке: тогда весь
+// существующий код может продолжать писать `el.textContent = …` как писал, а
+// нам достаточно позвать mqScan() после обновления. Иначе пришлось бы править
+// каждое место, где меняется название, и одно из них обязательно забылось бы.
+//
+// Ширину меряем в пикселях и из неё считаем длительность, чтобы длинная строка
+// не пролетала за то же время, что короткая: скорость постоянная (~40 px/с).
+function mqScan(root) {
+  const scope = root || document;
+  let els;
+  try { els = scope.querySelectorAll('[data-mq]'); } catch (e) { return; }
+  els.forEach(el => {
+    let inner = el.firstElementChild;
+    if (!inner || !inner.classList.contains('mq-i')) {
+      inner = document.createElement('span');
+      inner.className = 'mq-i';
+      while (el.firstChild) inner.appendChild(el.firstChild);
+      el.appendChild(inner);
+    }
+    // clientWidth — видимая ширина, scrollWidth — сколько текст занял бы весь.
+    const dx = inner.scrollWidth - el.clientWidth;
+    if (dx > 4) {
+      el.style.setProperty('--mq-dx', dx + 'px');
+      el.style.setProperty('--mq-dur', Math.max(5, dx / 40 + 4).toFixed(1) + 's');
+      el.classList.add('mq-on');
+    } else {
+      el.classList.remove('mq-on');
+      el.style.removeProperty('--mq-dx');
+      el.style.removeProperty('--mq-dur');
+    }
+  });
+}
+
 function _ppRenderQueue(create) {
   const q = (typeof Preview !== 'undefined' && Preview.queue) || [];
   let box = document.getElementById('pp-queue');
@@ -115,8 +166,12 @@ function _ppRenderQueue(create) {
     let header = '';
     if (alb && alb !== _prevAlbum) {
       _prevAlbum = alb; _albTrackNo = 0;
+      // Автор АЛЬБОМА, а не первого трека. Для компиляции/DJ-микса артист трека
+      // (напр. David Duriez) — не автор сборника (Mount Kimbie). Берём albumArtist,
+      // который несёт очередь; на него же откатываемся, только если его нет.
+      const gArtist = it.albumArtist || it.artist || '';
       header = `<div class="pq-group"><span class="pq-group-name">${esc(alb)}</span>`
-             + (it.artist ? `<span class="pq-group-artist">${esc(it.artist)}</span>` : '') + `</div>`;
+             + (gArtist ? `<span class="pq-group-artist">${esc(gArtist)}</span>` : '') + `</div>`;
     }
     _albTrackNo++;
     const title = esc(it.title || '');
@@ -126,7 +181,13 @@ function _ppRenderQueue(create) {
     // У треков релиза в ней лежит «Сервис · Альбом» — это дубль подстрочника, и
     // на экране он съедал третью строку впустую (замечено по скриншоту 02.08).
     const why = String(it.label || '');
-    const label = (why && /·/.test(why) && !/^(spotify|apple|deezer|qobuz|tidal|soundcloud)\s/i.test(why))
+    // …и НЕ показываем, когда она повторяет заголовок альбома, который стоит
+    // прямо над этими треками. У локального микса label = «Библиотека · <тот же
+    // альбом>», и третья строка в каждой строке очереди дублировала шапку,
+    // раздувая список впустую.
+    const dupOfHeader = !!alb && why.includes(alb);
+    const label = (why && !dupOfHeader && /·/.test(why)
+                   && !/^(spotify|apple|deezer|qobuz|tidal|soundcloud)\s/i.test(why))
       ? `<span class="pq-why">${esc(why)}</span>` : '';
     const q = _pqQuality(it);
     // Номер внутри альбома (как в AIMP), если группируем; иначе позиция в очереди.
@@ -135,30 +196,71 @@ function _ppRenderQueue(create) {
         title="${title}${artist ? ' — ' + artist : ''}${q ? ' · ' + esc(q) : ''}">
         <span class="pq-n">${on ? '▶' : num}</span>
         <span class="pq-t">
-          <span class="pq-title">${title}</span>
-          <span class="pq-sub">${artist}${q ? `<b class="pq-q">·&nbsp;${esc(q)}</b>` : ''}</span>
+          <span class="pq-title" data-mq>${title}</span>
+          <span class="pq-sub" data-mq>${artist}${q ? `<b class="pq-q">·&nbsp;${esc(q)}</b>` : ''}</span>
           ${label}
         </span>
         <span class="pq-d">${_pqFmt(_pqDur(it, i))}</span>
+        <button class="pq-rm" onclick="_pqRemove(${i},event)" title="${t('pq.remove')}" aria-label="${t('pq.remove')}">×</button>
       </div>${on ? _pqChapters() : ''}`;
   }).join('');
   box.innerHTML = `
     <div class="pq-head">
-      <span>${ti('pq.title_n', { n: q.length })}</span>
-      <button class="pq-x" onclick="togglePlayerQueue()" aria-label="${t('pq.close')}">×</button>
+      <span>${ti('pq.title_n', { n: q.length })}${_pqLiveNote()}</span>
+      <span style="display:flex;gap:6px;align-items:center">
+        <button class="pq-clear" onclick="_pqClear(event)" title="${t('pq.clear')}">${t('pq.clear')}</button>
+        <button class="pq-x" onclick="togglePlayerQueue()" aria-label="${t('pq.close')}">×</button>
+      </span>
     </div>
     <div class="pq-list">${rows}</div>`;
   // Держим текущий трек на виду: очередь радио растёт сама, и без этого
   // играющее уезжает за пределы панели.
   const cur = box.querySelector('.pq-row.on');
   if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest' });
+  // Длинные названия — посчитать, что не влезло, и запустить бегущую строку.
+  try { mqScan(box); } catch (e) {}
 }
-
 function _pqJump(i) {
   if (typeof Preview === 'undefined' || !Preview.queue || !Preview.queue[i]) return;
   Preview.idx = i;
   if (typeof _playPreviewAt === 'function') _playPreviewAt(i);
   _ppRenderQueue();
+}
+
+// Убрать трек из очереди. Если убираем ИГРАЮЩИЙ — переходим на следующий (или
+// закрываем плеер, если очередь опустела). Индекс правим, чтобы подсветка не
+// съехала на соседний трек.
+function _pqRemove(i, ev) {
+  if (ev) ev.stopPropagation();
+  if (typeof Preview === 'undefined' || !Preview.queue) return;
+  if (i < 0 || i >= Preview.queue.length) return;
+  const wasCurrent = (i === Preview.idx);
+  Preview.queue.splice(i, 1);
+  if (i < Preview.idx) Preview.idx--;
+  if (!Preview.queue.length) {
+    if (typeof _waStopIfPlaying === 'function') _waStopIfPlaying();
+    if (typeof closePreview === 'function') closePreview();
+    const box = document.getElementById('pp-queue'); if (box) box.remove();
+    return;
+  }
+  if (wasCurrent) {
+    if (Preview.idx >= Preview.queue.length) Preview.idx = Preview.queue.length - 1;
+    if (typeof _playPreviewAt === 'function') _playPreviewAt(Preview.idx);
+  }
+  _ppRenderQueue();
+}
+
+// Очистить очередь = убрать всё, КРОМЕ играющего (обрывать музыку неожиданно
+// нельзя). Радио тоже глушим, чтобы не набежало заново.
+function _pqClear(ev) {
+  if (ev) ev.stopPropagation();
+  if (typeof Preview === 'undefined' || !Preview.queue) return;
+  try { if (typeof DigsRadio === 'object' && DigsRadio) DigsRadio.on = false; } catch (_) {}
+  const cur = Preview.queue[Preview.idx] || null;
+  Preview.queue = cur ? [cur] : [];
+  Preview.idx = cur ? 0 : -1;
+  _ppRenderQueue();
+  if (typeof toast === 'function') toast(t('pq.cleared'), 'var(--muted)', '', 1500);
 }
 
 // Обновляемся на смене трека — номер и подсветка должны совпадать с тем, что
@@ -305,3 +407,16 @@ function _pqDropPreload() {
 
 setInterval(_pqPreload, 1000);
 document.addEventListener('ripster:track-start', _pqDropPreload);
+
+// Док плеера обновляет название через textContent — своей перерисовки у него
+// нет, поэтому пересчитываем переполнение по событию смены трека. Небольшая
+// задержка: на момент события ширина ещё может меняться (обложка, кнопки).
+document.addEventListener('ripster:track-start', () => setTimeout(() => {
+  try { mqScan(document.getElementById('pp-bar') || document); } catch (e) {}
+}, 120));
+// Изменили размер окна — то, что влезало, могло перестать влезать.
+let _mqRz = null;
+window.addEventListener('resize', () => {
+  clearTimeout(_mqRz);
+  _mqRz = setTimeout(() => { try { mqScan(); } catch (e) {} }, 200);
+});

@@ -149,6 +149,16 @@ async function restartAppWhenIdle() {
 
 // ── WEBSOCKET ─────────────────────────────────────────────────
 function connectWS() {
+  // Сначала гасим предыдущее соединение. Сторож «полумёртвого сокета» ниже
+  // вызывает connectWS() напрямую, не закрывая старый ws: если тот на самом
+  // деле жив, оба продолжают доставлять, и КАЖДОЕ сообщение приходит дважды.
+  // После трёх перезапусков сервера подряд (09.08.2026) их накопилось три —
+  // весь лог утроился, включая radar и spotify, которые к загрузкам отношения
+  // не имеют. Серверным гашением повторов это не лечится в принципе: сервер
+  // шлёт одно сообщение, копии делает клиент.
+  if (ws) {
+    try { ws.onclose = null; ws.onmessage = null; ws.onerror = null; ws.close(); } catch (e) {}
+  }
   ws = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws`);
   ws.onopen = () => {
     if (_restartPending) {
@@ -635,10 +645,40 @@ function handleMessage(msg) {
 }
 
 // ── API ───────────────────────────────────────────────────────
-async function api(method, path, body) {
+// Сколько ждём ответ сервера, прежде чем признать запрос неудавшимся.
+// Щедро: поиск по нескольким сервисам и разбор ссылки бывают долгими. Но
+// КОНЕЧНО — в этом весь смысл.
+var API_TIMEOUT_MS = 90000;
+
+async function api(method, path, body, timeoutMs) {
   const opts = { method, headers:{'Content-Type':'application/json'} };
   if(body) opts.body = JSON.stringify(body);
-  const r = await fetch(path, opts);
+
+  // 🔴 Раньше здесь был голый fetch БЕЗ таймаута. Если сервер завис или
+  // соединение застряло (ровно это бывает, когда слушающий сокет умер, а
+  // процесс жив — ловили дважды 09.08.2026), обещание не завершалось НИКОГДА:
+  // ни успеха, ни ошибки. Вызывающий код честно ставил «ищу…» и оставался в
+  // этом состоянии навсегда — жалоба пользователя про «бесконечный поиск
+  // лучшего» после ошибки Spotify именно об этом.
+  //
+  // Операция без честного финала выглядит как зависание, и хуже всего то, что
+  // обработчик ошибки при этом исправен — он просто никогда не вызывается.
+  const ctl = new AbortController();
+  const ms = timeoutMs || API_TIMEOUT_MS;
+  const timer = setTimeout(() => ctl.abort(), ms);
+  opts.signal = ctl.signal;
+
+  let r;
+  try {
+    r = await fetch(path, opts);
+  } catch (e) {
+    if (e && e.name === 'AbortError') {
+      throw new Error(`${t('t.server_slow')} (${Math.round(ms / 1000)} c)`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
   const text = await r.text();
   // Empty body — typically a 502/503/504 the tunnel returns while the origin
   // (server) is down or restarting. Surface a clean message instead of letting
@@ -1156,6 +1196,7 @@ const GUEST_WRITABLE_PREFIXES = [
   'releases-',        // their release radar filter prefs
   'language',         // UI language
   'service-colors',   // their per-service color overrides
+  '_last_svc',        // last service picked in Search — own pick, own browser, not the owner's default
 ];
 function _isGuestWritable(key) {
   return GUEST_WRITABLE_PREFIXES.some(p => key === p || key.startsWith(p));

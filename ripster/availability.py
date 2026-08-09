@@ -111,6 +111,29 @@ def _has_credentials(service: str) -> bool:
     return False
 
 
+def _apple_storefronts() -> list[str]:
+    """Магазины Apple, из которых мы РЕАЛЬНО можем качать, в порядке проверки.
+
+    `storefront` в конфиге — это то, что человек вписал руками; `apple-country`
+    приходит от самой Apple при проверке учётки и потому вернее. Разойтись они
+    могут запросто, поэтому спрашиваем оба.
+
+    Учётки пула (`wrapper-accounts`) своей страны пока не хранят — как только
+    начнут, их коды добавятся сюда же, и проверка станет по-настоящему
+    поаккаунтной. Список короткий и без повторов: каждый лишний магазин это
+    лишний сетевой запрос на КАЖДУЮ проверку доступности.
+    """
+    c = _cfg or {}
+    out: list[str] = []
+    for v in (c.get("apple-country"), c.get("storefront"),
+              *(a.get("storefront") or a.get("country")
+                for a in (c.get("wrapper-accounts") or []) if isinstance(a, dict))):
+        s = str(v or "").strip().lower()
+        if s and s not in out:
+            out.append(s)
+    return out or ["us"]
+
+
 async def _probe_one(service: str, upc: str, isrc: str) -> dict:
     """Спросить один сервис. Возвращает запись матрицы."""
     now = time.time()
@@ -119,7 +142,18 @@ async def _probe_one(service: str, upc: str, isrc: str) -> dict:
     try:
         from ripster.routes import discovery as _disc
         hit = None
-        if service in ("apple", "deezer") and upc:
+        if service == "apple" and upc:
+            # Права выдаются на УЧЁТКУ, а не на сервис: релиза может не быть в
+            # магазине из конфига и быть в магазине второй учётки. Раньше
+            # спрашивали ровно один storefront — и «нет в Apple» означало на
+            # деле «нет в том магазине, который вписан руками» (08.08.2026:
+            # в конфиге стояло US, а учётка оказалась CA).
+            for sf in _apple_storefronts():
+                hit = await _disc._find_by_upc(upc, service, sf)
+                if hit:
+                    hit = dict(hit, storefront=sf)
+                    break
+        elif service == "deezer" and upc:
             hit = await _disc._find_by_upc(upc, service,
                                            str((_cfg or {}).get("storefront", "us")))
         if hit is None and isrc and service in ("qobuz", "tidal"):
@@ -138,6 +172,10 @@ async def _probe_one(service: str, upc: str, isrc: str) -> dict:
             return {"available": True, "url": hit.get("url", ""),
                     "title": hit.get("title", ""), "artist": hit.get("artist", ""),
                     "cover": hit.get("cover", ""), "matched_by": hit.get("matched_by", ""),
+                    # В КАКОМ магазине нашлось. Когда учёток несколько, «доступно
+                    # в Apple» без этого не отвечает на главный вопрос — какой
+                    # именно учёткой качать.
+                    "storefront": hit.get("storefront", ""),
                     "checked_ts": now}
     except Exception as e:                                     # noqa: BLE001
         return {"available": False, "reason": REASON_NOT_YET,

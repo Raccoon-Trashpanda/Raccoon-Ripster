@@ -219,9 +219,24 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict) -> None
         pass
 
 
+# Сколько отказов «нет прав» подряд терпим, прежде чем прекратить прогон.
+# 09.08.2026: чарт Beatport на 87 треков выдал 87 таких отказов и молотил
+# двадцать минут, не сохранив ничего. Движок распознавал эту ошибку ПРАВИЛЬНО,
+# но только в конце прогона — то есть после того, как отвалятся все треки.
+# Десять — заведомо больше, чем пара недоступных релизов в чарте.
+_PERM_FAIL_LIMIT = 10
+
+
 @register
 class OrpheusBeatportEngine(EngineBase):
     name = "orpheus_beatport"
+
+    def __init__(self):
+        # Раннер читает abort_reason после каждой строки и глушит процесс
+        # (ProcessRunner._engine_wants_abort).
+        self.abort_reason = ""
+        self._perm_fails = 0
+        self._attempts = 0
 
     def qualities(self) -> list[dict]:
         return list(_QUALITIES)
@@ -271,6 +286,29 @@ class OrpheusBeatportEngine(EngineBase):
         clean = _strip_ansi(line).strip()
         if not clean:
             return
+
+        # Ранняя отсечка: чарт, на который у аккаунта нет прав, не станет
+        # доступнее к 87-му треку. Две части условия обязательны — если хоть
+        # что-то сохранилось, отдельные отказы это обычная недоступность
+        # релиза, и рвать из-за неё весь чарт нельзя.
+        # СЧИТАЕМ ПОПЫТКИ, а не «сохранения». «Downloading track file» печатается
+        # БЕЗУСЛОВНО прямо перед отказом — об этом прямо предупреждает комментарий
+        # в is_finished ниже, и первая версия этой отсечки на нём и споткнулась:
+        # счётчик «сохранённых» рос вместе с отказами и глушил защиту.
+        # Признак безнадёжности — не «ноль сохранений», а «каждая попытка
+        # закончилась отказом».
+        if re.search(r'Downloading track file|Saving\s*:', clean, re.I):
+            self._attempts += 1
+        if "do not have permission" in clean.lower():
+            self._perm_fails += 1
+            if (self._perm_fails >= _PERM_FAIL_LIMIT
+                    and self._perm_fails >= self._attempts and not self.abort_reason):
+                self.abort_reason = (
+                    f"Beatport отказал в правах на {self._perm_fails} треках подряд и не "
+                    f"сохранил ни одного. Подписка активна, но аккаунт не может начать "
+                    f"поток по этим релизам — обычно так ведёт себя чарт, который целиком "
+                    f"вне прав аккаунта. Дальше пробовать бессмысленно."
+                )
 
         if "BEATPORT_NOT_AUTHED" in clean or _RE_AUTH_FAIL.search(clean):
             yield Event(

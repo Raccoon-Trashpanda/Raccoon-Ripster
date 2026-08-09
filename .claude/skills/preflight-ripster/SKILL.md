@@ -31,7 +31,15 @@ node --check static/js/app.js   # + any other changed js
 # Совокупность загруженных скриптов — то, чего node --check не видит в принципе:
 # два файла с одним `let X` на верхнем уровне → второй не выполняется ЦЕЛИКОМ.
 # Так у КАЖДОГО публичного пользователя был мёртв cookies_ui.js (31.07.2026).
+# С 08.08.2026 сканер проверяет ЕЩЁ И view-фрагменты: контейнер #view-<n> без
+# файла views/<n>.html = 404 на старте. Ровно этого в нём не было, когда он
+# пропустил чёрный экран 3.5.0.
 python tools/check_js_collisions.py
+
+# Ключи i18n: и t()/ti() в JS, и data-i18n* в разметке, по обоим деревьям.
+# Пропущенный ключ НЕ показывает сырой ключ — он оставляет авторский русский
+# текст, то есть выглядит ровно как хардкод. Так и жили s.default_search_svc_*.
+python tools/check_i18n_keys.py
 ```
 Все три должны быть чисты (сканер возвращает 0). Подробности и правила —
 скилл `ripster-frontend-file-drift`.
@@ -117,6 +125,48 @@ diff <(grep -vE '^\s*#|^\s*$' /c/dev/_preflight/config.yaml) \
 timeout 35 /c/dev/_preflight/python/python.exe /c/dev/_preflight/app.py 2>&1 \
   | grep -iE "Ripster →|7799|10048|Traceback|ModuleNotFound"
 ```
+
+## Gate 4.5 — The installed app's UI actually LOADS (added 2026-08-08)
+
+**Why this gate exists:** Gate 4 proves the bundle imports and the server starts.
+It greps the console banner — and a console banner is exactly what 3.5.0 printed
+while every downloaded copy showed a **black screen**. The backend was perfect;
+the frontend died on the first `await` of its boot handler because the public
+build ships 13 view fragments and `views.js` fetched all 21 through
+`Promise.all`. Nothing in Gates 0–4 looks at the page, so all of them passed.
+
+Boot the INSTALLED copy on a spare port and require **zero** console errors.
+Never point this at 7799 (see `ripster-headless-verify` — the app kills a
+"stale" server holding its port).
+
+```bash
+RIPSTER_PORT=7803 /c/dev/_preflight/python/python.exe /c/dev/_preflight/app.py &
+# headless CDP: subscribe to Runtime.exceptionThrown + Log.entryAdded(level=error)
+# + Network.responseReceived(status>=400), navigate, wait for the socket, then assert:
+```
+
+Pass requires ALL of:
+
+| проверка | порог |
+|---|---|
+| `Runtime.exceptionThrown` | **0** |
+| 404 на собственные ресурсы (`/static/**`, `/api/**`) | **0** |
+| заполненных экранов (`section.view` с содержимым) | **все** |
+| WebSocket | `readyState === 1` |
+| версия в шапке | реальная, **не** `v—` |
+
+Последние две — самые полезные: `v—` и закрытый сокет означают, что обработчик
+загрузки оборвался на середине, даже когда каркас страницы выглядит нормально.
+Сравнивать длину основной области, а не «страница открылась»: при этом баге
+`document.body` весил 35 КБ вместо 320 КБ.
+
+И: **прогонять на чистой распаковке публикуемого дерева** (`git archive HEAD`),
+а не на рабочей копии — иначе гейт увидит файлы, которых у пользователя нет.
+Если установщик пакует рабочий каталог, спрятать незакоммиченное (`git stash`)
+до сборки.
+
+Связано: `ship-what-you-tested` (тот же вывод в общем виде),
+`ripster-frontend-file-drift` (сам баг и сканер под него).
 
 ## Gate 5 — Shipped default credentials are ALIVE (not stale)
 
@@ -230,3 +280,5 @@ Report each gate's pass/fail. Only after ALL pass:
 - Light-theme unreadability (undefined `var(--X, #dark)` → black-on-light; status chip = bare colour on hardcoded-dark box). See Gate 7.5.
 - One-click gap: a Setup button that runs the *final* step (e.g. `wvd_console.ps1 -Auto`) but skips the prerequisite toolchain installer (`setup_widevine_toolchain`) → works on the dev box (prereqs already there), fails rc≠0 on a clean install. Every one-click button must install its OWN prerequisites idempotently, not assume a prior step ran.
 - self-update overlay gap: a code/script dir edited for a fix but absent from `_OVERLAY_PATHS` in updater.py → testers on an existing install never receive it via "Обновить сейчас" (only a full reinstall). If you fix files under a NEW top-level dir, add it to `_OVERLAY_PATHS` (both trees).
+- **Backend green, frontend dead** (3.5.0): server banner prints, imports fine, every file present — and the page is a black rectangle because one missing view fragment rejected the `Promise.all` at the head of the boot handler. Nothing but Gate 4.5 sees this. Tells: version stuck at `v—`, WebSocket never opens, `document.body` a tenth of its normal size.
+- **Installer packs the WORKING TREE, not the commit** (`SrcDir=".."`): everything uncommitted in `github_setup/` ships. Stash before ISCC, or build from `git archive HEAD`.

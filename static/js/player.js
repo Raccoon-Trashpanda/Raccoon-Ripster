@@ -59,7 +59,16 @@ const _WA = {
   suspendedAt: 0,   // ctx.currentTime at pause
   loading: false,
   _preloading: false, // guard against concurrent preload fetches
+  // Look-ahead кэш декодированных буферов на несколько треков вперёд. Один
+  // сосед (nextBuffer) не спасает DJ-микс: после длинного трека идёт трек на
+  // 37с, а декод FLAC у Deezer под троттлингом = 20–40с, и предзагрузка не
+  // успевает → стык 5с. Держим горизонт из LOOKAHEAD треков: пока играет
+  // длинный, короткие успевают подгрузиться заранее.
+  ahead:     new Map(),   // absIdx → AudioBuffer
+  aheadItem: new Map(),   // absIdx → queue item (валидация, что очередь не сменилась)
+  _aheadRunning: false,
 };
+const _WA_LOOKAHEAD = 3;
 function _waEnabled() {
   // Mobile: force the plain <audio> path (no Web Audio gapless). The WA
   // buffer-source graph runs on an AudioContext that the OS suspends in the
@@ -567,6 +576,14 @@ function _waCanPlay(item) {
     const dur = Number(item.duration || item.dur || item.length || 0);
     if (!dur || dur > _WA_MAX_SEC) return false;
   }
+  // Локальный микс тоже декодируется ЦЕЛИКОМ (ALAC→FLAC-транскод без Range).
+  // Обычный трек альбома (2–5 мин) — мгновенно; но одиночный часовой DJ-микс
+  // одним файлом раскодировать в память нельзя. Длину из тегов знаем всегда —
+  // длинный отдаём обычным <audio> потоком. Неизвестна — доверяем (allow).
+  if (item.local) {
+    const dur = Number(item.duration || item.dur || item.length || 0);
+    if (dur && dur > _WA_MAX_SEC) return false;
+  }
   if (!item.url) return true;       // lazy resolve → will hit our same-origin /api/stream/<svc>
   try {
     const u = new URL(item.url, location.origin);
@@ -734,10 +751,25 @@ function _vizConfigChanged() {
   if (S.config?.['player-viz'] && audio && !audio.paused) _vizStart();
   else _vizStop();
 }
-async function _waLoadBuffer(url) {
-  const r   = await fetch(url, {credentials: 'same-origin'});
-  const ab  = await r.arrayBuffer();
-  return await _WA.ctx.decodeAudioData(ab);
+async function _waLoadBuffer(url, timeoutMs) {
+  // Таймаут+abort ОБЯЗАТЕЛЕН для look-ahead: Deezer под рейт-лимитом держит
+  // соединение открытым, и `arrayBuffer()` может не завершиться никогда — тогда
+  // вся последовательная предзагрузка виснет, `_aheadRunning` застревает в true,
+  // и дозагрузка мертва. С abort зависший трек просто отваливается и повторяется.
+  let ctrl = null, timer = null;
+  const opts = {credentials: 'same-origin'};
+  if (timeoutMs) {
+    ctrl = new AbortController();
+    opts.signal = ctrl.signal;
+    timer = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, timeoutMs);
+  }
+  try {
+    const r   = await fetch(url, opts);
+    const ab  = await r.arrayBuffer();
+    return await _WA.ctx.decodeAudioData(ab);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 // DRM format preference for SoundCloud — detected once at startup.
 // 'ctr' = Widevine (Chrome/Edge/Firefox), 'cbc' = FairPlay (Safari/iOS).
@@ -988,7 +1020,11 @@ async function _waPlay(idx, startAtSec = 0) {
       return false;
     }
   }
-  // Stop any in-flight source.
+  // Stop any in-flight source — И curSource, И запланированный стык. Раньше
+  // гасился только curSource: при ручном скипе (⏭) уже запланированный
+  // schedSource оставался и стартовал параллельно с новым треком → «фоном пошёл
+  // другой трек, каша». Теперь любой явный старт трека сначала снимает стык.
+  _waCancelScheduled();
   if (_WA.curSource) { try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch {} }
   const src = _WA.ctx.createBufferSource();
   src.buffer = buffer;
@@ -1020,25 +1056,97 @@ async function _waPlay(idx, startAtSec = 0) {
   try { _syncAlbumPlayBtns?.(); } catch {}
   return true;
 }
-async function _waPreloadNext() {
-  if (_WA.nextBuffer || _WA._preloading) return;
-  const nextIdx = Preview.idx + 1;
-  if (nextIdx >= Preview.queue.length) return;
-  const item = Preview.queue[nextIdx];
-  if (!item) return;
-  _WA._preloading = true;
-  try {
-    const r = await _waResolveUrl(item);
-    if (!r?.url) return;
-    _WA.nextBuffer = await _waLoadBuffer(r.url);
-    _WA.nextItem = item;
-    console.log('[gapless] preloaded next:', item.title);
-    _waScheduleNext();
-  } catch (e) {
-    console.warn('[gapless] preload failed:', e.message);
-  } finally {
-    _WA._preloading = false;
+// Выбросить из look-ahead кэша всё, что уже позади текущего трека — иначе 48
+// декодированных FLAC (~30МБ PCM каждый) съедят память.
+function _waPruneAhead() {
+  const keepFrom = Preview.idx;   // текущий + будущее держим, прошлое чистим
+  for (const k of [..._WA.ahead.keys()]) {
+    if (k < keepFrom) { _WA.ahead.delete(k); _WA.aheadItem.delete(k); }
   }
+}
+
+// Заполнить горизонт из LOOKAHEAD треков ВПЕРЁД — ПОСЛЕДОВАТЕЛЬНО (один за
+// другим), чтобы не плодить параллельные запросы к Deezer, который от них
+// троттлит ещё сильнее. Каждый трек — с ретраями на рейт-лимит. Идемпотентна:
+// уже загруженное не трогает, поэтому её безопасно дёргать из тика.
+async function _waPreloadAhead() {
+  if (_WA._aheadRunning) return;
+  _WA._aheadRunning = true;
+  try {
+    for (let n = 1; n <= _WA_LOOKAHEAD; n++) {
+      const idx = Preview.idx + n;
+      if (idx >= Preview.queue.length) break;
+      const item = Preview.queue[idx];
+      if (!item) continue;
+      // Уже в кэше и это тот же трек (очередь могли пересобрать) — пропускаем.
+      if (_WA.ahead.has(idx) && _WA.aheadItem.get(idx) === item) continue;
+      // Кросс-сервисный LOSSLESS prefetch (проверено 02.08.2026). Deezer сам себя
+      // троттлит при параллели (играющий поток + предзагрузка через один аккаунт)
+      // → на коротком треке микса следующий не успевает → яма. Тянем следующий с
+      // ДРУГОГО сервиса по тому же ISRC (Tidal — другой CDN/auth, Deezer его не
+      // видит). СТРОГО lossless→lossless: FLAC даёт идентичный PCM без priming/
+      // padding, стык сэмпл-точный; AAC сдвинул бы микросекунды и сломал
+      // бесшовность. `/api/stream/tidal-dash` — same-origin fMP4-FLAC,
+      // decodeAudioData его берёт (dur/ch/rate верные, decode ~165мс). Best-effort:
+      // не нашлось/не загрузилось — откат на Deezer, рабочий gapless не страдает.
+      // (undefined = ещё не пробовали, null = пробовали, alt нет.)
+      if (item._altUrl === undefined && _effSvc(item) === 'deezer') {
+        item._altUrl = null;
+        try {
+          const a = await fetch('/api/gapless/altsource?service=deezer&id=' +
+            encodeURIComponent(_effId(item))).then(r => r.json());
+          if (a && a.ok && a.service && a.id) {
+            const rr = await _waResolveUrl({service: a.service, id: String(a.id),
+                                            title: item.title, artist: item.artist});
+            if (rr && rr.url) {
+              item._altUrl = rr.url;
+              console.log(`[gapless] alt lossless ${a.service}:`, item.title);
+            }
+          }
+        } catch (_) { /* alt не вышел — Deezer ниже */ }
+      }
+      let buf = null;
+      for (let attempt = 1; attempt <= 3 && !buf; attempt++) {
+        try {
+          let loadUrl = item._altUrl;
+          if (!loadUrl) { const r = await _waResolveUrl(item); loadUrl = r?.url; }
+          if (!loadUrl) throw new Error('no url');
+          buf = await _waLoadBuffer(loadUrl, 30000);   // abort зависший трек
+        } catch (e) {
+          if (item._altUrl) item._altUrl = null;       // alt подвёл → откат на Deezer
+          // Рейт-лимит/сеть — подождать и повторить, а не бросать трек.
+          if (attempt < 3) await new Promise(res => setTimeout(res, 1500 * attempt));
+          else console.warn(`[gapless] preload idx ${idx} failed:`, e.message);
+        }
+      }
+      if (!buf) continue;                    // не смогли — оставим на след. тик
+      // Пока грузили, трек мог доиграться/смениться — проверяем актуальность.
+      if (Preview.queue[idx] !== item) continue;
+      _WA.ahead.set(idx, buf);
+      _WA.aheadItem.set(idx, item);
+      console.log(`[gapless] preloaded +${n}:`, item.title);
+      // Ближайший сосед — сразу в nextBuffer + планируем стык, если играем.
+      if (idx === Preview.idx + 1) {
+        _WA.nextBuffer = buf; _WA.nextItem = item;
+        _waScheduleNext();
+      }
+    }
+  } finally {
+    _WA._aheadRunning = false;
+  }
+}
+
+// Совместимость: старое имя. Теперь тянет ближайший из look-ahead кэша (если он
+// уже там) и в любом случае запускает дозаполнение горизонта.
+async function _waPreloadNext() {
+  const nextIdx = Preview.idx + 1;
+  const item = Preview.queue[nextIdx];
+  if (item && _WA.ahead.has(nextIdx) && _WA.aheadItem.get(nextIdx) === item) {
+    _WA.nextBuffer = _WA.ahead.get(nextIdx); _WA.nextItem = item;
+    _waScheduleNext();
+  }
+  _waPruneAhead();
+  _waPreloadAhead();       // не await — фон
 }
 
 // ── Sample-accurate hand-over ─────────────────────────────────────────────
@@ -1060,6 +1168,7 @@ function _waCancelScheduled() {
 }
 
 function _waScheduleNext() {
+  if (_WA._seeking) return;   // не планировать в окне перестройки seek (двойной трек)
   if (!_WA.ctx || !_WA.curSource || !_WA.curBuffer) return;
   if (!_WA.nextBuffer || _WA.schedSource) return;
   const nextIdx = Preview.idx + 1;
@@ -1103,6 +1212,19 @@ function _waPromoteScheduled() {
   _waAttachEnded(src, idx);
   if (typeof fpSyncMeta === 'function') fpSyncMeta(item);
   try { _syncAlbumPlayBtns?.(); } catch {}
+
+  // Сообщить всем, что играет уже ДРУГОЙ трек.
+  //
+  // Событие шлёт `_playPreviewAt`, и там написано «единственная точка, через
+  // которую проходит любой запуск трека». С появлением бесшовного стыка это
+  // перестало быть правдой: здесь звук УЖЕ играет, меняется только учёт, и
+  // `_playPreviewAt` не вызывается вовсе. Поэтому панель очереди подсвечивала
+  // предыдущий трек — переход слышен, а список стоит на месте.
+  try {
+    document.dispatchEvent(new CustomEvent('ripster:track-start',
+                                           { detail: { idx, item, gapless: true } }));
+  } catch (e) { /* старый движок без CustomEvent — не повод ломать переход */ }
+
   _waPreloadNext();
 }
 
@@ -1155,6 +1277,12 @@ async function _waSeek(sec) {
   // re-downloaded the whole track on every seek → seek felt dead on long mixes).
   if (!_WA.ctx || !_WA.curBuffer) return;
   const off = Math.max(0, Math.min(sec, _WA.curBuffer.duration - 0.2));
+  // Гонка двойного трека: между `await ctx.resume()` ниже и обновлением
+  // curStartT 250мс-тик успевал запланировать стык со СТАРЫМ таймингом — источник
+  // стартовал не в тот момент и накладывался («фоном пошёл другой трек, каша»).
+  // Флаг замораживает планировщик на время перестройки, а повторный
+  // _waCancelScheduled перед re-aim гасит всё, что могло проскочить в окне await.
+  _WA._seeking = true;
   // Seeking moves the end of this track, so the pending hand-over is now aimed
   // at the wrong instant — drop it and re-aim below.
   _waCancelScheduled();
@@ -1170,6 +1298,8 @@ async function _waSeek(sec) {
   _WA.curStartT = startedAt - off;
   _WA.curOffset = off;
   _waAttachEnded(src, Preview.idx);
+  _waCancelScheduled();       // гасим стык, если тик проскочил в окне await
+  _WA._seeking = false;       // планировщик снова активен
   _waScheduleNext();          // re-aim the hand-over at the new end time
   ['pp-play','pp-play-big','fp-play'].forEach(id => {
     const el = document.getElementById(id); if (el) el.textContent = '⏸';
@@ -1186,10 +1316,17 @@ setInterval(() => {
   const cur = _waCurrentTime(), dur = _waDuration();
   if (_WA.curItem) _mixPosSave?.(_WA.curItem.posKey, cur, dur);
   try { _lrcSyncTick?.(cur); } catch {}
-  // If user seeked to within 60s of end — urgently preload next track so the
-  // gapless transition is ready even if normal preload hasn't finished yet.
-  if (dur > 0 && (dur - cur) < 60 && !_WA.nextBuffer && !_WA._preloading) {
-    _waPreloadNext();
+  // Держим look-ahead горизонт заполненным: пока играет длинный трек, короткие
+  // следующие успевают подгрузиться заранее, и стык остаётся бесшовным даже на
+  // DJ-миксе с 37-секундными сегментами. Идемпотентно и последовательно внутри.
+  _waPruneAhead();
+  if (!_WA._aheadRunning) _waPreloadAhead();
+  // Ближайший сосед готов в кэше, но стык ещё не запланирован — запланировать.
+  const _ni = Preview.idx + 1;
+  if (!_WA.schedSource && _WA.ahead.has(_ni) && _WA.aheadItem.get(_ni) === Preview.queue[_ni]) {
+    _WA.nextBuffer = _WA.ahead.get(_ni);
+    _WA.nextItem   = _WA.aheadItem.get(_ni);
+    _waScheduleNext();
   }
   if (_seekDragging) return;          // don't snap visuals while user drags
   const pct = dur ? (cur / dur * 100) : 0;
@@ -1712,8 +1849,9 @@ async function _playPreviewAt(idx) {
   // previewNext — обрыв потока, пропуск DRM-трека). Раньше слушателей было двое,
   // а отправителя ни одного: панель показывала старую позицию после
   // переключения, и это выглядело как «трек сменился, а список не двигается»
-  // (02.08.2026). Шлём отсюда — это единственная точка, через которую проходит
-  // ЛЮБОЙ запуск трека.
+  // (02.08.2026). Шлём отсюда — через эту точку проходит любой ОБЫЧНЫЙ запуск
+  // трека. Бесшовный стык идёт мимо (звук уже играет, меняется только учёт),
+  // поэтому там событие шлётся отдельно — см. _waPromoteScheduled.
   try {
     document.dispatchEvent(new CustomEvent('ripster:track-start',
                                            { detail: { idx, item } }));
@@ -2655,6 +2793,15 @@ function fpSyncMeta(item) {
   if (title)  title.textContent  = item.title  || '—';
   if (artist) artist.textContent = item.artist || (item.label || '');
   if (src)    src.textContent    = item.label  || t('player.now_playing');
+  // Формат — той же функцией, что подписывает трек-лист и нижний плеер.
+  // Своя догадка по битрейту уже разъезжалась с ними (FLAC против 320),
+  // поэтому источник правды один. Нет подписи — прячем строку целиком.
+  const fmt = document.getElementById('fp-fmt');
+  if (fmt) {
+    const lab = (typeof _pqQuality === 'function') ? _pqQuality(item) : '';
+    fmt.textContent = lab || '';
+    fmt.hidden = !lab;
+  }
   if (art) {
     // Crossfade: preload the new image, then swap into place. The old <img>
     // fades to 0 over the same span. Skips work if the URL hasn't changed —
@@ -2804,6 +2951,17 @@ async function fpFetchLyrics() {
     const dur = audio?.duration && isFinite(audio.duration) ? Math.round(audio.duration) : 0;
     const params = new URLSearchParams({artist: item.artist, track: item.title});
     if (dur) params.set('duration', String(dur));
+    // Точные ключи — важнее строкового поиска. Для локального файла текст лежит
+    // в его собственном теге; для трека Apple — берётся по ID. Поиск по
+    // «артист + название» оставляем последним: у миксов и коллабов он мажет
+    // («anamē & Above & Beyond — Gratitude (feat. …) [Mixed]» не находится).
+    try {
+        const u = String(item.url || '');
+        const m = u.match(/[?&]p=([^&]+)/);
+        if (m && /\/api\/library\/file/.test(u)) params.set('path', decodeURIComponent(m[1]));
+    } catch (e) {}
+    const aid = item.appleId || (item.service === 'apple' ? item.id : '');
+    if (aid) params.set('apple_id', String(aid));
     const r = await fetch('/api/lyrics?' + params.toString());
     const d = await r.json();
     if (d.synced) {

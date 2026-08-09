@@ -15,6 +15,8 @@ app's config dict (used by Qobuz helpers for ``app_id`` and ``auth-token``).
 """
 from __future__ import annotations
 
+import html as _html_mod
+import re as _re_mod
 import time as _time
 
 from ripster import http_client as _HTTP
@@ -66,44 +68,289 @@ def install(app, ctx) -> None:
 
 
 # ── Lyrics (LRCLIB) ────────────────────────────────────────────────────────
-@router.get("/api/lyrics")
-async def lyrics(artist: str = "", track: str = "", album: str = "", duration: int = 0):
-    """Fetch synced + plain lyrics from lrclib.net. Free, no auth needed.
+def _lrc_candidates(artist: str, track: str) -> list[tuple[str, str]]:
+    """Пары (артист, название) от точной к самой упрощённой.
 
-    Returns {synced: "..lrc text..", plain: "...", source: "lrclib"} or
-    {synced: "", plain: "", source: ""} if not found.
+    lrclib — общественная база, и в ней лежат ОРИГИНАЛЬНЫЕ названия. У нас же
+    названия приходят из каталога стриминга, где к ним приклеены украшения
+    версии и полный список соавторов:
+
+        anamē & Above & Beyond — Gratitude (feat. Marty Longstaff) [Mixed]  → 404
+        Above & Beyond         — Gratitude                                  → есть
+
+    Поэтому не один запрос, а лестница: снимаем по одному «слою» и на каждом
+    шаге пробуем снова. Порядок важен — первым идёт самый точный вариант, чтобы
+    у трека с честным совпадением не подхватился чужой ремикс.
     """
-    if not artist or not track:
-        return {"synced": "", "plain": "", "source": ""}
+    import re as _re
+
+    def clean(t: str, level: int) -> str:
+        s = t.strip()
+        if level >= 1:                       # [Mixed], [Radio Edit], [Explicit]
+            s = _re.sub(r"\s*\[[^\]]*\]", "", s)
+        if level >= 2:                       # (feat. …), (with …)
+            s = _re.sub(r"\s*\((?:feat|ft|with)\.?[^)]*\)", "", s, flags=_re.I)
+        if level >= 3:                       # (… Mix), (… Remix), (… Version)
+            s = _re.sub(r"\s*\([^)]*(?:mix|remix|edit|version|dub)\)", "", s, flags=_re.I)
+        return _re.sub(r"\s{2,}", " ", s).strip(" -–—")
+
+    # Соавторы: пробуем всю склейку, затем каждого по отдельности. Первым — тот,
+    # кто указан последним: в наших склейках основной исполнитель часто идёт
+    # после приглашённого («anamē & Above & Beyond» — релиз Above & Beyond).
+    #
+    # 🔴 По «&» делим ТОЛЬКО если в строке есть запятая. Иначе «Above & Beyond»
+    # разваливается на «Above» и «Beyond» — двух несуществующих артистов, и
+    # лестница запросов начинает искать чушь. Ровно на этом уже обжигались в
+    # подсказках вишлиста; правило записано в памяти проекта.
+    sep = r"\s*(?:,|/|\bfeat\.?\b|\bft\.?\b)\s*"
+    if "," in artist:
+        sep = r"\s*(?:&|,|/|\bfeat\.?\b|\bft\.?\b)\s*"
+    parts = [p.strip() for p in _re.split(sep, artist, flags=_re.I) if p.strip()]
+    artists = [artist.strip()] + [p for p in reversed(parts) if p != artist.strip()]
+
+    # «Хвосты» по «&», от длинного к короткому: «anamē & Above & Beyond» даёт
+    # «Above & Beyond» — именно он и находится в базе. Так мы добираемся до
+    # настоящего имени группы, не разрывая его пополам: длинный хвост пробуется
+    # раньше короткого, поэтому «Above & Beyond» опережает бессмысленное
+    # «Beyond», и до последнего дело обычно не доходит.
+    amp = [p.strip() for p in artist.split("&") if p.strip()]
+    for start in range(1, len(amp)):
+        tail = " & ".join(amp[start:])
+        if tail and tail not in artists:
+            artists.append(tail)
+
+    seen, out = set(), []
+    for lvl in (0, 1, 2, 3):
+        t = clean(track, lvl)
+        if not t:
+            continue
+        for a in artists:
+            key = (a.lower(), t.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((a, t))
+    return out
+
+
+_RE_LRC_STAMP = _re_mod.compile(r"^\s*\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]", _re_mod.M)
+
+
+def _split_lrc(text: str) -> dict:
+    """Разложить текст на synced/plain по наличию таймкодов.
+
+    Один и тот же тег может содержать и то и другое: наш загрузчик кладёт LRC с
+    метками, когда Apple их дала, и голый текст, когда нет.
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"synced": "", "plain": ""}
+    if _RE_LRC_STAMP.search(text):
+        return {"synced": text, "plain": _RE_LRC_STAMP.sub("", text).strip()}
+    return {"synced": "", "plain": text}
+
+
+def _lyrics_from_file(path: str) -> dict:
+    """Текст, вшитый в САМ файл. Самый точный источник: угадывать нечего.
+
+    Для локального трека это правильный первый шаг — ни сети, ни сопоставления
+    по названию, которое у миксов и коллабов регулярно мажет.
+    """
+    try:
+        from ripster.routes.library import _safe_resolve
+        import mutagen
+        real = _safe_resolve(path)
+        if not real.is_file():
+            return {}
+        a = mutagen.File(str(real), easy=False)
+        if a is None or not a.tags:
+            return {}
+        raw = ""
+        # MP4/M4A (ALAC, AAC)
+        v = a.tags.get("\xa9lyr") if hasattr(a.tags, "get") else None
+        if v:
+            raw = str(v[0]) if isinstance(v, list) else str(v)
+        # FLAC / Vorbis
+        if not raw:
+            for k in ("LYRICS", "lyrics", "UNSYNCEDLYRICS", "unsyncedlyrics"):
+                v = a.tags.get(k) if hasattr(a.tags, "get") else None
+                if v:
+                    raw = v[0] if isinstance(v, list) else str(v)
+                    break
+        # MP3 (ID3 USLT — ключ содержит язык и описание)
+        if not raw:
+            for k in list(getattr(a.tags, "keys", lambda: [])()):
+                if str(k).startswith("USLT"):
+                    raw = str(a.tags[k].text if hasattr(a.tags[k], "text") else a.tags[k])
+                    break
+        out = _split_lrc(raw)
+        return {**out, "source": "файл"} if (out["synced"] or out["plain"]) else {}
+    except Exception as e:                                      # noqa: BLE001
+        print(f"[lyrics] тег файла не прочитан: {e}", flush=True)
+        return {}
+
+
+async def _lyrics_from_apple(song_id: str) -> dict:
+    """Текст из каталога Apple ПО ID — тоже без угадывания.
+
+    Магазин перебираем так же, как в загрузчике: текст живёт в магазине
+    ПОДПИСКИ, а не в том, что стоит в ссылке (08.08.2026: ru → 404, ca → 200).
+    Apple отдаёт TTML; при `itunes:timing="Line"` у строк есть begin= — из них
+    собираем обычный LRC. Пословной разметки нашему токену не дают, поэтому
+    караоке по словам не обещаем.
+    """
+    cfg = _config or {}
+    bearer = str(cfg.get("authorization-token") or "")
+    mut = str(cfg.get("media-user-token") or "")
+    if not (song_id and bearer and len(mut) > 50):
+        return {}
+    fronts, seen = [], set()
+    for s in (cfg.get("apple-country"), cfg.get("storefront"), "us"):
+        s = str(s or "").strip().lower()
+        if s and s not in seen:
+            seen.add(s); fronts.append(s)
+    hdr = {"Authorization": f"Bearer {bearer}", "Origin": "https://music.apple.com",
+           "Referer": "https://music.apple.com/", "Cookie": f"media-user-token={mut}"}
     try:
         async with _HTTP.ashared() as c:
-            params = {"artist_name": artist, "track_name": track}
-            if album:    params["album_name"] = album
-            if duration: params["duration"]   = str(duration)
-            r = await c.get("https://lrclib.net/api/get", params=params)
-            if r.status_code == 404:
-                # Try the search fallback (returns best match)
-                sr = await c.get("https://lrclib.net/api/search",
-                                 params={"track_name": track, "artist_name": artist})
-                if sr.status_code == 200:
-                    arr = sr.json() or []
-                    if arr:
-                        data = arr[0]
+            for sf in fronts:
+                r = await c.get(
+                    f"https://amp-api.music.apple.com/v1/catalog/{sf}/songs/{song_id}/lyrics",
+                    params={"l": "en-US"}, headers=hdr)
+                if r.status_code != 200:
+                    continue
+                data = (r.json().get("data") or [{}])[0]
+                ttml = (data.get("attributes") or {}).get("ttml") or ""
+                if not ttml:
+                    continue
+                return {**_ttml_to_lyrics(ttml), "source": f"Apple ({sf})"}
+    except Exception as e:                                      # noqa: BLE001
+        print(f"[lyrics] Apple: {e}", flush=True)
+    return {}
+
+
+def _ttml_to_lyrics(ttml: str) -> dict:
+    """TTML → {synced (LRC), plain}. Умеет и построчный тайминг, и его отсутствие."""
+    def _to_sec(v: str) -> float:
+        v = (v or "").strip()
+        if v.endswith("s") and ":" not in v:
+            try: return float(v[:-1])
+            except ValueError: return 0.0
+        parts = v.split(":")
+        try:
+            parts = [float(x) for x in parts]
+        except ValueError:
+            return 0.0
+        sec = 0.0
+        for p in parts:
+            sec = sec * 60 + p
+        return sec
+
+    lines = _re_mod.findall(r"<p\b([^>]*)>(.*?)</p>", ttml, _re_mod.S)
+    plain, lrc = [], []
+    for attrs, inner in lines:
+        text = _re_mod.sub(r"<[^>]+>", "", inner)
+        text = _html_mod.unescape(text).strip()
+        if not text:
+            continue
+        plain.append(text)
+        m = _re_mod.search(r'begin="([^"]+)"', attrs)
+        if m:
+            s = _to_sec(m.group(1))
+            lrc.append(f"[{int(s // 60):02d}:{s % 60:05.2f}]{text}")
+    return {"synced": "\n".join(lrc) if lrc else "", "plain": "\n".join(plain)}
+
+
+@router.get("/api/lyrics")
+async def lyrics(artist: str = "", track: str = "", album: str = "", duration: int = 0,
+                 path: str = "", apple_id: str = "",
+                 tidal_id: str = "", spotify_id: str = "", deezer_id: str = ""):
+    """Текст песни из первого источника, который его отдал.
+
+    Лестница по убыванию точности:
+
+      1. тег самого файла            — ничего не угадывает
+      2. Apple по ID трека           — точное попадание
+      3. Tidal / Spotify / Deezer    — по ID, если он известен; иначе поиск
+      4. lrclib.net                  — общественная база, поиск по строке
+
+    Порядок не случаен. Первые два не могут ошибиться адресом. Сервисы дальше
+    ищут по «артист + название», поэтому у них есть проверки на совпадение и на
+    длительность, а lrclib стоит последним: у миксов и коллабов он мажет чаще,
+    чем попадает.
+
+    Ответ всегда одной формы: {synced, plain, source}. Пустой — если текста нет
+    нигде; поле `source` тогда пустое.
+    """
+    if path:
+        got = _lyrics_from_file(path)
+        if got:
+            return got
+    if apple_id:
+        got = await _lyrics_from_apple(apple_id)
+        if got and (got.get("synced") or got.get("plain")):
+            return got
+
+    # Потоковые сервисы. Порядок — по качеству синхронизации: у Tidal она
+    # построчная и обычно аккуратнее прочих, у Deezer бывает грубее.
+    # Сервис без ключей молча пропускает ход: отсутствие ARL или sp_dc — это не
+    # ошибка лирики, а просто «этот источник сегодня не участвует».
+    if artist and track:
+        from ripster import lyrics_sources as _LSRC
+        _c = _config or {}
+        for _fn in (
+            lambda: _LSRC.from_tidal(artist, track, duration, _c, tidal_id),
+            lambda: _LSRC.from_spotify(artist, track, duration, spotify_id),
+            lambda: _LSRC.from_deezer(artist, track, duration, _c, deezer_id),
+        ):
+            try:
+                got = await _fn()
+            except Exception:
+                got = None
+            if got and (got.get("synced") or got.get("plain")):
+                return got
+
+    if not artist or not track:
+        return {"synced": "", "plain": "", "source": ""}
+    cands = _lrc_candidates(artist, track)
+    try:
+        async with _HTTP.ashared() as c:
+            for i, (a, t) in enumerate(cands):
+                params = {"artist_name": a, "track_name": t}
+                # Альбом и длительность сужают поиск и потому помогают ТОЛЬКО
+                # точному варианту: у упрощённого названия длительность уже
+                # другой записи, и совпадение не найдётся никогда.
+                if i == 0:
+                    if album:    params["album_name"] = album
+                    if duration: params["duration"]   = str(duration)
+                r = await c.get("https://lrclib.net/api/get", params=params)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get("syncedLyrics") or data.get("plainLyrics"):
                         return {
                             "synced": data.get("syncedLyrics") or "",
                             "plain":  data.get("plainLyrics")  or "",
-                            "source": "lrclib-search",
+                            "source": "lrclib" if i == 0 else f"lrclib:упрощён ({a} — {t})",
                         }
-                return {"synced": "", "plain": "", "source": ""}
-            if r.status_code != 200:
-                return {"synced": "", "plain": "", "source": "",
-                        "error": f"lrclib {r.status_code}"}
-            data = r.json()
-            return {
-                "synced": data.get("syncedLyrics") or "",
-                "plain":  data.get("plainLyrics")  or "",
-                "source": "lrclib",
-            }
+                elif r.status_code not in (404, 400):
+                    return {"synced": "", "plain": "", "source": "",
+                            "error": f"lrclib {r.status_code}"}
+
+            # Ничего точного — последняя попытка через поиск по самому
+            # упрощённому варианту: он даёт лучшее совпадение, а не точное.
+            a, t = cands[-1] if cands else (artist, track)
+            sr = await c.get("https://lrclib.net/api/search",
+                             params={"track_name": t, "artist_name": a})
+            if sr.status_code == 200:
+                arr = sr.json() or []
+                if arr:
+                    data = arr[0]
+                    return {
+                        "synced": data.get("syncedLyrics") or "",
+                        "plain":  data.get("plainLyrics")  or "",
+                        "source": "lrclib-search",
+                    }
+            return {"synced": "", "plain": "", "source": ""}
     except Exception as e:
         return {"synced": "", "plain": "", "source": "", "error": str(e)}
 
@@ -898,7 +1145,14 @@ async def api_album_detail(service: str, album_id: str):
     if not eng_name:
         raise HTTPException(400, f"Unsupported service: {service}")
     from ripster.engines import get_engine
-    return await get_engine(eng_name).get_album(album_id, _config)
+    d = await get_engine(eng_name).get_album(album_id, _config)
+    # Apple/Spotify can't stream through us — resolve the SAME release on Deezer
+    # by UPC so the card (and the search-tile ▶) plays the whole thing, not a
+    # 30-sec preview. Frontend still shows the original service. Best-effort.
+    if isinstance(d, dict) and not d.get("error") and service in ("spotify", "apple"):
+        await _attach_playable_sources(d.get("tracks") or [],
+                                       (d.get("album") or {}).get("upc", ""))
+    return d
 
 
 _RE_ALBUM_ID = {

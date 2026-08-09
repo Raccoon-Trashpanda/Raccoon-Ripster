@@ -242,10 +242,30 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict,
 
         # Folder structure: always create Artist/Album/ hierarchy
         fmt = cfg["global"].setdefault("formatting", {})
-        fmt.setdefault("album_format",             "{name}{explicit}")
+        # Артист в шаблоне АЛЬБОМА, а не только в шаблоне трека: иначе при
+        # включённом force_album_format релиз кладётся прямо в корень
+        # качества (проверено 09.08.2026: «OGG 160/Hot Fuss/…» — папка
+        # релиза есть, папки артиста нет). Приводим к той же глубине, что
+        # у Apple, Deezer и Yandex: качество/артист/релиз/файл.
+        fmt["album_format"] = "{artist}/{name}{explicit}"   # именно artist:
+        # в AlbumInfo поля album_artist НЕТ, и .format(**album_tags) упал бы
+        # с KeyError — проверено по orpheus/utils/models.py до запуска.
         fmt.setdefault("playlist_format",          "{name}{explicit}")
         fmt.setdefault("track_filename_format",    "{track_number}. {name}")
-        fmt["single_full_path_format"] = "{artist}/{name}"  # track-only URLs get artist subfolder
+        # Сингл — это тоже релиз, и папка ему нужна такая же, как альбому.
+        # Жалоба пользователя с GitHub 09.08.2026: «не создаются папки на
+        # синглы». Замер по диску подтвердил: у Apple, Deezer и Yandex глубина
+        # четыре (сервис/качество/артист/релиз/файл), а у Spotify — три:
+        # `spotify/OGG 320/Kunal Ganjawala/Dil Na Diya.ogg`, трек лежал прямо в
+        # папке артиста.
+        #
+        # Причина — шаблон `{artist}/{name}` для одиночных треков: уровня релиза
+        # в нём просто нет. Правим не шаблон, а включаем штатный механизм
+        # OrpheusDL: `force_album_format` заставляет обращаться с одиночным
+        # треком как с альбомом, то есть строить полный путь релиза и заодно
+        # класть обложку и буклет. Своя правка шаблона всего этого не дала бы.
+        fmt["force_album_format"] = True
+        fmt["single_full_path_format"] = "{artist}/{name}"  # запасной путь, если механизм выключат
         fmt.setdefault("enable_zfill",             True)
 
         # Cover: embed a uniform 1000×1000 in-audio cover (per request, all

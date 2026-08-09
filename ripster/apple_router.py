@@ -56,6 +56,41 @@ def _rewrite_storefront(url: str, cc: str) -> str:
     return re.sub(r"(music\.apple\.com/)[a-z]{2}(/)", rf"\g<1>{cc}\g<2>", url, count=1, flags=re.I)
 
 
+def rewrite_storefront_resolved(url: str, cc: str) -> str:
+    """Сменить витрину и подставить ЕЁ СОБСТВЕННЫЙ номер альбома.
+
+    🔴 Зачем отдельная функция (08.08.2026). `_rewrite_storefront` меняет только
+    код страны, а идентификатор оставляет прежним. Для видео это верно — там ID
+    глобальный. Для АЛЬБОМОВ — нет: Apple нумерует один и тот же релиз
+    по-разному в разных витринах.
+
+        Apparat — A Hum Of Maybe:  ru/gb/de → 1850997297
+                                   ca/us    → 1852529754
+                                   jp       → 1878218670
+
+    Из-за этого повтор «своя витрина вместо чужой» был обречён: ссылка честно
+    становилась /ca/, но с номером, которого в канадской витрине не существует,
+    и каталог отвечал «релиза нет». Дальше задача уходила на публичный wrapper,
+    тот лежал, и прогон уходил в пустоту на девятнадцать минут — при живом
+    оплаченном аккаунте, у которого этот альбом БЫЛ.
+
+    Если найти местный номер не удалось, возвращаем обычную замену страны: хуже
+    прежнего не будет, а сеть могла просто не ответить.
+    """
+    plain = _rewrite_storefront(url, cc)
+    if "/album/" not in url and "/song/" not in url:
+        return plain                      # видео и прочее — номер глобальный
+    try:
+        from ripster.engines.errors import apple_album_by_storefront
+        found = apple_album_by_storefront(url)
+        local = (found.get((cc or "").lower()) or ("", ""))[0]
+        if local:
+            return re.sub(r"/(\d+)(\?|$)", rf"/{local}\g<2>", plain, count=1)
+    except Exception:
+        pass
+    return plain
+
+
 async def resolve_available_url(url: str, config: dict):
     """If the Apple link isn't streamable in its own storefront, return a URL
     rewritten to a region that CAN stream it (pre-release case). Returns
@@ -275,16 +310,63 @@ def local_wrapper_healthy() -> bool:
 _public_unhealthy_until: float = 0.0
 
 
-def mark_public_wrapper_unhealthy(ttl: float = 300.0) -> None:
-    """Flag the public wm.wol.moe pool as having no ready instances for ``ttl``
-    seconds — the router treats it as down meanwhile instead of retrying blind."""
-    global _public_unhealthy_until
-    _public_unhealthy_until = time.time() + ttl
+_public_down: bool = False        # выключен до подтверждения работоспособности
+_public_next_probe: float = 0.0   # раньше этого времени не пробуем даже разово
+_public_fail_streak: int = 0
+
+# Пауза перед разведкой растёт: пул волонтёрский и лежит по часу и дольше,
+# долбиться в него каждые пять минут бессмысленно.
+_PUBLIC_BACKOFF = (300.0, 900.0, 1800.0, 3600.0)
+
+
+def mark_public_wrapper_unhealthy(ttl: float = 0.0) -> None:
+    """Выключить публичный wrapper-manager — до подтверждения, что он ожил.
+
+    Раньше это был просто таймер на 300 с: истёк — и трафик снова шёл в мёртвый
+    пул, снова упирался, снова ждал. Владелец сформулировал правило иначе, и
+    оно правильнее: <b>определили как нерабочий — не использовать, пока не
+    определится как рабочий</b>. Поэтому здесь защёлка, а не срок.
+
+    `ttl` оставлен ради обратной совместимости вызовов и игнорируется: паузу
+    выбирает сама функция по длине череды отказов.
+    """
+    global _public_down, _public_next_probe, _public_fail_streak
+    _public_down = True
+    _public_fail_streak = min(_public_fail_streak + 1, len(_PUBLIC_BACKOFF) - 1)
+    _public_next_probe = time.time() + _PUBLIC_BACKOFF[_public_fail_streak]
+
+
+def mark_public_wrapper_healthy() -> bool:
+    """Публичный пул только что реально отработал — снять защёлку.
+
+    Возвращает True, если состояние поменялось (был выключен), чтобы вызывающий
+    мог сообщить об этом один раз, а не при каждом успешном треке.
+    """
+    global _public_down, _public_fail_streak
+    changed = _public_down
+    _public_down = False
+    _public_fail_streak = 0
+    return changed
 
 
 def public_wrapper_healthy() -> bool:
-    """False while the public pool is in its post-failure cooldown."""
-    return time.time() >= _public_unhealthy_until
+    """Можно ли сейчас направлять задачи в публичный пул.
+
+    Пока защёлка стоит — нельзя. Исключение одно: после паузы пропускаем ОДНУ
+    разведочную попытку, иначе выключенный однажды пул никогда не вернётся сам.
+    Успех такой попытки снимает защёлку через `mark_public_wrapper_healthy()`,
+    неуспех — заводит её снова, уже с большей паузой.
+    """
+    if not _public_down:
+        return True
+    return time.time() >= _public_next_probe
+
+
+def public_wrapper_state() -> dict:
+    """Состояние для интерфейса и отчётов: выключен ли и когда следующая проба."""
+    return {"down": _public_down,
+            "next_probe_in": max(0, int(_public_next_probe - time.time())) if _public_down else 0,
+            "fail_streak": _public_fail_streak}
 
 
 def _local_wrapper_ok(config: dict) -> bool:

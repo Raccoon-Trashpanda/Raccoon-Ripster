@@ -46,11 +46,74 @@ def install(app, ctx) -> None:
     app.include_router(router)
 
 
+@router.get("/api/gapless/altsource")
+async def gapless_altsource(service: str, id: str):
+    """Тот же трек (по ISRC) на ДРУГОМ сервисе — для бесшовной предзагрузки.
+
+    Deezer сам себя троттлит, когда играющий поток и предзагрузка идут через один
+    аккаунт: на коротком треке микса (37–46с) следующий не успевает скачаться →
+    яма на стыке. Alt-сервис (Tidal/Qobuz) — другой CDN/auth, Deezer его не видит,
+    коллизии нет. Возвращает {ok, service, id} для стрима через
+    /api/stream/<service>/<id>; на стороне плеера есть откат на исходник, поэтому
+    любой сбой — просто {ok:false}, а не ошибка.
+
+    Матчим СТРОГО по ISRC каждого сегмента: у DJ-микса сегментация на разных
+    сервисах разная (fabric-микс: Deezer 37 треков, Qobuz 24 — другой эдит), так
+    что маппинг по позиции в альбоме поехал бы. ISRC-точно или никак.
+    """
+    if service != "deezer" or not id:
+        return {"ok": False}
+    isrc = ""
+    try:
+        async with httpx.AsyncClient(timeout=8) as c:
+            r = await c.get(f"https://api.deezer.com/track/{id}")
+            isrc = ((r.json() or {}).get("isrc") or "").strip()
+    except Exception:
+        return {"ok": False}
+    if not isrc:
+        return {"ok": False}
+
+    from ripster.routes import isrc as _im
+    # Tidal первым: ISRC-поиск точный и быстрый (fabric-микс совпал за ~4с).
+    tok, cc = "", ""
+    try:
+        from ripster.engines import tidal as _tid
+        tok, cc = await _tid._orpheus_access_token()
+    except Exception:
+        tok = ""
+    if not tok:
+        tok = (_cfg.get("tidal-token") or "").strip()
+        cc = (_cfg.get("tidal-country") or "US").strip().upper()
+    if tok:
+        try:
+            hit = await _im._tidal_search_isrc(isrc, tok, (cc or "US"))
+            if hit and hit.get("track_id"):
+                return {"ok": True, "service": "tidal", "id": str(hit["track_id"]), "isrc": isrc}
+        except Exception:
+            pass
+    # Qobuz запасным.
+    qtok = (_cfg.get("qobuz-auth-token") or "").strip()
+    if qtok:
+        try:
+            hit = await _im._qobuz_search_isrc(
+                isrc, (_cfg.get("qobuz-app-id") or "312369995").strip(), qtok)
+            if hit and hit.get("track_id"):
+                return {"ok": True, "service": "qobuz", "id": str(hit["track_id"]), "isrc": isrc}
+        except Exception:
+            pass
+    return {"ok": False}
+
+
 def _stream_origin(request: Request) -> tuple[str, str]:
-    """Client IP for stream attribution (public build has no guest sessions)."""
+    """Extract (guest session_id, client_ip) for stream-event attribution."""
+    try:
+        from ripster.guest_manager import get_manager
+        sid = get_manager().get_session_id_from_request(request) or ""
+    except Exception:
+        sid = ""
     ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
         or (request.client.host if request.client else "")
-    return "", ip
+    return sid, ip
 
 
 def _display_name(artist: str, name: str, fallback: str) -> str:
@@ -61,8 +124,14 @@ def _display_name(artist: str, name: str, fallback: str) -> str:
 
 def _record_listen(stream_type: str, request: Request, track_id: str,
                    name: str, artist: str, url: str) -> None:
-    # Public build ships no analytics collector — listens are not recorded.
-    return None
+    try:
+        from ripster import stats_collector as _sc
+        sid, ip = _stream_origin(request)
+        _sc.record_stream(stream_type,
+                          _display_name(artist, name, f"track/{track_id}"),
+                          url, session_id=sid, client_ip=ip)
+    except Exception:
+        pass
 
 
 # ── Generic CDN proxy ─────────────────────────────────────────────────────

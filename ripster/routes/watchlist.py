@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -378,6 +379,13 @@ async def api_watchlist_download_latest(item_id: str, body: dict | None = None):
             "error": ("" if queued else f"Не нашёл этих релизов в {svc}")}
 
 
+# Разделители склейки соавторов в строке кредитов. Применяются ТОЛЬКО после того,
+# как имя целиком не нашлось в каталоге, — иначе «Above & Beyond» распалось бы на
+# двух несуществующих артистов. «x» намеренно НЕ разделитель: «Malcolm X» дороже,
+# чем пойманная пара DJ-коллабораций.
+_CREDIT_SEP = re.compile(r"\s*(?:,|&|×|\+|\bfeat\.?|\bft\.?|\bvs\.?)\s*", re.I)
+
+
 @router.post("/api/watchlist/repair")
 async def api_watchlist_repair():
     """Backfill missing artist_ids and drop duplicates.
@@ -427,8 +435,13 @@ async def api_watchlist_repair():
         # ложилась в список мёртвой навсегда (02.08.2026: «A Vision of Panorama,
         # Meora, Café del Mar», «Mystific, Talk Jungle»). Разбираем на людей:
         # первый живой становится этой записью, остальные — отдельными.
-        if not aid and "," in (it.get("name") or ""):
-            for part in [p.strip() for p in it["name"].split(",") if p.strip()]:
+        # 07.08.2026: разделителем была ТОЛЬКО запятая, поэтому «Golan Zocher &
+        # Moshic» (добавлен 04.08) чинился нулём при каждой проверке и вечно
+        # висел предупреждением. Разбор безопасен именно как ФОЛБЭК: имя целиком
+        # уже пробовали выше, так что «Above & Beyond» сюда не доходит, а часть,
+        # которую iTunes не знает, отсеивается ниже по пустому pid.
+        if not aid and _CREDIT_SEP.search(it.get("name") or ""):
+            for part in [p.strip() for p in _CREDIT_SEP.split(it["name"]) if p.strip()]:
                 r = await _wls.resolve_apple_artist(part)
                 pid = r.get("artist_id", "")
                 if not pid:
@@ -637,6 +650,50 @@ def next_check_delay(cfg: dict | None = None, base: float = 6 * 3600) -> float:
     if cfg.get("watchlist-nz-window", True) is False:
         return base
     return max(60.0, min(base, seconds_to_nz_friday()))
+
+
+def seconds_since_last_pass(items: "list | None" = None) -> "float | None":
+    """Seconds since the most recent entry check, or None if nothing was ever
+    checked. `last_check` on the entries IS our persisted clock — we keep no
+    separate timer file."""
+    items = items if items is not None else (_s.get("items") or [])
+    newest = None
+    for e in items:
+        raw = (e or {}).get("last_check")
+        if not raw:
+            continue
+        try:
+            t = datetime.fromisoformat(str(raw))
+        except ValueError:
+            continue
+        if newest is None or t > newest:
+            newest = t
+    if newest is None:
+        return None
+    # last_check is written as naive local time; compare on the same clock.
+    return max(0.0, (datetime.now() - newest).total_seconds())
+
+
+def initial_check_delay(cfg: dict | None = None, base: float = 6 * 3600,
+                        grace: float = 120.0) -> float:
+    """How long to sleep before the FIRST check after a start-up.
+
+    Found 2026-08-09: the loop slept the full interval before its first pass, so
+    every restart put the 6h clock back to zero. On a day of active development
+    the app restarts every ~10-15 min and the watchlist was therefore checked
+    almost never — 146 entries carried one single pass from 25h earlier, and the
+    only reason that one happened was a rare quiet gap. Nothing looked broken:
+    the loop was alive and dutifully sleeping, just never reaching the end.
+
+    So resume the clock instead of resetting it — the interval is measured from
+    the last real pass (`last_check`), not from process start. `grace` keeps a
+    due check from firing into the middle of boot.
+    """
+    interval = next_check_delay(cfg, base)
+    since    = seconds_since_last_pass()
+    if since is None:
+        return grace                      # fresh list — check shortly after boot
+    return max(grace, min(interval, interval - since))
 
 
 def _notify_release(artist: str, release: str, compilation: bool, queued: bool,

@@ -255,6 +255,22 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict, atmos: 
         if save_path:
             gen["download_path"] = save_path.rstrip("/\\") + "\\"
 
+        # Единая раскладка папок: артист / релиз / файл — как у Apple, Deezer,
+        # Yandex и Spotify (требование владельца 09.08.2026: единообразие по
+        # ВСЕМ сервисам, сингл и альбом без разницы).
+        #
+        # Замер до правки показывал у Tidal три уровня вместо четырёх:
+        # «tidal/FLAC CD/Group Therapy 689 (DJ Mix)/01. …» — папки артиста нет.
+        #
+        # Формат задаётся ЗДЕСЬ, а не только в движке Spotify, хотя settings.json
+        # у них общий: иначе раскладка Tidal зависела бы от того, запускался ли
+        # до него Spotify. Настройка, работающая через раз, хуже отсутствующей.
+        fmt = cfg["global"].setdefault("formatting", {})
+        fmt["album_format"]          = "{artist}/{name}{explicit}"
+        fmt["force_album_format"]    = True     # сингл — тоже релиз, ему нужна папка
+        fmt.setdefault("track_filename_format", "{track_number}. {name}")
+        fmt.setdefault("enable_zfill", True)
+
         covers = cfg["global"].setdefault("covers", {})
         covers["embed_cover"]         = True
         # Embedded (in-audio) cover is pinned to 1000×1000 across ALL services
@@ -278,6 +294,12 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict, atmos: 
         sp.write_text(json.dumps(cfg, indent=4, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
+
+
+# Сколько отказов по правам подряд терпим, прежде чем прекратить прогон.
+# Десять — заведомо больше, чем случайная пара недоступных треков, и
+# кратно меньше тех 87, что набежали 09.08.2026.
+_PERM_FAIL_LIMIT = 10
 
 
 @register
@@ -338,10 +360,37 @@ class TidalEngine(EngineBase):
         cmd.append(_to_orpheus_url(url))
         return cmd
 
+    def __init__(self):
+        # Раннер читает abort_reason после каждой строки и глушит процесс
+        # (см. ProcessRunner._engine_wants_abort).
+        self.abort_reason = ""
+        self._perm_fails = 0
+        self._saved = 0
+
     def iter_events(self, line: str, *, progress: tuple[int, int]):
         clean = _strip_ansi(line).strip()
         if not clean:
             return
+
+        # Прогон, который не может закончиться успехом, обязан прекращаться.
+        # 09.08.2026: плейлист Tidal выдал 87 подряд «You do not have permission
+        # to perform this action» и молотил двадцать минут, не сохранив ничего.
+        # Тот же класс, что пустой публичный пул у Apple — и лечится так же.
+        #
+        # Условие с ДВУМЯ частями обязательно: если хоть один трек сохранился,
+        # отказ по отдельным трекам — это нормальная недоступность в регионе, и
+        # обрывать из-за неё весь плейлист нельзя.
+        if _RE_TRACK_DONE.search(clean) or "Track download completed" in clean:
+            self._saved += 1
+        if "do not have permission" in clean.lower():
+            self._perm_fails += 1
+            if self._perm_fails >= _PERM_FAIL_LIMIT and not self._saved and not self.abort_reason:
+                self.abort_reason = (
+                    f"Tidal отказал в правах на {self._perm_fails} треках подряд и не "
+                    f"сохранил ни одного. Обычно это значит, что сессия не даёт "
+                    f"запрошенное качество: попробуй уровень ниже (FLAC вместо Hi-Res) "
+                    f"или переавторизуй Tidal."
+                )
         if "TIDAL_NOT_AUTHED" in clean or _RE_AUTH_FAIL.search(clean):
             yield Event(
                 kind=EventKind.FATAL,

@@ -18,7 +18,7 @@ async function _loadAllViews() {
   const wanted = _VIEW_FILES.filter(n => document.getElementById('view-' + n));
   const results = await Promise.allSettled(
     wanted.map(n =>
-      fetch(`/static/views/${n}.html?v=106`)
+      fetch(`/static/views/${n}.html?v=111`)
         .then(r => { if (!r.ok) throw new Error(`views/${n}.html ${r.status}`); return r.text(); })
     )
   );

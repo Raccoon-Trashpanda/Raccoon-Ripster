@@ -26,14 +26,26 @@ function relCover(url, px) {
       return url.replace(/ab67616d0000(b273|1e02|4851)/, code);
     }
     // Apple: размер — настоящий сегмент пути, любые значения живы (проверено).
+    // Для зума (px>=700) берём 1000×1000 — правило по всему Ripster.
     if (url.includes('mzstatic.com')) {
-      const n = px <= 96 ? 128 : (px <= 320 ? 296 : 632);
+      const n = px <= 96 ? 128 : (px <= 320 ? 296 : (px <= 700 ? 632 : 1000));
       return url.replace(/\/\d+x\d+([a-z]{0,2})\.(jpg|png|webp)/i, `/${n}x${n}$1.$2`);
     }
-    // Deezer: то же самое, проверено.
+    // Deezer: то же самое, проверено. dzcdn отдаёт и 1000×1000.
     if (url.includes('dzcdn.net') || url.includes('deezer.com')) {
-      const n = px <= 96 ? 120 : (px <= 320 ? 264 : 500);
+      const n = px <= 96 ? 120 : (px <= 320 ? 264 : (px <= 700 ? 500 : 1000));
       return url.replace(/\/\d+x\d+-/, `/${n}x${n}-`);
+    }
+    // Tidal: resources.tidal.com/images/<uuid>/WxH.jpg — живы 80/160/320/640/1280.
+    if (url.includes('resources.tidal.com')) {
+      const n = px <= 96 ? 160 : (px <= 320 ? 320 : (px <= 700 ? 640 : 1280));
+      return url.replace(/\/\d+x\d+\.(jpg|png|webp)/i, `/${n}x${n}.$1`);
+    }
+    // Qobuz: static.qobuz.com/images/covers/.../_600.jpg — размер в суффиксе
+    // (_50/_150/_230/_600/_max/_org). Для зума берём _org (оригинал), для сетки — _230.
+    if (url.includes('qobuz.com') && /_(?:\d+|max|org)\.(jpg|png|webp)/i.test(url)) {
+      const suf = px <= 96 ? '_50' : (px <= 320 ? '_230' : (px <= 700 ? '_600' : '_org'));
+      return url.replace(/_(?:\d+|max|org)\.(jpg|png|webp)/i, `${suf}.$1`);
     }
   } catch (e) { /* адрес незнакомого вида — отдаём как есть */ }
   return url;
@@ -805,7 +817,11 @@ async function playRelease(service, url, title, artist, cover) {
     // все треки, и Apple-карточка перестаёт играть ВООБЩЕ — вместо превью
     // получается тишина. Поймано проверкой сразу после правки (02.08.2026):
     // «треков 4, с играбельной копией 0, UPC альбома: None».
-    if (service === 'spotify') {
+    if (service === 'spotify' || service === 'apple') {
+      // Apple теперь ОТДАЁТ штрихбар (get_album → amp-api UPC), поэтому copy-
+      // резолвер находит Deezer-копию и фильтр не вычищает всё в тишину. Если
+      // копии нет (Apple-эксклюзив) — треков 0 → честное сообщение ниже, как у
+      // Spotify, а не безмолвный обрыв.
       const total = tracks.length;
       tracks = tracks.filter(tr => tr.playable_service && tr.playable_id != null);
       if (!tracks.length) {
@@ -827,6 +843,9 @@ async function playRelease(service, url, title, artist, cover) {
       _streamId:      tr.playable_id != null ? String(tr.playable_id) : String(tr.id),
       title:     tr.title,
       artist:    tr.artist || artist,
+      // Автор АЛЬБОМА (аргумент playRelease) — для заголовка группы в трек-листе.
+      // Артист трека у компиляции ≠ автор сборника (David Duriez ≠ Mount Kimbie).
+      albumArtist: artist || '',
       cover:     tr.artwork || cover || '',
       permalink: tr.url || url,
       full:      true,

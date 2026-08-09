@@ -23,6 +23,7 @@ import json
 import os
 import re
 import socket
+import ssl
 import subprocess
 import sys
 import time
@@ -54,7 +55,7 @@ def _cfg_get(key: str) -> str:
     """Cheap YAML scalar read (avoids a pyyaml dep)."""
     try:
         import re
-        txt = CONFIG.read_text(encoding="utf-8")
+        txt = CONFIG.read_text(encoding="utf-8-sig")
         m = re.search(rf"^{re.escape(key)}:\s*(.+)$", txt, re.M)
         return m.group(1).strip().strip("'\"") if m else ""
     except Exception:
@@ -92,13 +93,72 @@ def _docker(*args, timeout=30):
         return -1, str(e)
 
 
-def ok(msg): _report.append(f"✅ {msg}")
+def _esc(msg) -> str:
+    """Report lines carry raw error text (e.g. "<urlopen error _ssl.c:1063…>"), and the
+    owner report is sent parse_mode=HTML — an unescaped "<" makes Telegram reject the
+    WHOLE message with 400 and the owner silently gets nothing (2026-08-07). Only main()
+    emits real markup, so every check-produced line is escaped at the source."""
+    return (str(msg).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def _strip_html(s: str) -> str:
+    """Markup out, entities back to real characters — for the log and the plain-text resend."""
+    for tag in ("<b>", "</b>", "<i>", "</i>"):
+        s = s.replace(tag, "")
+    return s.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&")
+
+
+_STATE = ROOT / "tools" / ".healthcheck_state.json"
+
+
+def _state_load() -> dict:
+    """Small cross-run memory. Never fatal: a corrupt/missing file just means
+    'no history', which degrades to the old single-run behaviour."""
+    try:
+        return json.loads(_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _state_save(st: dict) -> None:
+    # A --no-log run is a verification re-run: it must not inflate streak
+    # counters, or re-checking a fix would itself look like a repeat failure.
+    if NO_LOG:
+        return
+    try:
+        _STATE.write_text(json.dumps(st, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _streak(key: str, failing: bool) -> int:
+    """Consecutive sweeps this check has been failing (0 when healthy).
+
+    Added 08.08.2026: the tunnel playbook says "escalate if it's still like this
+    on the next check", but nothing counted — the streak lived only in
+    HANDOFF_DAILY_OPS.md and a human had to read it back. Now the check knows."""
+    st = _state_load()
+    n = (int(st.get(key, 0)) + 1) if failing else 0
+    # 08.08.2026: _state_save already refuses to PERSIST on a --no-log run, but
+    # the inflated number was still being RETURNED, so a verification re-run
+    # printed "4-я проверка подряд" while the state file honestly held 3 — the
+    # half-fix looked exactly like the bug it was meant to prevent. A run that
+    # isn't counted must not be counted in the text either: report the last real
+    # streak instead.
+    if NO_LOG:
+        return int(st.get(key, 0)) if failing else 0
+    st[key] = n
+    _state_save(st)
+    return n
+
+
+def ok(msg): _report.append(f"✅ {_esc(msg)}")
 def warn(msg):
-    global _issues; _issues += 1; _report.append(f"⚠️ {msg}")
+    global _issues; _issues += 1; _report.append(f"⚠️ {_esc(msg)}")
 def bad(msg):
-    global _issues; _issues += 1; _report.append(f"❌ {msg}")
+    global _issues; _issues += 1; _report.append(f"❌ {_esc(msg)}")
 def fixed(msg):
-    _fixes.append(msg); _report.append(f"🔧 {msg}")
+    _fixes.append(_esc(msg)); _report.append(f"🔧 {_esc(msg)}")
 
 
 # ── checks ────────────────────────────────────────────────────────────────────
@@ -492,22 +552,114 @@ def check_engine_probe():
         ok(f"Сервисы отвечают по-настоящему ({len(services)} проверено)")
 
 
+def _trust_ctx():
+    """Контекст проверки TLS на СВЕЖЕМ наборе корней (Mozilla/certifi).
+
+    В хранилище Windows на этой машине лежит ПРОСРОЧЕННАЯ кросс-подписанная
+    копия ISRG Root X2 (истекла 15.09.2025), и OpenSSL строит цепочку через
+    неё вместо валидной (через ISRG Root X1, живой до 2032) — нормальный
+    сертификат Let's Encrypt проверяется как "certificate has expired", хотя
+    любой браузер (CryptoAPI) его принимает. У certifi этой копии нет.
+    None = certifi недоступен, проверяем штатным хранилищем.
+    """
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        return None
+
+
+def _serveo_sshd_note() -> str:
+    """Tell serveo's OWN ssh daemon being sick apart from our network blocking 22.
+
+    08.08.2026: serveo.net:22 completed the TCP handshake and then sent no SSH
+    banner at all for 10s, while a control host answered in ~2s — so outbound 22
+    is open from here and it is their sshd that is degraded. Silence-after-accept
+    is the cheapest positive proof it is their side, not ours."""
+    try:
+        with socket.create_connection(("serveo.net", 22), timeout=10) as s:
+            s.settimeout(10)
+            try:
+                banner = s.recv(48)
+            except Exception:
+                banner = b""
+    except Exception:
+        return "; serveo.net:22 не принимает вовсе (похоже на нашу сеть)"
+    if not banner.startswith(b"SSH-"):
+        return "; serveo.net:22 принимает соединение, но НЕ шлёт SSH-баннер — болен их sshd"
+    return ""
+
+
 def check_tunnel():
     url = _cfg_get("public-url")
     if not url or _cfg_get("remote-enabled") not in ("true", "True", "1"):
         ok("Туннель выключен (remote-enabled off) — пропускаю"); return
     try:
         req = urllib.request.Request(url, method="GET", headers={"User-Agent": "hc"})
-        with urllib.request.urlopen(req, timeout=12) as r:
+        with urllib.request.urlopen(req, timeout=12, context=_trust_ctx()) as r:
+            _streak("tunnel_serveo_side", False)
             ok(f"Туннель отвечает ({url})"); return
     except urllib.error.HTTPError as he:
         # Any HTTP status (401/403/405/…) means the tunnel is UP and routing —
         # only a connection error means it's actually down.
         if he.code < 500:
+            _streak("tunnel_serveo_side", False)
             ok(f"Туннель отвечает ({url}, HTTP {he.code})"); return
         warn(f"Туннель вернул {he.code} (5xx) — сервер за туннелем нездоров")
     except Exception as e:
-        warn(f"Туннель ({url}) не отвечает: {str(e)[:60]} — переподключится сам (watchdog)")
+        # A TLS trust failure is NOT the tunnel being down: serveo's wildcard cert
+        # is theirs to renew, and reconnecting the ssh session does nothing for it
+        # (2026-08-03: cert expired at 23:59 GMT, tunnel kept routing HTTP 200).
+        # Re-probe without verification to tell the two apart honestly.
+        if "CERTIFICATE_VERIFY" in str(e):
+            try:
+                ctx = ssl.create_default_context()
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+                req = urllib.request.Request(url, headers={"User-Agent": "hc"})
+                with urllib.request.urlopen(req, timeout=12, context=ctx) as r:
+                    code = r.status
+            except urllib.error.HTTPError as he:
+                code = he.code
+            except Exception:
+                code = 0
+            if code and code < 500:
+                # Routing works — this is a cert problem, not a serveo-side outage.
+                _streak("tunnel_serveo_side", False)
+                # "…[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed:
+                #  certificate has expired (_ssl.c:1081)>" → "certificate has expired"
+                reason = str(e).split("certificate verify failed:")[-1]
+                reason = reason.split("(_ssl.c")[0].strip(" >)") or "невалиден"
+                warn(f"Туннель РАБОТАЕТ (HTTP {code}), но его TLS-сертификат не проходит "
+                     f"проверку: {reason} — это сертификат serveo, watchdog "
+                     f"НЕ поможет. Гости упрутся в предупреждение браузера, пока serveo "
+                     f"его не перевыпустит")
+                return
+        # «Не отвечает» — слишком общо, чтобы решить, надо ли вмешиваться. Отделяем
+        # НАШУ сторону от serveo: если TCP на 443 принимается, а HTTP молчит, то
+        # маршрутизация лежит у serveo, и ни watchdog, ни перезапуск ssh не помогут
+        # (07.08.2026: TCP 80/443 и serveo.net:22 принимали, HTTP/HTTPS —
+        # таймаут; ssh-сессии поднимались и отваливались каждые несколько минут).
+        host = url.split("://", 1)[-1].split("/", 1)[0]
+        tcp_ok = False
+        try:
+            with socket.create_connection((host, 443), timeout=8):
+                tcp_ok = True
+        except Exception:
+            pass
+        if tcp_ok:
+            n = _streak("tunnel_serveo_side", True)
+            tail = (f"Это {n}-я проверка подряд — молчаливого самовосстановления "
+                    f"уже не ждём, писать в serveo" if n >= 2 else
+                    "Если так же и на следующей проверке — писать им")
+            warn(f"Туннель ({url}): serveo принимает TCP, но HTTP не отвечает "
+                 f"({str(e)[:50]}){_serveo_sshd_note()} — маршрутизация лежит на "
+                 f"СТОРОНЕ serveo, перезапуск ssh не поможет. Гости не зайдут, "
+                 f"пока serveo не починится. {tail}")
+        else:
+            _streak("tunnel_serveo_side", True)
+            warn(f"Туннель ({url}) недоступен даже по TCP: {str(e)[:50]} — "
+                 f"сеть или serveo целиком; переподключится сам (watchdog)")
 
 
 def check_queue():
@@ -587,12 +739,45 @@ def check_watchlist():
         seen.add(sig)
 
     if not broken and not dups:
+        # СНАЧАЛА возраст последнего прохода, и только потом «ни разу не
+        # проверялись». 09.08.2026 порядок был обратный, и проверка сказала
+        # «6 из 152 ни разу» — мягкая, ожидаемая фраза про шесть вчерашних
+        # записей, — тогда как правда была куда хуже: весь список не
+        # опрашивался 25 часов, а те шестеро просто попали под общий простой.
+        # Диагноз показывал симптом самой малой части и прятал причину.
+        newest = None
+        for x in items:
+            raw = x.get("last_check")
+            if not raw:
+                continue
+            try:
+                t = datetime.fromisoformat(str(raw))
+            except ValueError:
+                continue
+            if newest is None or t > newest:
+                newest = t
+        age_h = ((datetime.now() - newest).total_seconds() / 3600.0
+                 if newest else None)
+        # Интервал 6ч; поднимаем тревогу вдвое позже, чтобы обычная задержка
+        # прохода не мигала краснотой.
+        if age_h is None:
+            warn(f"Вишлист ({len(items)} записей): не проверялся НИ РАЗУ — "
+                 f"фоновой проход не отработал ни одного раза")
+            return
+        if age_h > 12:
+            warn(f"Вишлист: последний проход {age_h:.0f} ч назад при интервале 6ч — "
+                 f"опрос стоит, релизы проходят мимо. Частая причина: app.py "
+                 f"перезапускался чаще, чем раз в 6ч, и таймер обнулялся "
+                 f"(лечится initial_check_delay — нужен рестарт app.py)")
+            return
         never = [x for x in items if not x.get("last_check")]
         if never:
             warn(f"Вишлист: {len(never)} из {len(items)} ни разу не проверялись "
-                 f"(авто-проверка раз в 6ч — если так и останется, смотри логи)")
+                 f"(последний проход {age_h:.1f} ч назад — новые записи "
+                 f"подхватятся следующим)")
         else:
-            ok(f"Вишлист здоров ({len(items)} записей, все опрашиваются)")
+            ok(f"Вишлист здоров ({len(items)} записей, все опрашиваются, "
+               f"последний проход {age_h:.1f} ч назад)")
         return
 
     warn(f"Вишлист: {len(broken)} записей без artist_id, {dups} дублей — "
@@ -648,7 +833,7 @@ def check_botapi_responsive():
     API itself and restart on a hang (see project_botapi_container_hang)."""
     cfg = ROOT / "tgbot" / "config.json"
     try:
-        token = json.loads(cfg.read_text(encoding="utf-8")).get("bot_token", "")
+        token = json.loads(cfg.read_text(encoding="utf-8-sig")).get("bot_token", "")
     except Exception:
         return  # no bot configured on this box — nothing to check
     if not token:
@@ -758,6 +943,18 @@ _ERR_BUCKETS = [
     ("beatport-entitlement", ("do not have permission to perform this action",
                               "не хватает прав на скачивание")),
     ("beatport-region",     ("region locked", "territory restricted")),
+    # Deezer отдаёт трек, но не в запрошенном качестве (нет FLAC/320 у источника).
+    # Это состояние источника/ARL, а не поломка: сообщение уже само советует, что
+    # делать. 03.08.2026 давало 2 безымянные строки (сама ошибка + её копия из
+    # [history] recorded error) — ключ ловит обе формы.
+    ("deezer-quality",      ("недоступен в выбранном качестве", "нет flac/320")),
+    # Apple music-video: первая попытка варианта приходит нулевой («Failed to dl
+    # aac-lc: Unavailable» → 0 B), ключа нет, и runv3.go:487 всё равно зовёт
+    # mp4decrypt --key с пустым значением → «invalid argument for --key».
+    # 03.08.2026 обе такие строки САМИ ВОССТАНОВИЛИСЬ: следом шёл
+    # audio-stereo-256 и «Decrypted.» Загрузка не падает — это шум пробы
+    # варианта, а не сбой. Значение ключа в лог не попадает (уже редактится).
+    ("apple-mv-key",        ("invalid argument for --key",)),
     ("network",             ("getaddrinfo", "deadline exceeded", "connection", "timeout", "429")),
     # Хвосты уже посчитанных провалов: «Exit code 0» печатается ПОСЛЕ причины
     # (apple-album-unavailable), «=== Track N failed ===» — после 403 Beatport.
@@ -820,18 +1017,31 @@ def send_bot(text: str):
     if NO_BOT:
         return
     try:
-        cfg = json.loads(BOT_CFG.read_text(encoding="utf-8"))
+        cfg = json.loads(BOT_CFG.read_text(encoding="utf-8-sig"))
         token, owner = cfg["bot_token"], cfg["owner_id"]
         api = (cfg.get("local_bot_api") or "https://api.telegram.org").rstrip("/")
         import urllib.parse
+
+        def _post(chunk: str, html: bool):
+            fields = {"chat_id": owner, "text": chunk, "disable_web_page_preview": "true"}
+            if html:
+                fields["parse_mode"] = "HTML"
+            data = urllib.parse.urlencode(fields).encode()
+            urllib.request.urlopen(
+                urllib.request.Request(f"{api}/bot{token}/sendMessage", data=data), timeout=25)
+
         # Telegram hard limit 4096; chunk.
         for i in range(0, len(text), 3800):
             chunk = text[i:i + 3800]
-            data = urllib.parse.urlencode({
-                "chat_id": owner, "text": chunk, "parse_mode": "HTML",
-                "disable_web_page_preview": "true"}).encode()
-            urllib.request.urlopen(
-                urllib.request.Request(f"{api}/bot{token}/sendMessage", data=data), timeout=25)
+            try:
+                _post(chunk, html=True)
+            except urllib.error.HTTPError as he:
+                # A markup complaint must never cost the owner the whole report:
+                # resend the chunk as plain text rather than losing it.
+                if he.code != 400:
+                    raise
+                print("[healthcheck] HTML rejected (400) — resending chunk as plain text")
+                _post(_strip_html(chunk), html=False)
             time.sleep(0.4)
     except Exception as e:
         print(f"[healthcheck] bot send failed: {str(e)[:100]}")
@@ -853,7 +1063,50 @@ def append_handoff(summary: str):
         print(f"[healthcheck] handoff append failed: {str(e)[:100]}")
 
 
+def check_config_bom():
+    """A UTF-8 BOM in a JSON/YAML config silently disables whatever reads it.
+
+    2026-08-03: a PowerShell write (`>`/`Set-Content` default to UTF-8-with-BOM on
+    this box) put an EF BB BF on tgbot/config.json. `json.loads` then raised on the
+    very first character, and because every reader wraps that call in a bare
+    `except`, the damage was invisible: THIS checker could not message the owner,
+    check_botapi_responsive() decided "no bot configured" and skipped itself, and
+    telemetry reported "config недоступен". Readers now use utf-8-sig, but code we
+    don't control (engines, anything new) still reads plain utf-8 — so strip it.
+    """
+    targets = [BOT_CFG, ROOT / "tgbot" / "users.json", CONFIG]
+    hit = []
+    for p in targets:
+        try:
+            if not p.is_file():
+                continue
+            raw = p.read_bytes()
+            if not raw.startswith(b"\xef\xbb\xbf"):
+                continue
+            hit.append(p.name)
+            if NO_FIX:
+                continue
+            p.write_bytes(raw[3:])
+        except Exception as e:
+            warn(f"BOM-проверка {p.name} не удалась: {str(e)[:60]}")
+    if not hit:
+        ok("Конфиги без BOM (читаются всеми)")
+        return
+    if NO_FIX:
+        warn(f"BOM в конфигах: {', '.join(hit)} — ломает читателей на plain utf-8")
+        return
+    still = [p.name for p in targets
+             if p.is_file() and p.read_bytes().startswith(b"\xef\xbb\xbf")]
+    if still:
+        warn(f"BOM снять не удалось: {', '.join(still)} — нужен ручной разбор")
+    else:
+        fixed(f"Снят UTF-8 BOM с конфигов: {', '.join(hit)} "
+              f"(из-за него молча отваливались отчёт в бот и часть проверок)")
+
+
 def main():
+    # Before anything else: a BOM here would break the owner report itself.
+    check_config_bom()
     app_ok = check_app()
     if app_ok:
         check_apple_wrapper()
@@ -881,7 +1134,7 @@ def main():
                  "следующем пробуждении или напиши мне.</i>")
     send_bot(body)
     # plain-text handoff (strip simple tags)
-    plain = body.replace("<b>", "").replace("</b>", "").replace("<i>", "").replace("</i>", "")
+    plain = _strip_html(body)
     append_handoff(plain)
     # The ASCII squash exists so a cp866 console can't kill the run with
     # UnicodeEncodeError — but it also turned every logged report into rows of "?",
