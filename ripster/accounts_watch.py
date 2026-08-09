@@ -118,7 +118,7 @@ async def _default_notify(text: str) -> None:
             _ur.urlopen,
             f"https://api.telegram.org/bot{cfg['bot_token']}/sendMessage", data, 30)
     except Exception as e:
-        print(f"[accounts-watch] уведомление не ушло: {type(e).__name__}: {e}", flush=True)
+        print(f"[accounts-watch] notification not sent: {type(e).__name__}: {e}", flush=True)
 
 
 async def run(config: dict, base_dir, notify=None) -> None:
@@ -153,8 +153,8 @@ async def run(config: dict, base_dir, notify=None) -> None:
                 dead = [r["service"] for r in rows if not r["ok"]]
                 tail = f"\n\nЖивых: {len(rows) - len(dead)} из {len(rows)}."
                 await notify("🔎 Обход учёток\n\n" + "\n".join(msgs) + tail)
-            print(f"[accounts-watch] обход: {len(rows)} учёток, "
-                  f"изменений {len(msgs)}", flush=True)
+            print(f"[accounts-watch] survey: {len(rows)} accounts, "
+                  f"changes {len(msgs)}", flush=True)
         except Exception as e:
-            print(f"[accounts-watch] обход не удался: {type(e).__name__}: {e}", flush=True)
+            print(f"[accounts-watch] survey failed: {type(e).__name__}: {e}", flush=True)
         await asyncio.sleep(_PERIOD)

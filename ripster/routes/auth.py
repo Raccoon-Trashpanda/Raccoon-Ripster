@@ -1381,7 +1381,7 @@ async def logout_service(service: str, body: dict | None = None):
 
     if cleared and _save_config:
         _save_config(_cfg)
-    print(f"[logout] {svc}: ключей {len(cleared)}, файлов {len(removed)}"
+    print(f"[logout] {svc}: keys {len(cleared)}, files {len(removed)}"
           + (f", wrapper {wrapper}" if wrapper else ""), flush=True)
     return {"ok": True, "service": svc, "cleared": cleared,
             "removed": removed, "wrapper": wrapper}

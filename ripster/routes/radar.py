@@ -168,8 +168,8 @@ def _durable_merge(source: str, fresh: list, days: int) -> list:
     out.sort(key=lambda x: x.get("date", ""), reverse=True)
     restored = len(out) - sum(1 for r in (fresh or []) if (r.get("date") or "") >= cut)
     if restored > 0:
-        print(f"[radar] {source}: источник дал {len(fresh or [])}, из склада добавлено "
-              f"{restored} (окно {days}д)", flush=True)
+        print(f"[radar] {source}: source gave {len(fresh or [])}, added from store "
+              f"{restored} (window {days}d)", flush=True)
     return out
 
 

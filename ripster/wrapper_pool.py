@@ -112,9 +112,9 @@ class WrapperPool:
                 d.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     _sh.move(str(old), str(d))
-                    print(f"[pool] identity перенесена: acct{i} → {tag}", flush=True)
+                    print(f"[pool] identity migrated: acct{i} → {tag}", flush=True)
                 except Exception as e:
-                    print(f"[pool] перенос identity acct{i}→{tag} не удался: {e}", flush=True)
+                    print(f"[pool] identity migration acct{i}->{tag} failed: {e}", flush=True)
         d.mkdir(parents=True, exist_ok=True)
         return str(d)
 

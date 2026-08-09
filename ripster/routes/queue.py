@@ -143,8 +143,8 @@ async def add_to_queue(body: dict, request: Request):
     try:
         _q = str((body or {}).get("quality") or "")
         if (svc == "apple" and _q.isdigit()) or (svc != "apple" and _q.startswith("alac")):
-            print(f"[queue] РАСХОЖДЕНИЕ: сервис по ссылке '{svc}', качество '{_q}' "
-                  f"(источник: {(body or {}).get('source') or 'не указан'}) — {url[:110]}",
+            print(f"[queue] MISMATCH: link service '{svc}', quality '{_q}' "
+                  f"(source: {(body or {}).get('source') or 'unset'}) - {url[:110]}",
                   flush=True)
     except Exception:
         pass

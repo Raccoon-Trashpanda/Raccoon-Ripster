@@ -100,7 +100,52 @@ def install(app, ctx) -> None:
     _save_config_fn  = ctx.save_config
     _load_disk_cache()
     _load_artist_state()
+    _reconcile_from_cache()
     app.include_router(router)
+
+
+def _reconcile_from_cache() -> int:
+    """Вернуть в склад релизы, которые владельцу УЖЕ показывали.
+
+    Радар обязан чиниться сам. Причин потерять запись много и все разные: сбой
+    сети посреди прохода, протухший токен, ошибка в правилах переноса (одна такая
+    жила до 01.08.2026 и стирала все находки живой ленты). Ловить каждую по
+    отдельности — бесконечная работа, и каждый промах оплачивает пользователь
+    пропавшей карточкой.
+
+    Поэтому сверяемся с тем, что нельзя подделать: `spotify_releases_cache.json`
+    хранит СНИМКИ уже отданных лент — ровно то, что человек видел на экране. Если
+    склад чего-то из этого не помнит, помнит снимок, и запись возвращается.
+
+    Границы намеренные:
+      • только окно хранения — древности не воскрешаем;
+      • только артисты, уже известные складу, — иначе снимок протащил бы обратно
+        тех, от кого давно отписались;
+      • пометка `recovered`, чтобы такую запись было видно в отладке.
+
+    Возвращает число восстановленных записей.
+    """
+    if not _sp_artist_state or not _sp_releases_cache:
+        return 0
+    cutoff = (datetime.now() - timedelta(days=_SP_STATE_WINDOW_DAYS)).strftime("%Y-%m-%d")
+    have = {aid: {r.get("id") for r in (st.get("releases") or [])}
+            for aid, st in _sp_artist_state.items()}
+    back = 0
+    for entry in _sp_releases_cache.values():
+        for rel in (entry.get("releases") or []):
+            aid, rid = rel.get("artist_id"), rel.get("id")
+            if not aid or not rid or aid not in _sp_artist_state:
+                continue
+            if rel.get("date", "") < cutoff or rid in have[aid]:
+                continue
+            _sp_artist_state[aid].setdefault("releases", []).append({**rel, "recovered": True})
+            have[aid].add(rid)
+            back += 1
+    if back:
+        _save_artist_state()
+        print(f"[spotify] store self-check: returned {back} releases already "
+              f"were shown to the owner", flush=True)
+    return back
 
 
 def _load_artist_state() -> None:
@@ -145,7 +190,7 @@ def _load_artist_state() -> None:
                     for st in _sp_artist_state.values():
                         st["ts"] = 0
                     print("[spotify] store has 0 compilations → marked all artists "
-                          "stale; next crawl will fill Сборники", flush=True)
+                          "stale; next crawl will fill Compilations", flush=True)
                 _save_artist_state()   # persists comp_v2 so this runs only once
         except Exception as e:
             print(f"[spotify] artist-state load error: {e}", flush=True)
@@ -240,7 +285,6 @@ def _save_artist_state() -> None:
                 # this every pass would re-fetch metadata for the same comps.
                 "album_meta":   _sp_album_meta,
             }), encoding="utf-8")
-
         except Exception as e:
             print(f"[spotify] artist-state save error: {e}", flush=True)
 
@@ -260,10 +304,14 @@ def _carry_over(prev_releases: list, cutoff: str) -> list:
     момент 337) стирались при первом же пере-обходе артиста. Для владельца это
     выглядело как «карточка была и после перезапуска исчезла».
 
+    Плюс `recovered` — записи, возвращённые самопроверкой склада
+    (`_reconcile_from_cache`): без этого пере-обход выкидывал бы их снова, а
+    самопроверка возвращала на каждом запуске, и запись вечно мигала бы.
+
     Функция чистая — её проверяет `tools/test_radar_persistence.py`.
     """
     return [r for r in (prev_releases or [])
-            if (r.get("alb_artist") is not None or r.get("live"))
+            if (r.get("alb_artist") is not None or r.get("live") or r.get("recovered"))
             and r.get("date", "") >= cutoff]
 
 
@@ -538,16 +586,10 @@ _SP_APPEARS_META_PER_PASS    = 1000
 # stamped) or untouched, never half-known. The pass budget below is what bounds
 # the load; capping per artist as well only made artists take several passes to
 # finish while their shelf got re-fetched each time.
-# Resolve a whole shelf in one go: an artist is then either fully done (ao_ts
-# stamped) or untouched, never half-known. The pass budget below is what bounds
-# the load; capping per artist as well only made artists take several passes to
-# finish while their shelf got re-fetched each time.
 _SP_APPEARS_META_PER_ARTIST  = 50
 _SP_APPEARS_REFRESH          = 24 * 3600
 _SP_APPEARS_HOT_DAYS         = 14      # "released recently" = could be on a new comp
 _SP_APPEARS_HOT_REFRESH      = 6 * 3600
-_SP_CT_URL = "https://clienttoken.spotify.com/v1/clienttoken"
-_SP_WEB_CLIENT_ID = "d8a5ed958d274c2e8ee717e6a4b0971d"
 _SP_CT_URL = "https://clienttoken.spotify.com/v1/clienttoken"
 _SP_WEB_CLIENT_ID = "d8a5ed958d274c2e8ee717e6a4b0971d"
 
@@ -593,9 +635,9 @@ async def _sp_client_token() -> str | None:
                         tmp.replace(p)
                     except Exception:
                         pass
-                print("[spotify] client-token: свежий наминчен (radar)", flush=True)
+                print("[spotify] client-token: freshly minted (radar)", flush=True)
                 return tok
-            print(f"[spotify] client-token mint: пустой ответ {str(r.json())[:120]}", flush=True)
+            print(f"[spotify] client-token mint: empty response {str(r.json())[:120]}", flush=True)
     except Exception as e:
         print(f"[spotify] client-token mint failed: {e}", flush=True)
     return None
@@ -893,8 +935,8 @@ def _sp_merge_whatsnew(items: list) -> int:
         _sp_followed_cache["artists"] = [{"id": i, "name": n} for i, n in seeded.items()]
         _sp_followed_cache.setdefault("market", "")
         _sp_followed_cache["ts"] = datetime.now().timestamp()
-        print(f"[spotify] подписок не было — засеял {len(seeded)} артистов из ленты "
-              f"«Что нового» (Developer App не нужен)", flush=True)
+        print(f"[spotify] no subscriptions - seeded {len(seeded)} artists from feed "
+              f"What's New (no Developer App needed)", flush=True)
     return added
 
 
@@ -1135,7 +1177,7 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
     elif web_token:
         hdr = {"Authorization": f"Bearer {web_token}"}
         print(f"[spotify] scan using web-player token ({_tok_src}) — "
-              f"нет dev-OAuth, /v1 скорее всего ответит 429", flush=True)
+              f"no dev-OAuth, /v1 will likely return 429", flush=True)
     else:
         # Neither credential exists — nothing to scan with.
         _sp_scan_running = False
@@ -1192,9 +1234,9 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
         else:
             url = "https://api.spotify.com/v1/me/following?type=artist&limit=50"
         _429_hits = 0
-        # Дошла ли пагинация до конца. Любой выход по ошибке снимает флаг:
-        # тогда собранное — ПОДМНОЖЕСТВО подписок, и заменять им
-        # долговременный список нельзя (радар потеряет артистов).
+        # Дошла ли пагинация до конца. Любой выход по ошибке снимает флаг: тогда
+        # собранное — это ПОДМНОЖЕСТВО подписок, и заменять им долговременный
+        # список нельзя (иначе радар теряет всех недособранных артистов).
         paged_ok = True
         while url:
             try:
@@ -1267,8 +1309,8 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             _was = len(_sp_followed_cache.get("artists") or [])
             _fa = _merge_followed(_sp_followed_cache.get("artists") or [], artists, paged_ok)
             if not paged_ok:
-                print(f"[spotify] /me/following оборвалась — список подписок не "
-                      f"усекаю: было {_was}, стало {len(_fa)}", flush=True)
+                print(f"[spotify] /me/following broke - subscription list not "
+                      f"truncating: was {_was}, now {len(_fa)}", flush=True)
             _sp_followed_cache = {
                 "artists": _fa,
                 "market":  market or _sp_followed_cache.get("market", ""),
@@ -1282,16 +1324,26 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             cached = list(_sp_followed_cache.get("artists") or [])
             if cached:
                 artists = cached
-                market = _sp_followed_cache.get("market", market)
+                market = _sp_followed_cache.get("market", "") or market
+                print(f"[spotify] /me/following unavailable - {len(artists)} artists from subscription cache",
+                      flush=True)
             else:
-                # Подписок нет и взять их неоткуда — ровно то состояние, в
-                # котором навсегда остаётся аккаунт без Premium: список подписок
+                # Подписок нет и взять их неоткуда. РАНЬШЕ ЗДЕСЬ БЫЛ ВЫХОД — и это
+                # был приговор для всякого аккаунта без Premium: список подписок
                 # даёт только /v1/me/following, а он требует Developer App,
-                # которому Spotify отказывает без Premium у ВЛАДЕЛЬЦА приложения.
-                # Лента «Что нового» живёт в api-partner, работает по одной
-                # librespot-сессии и Developer App не требует — идём через неё.
-                print("[spotify] подписок нет — иду через ленту «Что нового» "
-                      "(Developer App не требуется)", flush=True)
+                # которому Spotify отказывает, если у ВЛАДЕЛЬЦА приложения нет
+                # Premium. Радар оставался пустым навсегда.
+                #
+                # Но персонализированная лента «Что нового» (queryWhatsNewFeed)
+                # живёт в api-partner, отвечает по одной librespot-сессии и
+                # никакого Developer App не требует — проверено живьём
+                # 31.07.2026, HTTP 200 и десять релизов. Так что не выходим:
+                # идём дальше с пустым списком, лента ниже сама даст релизы и
+                # засеет артистов (см. _sp_merge_whatsnew).
+                print("[spotify] no subscriptions - going via the What's New feed "
+                      "(no Developer App required)", flush=True)
+                artists = []
+        market = _sp_followed_cache.get("market", market)
 
         # ── Paced, persistent DELTA crawl — api-partner GraphQL ─────────────
         # 2026-07-19: api.spotify.com/v1 для наших веб-токенов перманентно 429
@@ -1318,7 +1370,7 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             gql_dead = "не удалось получить client-token"
         if gql_dead:
             _sp_last_error = "Радар: " + gql_dead
-            print(f"[spotify] crawl: GraphQL недоступен — {gql_dead}; отдаю стор", flush=True)
+            print(f"[spotify] crawl: GraphQL unavailable - {gql_dead}; returning store", flush=True)
 
         if _broadcast:
             await _broadcast({"type": "releases_scan_start", "phase": "albums",
@@ -1419,8 +1471,8 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             cold.sort(key=lambda x: (x[0], x[1]))
             ao_queue = ([a for _, a in hot] + [a for _, _, a in cold])[:ao_budget]
             if hot:
-                print(f"[spotify] appears-on queue: {len(hot)} свежих артистов "
-                      f"(релиз за {_SP_APPEARS_HOT_DAYS}д) + {len(cold)} остальных",
+                print(f"[spotify] appears-on queue: {len(hot)} fresh artists "
+                      f"(released within {_SP_APPEARS_HOT_DAYS}d) + {len(cold)} others",
                       flush=True)
         ao_stats = {"artists": 0, "comps": 0, "meta": 0}
 
@@ -1506,8 +1558,8 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
                     if status == 429:
                         gql_429s += 1
                         if gql_429s >= 3:
-                            print(f"[spotify] crawl: 429×{gql_429s} на api-partner у '{name}' "
-                                  f"({idx+1}/{total}) — стоп пасса, добор в следующий скан", flush=True)
+                            print(f"[spotify] crawl: 429x{gql_429s} on api-partner for '{name}' "
+                                  f"({idx+1}/{total}) - pass stopped, resumes next scan", flush=True)
                             break
                         continue
                     if items is None:

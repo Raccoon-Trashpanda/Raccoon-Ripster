@@ -883,6 +883,12 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
     from ripster.routes import discovery as _disc
     from ripster import availability as _av
 
+    # «auto» с фронта = нет жёсткого предпочтения: берём порядок качества владельца
+    # и матрица сама выберет первый ДОСТУПНЫЙ (где релиз уже отдаётся раньше всех).
+    _avail = cfg.get("availability-preference") or ["apple", "qobuz", "deezer", "tidal"]
+    if want_svc in ("", "auto", None):
+        want_svc = _avail[0] if _avail else "apple"
+
     # Уже в нужном сервисе — ничего выяснять не надо.
     if (rel.get("service") or "") == want_svc and rel.get("url"):
         return rel.get("url", "")
@@ -903,11 +909,11 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
             u = (m["services"][best] or {}).get("url", "")
             if u:
                 if best != want_svc:
-                    print(f"[watchlist] «{title}»: в {want_svc} ещё нет, беру из {best}",
+                    print(f"[watchlist] '{title}': not in {want_svc} yet, taking from {best}",
                           flush=True)
                 return u
-        print(f"[watchlist] «{title}» пока нигде не доступен "
-              f"({_av.summary_ru(m['services'])}) — проверю позже", flush=True)
+        print(f"[watchlist] '{title}' not available anywhere yet "
+              f"({_av.summary_ru(m['services'])}) - will check later", flush=True)
         return ""
 
     # Штрихкода нет — старый путь: поиск в целевом сервисе по названию.
@@ -918,7 +924,7 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
     except Exception:
         u = ""
     if not u:
-        print(f"[watchlist] «{title}» не найден в {want_svc} (нет штрихкода) — пропускаю",
+        print(f"[watchlist] '{title}' not found in {want_svc} (no barcode) - skipping",
               flush=True)
     return u
 
@@ -1026,7 +1032,7 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
             xref = await _xref.resolve_many(names, service, client)
             if not xref:
                 continue
-            print(f"[watchlist] {service}: опрашиваю {len(xref)} из {len(names)} артистов",
+            print(f"[watchlist] {service}: polling {len(xref)} of {len(names)} artists",
                   flush=True)
 
             for entry in targets:
@@ -1066,8 +1072,8 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
                                      "url": r.get("url", "")})
                     _notify_release(nm, f"{title} (уже доступен в {service})",
                                     False, bool(entry.get("auto_download")), r)
-                    print(f"[watchlist] ⚡ «{title}» ({nm}) уже в {service} — "
-                          f"в Apple ещё нет", flush=True)
+                    print(f"[watchlist] ⚡ '{title}' ({nm}) already in {service} - "
+                          f"not in Apple yet", flush=True)
 
                     if not (entry.get("auto_download") and early_dl):
                         continue
@@ -1128,7 +1134,7 @@ async def _check_watchlist():
         new_found += await _check_early_targets(targets, broadcast, save, cfg,
                                                 queue, snapshot)
     except Exception as e:                                          # noqa: BLE001
-        print(f"[watchlist] ранние витрины: {e}", flush=True)
+        print(f"[watchlist] early storefronts: {e}", flush=True)
 
     storefront = cfg.get("storefront", "us") or "us"
     # Compilations cost one extra lookup per artist; on by default because a

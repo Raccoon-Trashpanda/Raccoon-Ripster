@@ -46,10 +46,10 @@ def _st(name: str) -> dict:
 
 
 async def _say(msg: str, level: str = "warn") -> None:
-    print(f"[сторож] {msg}", flush=True)
+    print(f"[watchdog] {msg}", flush=True)
     if _broadcast:
         try:
-            await _broadcast({"type": "log", "msg": f"[сторож] {msg}", "level": level})
+            await _broadcast({"type": "log", "msg": f"[watchdog] {msg}", "level": level})
         except Exception:
             pass
 
@@ -174,7 +174,7 @@ async def _tick(name: str, alive_fn, revive_fn, blocked_fn) -> None:
 async def run() -> None:
     """Фоновый цикл. Первая проверка — через 10 секунд после старта."""
     if str(_config.get("watchdog-enabled", True)).lower() in ("0", "false", "no"):
-        print("[сторож] выключен в настройках", flush=True)
+        print("[watchdog] disabled in settings", flush=True)
         return
     await asyncio.sleep(_FIRST_DELAY)
     while True:
@@ -182,5 +182,5 @@ async def run() -> None:
             try:
                 await _tick(name, a, r, b)
             except Exception as e:
-                print(f"[сторож] {name}: {type(e).__name__}: {e}", flush=True)
+                print(f"[watchdog] {name}: {type(e).__name__}: {e}", flush=True)
         await asyncio.sleep(_FIRST_DELAY)

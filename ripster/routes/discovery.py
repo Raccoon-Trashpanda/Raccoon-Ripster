@@ -186,7 +186,7 @@ def _lyrics_from_file(path: str) -> dict:
         out = _split_lrc(raw)
         return {**out, "source": "файл"} if (out["synced"] or out["plain"]) else {}
     except Exception as e:                                      # noqa: BLE001
-        print(f"[lyrics] тег файла не прочитан: {e}", flush=True)
+        print(f"[lyrics] file tag not read: {e}", flush=True)
         return {}
 
 
@@ -2096,14 +2096,38 @@ async def isrc_upgrade(body: dict):
     # oembed endpoint (no auth, not geo-blocked) for the track name, so the fuzzy
     # lossless search still runs under a VPN. ISRC is then borrowed from the Deezer
     # match below (Deezer search items carry isrc), so Apple/Qobuz exact still work.
-    if not title and "open.spotify.com/track/" in sp_url:
+    if (not title or not artist) and "open.spotify.com/track/" in sp_url:
+        # Без токена берём метаданные СО СТРАНИЦЫ. oembed даёт только название;
+        # og-теги самой страницы дают ещё и артистов, а без артиста поиск на
+        # Deezer промахивается чаще (одно название носят десятки треков). Это
+        # ровно приём из reverse-skill: разобрать то, что страница отдаёт
+        # публично, вместо запроса к закрытому API.
         try:
             async with _HTTP.ashared() as c:
-                r = await c.get("https://open.spotify.com/oembed", params={"url": sp_url})
-                if r.status_code == 200:
-                    title = (r.json().get("title") or "").strip()
+                pg = await c.get(sp_url, headers={"User-Agent": "Mozilla/5.0"})
+                if pg.status_code == 200:
+                    import re as _re2
+                    h = pg.text
+                    _ot = _re2.search(r'<meta property="og:title" content="([^"]+)"', h)
+                    _od = _re2.search(r'<meta property="og:description" content="([^"]+)"', h)
+                    if _ot and not title:
+                        title = _ot.group(1).strip()
+                    # og:description = «Артист1, Артист2 · Название» — берём часть
+                    # до разделителя как список артистов.
+                    if _od and not artist:
+                        _d = _od.group(1)
+                        artist = (_d.split("·")[0].strip() if "·" in _d else "").strip()
         except Exception:
             pass
+        # Запасной путь, если og не отдался: oembed хотя бы с названием.
+        if not title:
+            try:
+                async with _HTTP.ashared() as c:
+                    r = await c.get("https://open.spotify.com/oembed", params={"url": sp_url})
+                    if r.status_code == 200:
+                        title = (r.json().get("title") or "").strip()
+            except Exception:
+                pass
 
     def _norm(s: str) -> str:
         return "".join(ch for ch in (s or "").lower() if ch.isalnum())

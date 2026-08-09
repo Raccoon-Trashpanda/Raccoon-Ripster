@@ -679,7 +679,7 @@ async def stream_deezer(track_id: str, request: Request, quality: int = 3,
                     if not cdn_url:
                         print(f"[deezer] get_url retry FAILED track={track_id}: {why}", flush=True)
                         raise HTTPException(503,
-                            f"Deezer get_url: {why} (рейт-лимит/токен) — попробуй ещё раз")
+                            f"Deezer get_url: {why} (rate-limit/token) - try again")
                 # Drop expired entries so the cache stays small (bounded by the
                 # number of distinct tracks played within the 2-min window).
                 if len(_DZ_URL) > 256:

@@ -163,8 +163,8 @@ async def run(config: dict) -> None:
                 newest = 0
             if newest and (now - newest) < max(mins * 60, _MIN_GRACE):
                 removed.append(tid)
-                print(f"[autodelete] {d}: внутри есть свежие файлы "
-                      f"({int(now - newest)} с назад) — не удаляю, снимаю запись",
+                print(f"[autodelete] {d}: contains fresh files "
+                      f"({int(now - newest)}s ago) - keeping, dropping the record",
                       flush=True)
                 continue
 

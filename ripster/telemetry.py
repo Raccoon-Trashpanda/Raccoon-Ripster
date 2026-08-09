@@ -520,11 +520,11 @@ def _schedule_bot_notify(rec: dict, zip_path: Path) -> None:
     async def _run():
         try:
             ok, why = await notify_owner_bot(rec, zip_path)
-            print(f"[telemetry] отчёт {rec.get('code')} → бот: "
-                  f"{'доставлен через ' + why if ok else 'НЕ доставлен (' + why + ')'}",
+            print(f"[telemetry] report {rec.get('code')} -> bot: "
+                  f"{'delivered via ' + why if ok else 'NOT delivered (' + why + ')'}",
                   flush=True)
         except Exception as e:                                # noqa: BLE001
-            print(f"[telemetry] доставка отчёта в бот сорвалась: {e}", flush=True)
+            print(f"[telemetry] report delivery to bot failed: {e}", flush=True)
     try:
         asyncio.get_running_loop().create_task(_run())
     except RuntimeError:

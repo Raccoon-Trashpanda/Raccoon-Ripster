@@ -617,7 +617,7 @@ async def sc_stream(track_id: str, request: Request, name: str = "", artist: str
                         return _drm_response(_d_url, _d_lat, _d_proto, track_json)
                 if has_encrypted:
                     raise HTTPException(451,
-                        "Трек защищён DRM — добавь OAuth-токен в Settings → SoundCloud.")
+                        "Track is DRM-protected - add an OAuth token in Settings -> SoundCloud.")
                 print(f"[soundcloud] no transcodings for {track_id} "
                       f"(streamable={track_json.get('streamable')}, "
                       f"policy={track_json.get('policy')})", flush=True)
@@ -671,7 +671,7 @@ async def sc_stream(track_id: str, request: Request, name: str = "", artist: str
                 if _has_enc2:
                     print(f"[soundcloud] {track_id} DRM-only, no OAuth set", flush=True)
                     raise HTTPException(451,
-                        "Трек защищён DRM — добавь OAuth-токен в Settings → SoundCloud.")
+                        "Track is DRM-protected - add an OAuth token in Settings -> SoundCloud.")
                 print(f"[soundcloud] all transcodings failed for {track_id} "
                       f"(last={last_status} body={last_body})", flush=True)
                 raise HTTPException(502,
@@ -844,7 +844,7 @@ async def sc_license_proxy(token: str, request: Request):
         if r.status_code != 200:
             print(f"[soundcloud] license proxy → {r.status_code}: {r.text[:160]}", flush=True)
             raise HTTPException(r.status_code,
-                f"SC license server: {r.status_code} — токен мог истечь")
+                f"SC license server: {r.status_code} - token may have expired")
         return Response(content=r.content, media_type="application/octet-stream")
     except HTTPException:
         raise

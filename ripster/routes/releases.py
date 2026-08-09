@@ -112,8 +112,8 @@ async def _watchlist_artists(service: str, artists: list) -> list[dict]:
     extra = [{"id": v["id"], "name": v.get("name") or nm, "via_xref": True}
              for nm, v in found.items() if str(v.get("id")) not in have]
     if extra:
-        print(f"[radar] {service}: подписок {len(artists)}, из вишлиста добавлено "
-              f"{len(extra)} (из {len(names)} имён)", flush=True)
+        print(f"[radar] {service}: subscriptions {len(artists)}, added from watchlist "
+              f"{len(extra)} (of {len(names)} names)", flush=True)
     return extra
 
 

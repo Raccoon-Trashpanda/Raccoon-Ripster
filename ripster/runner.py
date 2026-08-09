@@ -44,7 +44,16 @@ _RE_NO_RETRY = _re.compile(
     # прогон на 10-м отказе — но раннер повторял задачу ТРИЖДЫ, и вместо одной
     # понятной ошибки человек получал три подряд. Повтор нужен для случайных
     # сбоев, а не для «этому аккаунту сюда нельзя».
-    r'do\s+not\s+have\s+permission|отказал\s+в\s+правах|'
+    #
+    # ⚠️ Проверяется против `msg = result.error`, а НЕ против лога движка. Первая
+    # редакция этой строки (09.08.2026, тот же день) ловила только `do not have
+    # permission` (сырой ответ Beatport, остаётся в log_text) и `отказал в правах`
+    # (текст abort_reason, уходит отдельной строкой в консоль) — до `msg` не
+    # доходит ни одно: engines/orpheus_beatport.py:362 переводит 403 в «аккаунту
+    # НЕ ХВАТАЕТ ПРАВ на скачивание». Детектор стоял в коде и не сработал бы ни
+    # разу. Тот же класс, что и мёртвая отсечка враппера 08.08. Якорь — по строке,
+    # которая реально попадает в проверку.
+    r'do\s+not\s+have\s+permission|отказал\s+в\s+правах|не\s+хватает\s+прав|'
     # Apple: каталог не отдал альбом (нет в этом магазине). Ответ детерминированный
     # — 08.08.2026 он повторялся ТРИЖДЫ с паузами 15/45/120с, и гость три с
     # половиной минуты ждал ровно того же «нет». Повтор осмыслен для временных
@@ -1613,9 +1622,9 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                     f"🎧 ARL слота {_dz_slot} не отвечает "
                                     f"({_inf.get('reason')})" +
                                     (" → беру живой" if _alt else " → живых нет"))
-                                print(f"[deezer-pool] слот {_dz_slot}: ARL мёртв "
-                                      f"({_inf.get('reason')}), замена: "
-                                      f"{'найдена' if _alt else 'НЕТ'}", flush=True)
+                                print(f"[deezer-pool] slot {_dz_slot}: ARL dead "
+                                      f"({_inf.get('reason')}), replacement: "
+                                      f"{'found' if _alt else 'NONE'}", flush=True)
                                 if _alt:
                                     _dz_arl = _alt
                             elif _inf.get("country"):
@@ -1628,7 +1637,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                 print(f"[deezer-pool] {_msg}", flush=True)
                         except Exception as _e_arl:
                             # Не молча: немой except уже прятал NameError (08.08).
-                            print(f"[deezer-pool] проверка ARL не удалась: {_e_arl!r}",
+                            print(f"[deezer-pool] ARL check failed: {_e_arl!r}",
                                   flush=True)
                         _cfg_view["deezer-arl"] = _dz_arl
                         if _dz_cfg_dir is not None:
@@ -1803,13 +1812,13 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                 _acq = (int(_forced), _fp[0], _fp[1])
                                 task["log"].append(
                                     f"🦝 слот закреплён за задачей: {_forced} (порт {_fp[0]})")
-                                print(f"[runner] слот {_forced} закреплён, порт {_fp[0]}", flush=True)
+                                print(f"[runner] slot {_forced} pinned, port {_fp[0]}", flush=True)
                             else:
                                 task["log"].append(
-                                    f"🦝 закреплённый слот {_forced} не поднялся — беру любой")
-                                print(f"[runner] закреплённый слот {_forced} НЕ поднялся", flush=True)
+                                    f"🦝 pinned slot {_forced} did not come up - taking any")
+                                print(f"[runner] pinned slot {_forced} did NOT come up", flush=True)
                         except Exception as _e_fs:
-                            print(f"[runner] закрепление слота не удалось: {_e_fs!r}", flush=True)
+                            print(f"[runner] slot pinning failed: {_e_fs!r}", flush=True)
                     if _acq is None:
                         _acq = await asyncio.to_thread(_pool.acquire)
                     if _acq:
@@ -2201,7 +2210,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                 print(f"[qobuz-retag] {_am.group(1)} → {_rn} file(s) retagged", flush=True)
                                 if _rn:
                                     task.setdefault("log", []).append(
-                                        f"[qobuz] артисты/композиторы в тегах исправлены: {_rn} файл(ов)")
+                                        f"[qobuz] artist/composer tags fixed: {_rn} file(s)")
                             else:
                                 print(f"[qobuz-retag] no album id in url {_u!r}", flush=True)
                         except Exception as _re_e:
@@ -2701,7 +2710,7 @@ async def _warn_quality_mismatch(task: dict, audio: list, tid: str) -> None:
         task.setdefault("log", []).append(msg)
         await _broadcast({"type": "log", "level": "warn", "task_id": tid, "text": msg})
     except Exception as e:                                    # noqa: BLE001
-        print(f"[quality-check] пропущено: {e}", flush=True)
+        print(f"[quality-check] skipped: {e}", flush=True)
 
 async def run_task(task: dict) -> None:
     """Dispatch a single task to the correct engine runner."""
@@ -2878,7 +2887,7 @@ async def run_task(task: dict) -> None:
                                     task["log"].append(
                                         f"─── слот {_slot['slot']} ({_cc}) не поднялся "
                                         f"— пропускаю ───")
-                                    print(f"[runner] слот {_slot['container']} не поднялся",
+                                    print(f"[runner] slot {_slot['container']} did not come up",
                                           flush=True)
                                     raise _NeedAMDFallback()
                                 _u2 = await asyncio.to_thread(
@@ -2899,10 +2908,10 @@ async def run_task(task: dict) -> None:
                                 # построил неверный вывод. Пишем в общий лог, а
                                 # не в task["log"]: последний в консоль не идёт.
                                 _all = await asyncio.to_thread(_AA.all_slots)
-                                print(f"[runner] свой слот не подобран: наши сессии="
+                                print(f"[runner] no own slot matched: our sessions="
                                       f"{[(s['slot'], s['country']) for s in _all]}, "
-                                      f"релиз доступен в={sorted(_avail)}, "
-                                      f"исключена='{_failed_cc}'", flush=True)
+                                      f"release available in={sorted(_avail)}, "
+                                      f"excluded='{_failed_cc}'", flush=True)
                         except _NeedAMDFallback:
                             _retried_sf = False          # и чужой слот не дал ключа
                         except Exception as _e_slot:
