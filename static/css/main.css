@@ -2661,3 +2661,49 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   .dlorb-skin{animation:none!important}
   .dlorb-more{transition:none}
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Движок без color-mix() — окно Ripster.exe на старой WebView2
+   ---------------------------------------------------------------------------
+   В листе 24 объявления с `color-mix()` без запасного варианта. Два места автор
+   уже прикрыл (`.rel-card.tinted`, `#sc-detail.tinted`), остальные — нет.
+
+   Почему обычный приём «положить запасное объявление выше» здесь НЕ работает.
+   Для пользовательского свойства любой набор токенов синтаксически допустим,
+   поэтому `--sb-thumb:color-mix(…)` парсится всегда и перекрывает то, что
+   стояло раньше. Ошибка вылезает позже, при подстановке в `var()`, и тогда
+   свойство становится не «предыдущим значением», а НЕОПРЕДЕЛЁННЫМ. То же с
+   обычными свойствами, если внутри есть `var()`. Единственный надёжный способ —
+   `@supports`.
+
+   Цена промаха видна глазом: `--sb-thumb` кормит ВСЕ полосы прокрутки (7 мест).
+   Без color-mix они становятся прозрачными — то самое «ползунок вообще не
+   видно». Правка ширины и цвета этого не лечила, потому что чинили не то.
+   ═════════════════════════════════════════════════════════════════════════ */
+@supports not (color:color-mix(in srgb,red 50%,blue)){
+  /* Полосы прокрутки — сплошной цвет границы вместо смешения с прозрачным. */
+  :root, html.light, html[data-theme="light"], html[data-theme="midnight"],
+  html[data-theme="ember"], html[data-theme="sepia"], html[data-theme="neon"]{
+    --sb-thumb:var(--border2);
+  }
+  /* Рамка индикатора: тон состояния вместо подмешанного к границе. */
+  .tb-pulse-framed[data-state="live"]{border-color:var(--green)}
+  .tb-pulse-framed[data-state="wait"]{border-color:var(--orange)}
+  /* Кнопки действий в очереди: без запасного рамка и фон пропадали целиком,
+     то есть кнопка переставала читаться как кнопка. */
+  .qi-actions .dl-action-btn,.dl-action-btn{
+    border-color:var(--border);
+    background:var(--surface2);
+    box-shadow:0 1px 2px rgba(0,0,0,.3);
+  }
+  .qi-actions .dl-action-btn:hover{border-color:var(--c);box-shadow:0 2px 4px rgba(0,0,0,.35)}
+  .qi-close:hover{box-shadow:0 2px 4px rgba(0,0,0,.3)}
+  /* Свечение под курсором — просто нет. Украшение, а не смысл. */
+  #pp-bar .fx-glow::after, #pp-expanded .fx-glow::after{background:none}
+  /* Полоса проигранного в мини-плеере: без заливки полоса исчезала. */
+  #pp-bar .pp-played, .pp-played{background:var(--pp-cache) !important}
+  #view-search.tinted .view-head,
+  #view-search.tinted .search-panel{box-shadow:inset 0 2px 0 0 var(--tint)}
+  /* Вкладки вишлиста: активная переставала отличаться от обычной. */
+  .wl-kind-tab.active{background:var(--surface2);border-color:var(--red)}
+}

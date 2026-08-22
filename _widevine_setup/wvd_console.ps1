@@ -65,6 +65,13 @@ function Connect-Wifi {
         Start-Sleep 2
     }
     Write-Host "  WARN: emulator network still 'none' after Wi-Fi connect." -ForegroundColor Yellow
+    # A bare fact gets scrolled past. The consequence is what matters here:
+    # with no guest network KeyDive cannot do a license exchange, so minting
+    # WILL fail - and downstream that looks like "it froze for no reason".
+    Write-Host "  This is fatal for minting: KeyDive needs the guest online to do a" -ForegroundColor Yellow
+    Write-Host "  license exchange. Expect the extraction step to fail." -ForegroundColor Yellow
+    Write-Host "  Usual causes: AEHD/hypervisor not running, or the emulator booted" -ForegroundColor Yellow
+    Write-Host "  before netsim was ready - stop the emulator (5) and retry." -ForegroundColor Yellow
     return $false
 }
 
@@ -110,11 +117,56 @@ function Ensure-Frida {
             $url = "https://github.com/frida/frida/releases/download/$ver/frida-server-$ver-android-x86_64.xz"
             $xz  = "$cached.xz"
             Write-Host "Downloading frida-server $ver (matches KeyDive)..." -ForegroundColor Cyan
+            # -TimeoutSec bounds the REQUEST, not the body transfer. On Windows
+            # PowerShell 5.1 a stalled GitHub download can sit for hours with one
+            # motionless "Downloading..." line on screen. That is exactly where
+            # "one-click install does nothing" came from (22.08.2026): it is
+            # indistinguishable from a hang, and the bundled fallback lives in
+            # the catch block, which a stall NEVER reaches.
+            #
+            # So: download in a background job and bound the WHOLE step by wall
+            # clock. If it does not finish, kill the job and fall back honestly
+            # instead of waiting forever.
+            $dlOk = $false
+            $deadline = 150
             try {
-                Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $xz -TimeoutSec 180
-                & $VENVPY -c "import lzma,sys; open(sys.argv[2],'wb').write(lzma.open(sys.argv[1]).read())" $xz $cached
+                $job = Start-Job -ScriptBlock {
+                    param($u, $o)
+                    $ProgressPreference = 'SilentlyContinue'
+                    Invoke-WebRequest -UseBasicParsing -Uri $u -OutFile $o -TimeoutSec 60
+                } -ArgumentList $url, $xz
+                # A heartbeat every 10s. A silent screen reads as "frozen" and
+                # people kill the window even when the work is going fine.
+                $waited = 0
+                while($waited -lt $deadline -and $job.State -eq 'Running'){
+                    Start-Sleep -Seconds 5; $waited += 5
+                    if($waited % 10 -eq 0){
+                        $sz = 0
+                        if(Test-Path $xz){ $sz = [math]::Round((Get-Item $xz).Length / 1MB, 1) }
+                        Write-Host ("  ...{0}s, {1} MB" -f $waited, $sz) -ForegroundColor DarkGray
+                    }
+                }
+                if($job.State -eq 'Running'){
+                    Stop-Job $job -EA SilentlyContinue
+                    Write-Host "  frida-server: no progress in ${deadline}s - giving up on the download." -ForegroundColor Yellow
+                } else {
+                    Receive-Job $job -EA SilentlyContinue | Out-Null
+                    if((Test-Path $xz) -and (Get-Item $xz).Length -gt 0){ $dlOk = $true }
+                }
+                Remove-Job $job -Force -EA SilentlyContinue
+                if($dlOk){
+                    & $VENVPY -c "import lzma,sys; open(sys.argv[2],'wb').write(lzma.open(sys.argv[1]).read())" $xz $cached
+                }
                 Remove-Item $xz -Force -EA SilentlyContinue
             } catch { Write-Host "frida-server $ver download failed ($_) - using bundled." -ForegroundColor Yellow }
+            if(-not $dlOk){
+                # Name the CONSEQUENCE, not just the fact. A frida version
+                # mismatch surfaces in KeyDive as "Frida server is not running",
+                # a message that leads nobody to the real cause.
+                Write-Host "  Falling back to the bundled frida-server." -ForegroundColor Yellow
+                Write-Host "  If KeyDive later says 'Frida server is not running', the cause is a" -ForegroundColor Yellow
+                Write-Host "  version mismatch with client $ver, not a dead server." -ForegroundColor Yellow
+            }
         }
         if(Test-Path $cached){ $srv = $cached }
     }

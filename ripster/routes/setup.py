@@ -51,6 +51,8 @@ import httpx
 
 from fastapi import APIRouter, HTTPException, Request
 
+from ripster.i18n_msg import imsg   # новые ручки отдают ключ+параметры,
+                                    # а не готовую русскую строку
 from ripster import setup as _setup
 from ripster import amd as _amd
 
@@ -456,6 +458,73 @@ async def wrapper_accounts_order(body: dict):
             "order": [a.get("label") or a["id"] for a in new],
             "note": "контейнеры перезапустятся при следующем запуске пула — "
                     "каждый аккаунт останется на своей identity"}
+
+
+@router.post("/api/wrapper/accounts/prefs")
+async def wrapper_accounts_prefs(body: dict):
+    """Приоритет и включение Apple-слотов.
+
+    Тело: {"slots": [{"slot": 0, "priority": 2, "enabled": true}, …]}.
+    Оба поля необязательны; переданное — записывается, остальное не трогается.
+
+    Почему это ОТДЕЛЬНАЯ ручка, а не `/order`. `/order` физически переставляет
+    записи, и для Apple это допустимо лишь потому, что каталоги device-identity
+    именуются по аккаунту. Но перестановка меняет НОМЕР СЛОТА, то есть
+    контейнер, а значит требует перелогина — а каждый перелогин жжёт слот
+    устройства у Apple (скилл ripster-apple-wrapper). Приоритет ничего не
+    переставляет: записи и контейнеры остаются на местах, меняется только
+    очередь опроса. Это разные операции с разной ценой, и путать их нельзя.
+
+    Приоритет действует ВНУТРИ витрины, а не поверх неё: страна решает, есть ли
+    релиз вообще (`apple_accounts.pick_slot_for`).
+    """
+    slots = body.get("slots")
+    if not isinstance(slots, list) or not slots:
+        raise HTTPException(400, imsg("err.slots_required",
+                                      "нужен непустой список slots"))
+    from ripster import wrapper_pool as _pool
+    n = len(_pool._configured_accounts(_cfg))
+    extras = list(_cfg.get("wrapper-accounts") or [])
+    changed = 0
+    for item in slots:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("slot"))
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= idx < n):
+            raise HTTPException(400, imsg("err.slot_range",
+                                          "слот {i} вне диапазона 0..{max}",
+                                          i=idx, max=n - 1))
+        has_p, has_e = "priority" in item, "enabled" in item
+        if not (has_p or has_e):
+            continue
+        if idx == 0:
+            if has_p and _cfg.get("wrapper-primary-priority") != item["priority"]:
+                _cfg["wrapper-primary-priority"] = item["priority"]; changed += 1
+            if has_e and _cfg.get("wrapper-primary-enabled") != bool(item["enabled"]):
+                _cfg["wrapper-primary-enabled"] = bool(item["enabled"]); changed += 1
+        else:
+            e = extras[idx - 1]
+            if not isinstance(e, dict):
+                continue
+            if has_p and e.get("priority") != item["priority"]:
+                e["priority"] = item["priority"]; changed += 1
+            if has_e and e.get("enabled") != bool(item["enabled"]):
+                e["enabled"] = bool(item["enabled"]); changed += 1
+    _cfg["wrapper-accounts"] = extras
+    if not _save_config:
+        raise HTTPException(500, imsg("err.cfg_save_unavailable",
+                                      "сохранение конфига недоступно"))
+    try:
+        _save_config(_cfg)
+    except Exception as e:
+        raise HTTPException(500, imsg("err.cfg_save_failed",
+                                      "не сохранил конфиг: {e}", e=str(e)))
+    # Число, а не «готово»: массовое действие без счётчика неотличимо от
+    # действия вхолостую (урок вишлиста, 22.08.2026).
+    return {"ok": True, "changed": changed, "slots": n}
 
 
 @router.post("/api/wrapper/accounts/add")
@@ -1332,40 +1401,6 @@ async def fix_gamdl_deps():
             await _setup.ilog("   ✓ pywidevine upgraded", "success")
         else:
             await _setup.ilog(f"   ✗ pywidevine failed: {o2[:100]}", "error")
-
-        # ── construct: пин, без которого Apple перестаёт качать целиком ──────
-        #
-        # `pywidevine/device.py` пишет `Const(Int8ub, 2)`. Этот порядок аргументов
-        # принимает ТОЛЬКО construct 2.8.8 — замерено перебором версий 22.08.2026:
-        # 2.8.22, 2.9.45 и вся ветка 2.10.x поднимают
-        # `TypeError: subcon should be a Construct field`. Правильный для них
-        # порядок — `Const(2, Int8ub)`, но чинить чужой пакет мы не будем.
-        # Сам pywidevine пин не объявляет: 2.8.8 приезжает транзитивно от pymp4.
-        #
-        # Цена промаха несоразмерна: AMD импортирует pywidevine в
-        # `src/legacy/decrypt.py` на уровне модуля, поэтому кривой construct
-        # убивает ВСЕ загрузки Apple на этапе BOOT — до единого сетевого запроса.
-        # Именно так 22.08 человек получил три одинаковых трейсбека подряд.
-        #
-        # `--no-deps` обязателен: без него pip тянет за construct зависимости и
-        # может снова сдвинуть версию, ради которой всё и делается.
-        rc3, o3 = await _setup.irun([sys.executable, "-m", "pip", "install",
-                                      "construct==2.8.8", "--no-deps",
-                                      "--force-reinstall",
-                                      "--break-system-packages", "-q"])
-        if rc3 == 0:
-            await _setup.ilog("   ✓ construct закреплён на 2.8.8 (нужен pywidevine)", "success")
-        else:
-            await _setup.ilog(f"   ✗ construct pin failed: {o3[:100]}", "error")
-
-        # Проверка, которая МОЖЕТ провалиться: импорт, а не наличие файла.
-        rc4, o4 = await _setup.irun([sys.executable, "-c",
-            "from pywidevine.device import Device; print('WVD_IMPORT_OK')"])
-        if rc4 == 0 and "WVD_IMPORT_OK" in (o4 or ""):
-            await _setup.ilog("   ✓ pywidevine импортируется — Apple сможет качать", "success")
-        else:
-            await _setup.ilog("   ✗ pywidevine НЕ импортируется — загрузки Apple упадут "
-                              f"на старте: {(o4 or '')[-160:]}", "error")
         rc_v, verify_out = await _setup.irun([sys.executable, "-c",
             "from gamdl.downloader import Downloader; print('gamdl OK')"])
         if rc_v == 0:

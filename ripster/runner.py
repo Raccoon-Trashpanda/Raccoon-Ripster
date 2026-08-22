@@ -3107,7 +3107,10 @@ async def run_task(task: dict) -> None:
                             _tried = set(task.get("_slots_tried") or [])
                             _slot = await asyncio.to_thread(
                                 _AA.pick_slot_for, sorted(_avail),
-                                tuple(_tried | {_failed_cc}))
+                                # config обязателен: без него приоритет и выключение
+                                # слотов из настроек до выбора не доедут, и функция
+                                # молча вернётся к прежнему «первый по стране».
+                                tuple(_tried | {_failed_cc}), _config)
                             if _slot and _avail.get(_slot["country"]):
                                 _cc = _slot["country"]
                                 task["_slots_tried"] = sorted(_tried | {_cc})
@@ -3158,7 +3161,8 @@ async def run_task(task: dict) -> None:
                                 # «код не выполнялся» — на этом я уже дважды
                                 # построил неверный вывод. Пишем в общий лог, а
                                 # не в task["log"]: последний в консоль не идёт.
-                                _all = await asyncio.to_thread(_AA.all_slots)
+                                _all = await asyncio.to_thread(
+                                    _AA.all_slots, 8, False, _config)
                                 print(f"[runner] no own slot matched: our sessions="
                                       f"{[(s['slot'], s['country']) for s in _all]}, "
                                       f"release available in={sorted(_avail)}, "

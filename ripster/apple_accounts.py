@@ -159,7 +159,53 @@ def slot_port(slot: int) -> int:
     return 10020 + int(slot)
 
 
-def all_slots(max_slots: int = 8, include_stopped: bool = False) -> list[dict]:
+# ── Предпочтения по слотам: чей ход раньше и кого не трогать ────────────────
+# У Apple слот — это НЕ «следующая свободная учётка», как в пулах Deezer/Qobuz.
+# Слот привязан к стране, а страна решает, есть ли релиз вообще. Поэтому
+# приоритет здесь работает ВНУТРИ страны, а не вместо неё: сначала выбирается
+# витрина, в которой релиз существует, и только среди своих аккаунтов в этой
+# витрине приоритет решает, кого спросить первым.
+#
+# Сделать наоборот — поставить приоритет выше страны — значит сломать
+# маршрутизацию: аккаунт с приоритетом 0 в US будет вечно получать японские
+# релизы, которых в US нет, и упираться в Invalid CKC. Разбор 08.08 (Apparat)
+# был ровно про это, только с другой стороны.
+#
+# Индекс записи И ЕСТЬ номер слота: primary = 0 (контейнер `amd-wrapper`),
+# дальше `wrapper-accounts[i-1]` → `rip-wrapper-i`. Переставлять записи нельзя —
+# уведёт чужой контейнер под чужую учётку.
+
+def slot_prefs(config: dict | None) -> dict:
+    """slot -> {'priority': float, 'enabled': bool, 'label': str}.
+
+    Ключей может не быть вовсе — тогда приоритет равен номеру слота, то есть
+    поведение в точности прежнее. Это не вежливость: у владельца шесть учёток,
+    и молчаливая перестановка после обновления была бы неотличима от поломки.
+    """
+    out: dict[int, dict] = {}
+    if not config:
+        return out
+    def _f(v, dflt):
+        try:
+            return float(dflt if v is None else v)
+        except (TypeError, ValueError):
+            return float(dflt)
+    aid = config.get("wrapper-apple-id")
+    if aid:
+        out[0] = {"priority": _f(config.get("wrapper-primary-priority"), 0),
+                  "enabled":  config.get("wrapper-primary-enabled", True) is not False,
+                  "label":    str(config.get("wrapper-apple-id") or "primary")}
+    for i, extra in enumerate(config.get("wrapper-accounts") or [], start=1):
+        if not isinstance(extra, dict):
+            continue
+        out[i] = {"priority": _f(extra.get("priority"), i),
+                  "enabled":  extra.get("enabled", True) is not False,
+                  "label":    str(extra.get("label") or extra.get("id") or f"slot{i}")}
+    return out
+
+
+def all_slots(max_slots: int = 8, include_stopped: bool = False,
+              config: dict | None = None) -> list[dict]:
     """Все живые Apple-сессии: контейнер, слот, страна.
 
     Слот 0 — основной `amd-wrapper`, дальше `rip-wrapper-N`. Молчащие слоты в
@@ -184,16 +230,29 @@ def all_slots(max_slots: int = 8, include_stopped: bool = False) -> list[dict]:
         if cc:
             out.append({"slot": i, "container": name, "country": cc,
                         "running": running, "port": slot_port(i)})
+    # Предпочтения навешиваются ПОСЛЕ обхода: обход про то, что физически есть,
+    # конфиг — про то, чего мы от этого хотим. Смешивать нельзя, иначе слот,
+    # выключенный в настройках, исчезнет и из диагностики тоже.
+    prefs = slot_prefs(config)
+    for sl in out:
+        pr = prefs.get(sl["slot"]) or {}
+        sl["priority"] = pr.get("priority", float(sl["slot"]))
+        sl["enabled"]  = pr.get("enabled", True)
+        if pr.get("label"):
+            sl["label"] = pr["label"]
     return out
 
 
-def slot_for_country(cc: str) -> dict | None:
+def slot_for_country(cc: str, config: dict | None = None) -> dict | None:
     """Живая сессия в нужной стране, если такая есть."""
     cc = (cc or "").lower()
-    return next((s for s in all_slots() if s["country"] == cc), None)
+    got = [s for s in all_slots(config=config)
+           if s["country"] == cc and s.get("enabled", True)]
+    got.sort(key=lambda s: (float(s.get("priority", s["slot"])), s["slot"]))
+    return got[0] if got else None
 
 
-def pick_slot_for(countries, exclude=()) -> dict | None:
+def pick_slot_for(countries, exclude=(), config: dict | None = None) -> dict | None:
     """Первая наша сессия, чья страна есть среди *countries* и не в *exclude*.
 
     Ровно то, чего не хватало маршрутизатору: релиз доступен в списке витрин —
@@ -211,9 +270,21 @@ def pick_slot_for(countries, exclude=()) -> dict | None:
     # include_stopped: выключенный слот — это НАША живая учётка, просто
     # погашенная сборщиком простоя. Пропускать её значит уходить к чужому
     # публичному wrapper'у при свободном своём аккаунте (09.08.2026).
-    slots = [s for s in all_slots(include_stopped=True) if s["country"] not in skip]
+    slots = [s for s in all_slots(include_stopped=True, config=config)
+             if s["country"] not in skip]
+    # Выключенную владельцем учётку не берём вовсе. Если выключены ВСЕ — берём
+    # как есть: пустой ответ здесь неотличим от «своих аккаунтов нет», и задача
+    # молча уедет к чужому публичному wrapper'у. Про такое надо сказать вслух.
+    on = [s for s in slots if s.get("enabled", True)]
+    if slots and not on:
+        print("[apple] все слоты выключены в настройках — беру как есть", flush=True)
+        on = slots
+    # Внутри одной витрины — по приоритету, затем по номеру слота. Порядок
+    # витрин остаётся главным: страна решает, есть ли релиз, приоритет — лишь
+    # кого из СВОИХ в этой стране спросить первым.
+    on.sort(key=lambda s: (float(s.get("priority", s["slot"])), s["slot"]))
     for c in want:                                  # порядок витрин важнее
-        for s in slots:
+        for s in on:
             if s["country"] == c:
                 return s
     return None
