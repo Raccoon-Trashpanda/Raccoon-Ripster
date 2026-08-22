@@ -74,6 +74,31 @@
           <span id="wl-count" style="font-size:11px;color:var(--muted2);font-family:var(--mono);white-space:nowrap"></span>
         </div>
 
+        <!-- Автоскачивание пачкой. Галочка на карточке до 22.08.2026 не меняла
+             НИЧЕГО (фронт показывал уведомление и не ходил на сервер), поэтому
+             накопившиеся подписки нельзя было выключить в принципе. Кнопки
+             раздельные по видам: у лейбла и у артиста разная цена ошибки —
+             лейбл выпускает десятки релизов в месяц. -->
+        <div id="wl-bulk" style="display:flex;align-items:center;gap:10px;margin-bottom:11px;flex-wrap:wrap;
+                    padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+          <span style="font-size:11px;color:var(--muted);font-family:var(--font)" data-i18n="wl.bulk_title">Автоскачивание</span>
+          <span class="wl-bulk-grp" style="display:flex;align-items:center;gap:4px">
+            <span style="font-size:11px;color:var(--muted2)" data-i18n="wl.kind_all">Все</span>
+            <button class="wl-bulk-btn" onclick="wlBulkAuto('all',true)"   data-i18n="wl.bulk_on">включить</button>
+            <button class="wl-bulk-btn" onclick="wlBulkAuto('all',false)"  data-i18n="wl.bulk_off">выключить</button>
+          </span>
+          <span class="wl-bulk-grp" style="display:flex;align-items:center;gap:4px">
+            <span style="font-size:11px;color:var(--muted2)" data-i18n="wl.kind_artists">Артисты</span>
+            <button class="wl-bulk-btn" onclick="wlBulkAuto('artist',true)"  data-i18n="wl.bulk_on">включить</button>
+            <button class="wl-bulk-btn" onclick="wlBulkAuto('artist',false)" data-i18n="wl.bulk_off">выключить</button>
+          </span>
+          <span class="wl-bulk-grp" style="display:flex;align-items:center;gap:4px">
+            <span style="font-size:11px;color:var(--muted2)" data-i18n="wl.kind_labels">Лейблы</span>
+            <button class="wl-bulk-btn" onclick="wlBulkAuto('label',true)"  data-i18n="wl.bulk_on">включить</button>
+            <button class="wl-bulk-btn" onclick="wlBulkAuto('label',false)" data-i18n="wl.bulk_off">выключить</button>
+          </span>
+        </div>
+
         <div id="wl-list"></div>
         <div id="wl-nomatch" style="display:none;text-align:center;padding:26px;font-size:12px;color:var(--muted)"
              data-i18n="wl.no_match">Ничего не нашлось — попробуй другое имя</div>

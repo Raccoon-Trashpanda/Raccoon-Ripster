@@ -266,6 +266,51 @@ async def api_watchlist_suggestions(limit: int = Query(12, ge=1, le=50)):
     return res
 
 
+@router.post("/api/watchlist/auto")
+async def wl_set_auto(body: dict):
+    """Включить или выключить автоскачивание — одной записи или сразу группе.
+
+    Зачем маршрут вообще понадобился: галочка на карточке НИКОГДА ничего не
+    меняла. `wlToggleAuto` во фронте показывал всплывающее сообщение и выходил
+    («Update via re-add (simple)»), сервер об этом не узнавал. Поэтому у
+    владельца накопились 187 записей из 257 с включённым автоскачиванием,
+    выключить которые было физически нечем.
+
+    `scope`: `all` — все записи, `artist` / `label` — только свой вид,
+    пусто — одна запись по `id`. Вид берём из поля `kind`, а у старых записей
+    его нет вовсе (7 штук у владельца): такие считаем артистами, потому что
+    отслеживание по лейблу появилось позже и всегда пишет `kind`.
+    """
+    items = _s["items"]
+    value = bool(body.get("auto_download"))
+    scope = str(body.get("scope") or "").strip().lower()
+    item_id = str(body.get("id") or "")
+
+    def kind_of(e: dict) -> str:
+        return str(e.get("kind") or "artist").lower()
+
+    if scope in ("all", "artist", "label"):
+        target = [e for e in items
+                  if scope == "all" or kind_of(e) == scope]
+    elif item_id:
+        target = [e for e in items if str(e.get("id")) == item_id]
+        if not target:
+            raise HTTPException(status_code=404, detail="Запись не найдена")
+    else:
+        raise HTTPException(status_code=400,
+                            detail="Нужен scope (all/artist/label) или id записи")
+
+    changed = 0
+    for e in target:
+        if bool(e.get("auto_download")) != value:
+            e["auto_download"] = value
+            changed += 1
+    if changed:
+        _s["save"](items)
+    return {"ok": True, "changed": changed, "matched": len(target),
+            "auto_download": value}
+
+
 @router.post("/api/watchlist/suggestions/dismiss")
 async def api_watchlist_suggestion_dismiss(body: dict):
     key = (body.get("key") or "").strip()

@@ -2423,6 +2423,16 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   font-family:var(--font);white-space:nowrap;transition:background .12s,color .12s,border-color .12s;
 }
 .wl-kind-tab:hover{color:var(--text);border-color:var(--muted2)}
+
+/* Кнопки пакетного автоскачивания. Намеренно тише вкладок видов: это действие
+   над многими записями сразу, и оно не должно выглядеть как основной элемент
+   управления страницей. */
+.wl-bulk-btn{
+  padding:4px 9px;background:transparent;border:1px solid var(--border);
+  border-radius:6px;font-size:11px;cursor:pointer;color:var(--muted);
+  font-family:var(--font);white-space:nowrap;transition:background .12s,color .12s,border-color .12s;
+}
+.wl-bulk-btn:hover{color:var(--text);border-color:var(--muted2);background:var(--surface)}
 .wl-kind-tab.active{
   background:color-mix(in srgb,var(--red) 16%,transparent);
   border-color:color-mix(in srgb,var(--red) 42%,transparent);

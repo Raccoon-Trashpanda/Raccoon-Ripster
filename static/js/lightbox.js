@@ -365,8 +365,26 @@ async function wlRemove(id) {
 }
 
 async function wlToggleAuto(id, val) {
-  // Update via re-add (simple)
-  toast(val?t('wl.auto_on'):t('wl.notify_only'));
+  // До 22.08.2026 здесь стоял только toast с припиской «Update via re-add
+  // (simple)» — то есть галочка показывала сообщение и НЕ ходила на сервер.
+  // Снаружи это выглядело как рабочий переключатель: галка вставала, надпись
+  // менялась, а при следующей загрузке страницы всё возвращалось. Так у
+  // владельца накопились 187 подписок с автоскачиванием, которые нечем было
+  // выключить.
+  const r = await api('POST', '/api/watchlist/auto', {id, auto_download: val});
+  if (!r || r.ok === false) { toast(t('err.generic'), 'var(--red)'); return; }
+  toast(val ? t('wl.auto_on') : t('wl.notify_only'));
+  loadWatchlist();
+}
+
+// Пакетное включение/выключение по видам подписок.
+async function wlBulkAuto(scope, val) {
+  const r = await api('POST', '/api/watchlist/auto', {scope, auto_download: val});
+  if (!r || r.ok === false) { toast(t('err.generic'), 'var(--red)'); return; }
+  // Говорим ЧИСЛО, а не «готово»: пакетное действие без счётчика неотличимо от
+  // действия вхолостую, и понять, попало ли оно куда надо, нельзя.
+  toast(ti('wl.bulk_done', {n: r.changed, total: r.matched}));
+  loadWatchlist();
 }
 
 async function wlCheckNow() {
