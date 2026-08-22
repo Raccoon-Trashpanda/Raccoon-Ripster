@@ -33,6 +33,7 @@ import sys
 import time
 from collections import defaultdict, deque
 from typing import Callable
+from ripster.i18n_msg import imsg
 
 from fastapi import HTTPException, Request, WebSocket
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -401,7 +402,7 @@ def install(app, config: dict, save_config: Callable[[dict], None]) -> None:
         stored = _config.get("app-password-hash", "")
         if not isinstance(pw, str) or not _verify_password(pw, stored):
             _record_failed_login(ip)
-            raise HTTPException(401, "Неверный пароль")
+            raise HTTPException(401, imsg("err.wrong_password", "Неверный пароль"))
         _clear_login_attempts(ip)
         resp = JSONResponse({"ok": True})
         resp.set_cookie(
@@ -427,14 +428,14 @@ def install(app, config: dict, save_config: Callable[[dict], None]) -> None:
             raise HTTPException(400, "Invalid payload")
         if is_enabled():
             if not old_pw:
-                raise HTTPException(401, "Введи текущий пароль")
+                raise HTTPException(401, imsg("err.current_password_required", "Введи текущий пароль"))
             if not _verify_password(old_pw, _config.get("app-password-hash", "")):
-                raise HTTPException(401, "Текущий пароль неверен")
+                raise HTTPException(401, imsg("err.current_password_wrong", "Текущий пароль неверен"))
         if new_pw == "":
             _config["app-password-hash"] = ""
         else:
             if len(new_pw) < 4:
-                raise HTTPException(400, "Пароль слишком короткий (минимум 4 символа)")
+                raise HTTPException(400, imsg("err.password_too_short", "Пароль слишком короткий (минимум 4 символа)"))
             _config["app-password-hash"] = _hash_password(new_pw)
         _save_config(_config)
         return {"ok": True, "auth_enabled": is_enabled()}

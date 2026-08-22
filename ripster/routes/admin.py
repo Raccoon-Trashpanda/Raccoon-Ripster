@@ -1347,7 +1347,16 @@ async def admin_bot_control(body: dict, request: Request):
 async def admin_probe_all(request: Request):
     """Probe every service in parallel — slow (network), so explicit POST."""
     _require_owner(request)
-    services = ["apple", "qobuz", "tidal", "deezer", "spotify", "soundcloud", "beatport", "yandex", "amazon"]
+    # Список берём из реестра проб, а не переписываем рядом руками. Ровно этим
+    # список и отставал: 22.08.2026 в реестр добавилась проба `apple_wrapper`
+    # (слоты враппера — отдельная учётка от веб-токенов Apple), а сюда её никто
+    # не вписал, и в админке её не было вовсе. Два списка одного и того же —
+    # это не дублирование, а обещание разойтись.
+    from ripster.routes.auth import _probes as _auth_probes
+    # bbc здесь тоже нужен: бот про него уже докладывает, и служба, живая в
+    # одном окне и отсутствующая в другом, — это два разных ответа на один
+    # вопрос.
+    services = list(_auth_probes().keys())
     results = await asyncio.gather(*[_probe_one(s) for s in services])
     summary = {
         "ok_count":   sum(1 for r in results if r.get("ok")),

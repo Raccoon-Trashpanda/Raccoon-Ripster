@@ -423,6 +423,7 @@ def tracklist_for(title: str, artist: str = "", duration: int = 0,
     # instead of pinning a threadpool worker for tens of seconds → no app-wide lag.
     if not force and time.time() < _cooldown_until:
         return {"ok": False, "cooldown": True,
+                "error_key": "err.tl1001_cooldown",
                 "error": "1001TL временно недоступен (backoff после сбоя)"}
 
     def _ret(result: dict) -> dict:
@@ -466,6 +467,7 @@ def tracklist_for(title: str, artist: str = "", duration: int = 0,
     if not best:
         if challenged and not _LOGGED_IN:
             return _ret({"ok": False, "challenged": challenged,
+                         "error_key": "err.tl1001_captcha",
                          "error": ("страница(ы) за анти-бот капчей — нужен логин "
                                    "1001TL (tl1001-email/tl1001-password), анонимно "
                                    "эти сеты недоступны")})

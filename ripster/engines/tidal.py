@@ -34,6 +34,7 @@ from .errors import classify_download_error
 from .registry import register
 from ripster import http_client as _HTTP
 from ripster.safe_pickle import safe_loads as _pickle_loads
+from ripster.py_runtime import app_python
 
 
 # ── OrpheusDL paths ───────────────────────────────────────────────────────────
@@ -53,7 +54,20 @@ def _orpheus_python() -> str:
         cand = base / "tools" / "orpheusvenv" / sub[0] / sub[1]
         if cand.is_file():
             return str(cand)
-    return sys.executable
+    # tools/orpheusvenv отсутствует в этой установке — и тогда раньше молча брался
+    # sys.executable, то есть ЛЮБОЙ интерпретатор, которым подняли app.py. 10-11.08.2026
+    # app.py стартовал из C:\Python314 (не из .venv), и OrpheusDL получил его user-site,
+    # где лежит пакет `ffmpeg` вместо `ffmpeg-python` → `ImportError: cannot import name
+    # 'Error' from 'ffmpeg'` на КАЖДОМ движке Orpheus (beatport/spotify/tidal), 12 прогонов
+    # подряд. В логе это видно буквально: все 203 прогона из .venv отработали без этой
+    # ошибки, все 12 из C:\Python314 — с ней. Поэтому берём venv проекта ЯВНО, а не
+    # «тот, которым запустились»: интерпретатор движка не должен зависеть от того, как
+    # именно подняли сервер.
+    # Дальше — ОБЩЕЕ правило приложения (ripster/py_runtime.py): venv проекта с
+    # проверкой запускаемости, переопределение через RIPSTER_ENGINE_PYTHON, иначе
+    # текущий интерпретатор. Здесь лежала третья копия одного и того же перебора,
+    # и именно про такие копии предупреждал разбор 16.08: расходятся они молча.
+    return app_python()
 
 def _settings_path() -> Path:
     return _orpheus_dir() / "config" / "settings.json"
@@ -175,6 +189,20 @@ _RE_AUTH_FAIL   = re.compile(
     r'TIDAL_NOT_AUTHED|no saved session|relogin|invalid.*session|unauthorized|'
     r'\b401\b|\b403\b|EOFError|Choose a login method|'
     r'TidalAuthError|token has expired|token.*expired',
+    re.I,
+)
+
+# Смерть сессии ПОСРЕДИ релиза. Отдельный, более узкий и одновременно более
+# полный набор, чем `_RE_AUTH_FAIL`: он ловит и НАШУ СОБСТВЕННУЮ строку, которую
+# ветка авторизации пишет в лог по каждому отказавшему треку. Якорь по ней —
+# не прихоть: в живом логе (проверено на прогоне 15.08, альбом на 33 трека,
+# оборвался на 17-м) английских маркеров в хвосте НЕТ ВОВСЕ, есть только
+# «Tidal: сессия недействительна — переавторизуйся». Первая редакция этой правки
+# смотрела на `_RE_AUTH_FAIL` и молча не срабатывала — ровно тот случай, когда
+# детектор стоит в коде и не может сработать ни разу.
+_RE_SESSION_DEAD = re.compile(
+    r'сесси\w*\s+(?:истекла|оборвалась|недействительн)|переавторизуйся|'
+    r'TIDAL_NOT_AUTHED|TidalAuthError|token\s+has\s+expired|no\s+saved\s+session',
     re.I,
 )
 
@@ -300,6 +328,10 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict, atmos: 
 # Десять — заведомо больше, чем случайная пара недоступных треков, и
 # кратно меньше тех 87, что набежали 09.08.2026.
 _PERM_FAIL_LIMIT = 10
+# Отказы «похожие на авторизацию» ПОСЛЕ первого сохранённого трека — это отдельные
+# треки без прав, а не смерть сессии. Но если они пошли подряд и новых сохранений
+# нет, прогон всё равно обязан закончиться (см. скилл ripster-runaway-runs).
+_AUTH_FAIL_LIMIT = 10
 
 
 @register
@@ -365,6 +397,7 @@ class TidalEngine(EngineBase):
         # (см. ProcessRunner._engine_wants_abort).
         self.abort_reason = ""
         self._perm_fails = 0
+        self._auth_fails = 0
         self._saved = 0
 
     def iter_events(self, line: str, *, progress: tuple[int, int]):
@@ -382,6 +415,10 @@ class TidalEngine(EngineBase):
         # обрывать из-за неё весь плейлист нельзя.
         if _RE_TRACK_DONE.search(clean) or "Track download completed" in clean:
             self._saved += 1
+            # «Подряд» значит подряд: новый сохранённый трек обнуляет серию, иначе
+            # десяток разбросанных по альбому недоступных треков оборвал бы прогон,
+            # который в остальном идёт нормально.
+            self._auth_fails = 0
         if "do not have permission" in clean.lower():
             self._perm_fails += 1
             if self._perm_fails >= _PERM_FAIL_LIMIT and not self._saved and not self.abort_reason:
@@ -392,9 +429,34 @@ class TidalEngine(EngineBase):
                     f"или переавторизуй Tidal."
                 )
         if "TIDAL_NOT_AUTHED" in clean or _RE_AUTH_FAIL.search(clean):
+            # ТОТ ЖЕ ДВУХЧАСТНЫЙ ЗАПРЕТ, ЧТО И ВЫШЕ: сессия, которая только что
+            # сохранила треки, ЖИВА по определению. 15.08.2026 17:07 альбом на 33
+            # трека умер на 17-м с «переавторизуйся» — после ШЕСТНАДЦАТИ выкачанных
+            # FLAC. Совпало по `\b401\b|\b403\b|unauthorized`, а такую строку легко
+            # даёт отдельный трек без прав в регионе. Человеку велели войти заново
+            # (не поможет НИКОГДА), а 16 готовых треков уехали в «ошибка».
+            #
+            # Сырую строку теперь показываем: раньше она сюда входила и исчезала,
+            # заменяясь вердиктом, — по логу невозможно было понять, что совпало.
+            if self._saved:
+                self._auth_fails += 1
+                if self._auth_fails >= _AUTH_FAIL_LIMIT and not self.abort_reason:
+                    self.abort_reason = (
+                        f"Tidal перестал отдавать треки после {self._saved} сохранённых "
+                        f"({self._auth_fails} отказов подряд). Сохранённое останется; "
+                        f"остаток забери повтором или из другого сервиса."
+                    )
+                yield Event(
+                    kind=EventKind.TRACK_ERROR,
+                    message=(f"Tidal не отдал трек (вход исправен, сохранено: "
+                             f"{self._saved}): {clean}"),
+                    level=LineLevel.ERROR,
+                )
+                return
             yield Event(
                 kind=EventKind.FATAL,
-                message="Tidal: сессия недействительна — переавторизуйся в Settings → Tidal",
+                message=("Tidal: сессия недействительна — переавторизуйся в "
+                         f"Settings → Tidal · {clean}"),
                 level=LineLevel.ERROR,
             )
             return
@@ -429,6 +491,23 @@ class TidalEngine(EngineBase):
         done = len(re.findall(r'===\s*Track\s+\S+\s+downloaded\s*===', log_text, re.I))
         if done > 0:
             errs = len(re.findall(r'\berror\b|\bfailed\b|\bexception\b|Traceback', log_text, re.I))
+            # Ветка `done > 0` КОРОТИЛА всё остальное: насчитала скачанное и
+            # вернула успех с ПУСТОЙ причиной. 15.08.2026 альбом на 33 трека
+            # умер на 17-м (сессия Tidal), шестнадцать файлов легли на диск — и
+            # раннер записал «error: (none captured)», хотя готовая причина
+            # лежала строкой ниже в том же логе. Дальше по цепочке пустая строка
+            # не совпадала ни с одной отсечкой, поэтому задача повторялась
+            # трижды, а недобор объяснялся «сбоем постобработки, повтори».
+            #
+            # Файлы всё равно отдаём (success=True) — они настоящие и нужны
+            # человеку. Но причину недобора называем: она и остановит повтор, и
+            # объяснит, почему треков меньше, чем в релизе.
+            if _RE_SESSION_DEAD.search(log_text):
+                return EngineResult(
+                    success=True, tracks_ok=done, tracks_err=errs,
+                    error=("Tidal: сессия оборвалась на середине релиза — забрано "
+                           f"{done} трек(ов), остальные не отданы. Переавторизуйся "
+                           "в Settings → Tidal и добери остаток."))
             return EngineResult(success=True, tracks_ok=done, tracks_err=errs)
 
         if rc == 0 and _RE_SKIP.search(log_text):
@@ -439,6 +518,19 @@ class TidalEngine(EngineBase):
                 success=False,
                 error="Tidal: сессия истекла/недействительна — переавторизуйся в Settings → Tidal.",
             )
+
+        # Отказ по правам (403 «You do not have permission») при НУЛЕ докачанных
+        # треков. Без этой ветки прогон доходил до общего хвоста функции и получал
+        # «трек не докачался (DASH/сеть прервалась) — повтори»: не просто потерю
+        # причины, а замену её на противоположную по смыслу — сеть тут ни при чём,
+        # повтор гарантированно даст тот же отказ. Формулировка намеренно содержит
+        # «не хватает прав» — по этой строке `_RE_NO_RETRY` в runner.py отсекает
+        # бессмысленный авто-повтор (см. там же про вердикт `abort_reason`).
+        if re.search(r'You do not have permission to perform this action', log_text, re.I):
+            return EngineResult(False, error="Tidal: аккаунту не хватает прав на скачивание в "
+                                             "этом качестве (403 на запросе потока, не на логине). "
+                                             "Обычно помогает уровень ниже — FLAC вместо Hi-Res — "
+                                             "либо переавторизация Tidal.")
 
         # Region-lock / phantom-removed link (e.g. OrpheusDL: "Album [X] not found.
         # This might be region-locked.") — surface the REAL cause via the shared
@@ -553,7 +645,8 @@ class TidalEngine(EngineBase):
         import httpx as _httpx
         token, country = await _tidal_token_country(config)
         if not token:
-            return {"error": "Tidal access_token не настроен", "releases": []}
+            return {"error_key": "err.tidal_no_token_cfg",
+                    "error": "Tidal access_token не настроен", "releases": []}
         headers = {"Authorization": f"Bearer {token}"}
         wanted  = {t.strip() for t in types.split(",") if t.strip()} if types else set()
         try:
@@ -561,7 +654,9 @@ class TidalEngine(EngineBase):
                 info_r = await c.get(f"https://api.tidal.com/v1/artists/{artist_id}",
                                      headers=headers, params={"countryCode": country})
                 if info_r.status_code == 401:
-                    return {"error": "Tidal: токен истёк. Обнови access_token в Settings → Tidal.", "releases": []}
+                    return {"error_key": "err.tidal_token_expired",
+                            "error": "Tidal: токен истёк. Обнови access_token в Settings → Tidal.",
+                            "releases": []}
                 info = info_r.json()
                 albums_r = await c.get(f"https://api.tidal.com/v1/artists/{artist_id}/albums",
                                        headers=headers,
@@ -604,14 +699,16 @@ class TidalEngine(EngineBase):
         import httpx as _httpx
         token, country = await _tidal_token_country(config)
         if not token:
-            return {"error": "Tidal access_token не настроен"}
+            return {"error_key": "err.tidal_no_token_cfg",
+                    "error": "Tidal access_token не настроен"}
         headers = {"Authorization": f"Bearer {token}"}
         try:
             async with _HTTP.ashared() as c:
                 alb_r = await c.get(f"https://api.tidal.com/v1/albums/{album_id}",
                                     headers=headers, params={"countryCode": country})
                 if alb_r.status_code == 401:
-                    return {"error": "Tidal: токен истёк. Обнови access_token в Settings → Tidal."}
+                    return {"error_key": "err.tidal_token_expired",
+                            "error": "Tidal: токен истёк. Обнови access_token в Settings → Tidal."}
                 a = alb_r.json()
                 tr_r = await c.get(f"https://api.tidal.com/v1/albums/{album_id}/tracks",
                                    headers=headers,

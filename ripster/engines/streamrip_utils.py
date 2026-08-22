@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
+from ripster.py_runtime import app_python
 
 
 def config_dir(override: str = "") -> Path:
@@ -40,7 +41,7 @@ def find_rip() -> list[str]:
     `[*find_rip(), ...]`. sys.executable also guarantees the running streamrip
     version matches the importable `streamrip` package (the old path-probing could
     pick a stale rip.exe from another env)."""
-    return [sys.executable, "-c",
+    return [app_python(), "-c",
             "import sys; from streamrip.rip import rip; sys.exit(rip())"]
 
 

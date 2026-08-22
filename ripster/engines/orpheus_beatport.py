@@ -18,6 +18,7 @@ from pathlib import Path
 
 from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
 from .registry import register
+from ripster.py_runtime import app_python
 
 
 def _base_dir() -> Path:
@@ -36,7 +37,20 @@ def _orpheus_python() -> str:
         cand = base / "tools" / "orpheusvenv" / sub[0] / sub[1]
         if cand.is_file():
             return str(cand)
-    return sys.executable
+    # tools/orpheusvenv отсутствует в этой установке — и тогда раньше молча брался
+    # sys.executable, то есть ЛЮБОЙ интерпретатор, которым подняли app.py. 10-11.08.2026
+    # app.py стартовал из C:\Python314 (не из .venv), и OrpheusDL получил его user-site,
+    # где лежит пакет `ffmpeg` вместо `ffmpeg-python` → `ImportError: cannot import name
+    # 'Error' from 'ffmpeg'` на КАЖДОМ движке Orpheus (beatport/spotify/tidal), 12 прогонов
+    # подряд. В логе это видно буквально: все 203 прогона из .venv отработали без этой
+    # ошибки, все 12 из C:\Python314 — с ней. Поэтому берём venv проекта ЯВНО, а не
+    # «тот, которым запустились»: интерпретатор движка не должен зависеть от того, как
+    # именно подняли сервер.
+    # Дальше — ОБЩЕЕ правило приложения (ripster/py_runtime.py): venv проекта с
+    # проверкой запускаемости, переопределение через RIPSTER_ENGINE_PYTHON, иначе
+    # текущий интерпретатор. Здесь лежала третья копия одного и того же перебора,
+    # и именно про такие копии предупреждал разбор 16.08: расходятся они молча.
+    return app_python()
 
 def _settings_path() -> Path:
     return _orpheus_dir() / "config" / "settings.json"

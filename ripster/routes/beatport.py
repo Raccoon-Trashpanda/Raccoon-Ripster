@@ -15,6 +15,7 @@ from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
+from ripster.i18n_msg import imsg
 
 router = APIRouter()
 
@@ -220,7 +221,7 @@ async def beatport_search(
 ):
     token = await _get_token()
     if not token:
-        raise HTTPException(401, "Beatport: настрой логин/пароль в Settings → Beatport")
+        raise HTTPException(401, imsg("err.bp_no_creds", "Beatport: настрой логин/пароль в Settings → Beatport"))
 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
@@ -229,18 +230,18 @@ async def beatport_search(
                             headers=_auth_headers(token))
         if r.status_code == 401:
             _token_cache.clear()
-            raise HTTPException(401, "Beatport: токен истёк — обнови логин в Settings")
+            raise HTTPException(401, imsg("err.bp_token_expired", "Beatport: токен истёк — обнови логин в Settings"))
         if r.status_code != 200:
             raise HTTPException(502, f"Beatport API: {r.status_code}: {r.text[:120]}")
     except HTTPException:
         raise
     except httpx.RequestError as e:
-        raise HTTPException(502, f"Beatport: сетевая ошибка — {e}")
+        raise HTTPException(502, imsg("err.bp_net", f"Beatport: сетевая ошибка — {e}", e=str(e)))
 
     try:
         data = r.json()
     except Exception as e:
-        raise HTTPException(502, f"Beatport вернул не-JSON ответ: {e}")
+        raise HTTPException(502, imsg("err.bp_not_json", f"Beatport вернул не-JSON ответ: {e}", e=str(e)))
 
     # Beatport v4 search returns {"tracks": {"count":N, "data":[...]}, "releases": {...}}
     # Fall back to flat {"count":N, "data":[...]} or {"count":N, "results":[...]}
@@ -260,7 +261,7 @@ async def beatport_search(
     try:
         formatted = [fmt(item) for item in items]
     except Exception as e:
-        raise HTTPException(502, f"Beatport: ошибка парсинга ответа — {e}")
+        raise HTTPException(502, imsg("err.bp_parse", f"Beatport: ошибка парсинга ответа — {e}", e=str(e)))
 
     return {"type": result_type, "count": count, "page": page, "results": formatted}
 
@@ -269,7 +270,7 @@ async def beatport_search(
 async def beatport_release(release_id: int):
     token = await _get_token()
     if not token:
-        raise HTTPException(401, "Beatport: настрой логин/пароль в Settings → Beatport")
+        raise HTTPException(401, imsg("err.bp_no_creds", "Beatport: настрой логин/пароль в Settings → Beatport"))
 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
@@ -280,10 +281,10 @@ async def beatport_release(release_id: int):
                 headers=_auth_headers(token),
             )
     except httpx.RequestError as e:
-        raise HTTPException(502, f"Beatport: сетевая ошибка — {e}")
+        raise HTTPException(502, imsg("err.bp_net", f"Beatport: сетевая ошибка — {e}", e=str(e)))
 
     if r_rel.status_code != 200:
-        raise HTTPException(404, "Релиз не найден")
+        raise HTTPException(404, imsg("err.release_not_found", "Релиз не найден"))
 
     rel    = r_rel.json()
     tracks = (r_trk.json().get("data") or []) if r_trk.status_code == 200 else []
@@ -302,7 +303,7 @@ async def beatport_upcoming(
     """Latest / upcoming releases sorted by release date desc."""
     token = await _get_token()
     if not token:
-        raise HTTPException(401, "Beatport: настрой логин/пароль в Settings → Beatport")
+        raise HTTPException(401, imsg("err.bp_no_creds", "Beatport: настрой логин/пароль в Settings → Beatport"))
 
     params: dict = {"page": page, "per_page": per_page, "order_by": "-publish_date"}
     if genre_id:
@@ -314,7 +315,7 @@ async def beatport_upcoming(
         if r.status_code != 200:
             raise HTTPException(502, f"Beatport API: {r.status_code}")
     except httpx.RequestError as e:
-        raise HTTPException(502, f"Beatport: сетевая ошибка — {e}")
+        raise HTTPException(502, imsg("err.bp_net", f"Beatport: сетевая ошибка — {e}", e=str(e)))
 
     data  = r.json()
     items = data.get("data") or []
@@ -331,7 +332,7 @@ async def beatport_upcoming(
 async def beatport_genres():
     token = await _get_token()
     if not token:
-        raise HTTPException(401, "Beatport: настрой логин/пароль")
+        raise HTTPException(401, imsg("err.bp_no_creds_short", "Beatport: настрой логин/пароль"))
 
     try:
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:

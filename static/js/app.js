@@ -263,6 +263,7 @@ function handleMessage(msg) {
       renderQueue(); updateTransport(); renderConfig();
       // Restructure the per-guest lamps/bars when a download starts/stops.
       if (document.getElementById('admin-links-list')?.offsetParent) loadAdminLinks();
+      try { window.DLOrb && DLOrb.sync(); } catch (_) {}
       break;
     case 'dl_counter': {
       const task = S.queue.find(t=>t.id===msg.task_id);
@@ -313,6 +314,7 @@ function handleMessage(msg) {
       }
       updateTransport();
       updateGuestDownloadBars();   // move per-guest bars live (cheap, visibility-guarded)
+      try { window.DLOrb && DLOrb.onProgress(msg); } catch (_) {}   // круг загрузки в панели
       break;
     }
     case 'log': {
@@ -688,10 +690,51 @@ async function api(method, path, body, timeoutMs) {
     return {};
   }
   try {
-    return JSON.parse(text);   // valid JSON (200 or a 4xx with a {detail} body) → caller handles
+    const data = JSON.parse(text);   // valid JSON (200 or a 4xx with a {detail} body) → caller handles
+    // i18n-контракт API-сообщений (#27): сервер может отдать detail как объект
+    // {key, params, msg}. Резолвим ключ через i18n здесь, ЦЕНТРАЛЬНО, чтобы все
+    // существующие места (res.detail / err.detail) получили уже локализованную
+    // строку без правок. Обратная совместимость: строковый detail проходит как есть.
+    if (data && data.detail) data.detail = errText(data.detail);
+    // Тот же контракт для dict-ответов `{ok:false, error, error_key, error_args}`
+    // (пробы, /api/sc/*, /api/setup/* и прочие «мягкие» отказы без HTTP-ошибки).
+    // Разворачиваем тоже ЦЕНТРАЛЬНО: иначе каждое из ~90 мест, читающих
+    // `res.error`, пришлось бы править отдельно — и любое забытое молча осталось
+    // бы русским. Русский `error` сервер отдавать не перестаёт: его читают
+    // телеграм-бот и healthcheck, живущие в русской среде.
+    if (data && data.error_key) {
+      const s = errKeyText(data.error_key, data.error_args);
+      if (s) data.error = s;
+    }
+    return data;
   } catch (_) {
     throw new Error(!r.ok ? `${t('t.server_down')} (HTTP ${r.status})` : t('t.bad_server_resp'));
   }
+}
+
+// Разворачивает detail API-сообщения: объект {key,params,msg} → локализованная
+// строка (ключ i18n, иначе ru-fallback msg); строка → как есть. Используется в
+// api() централизованно и на любых прямых fetch-местах.
+function errText(d) {
+  if (d && typeof d === 'object' && d.key) {
+    let s = null;
+    try { s = (typeof ti === 'function') ? ti(d.key, d.params || {}) : null; } catch (_) {}
+    // ti возвращает сам ключ, если перевода нет — тогда падаем на ru-fallback msg.
+    if (!s || s === d.key) s = d.msg || d.key;
+    return s;
+  }
+  return (typeof d === 'string') ? d : (d ? (d.msg || String(d)) : '');
+}
+
+// Разворачивает пару `error_key`/`error_args` (контракт dict-ответов) в строку на
+// языке интерфейса. Возвращает пустое значение, если перевода нет — тогда
+// вызывающий оставляет русский `error`, потому что показывать человеку сырой
+// ключ (`err.sc_no_client_id`) хуже, чем фразу не на его языке.
+function errKeyText(key, args) {
+  if (!key) return '';
+  let s = null;
+  try { s = (typeof ti === 'function') ? ti(key, args || {}) : null; } catch (_) {}
+  return (s && s !== key) ? s : '';
 }
 
 async function loadQualities() {
@@ -765,6 +808,7 @@ function showView(name, el) {
   document.querySelectorAll('.nav-item').forEach(n=>n.classList.remove('active'));
   document.getElementById('view-'+name)?.classList.add('active');
   el?.classList.add('active');
+  try { window.DLOrb && DLOrb.sync(); } catch (_) {}   // на вкладке задач круг не нужен
   if(name==='setup')     { checkTools(); loadDeps?.(); checkRipsterUpdate?.(true); }
   if(name==='history')   loadHistory();
   if(name==='watchlist') loadWatchlist();
@@ -928,7 +972,7 @@ async function _chooseSpTargetDirect(url, quality, target) {
   }
 }
 
-function _svcLabel(svc){ return {apple:'Apple Music',qobuz:'Qobuz',deezer:'Deezer',tidal:'Tidal',spotify:'Spotify',soundcloud:'SoundCloud',yandex:'Яндекс.Музыка'}[svc]||svc; }
+function _svcLabel(svc){ return {apple:'Apple Music',qobuz:'Qobuz',deezer:'Deezer',tidal:'Tidal',spotify:'Spotify',soundcloud:'SoundCloud',yandex:t('s.svc_yandex')}[svc]||svc; }
 // ── Service brand colors (single source of truth) ─────────────────────────
 // Default = real brand hues. User can override per service in Settings →
 // General → "Цвета сервисов" — overrides land in S.config['service-colors'].
@@ -1049,7 +1093,7 @@ async function fetchTags() {
   document.getElementById('tag-result').innerHTML = `<div class="empty-state" style="height:120px"><div class="empty-icon" style="font-size:28px">⏳</div><div>Fetching from Apple Music API…</div></div>`;
   try {
     const r = await fetch(`/api/meta?url=${encodeURIComponent(url)}`);
-    if(!r.ok){ const err=await r.json(); throw new Error(err.detail||'Failed'); }
+    if(!r.ok){ const err=await r.json(); throw new Error(errText(err.detail)||'Failed'); }
     const meta = await r.json();
     renderMeta(meta);
   } catch(e) {
@@ -1093,7 +1137,7 @@ function renderMeta(m) {
       <div class="meta-body">
         ${rows.map(([k,v])=>`<div class="meta-row"><div class="meta-key">${esc(k)}</div><div class="meta-val">${esc(v)}</div></div>`).join('')}
         ${fmts?`<div class="meta-row"><div class="meta-key">Formats</div><div class="meta-val" style="display:flex;gap:5px;flex-wrap:wrap">${fmts}</div></div>`:''}
-        ${m.artworkUrl?`<div class="meta-row"><div class="meta-key">Artwork</div><div class="meta-val"><a href="${esc(m.artworkUrl)}" target="_blank" style="color:var(--blue)">${esc(m.artworkUrl.split('/').pop().split('?')[0])}</a></div></div>`:''}
+        ${m.artworkUrl?`<div class="meta-row"><div class="meta-key">Artwork</div><div class="meta-val"><a href="${esc(m.artworkUrl)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" style="color:var(--blue)">${esc(m.artworkUrl.split('/').pop().split('?')[0])}</a></div></div>`:''}
       </div>
     </div>`;
 }
@@ -1169,6 +1213,7 @@ function applyConfig() {
   setVal('t-cookies-path',   c['gamdl-cookies-path']||'');
   updateEngineUI(c['engine']||'zhaarey');
   loadTokensToUI();
+  try { window.DLOrb && DLOrb.applyConfig(); } catch (_) {}
 }
 
 function setVal(id,v){ const el=document.getElementById(id); if(el) el.value=v??''; }
@@ -1661,8 +1706,9 @@ const THEMES = {
   ember:    { light:false, icon:'🔥' },
   sepia:    { light:true,  icon:'📜' },
   light:    { light:true,  icon:'☀️' },
+  neon:     { light:false, icon:'💗' },
 };
-const THEME_ORDER = ['dark','midnight','ember','sepia','light'];
+const THEME_ORDER = ['dark','midnight','ember','sepia','light','neon'];
 
 function setTheme(t) {
   const spec = THEMES[t] || THEMES.dark;
@@ -1746,6 +1792,41 @@ function _applyPlayerPrefsToUI() {
       if (lb) lb.textContent = v > 0 ? `+${v}` : String(v);
     });
 }
+
+// ── COVER FADE-IN SAFETY NET ─────────────────────────────────────────────
+// Обложки с data-cover невидимы (opacity:0) до класса .loaded, который вешает
+// инлайновый onload. Но картинка ИЗ КЭША успевает догрузиться ДО того, как
+// обработчик навесится (вставка через innerHTML) — `load` не выстрелит, .loaded
+// не появится, и обложка останется прозрачной НАВСЕГДА. Отсюда «периодически
+// нет обложек» в плеере и радаре: чаще на повторных заходах, т.е. именно там,
+// где кэш уже прогрет. Подметаем всё, что уже complete, и вешаем свои
+// обработчики на остальное. error тоже помечаем — иначе битая ссылка держит
+// пустое место вместо плейсхолдера.
+function _sweepCovers(root) {
+  const scope = root && root.querySelectorAll ? root : document;
+  scope.querySelectorAll('img[data-cover]:not(.loaded)').forEach(img => {
+    if (img.complete && img.naturalWidth > 0) { img.classList.add('loaded'); return; }
+    img.addEventListener('load',  () => img.classList.add('loaded'), {once: true});
+    img.addEventListener('error', () => img.classList.add('loaded'), {once: true});
+  });
+}
+// Один наблюдатель на всё приложение: любой новый DOM (радар, плеер, поиск,
+// библиотека) проходит через подметание. Троттлим через rAF, чтобы массовая
+// вставка карточек не дёргала обход на каждый узел.
+(function _initCoverSweeper() {
+  let pending = false;
+  const kick = () => {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => { pending = false; try { _sweepCovers(document); } catch (_) {} });
+  };
+  const start = () => {
+    kick();
+    try { new MutationObserver(kick).observe(document.body, {childList: true, subtree: true}); } catch (_) {}
+  };
+  if (document.body) start();
+  else document.addEventListener('DOMContentLoaded', start, {once: true});
+})();
 
 function applyStoredPrefs() {
   const t = localStorage.getItem('amd-theme') || 'dark';
@@ -2127,6 +2208,17 @@ async function loadReleases(force = false) {
     );
   });
 
+  // Лейблы из вишлиста — отдельный источник, потому что лейбл не артист: у него
+  // нет id, xref его не резолвит, и в списки артистов сервисов он не попадает.
+  // ВЫКЛЮЧЕН по умолчанию: пока `show-radar-labels` не выставлен в true, этой
+  // ветки не существует, лишнего запроса нет, и лента радара ровно та же.
+  if (S.config?.['show-radar-labels'] === true) {
+    fetches.push(
+      fetch(`/api/releases/labels?days=${days}${force ? '&force=1' : ''}`)
+        .then(r => r.json()).catch(e => ({ok: false, releases: [], error: e.message}))
+    );
+  }
+
   if(!fetches.length) {
     if(st) st.style.display = 'none';
     if(btn) btn.disabled = false;
@@ -2164,11 +2256,24 @@ async function loadReleases(force = false) {
   _relStopPoll();
 
   // Deduplicate by title+artist+year across services
-  const seen = new Set();
+  const seen = new Map();
   allReleases = allReleases.filter(rel => {
     const key = `${(rel.title||'').toLowerCase()}|${(rel.artist||'').toLowerCase()}|${(rel.year||rel.date||'').slice(0,4)}`;
-    if(seen.has(key)) return false;
-    seen.add(key);
+    const kept = seen.get(key);
+    if(kept) {
+      // Один и тот же релиз приходит и от артиста, за которым следим, и от его
+      // лейбла. Дубля быть не должно, но и повод терять нельзя: оставляем ПЕРВУЮ
+      // карточку (у неё сервис, где релиз уже отдаётся — ради этого весь
+      // кросс-сервисный радар и затевался, ссылку на Spotify скачать нельзя),
+      // и переносим на неё лейбловую метку. Карточка одна и стоит в блоке
+      // лейблов — там повод виден, а путь скачивания остаётся ранним.
+      if(rel.via_label && !kept.via_label) {
+        kept.via_label = true;
+        kept.label = kept.label || rel.label || '';
+      }
+      return false;
+    }
+    seen.set(key, rel);
     return true;
   });
   allReleases.sort((a, b) => (b.date || '').localeCompare(a.date || ''));

@@ -251,6 +251,7 @@ function renderRelChips() {
   const data = _relCache.data || [];
   const newCount = data.filter(_relIsNew).length;
   const favCount = _relFavs.length;
+  const labelCount = data.filter(_relIsLabelRel).length;
   const vc = document.getElementById('rel-view-chips');
   if (vc) {
     const mk = (id, label, clr) => {
@@ -260,7 +261,14 @@ function renderRelChips() {
     vc.innerHTML =
       mk('all', t('ck.f_all'), 'var(--text)') +
       mk('new', '🆕 '+t('rl.new_word') + (newCount ? ' ' + newCount : ''), 'var(--green)') +
-      mk('fav', '★ '+t('rl.fav_word') + (favCount ? ' ' + favCount : ''), 'var(--orange)');
+      mk('fav', '★ '+t('rl.fav_word') + (favCount ? ' ' + favCount : ''), 'var(--orange)') +
+      // Лейблы — это ПРИЗНАК релиза, а не раздел ленты. Отдельный блок сверху
+      // ломал единственную ось радара: наверху переставало быть «самое новое»
+      // и становилось «сначала лейблы, потом новое». Две оси на одном экране
+      // не читаются — владелец назвал это кашей, и он прав. Чип сужает ленту,
+      // оставляя её одной и по датам. Показываем только когда лейбловое есть:
+      // чип, который всегда даёт пусто, — это шум.
+      (labelCount ? mk('labels', '🏷 '+t('rl.labels_block') + ' ' + labelCount, 'var(--green)') : '');
   }
   const tc = document.getElementById('rel-type-chips');
   if (tc) {
@@ -276,10 +284,19 @@ function renderRelChips() {
   }
 }
 
+// Карточка попала в ленту потому, что мы следим за ЛЕЙБЛОМ, а не за артистом.
+// Это разный повод показать релиз. Сначала мы выносили такие карточки отдельным
+// блоком наверх — оказалось хуже: у радара одна смысловая ось, дата, и блок
+// сверху отнимал у верха страницы значение «самое новое». Теперь повод виден
+// бейджем на карточке, а чип «🏷 Лейблы» сужает ленту, не переставляя её.
+// Признак ставит бэкенд (`via_label`), фронт его не выдумывает.
+function _relIsLabelRel(r) { return !!(r && r.via_label); }
+
 function _relGroupGrid(cardsHtml) {
-  // align-items:stretch — чтобы карточки в ряду были одной высоты: у части
-  // релизов есть селектор качества, у части нет, и ряды кнопок стояли вразнобой.
-  return `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:12px;align-items:stretch">${cardsHtml}</div>`;
+  // .card-grid — общая для всех витрин ширина карточки (main.css, --card-min).
+  // Там же align-items:stretch: у части релизов есть селектор качества, у части
+  // нет, и без него ряды кнопок стояли вразнобой.
+  return `<div class="card-grid">${cardsHtml}</div>`;
 }
 function _renderRelFlat(list) {
   return _relGroupGrid(list.map(renderReleaseCard).join(''));
@@ -316,6 +333,7 @@ function _applyRelFilter(resetPage) {
   const q = (document.getElementById('rel-search')?.value || '').toLowerCase().trim();
   if (q) data = data.filter(r => (r.title||'').toLowerCase().includes(q) || (r.artist||'').toLowerCase().includes(q));
   if (_relView === 'new')  data = data.filter(_relIsNew);
+  if (_relView === 'labels') data = data.filter(_relIsLabelRel);
   if (_relTypeOff.size)    data = data.filter(r => !_relTypeOff.has(r.type || 'album'));
 
   const sort = document.getElementById('rel-sort')?.value || 'date_desc';
@@ -361,8 +379,20 @@ function _applyRelFilter(resetPage) {
   }
   if (empty) empty.style.display = 'none';
 
-  const visible = data.slice(0, _relShowing);
   const grouped = (sort === 'date_desc' || sort === 'date_asc');
+  // Лейбловые релизы отделяем В ОБОИХ режимах — и в группах по дате, и в
+  // «плоском». Блок отвечает на вопрос «почему эта карточка здесь», а не «как
+  // отсортировано»: в плоском режиме растворить его значило бы вернуть ровно ту
+  // потерю повода, из-за которой блок и заводится. Сортировка при этом общая —
+  // она применена выше, внутри блока порядок тот же, что и в остальной ленте.
+  //
+  // ⚠️ Блок строится из ВСЕГО отфильтрованного набора, а НЕ из видимой страницы.
+  // Первая редакция брала `data.slice(0, _relShowing)` — и при 2673 релизах в
+  // ленте в первую сотню попадало два лейбловых из двадцати четырёх, которые
+  // честно отдал сервер. Снаружи это выглядело как «источник не работает».
+  // Постраничность — свойство основной ленты, к отдельному разделу она не
+  // применяется: лейбловых релизов десятки, а не тысячи.
+  const visible = data.slice(0, _relShowing);
   grid.innerHTML = grouped ? _renderRelGroups(visible) : _renderRelFlat(visible);
   _relUpdateLoadMore(data.length);
   _relHydrateQualitySelects();
@@ -400,6 +430,11 @@ function _relShowMore() {
   _relShowing += _REL_PAGE_SIZE;
   const slice = data.slice(from, _relShowing);
   if (!grid || !slice.length || from === 0) { _applyRelFilter(); return; }
+  // Догрузка дописывает карточки В КОНЕЦ сетки, а лейбловый блок стоит
+  // отдельно и выше — добавка ушла бы мимо него. Пока в ленте есть лейбловые
+  // релизы, перерисовываем видимое целиком (страница уже отфильтрована и
+  // отсортирована, считать заново нечего). Нет их — путь ровно прежний.
+  if (data.some(_relIsLabelRel)) { _applyRelFilter(false); return; }
 
   const sortSel = document.getElementById('rel-sort');
   const grouped = (() => { const v = sortSel && sortSel.value; return v === 'date_desc' || v === 'date_asc'; })();
@@ -461,7 +496,11 @@ function _relCacheKey() {
   const days  = document.getElementById('rel-days')?.value  || (S.config?.['releases-days'] || '90');
   const types = document.getElementById('rel-types')?.value || (S.config?.['releases-types'] || 'album,single');
   const svcs  = _relActiveSvcs().join(',');
-  return `${days}|${types}|${svcs}`;
+  // Источник лейблов входит в ключ: иначе выключение переключателя оставляло бы
+  // на экране закэшированную ленту С лейблами до следующего сканирования.
+  // Выключен — ключ ровно прежний, старый кэш продолжает подходить.
+  const lbl   = (S.config?.['show-radar-labels'] === true) ? '|labels' : '';
+  return `${days}|${types}|${svcs}${lbl}`;
 }
 
 function _renderRelActiveSvcs() {
@@ -474,7 +513,12 @@ function _renderRelActiveSvcs() {
   cont.innerHTML = svcs.map(svc =>
     `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;border:1px solid ${colors[svc]||'var(--border)'}33;color:${colors[svc]||'var(--muted)'};background:${colors[svc]||'transparent'}11">`+
     `<span style="width:5px;height:5px;border-radius:50%;background:${colors[svc]||'var(--muted)'}"></span>${svc.charAt(0).toUpperCase()+svc.slice(1)}</span>`
-  ).join('');
+  ).join('')
+  // Лейблы — не сервис, а отдельный источник: показываем отдельным бейджем,
+  // и только когда владелец его включил.
+  + ((S.config?.['show-radar-labels'] === true)
+      ? `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;border:1px solid rgba(62,207,170,.3);color:var(--green);background:rgba(62,207,170,.08)" title="${t('rl.src_labels')}">🏷 ${t('rl.labels_badge')}</span>`
+      : '');
 }
 
 function saveRelSvcConfig() {
@@ -521,6 +565,10 @@ function _syncReleasesSettingsTab() {
     else spSt.textContent = hasSpDc ? '? '+t('rl.checking_word') : '⚠ '+t('rl.not_authed');
   }
 
+  // Лейблы: отдельный источник, свой ключ конфига, по умолчанию выключен.
+  const lcb = document.getElementById('rel-cfg-labels');
+  if (lcb) lcb.checked = (c['show-radar-labels'] === true);
+
   // Defaults
   const dSel = document.getElementById('rel-cfg-days');
   const tSel = document.getElementById('rel-cfg-types');
@@ -528,6 +576,15 @@ function _syncReleasesSettingsTab() {
   if(tSel) tSel.value = c['releases-types'] || 'album,single';
 
   _renderRelActiveSvcs();
+}
+
+// Переключатель «следить по лейблам». Отдельная функция, а не голый
+// saveSetting в разметке: после переключения ленту надо перечитать — иначе
+// источник включён, а на экране прежний кэш.
+function saveRadarLabels(on) {
+  saveSetting('show-radar-labels', !!on);
+  _renderRelActiveSvcs();
+  if (typeof loadReleases === 'function') loadReleases(false);
 }
 
 function _relSaveLS(data, key) {
@@ -655,7 +712,9 @@ function renderReleaseCard(rel) {
         onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text)'">${esc(rel.title)}${hiresBadge}</div>
       <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap${rel.artist_id ? ';cursor:pointer' : ''}" title="${esc(rel.artist)}"
         ${rel.artist_id ? `onclick="event.stopPropagation();openArtistPage('${esc(rel.service)}','${escJ(rel.artist_id)}')" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"` : ''}>${esc(rel.artist)}</div>
-      ${rel.label ? `<div style="font-size:10px;color:var(--muted);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.7" title="${esc(rel.label)}">${esc(rel.label)}</div>` : ''}
+      ${rel.label ? `<div style="font-size:10px;color:${rel.via_label ? 'var(--green)' : 'var(--muted)'};margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:${rel.via_label ? '1' : '.7'};cursor:pointer" title="${esc(rel.label)} — ${t('lbl.open_page')}"
+        onclick="event.stopPropagation();openLabelPage('${escJ(rel.label)}')"
+        onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${rel.via_label ? '🏷 ' : ''}${esc(rel.label)}</div>` : ''}
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${dt}${rel.tracks ? ' · ' + rel.tracks + ' ' + t('p.trk_abbr') : ''}</div>
       ${qualSelect}
       ${lyricsToggle}
@@ -664,15 +723,20 @@ function renderReleaseCard(rel) {
           style="padding:3px 7px;background:transparent;border:1px dashed var(--border);border-radius:6px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font)"
           title="${t('rl.avail_hint')}">${t('rl.avail_check')}</button>
       </div>
-      <div style="display:flex;flex-wrap:wrap;gap:5px;margin-top:7px">
-        <button onclick="downloadRelease(this,'${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}')"
-          style="flex:1 1 100%;padding:5px 0;background:rgba(192,132,160,.12);border:1px solid rgba(192,132,160,.2);border-radius:7px;font-size:10px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--font)">${t('btn.download')}</button>
+      <button class="rel-dl-btn" onclick="downloadRelease(this,'${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}')"
+        style="padding:5px 4px;background:rgba(192,132,160,.12);border:1px solid rgba(192,132,160,.2);border-radius:7px;font-size:10px;font-weight:700;color:var(--red);cursor:pointer;font-family:var(--font)">${t('btn.download')}</button>
+      <!-- .rel-act-row (main.css) — сетка равных колонок: перенос кнопок
+           невозможен по построению, включая пятую («открыть релиз»), которая
+           при старом flex-wrap:wrap болталась на второй строке. Отступы и
+           min-width:0 живут в классе, здесь их задавать НЕЛЬЗЯ: inline
+           перебьёт класс, и колонки снова перестанут сжиматься. -->
+      <div class="rel-act-row">
         <button onclick="smartDownloadRelease(this,'${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}')"
-          style="padding:5px 8px;background:transparent;border:1px solid rgba(255,214,10,.35);border-radius:7px;font-size:11px;color:#ffd60a;cursor:pointer;font-family:var(--font)" title="${t('rl.auto_src')}">⚡</button>
-        ${typeof afButton === 'function' ? afButton(rel.artist, 'padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;font-family:var(--font)') : ''}
-        <button onclick="toggleRelFav('${escJ(uid)}')" style="padding:5px 8px;background:transparent;border:1px solid ${isFav?'var(--orange)':'var(--border)'};border-radius:7px;font-size:11px;color:${isFav?'var(--orange)':'var(--muted)'};cursor:pointer;font-family:var(--font)" title="${isFav?t('sc2.unfav'):t('sc2.fav')}">${isFav?'★':'☆'}</button>
-        <button onclick="navigator.clipboard.writeText('${escJ(rel.url)}');toast(t('toast.link_copied'))" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font)" title="${t('ck.copy_link')}">⎘</button>
-        <a href="${esc(rel.url)}" target="_blank" style="padding:5px 8px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);text-decoration:none;display:flex;align-items:center" title="${t('ck.open_on')} ${escapeHtml(rel.service)}">↗</a>
+          style="background:transparent;border:1px solid rgba(255,214,10,.35);border-radius:7px;font-size:11px;color:#ffd60a;cursor:pointer;font-family:var(--font)" title="${t('rl.auto_src')}">⚡</button>
+        ${typeof afButton === 'function' ? afButton(rel.artist, 'background:transparent;border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;font-family:var(--font)') : ''}
+        <button onclick="toggleRelFav('${escJ(uid)}')" style="background:transparent;border:1px solid ${isFav?'var(--orange)':'var(--border)'};border-radius:7px;font-size:11px;color:${isFav?'var(--orange)':'var(--muted)'};cursor:pointer;font-family:var(--font)" title="${isFav?t('sc2.unfav'):t('sc2.fav')}">${isFav?'★':'☆'}</button>
+        <button onclick="navigator.clipboard.writeText('${escJ(rel.url)}');toast(t('toast.link_copied'))" style="background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font)" title="${t('ck.copy_link')}">⎘</button>
+        <a href="${esc(rel.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" style="background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);text-decoration:none" title="${t('ck.open_on')} ${escapeHtml(rel.service)}">↗</a>
       </div>
     </div>
   </div>`;
@@ -765,7 +829,8 @@ async function smartDownloadRelease(btn, url, title, artist) {
       return;
     }
     const c = r.chosen;
-    const svcName = {apple:'Apple', qobuz:'Qobuz', tidal:'Tidal', deezer:'Deezer'}[c.service] || c.service;
+    const svcName = {apple:'Apple', qobuz:'Qobuz', tidal:'Tidal', deezer:'Deezer',
+                     beatport:'Beatport', yandex:'Yandex'}[c.service] || c.service;
     const regionTag = c.region ? ` ${c.region.toUpperCase()}` : '';
     const q = c.quality || resolveQuality(c.service);
     const add = await api('POST', '/api/queue/add', {url: c.url, quality: q, title: c.title || title, artist: c.artist || artist});
@@ -921,11 +986,16 @@ async function relCheckAvail(btn, url, title, artist) {
  * русскую строку — и она лезла в английский интерфейс как есть.
  */
 function _availSummary(svcs) {
-  const by = {ready: [], waiting: [], region: [], notoken: [], noid: []};
+  const by = {ready: [], waiting: [], region: [], rights: [], notoken: [], noid: []};
   Object.keys(svcs || {}).forEach(function (s) {
     const v = svcs[s] || {};
     if (v.available) { by.ready.push(s); return; }
     if (v.reason === 'region_locked')  { by.region.push(s);  return; }
+    // «Есть в каталоге, но у нашей учётки нет прав» — НЕ то же, что гео-лок:
+    // регион лечится аккаунтом в другой стране, права — другой учёткой или
+    // подпиской. Свалить их в одну строку значит отправить человека искать
+    // прокси там, где прокси не поможет.
+    if (v.reason === 'no_entitlement') { by.rights.push(s);  return; }
     if (v.reason === 'no_token')       { by.notoken.push(s); return; }
     if (v.reason === 'no_identifier')  { by.noid.push(s);    return; }
     by.waiting.push(s);
@@ -934,6 +1004,7 @@ function _availSummary(svcs) {
   if (by.ready.length)   parts.push('✅ ' + by.ready.join(', ')   + ' — ' + t('rl.av_ready'));
   if (by.waiting.length) parts.push('⏳ ' + by.waiting.join(', ') + ' — ' + t('rl.av_waiting'));
   if (by.region.length)  parts.push('🚫 ' + by.region.join(', ')  + ' — ' + t('rl.av_region'));
+  if (by.rights.length)  parts.push('🔒 ' + by.rights.join(', ')  + ' — ' + t('rl.av_rights'));
   if (by.notoken.length) parts.push('🔑 ' + by.notoken.join(', ') + ' — ' + t('rl.av_notoken'));
   if (by.noid.length)    parts.push('❔ ' + by.noid.join(', ')    + ' — ' + t('rl.av_noid'));
   return parts.join(' · ') || t('rl.av_nowhere');

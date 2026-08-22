@@ -44,6 +44,11 @@ python tools/check_i18n_keys.py
 Все три должны быть чисты (сканер возвращает 0). Подробности и правила —
 скилл `ripster-frontend-file-drift`.
 
+Сканер молчит про находки, если консоль в cp1251 и он падает на печати `✗` —
+он сам себе это чинит (`reconfigure(encoding="utf-8")`), но если добавляешь свою
+проверку, помни: **`EXIT=1` без списка проблем — это сломанный инструмент, а не
+чистый прогон.** См. скилл `ripster-honest-diagnostics`.
+
 ## Gate 0.5 — No console-script `.exe` shims under the embeddable Python
 
 **Why (cost a tester's Qobuz AND Deezer simultaneously):** setuptools console-script
@@ -97,15 +102,35 @@ running RELEASE_VERSION to the latest GitHub release tag).
 ## Gate 3 — Deanon / privacy
 
 ```bash
-# No real identity anywhere that ships or is public:
-grep -rniI "<your-personal-email>\|@gmail" github_setup/ --include=*.md --include=*.py \
+# No real identity anywhere that ships or is public. The pattern itself must live
+# OUTSIDE this file: writing the maintainer's handle into a gate that ships in a
+# public repo IS the leak the gate exists to prevent (it shipped that way from
+# 3.6.0 to 3.6.2 — removed 22.08.2026). Keep it in an untracked local file:
+#   echo 'my-handle\|my-old-nick' > .deanon-patterns    # gitignored
+PAT_FILE=.deanon-patterns
+[ -f "$PAT_FILE" ] || { echo "no $PAT_FILE — Gate 3 cannot run"; exit 1; }
+grep -rniI "$(cat $PAT_FILE)\|@gmail" github_setup/ --include=*.md --include=*.py \
   --include=*.iss --include=*.yaml --include=*.html --include=*.js | grep -vi binary
-# Release bodies on GitHub (they are public even on a private repo's release page):
-#   curl -s -H "Authorization: Bearer $PAT" .../releases | grep <your-personal-email>
+# Release bodies on GitHub (public even on a private repo's release page):
+#   curl -s -H "Authorization: Bearer $PAT" .../releases | grep -f "$PAT_FILE"
 ```
 Must be empty. (Commit-author history is a separate, KNOWN item — scrub via history
 rewrite + force-push BEFORE flipping the repo public; see memory.)
 Also: `.iss` AppPublisher/AppURL stay neutral (Raccoon-Trashpanda).
+
+**Provenance of shipped files** — same class, different origin: a generated image
+carries a C2PA manifest (`trainedAlgorithmicMedia` in JPEG APP11 / PNG `caBX`),
+and chat-pasted text carries invisible characters that break word search.
+
+```bash
+python tools/check_ai_traces.py            # 0 = clean, 1 = something ships marked
+python tools/check_ai_traces.py --selftest # proves the check can go red
+```
+Red ONLY on what actually ships (`github_setup/`, `static/`, `installer/`);
+`design/` is a workshop and is reported for information only. Fixing is lossless
+for images — see the `ai-traces-hygiene` skill. Do NOT "rewrite text so a detector
+won't flag it": that trades the author's wording for the rewriter model's ceiling
+and cannot be verified.
 
 ## Gate 4 — Clean install + boot (the bundle is intact)
 
@@ -223,8 +248,8 @@ for msg in ['Qobuz: 0 треков','needs deezer-arl','set yandex-token']:
 
 ```bash
 # Owner tunnel up + ingest reachable cross-site (it is CSRF-exempt + token-gated)
-curl -s https://<your-tunnel>.serveousercontent.com/api/ping -w " %{http_code}\n"   # 200
-curl -s -X POST https://<your-tunnel>.serveousercontent.com/api/telemetry/ingest \
+curl -s https://raccoon-ripster.serveousercontent.com/api/ping -w " %{http_code}\n"   # 200
+curl -s -X POST https://raccoon-ripster.serveousercontent.com/api/telemetry/ingest \
   -H "Content-Type: application/json" \
   -d '{"instance_id":"preflight","token":"<shared token>","lines":[{"t":0,"level":"error","text":"preflight"}]}' \
   -w " %{http_code}\n"     # {"ok":true,...}  NOT 403 (CSRF) / 502 (tunnel down)

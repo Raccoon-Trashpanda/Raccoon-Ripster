@@ -283,7 +283,7 @@ def _cleanup(service: str) -> None:
 async def start(service: str) -> dict:
     spec = TARGETS.get(service)
     if not spec:
-        return {"ok": False, "error": f"Неизвестный сервис: {service}"}
+        return {"ok": False, "error_key": "err.unknown_service", "error_args": {"service": service}, "error": f"Неизвестный сервис: {service}"}
 
     prev = _sessions.get(service)
     if prev and prev.get("state") == "waiting":
@@ -292,7 +292,7 @@ async def start(service: str) -> dict:
 
     browser = find_browser()
     if not browser:
-        return {"ok": False, "error": "Не найден Chrome или Edge — вход открыть нечем"}
+        return {"ok": False, "error_key": "err.no_browser_found", "error": "Не найден Chrome или Edge — вход открыть нечем"}
 
     port = _free_port()
     profile = tempfile.mkdtemp(prefix=f"ripster_login_{service}_")
@@ -309,7 +309,7 @@ async def start(service: str) -> dict:
         proc = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:                                    # noqa: BLE001
         shutil.rmtree(profile, ignore_errors=True)
-        return {"ok": False, "error": f"Не удалось запустить браузер: {str(e)[:140]}"}
+        return {"ok": False, "error_key": "err.browser_start_failed", "error_args": {"e": str(e)[:140]}, "error": f"Не удалось запустить браузер: {str(e)[:140]}"}
 
     # ждём, пока протокол отладки поднимется
     ready = False
@@ -324,7 +324,7 @@ async def start(service: str) -> dict:
         except Exception:
             pass
         shutil.rmtree(profile, ignore_errors=True)
-        return {"ok": False, "error": "Браузер не отдал протокол отладки"}
+        return {"ok": False, "error_key": "err.browser_no_cdp", "error": "Браузер не отдал протокол отладки"}
 
     _sessions[service] = {"state": "waiting", "proc": proc, "profile": profile,
                           "port": port, "started": time.time(), "cancelled": False}

@@ -139,7 +139,7 @@ async function svcLogin(service, inputId, btn) {
     try { s = await api('GET', `/api/login/${service}/status`); } catch (e) { return; }
     if (!s || s.state === 'waiting') {
       const sec = (s && s.waiting_sec) || 0;
-      say((r.hint || t('sl.waiting')) + (sec > 5 ? ` (${sec} с)` : ''), '#0a84ff');
+      say((r.hint || t('sl.waiting')) + (sec > 5 ? ` (${sec} ${t('sl.sec_short')})` : ''), '#0a84ff');
       return;
     }
     done();

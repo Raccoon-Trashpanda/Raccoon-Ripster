@@ -150,12 +150,21 @@ async def reports_push_bot(body: dict | None = None):
     if code:
         items = [r for r in items if str(r.get("code", "")).upper() == code]
     if not items:
-        return {"ok": False, "error": "нечего отправлять"}
+        return {"ok": False, "error_key": "err.nothing_to_send", "error": "нечего отправлять"}
     sent, failed = [], []
     for rec in reversed(items):            # от старых к новым — читать по порядку
         fp = _t.report_path(str(rec.get("code") or ""))
         if fp is None:
-            failed.append({"code": rec.get("code"), "error": "архив не найден"})
+            # Ключ `info`, а не `error`: именно `info` читает тост
+            # (telemetry_ui.js → r.failed[0].info). Пока здесь стоял `error`,
+            # причина не доезжала вообще — человек видел «Не отправилось: —»
+            # на единственном отказе, у которого причина точно известна.
+            # `info_key` — контракт для СПИСКОВ: `api()` разворачивает только
+            # верхнеуровневый `error_key`, до элементов он не добирается, поэтому
+            # разворачиваем на месте отрисовки.
+            failed.append({"code": rec.get("code"),
+                           "info_key": "err.report_archive_missing",
+                           "info": "архив не найден"})
             continue
         ok, why = await _t.notify_owner_bot(rec, fp)
         (sent if ok else failed).append({"code": rec.get("code"), "info": why})

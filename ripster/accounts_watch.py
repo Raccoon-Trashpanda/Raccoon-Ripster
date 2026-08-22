@@ -59,6 +59,25 @@ async def _survey() -> list[dict]:
     return res.get("accounts") or []
 
 
+def _svc_name(svc: str) -> str:
+    """Человеческое имя службы для сообщения в бот.
+
+    Технический ключ в тексте владельцу — загадка вместо новости:
+    «apple_wrapper» не говорит ни что сломалось, ни куда идти чинить. Сам текст
+    лежит в реестре `ripster/i18n.py` (ключи `svc.*`), а не здесь: в Ripster
+    видимые человеку строки по месту не пишутся. Ключа нет — отдаём как есть,
+    это лучше пустоты.
+    """
+    try:
+        from ripster import i18n as _i18n
+        key = f"svc.{svc}"
+        if key in _i18n.FALLBACK:
+            return _i18n.tr(key)
+    except Exception:
+        pass
+    return svc
+
+
 def _diff(old: dict, rows: list[dict]) -> list[str]:
     """Только изменения статуса. Первый прогон изменениями не считается."""
     msgs = []
@@ -69,9 +88,9 @@ def _diff(old: dict, rows: list[dict]) -> list[str]:
             continue                      # первое знакомство — не новость
         if was.get("ok") != ok:
             if ok:
-                msgs.append(f"✅ {svc}: снова отвечает")
+                msgs.append(f"✅ {_svc_name(svc)}: снова отвечает")
             else:
-                msgs.append(f"🔴 {svc}: перестал отвечать — {r.get('error') or 'без причины'}")
+                msgs.append(f"🔴 {_svc_name(svc)}: перестал отвечать — {r.get('error') or 'без причины'}")
     return msgs
 
 

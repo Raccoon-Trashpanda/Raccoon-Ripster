@@ -193,6 +193,27 @@ def _ps_proc_count(cmdline_regex: str) -> int:
         return 0
 
 
+def _app_started_ts() -> float:
+    """Когда стартовал ЖИВОЙ app.py (unix-время), 0.0 — если определить не вышло.
+
+    Нужно, чтобы отличать поломки, случившиеся под ТЕКУЩИМ кодом, от тех, что
+    произошли до перезапуска и уже исправлены. Без этого суточное окно любой
+    проверки держит предупреждение ещё сутки после починки — и следующее
+    пробуждение заново выводит диагноз по симптому, которого больше нет.
+    """
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "$p = Get-CimInstance Win32_Process -Filter \"Name='python.exe' OR "
+             "Name='pythonw.exe'\" | Where-Object { $_.CommandLine -match 'app\\.py' } "
+             "| Sort-Object CreationDate | Select-Object -First 1; "
+             "if ($p) { [int][double]::Parse((Get-Date $p.CreationDate -UFormat %s)) }"],
+            capture_output=True, text=True, timeout=30, creationflags=CNW)
+        return float((r.stdout or "0").strip() or 0)
+    except Exception:
+        return 0.0
+
+
 _DETACHED = 0x00000008  # DETACHED_PROCESS
 
 
@@ -508,6 +529,120 @@ def check_tokens():
         ok("Токены всех сервисов на месте")
 
 
+def check_token_files():
+    """Файл в tokens/, который приложение молча НЕ применяет.
+
+    `config_service._load_token_files` требует `key: value` и правильно
+    отказывается есть что-то другое — но говорит об этом строкой в stderr. Её
+    никто не читает: `tokens/soundcloud.yaml` пролежал так с 01.06 по 14.08.2026
+    (в него вписали логин и пароль двумя строками), и всё это время он выглядел
+    как настроенный токен, а был пустым местом.
+
+    Не чиним автоматически СПЕЦИАЛЬНО: угадывать, какой ключ имелся в виду для
+    руками вписанного секрета, — это записать чужую строку не в то поле. Наше
+    дело — чтобы владелец про это узнал.
+
+    ВАЖНО про формулировку. Первая версия писала «Файлы токенов игнорируются —
+    приложение их НЕ применяет», и это прочли как «SoundCloud не работает», хотя
+    рабочий токен лежал в config.yaml, был жив (Go+) и качал с расшифровкой DRM.
+    Тревога была формально верной и по смыслу ложной. Поэтому теперь мы СНАЧАЛА
+    смотрим, настроен ли сервис в config.yaml, и различаем два разных случая:
+    лишний файл при рабочем сервисе — это уборка, а не авария.
+    """
+    import datetime as _dt
+    import re as _re2
+    tdir = ROOT / "tokens"
+    if not tdir.is_dir():
+        ok("Папки tokens/ нет — всё из config.yaml")
+        return
+    # Без pyyaml (у этой проверялки его сознательно нет): смотрим ВЕРХНЕУРОВНЕВЫЕ
+    # строки. У отображения каждая начинается с `ключ:`; строки с отступом и
+    # элементы списка — продолжения значения и в счёт не идут.
+    _KEY = _re2.compile(r"^[\w.\-]+\s*:")
+    # Какой ключ config.yaml делает сервис рабочим БЕЗ файла в tokens/.
+    _CFG_KEY = {
+        "soundcloud": "soundcloud-oauth-token", "qobuz": "qobuz-auth-token",
+        "tidal": "tidal-token", "deezer": "deezer-arl",
+        "apple": "media-user-token", "yandex": "yandex-token",
+        "tl1001": "tl1001-email",
+    }
+    bad, cosmetic = [], []
+    for tf in sorted(tdir.glob("*.yaml")):
+        try:
+            lines = tf.read_text(encoding="utf-8-sig").splitlines()
+        except Exception as e:
+            bad.append(f"{tf.name} (не читается: {str(e)[:40]})")
+            continue
+        top = [ln for ln in lines
+               if ln.strip() and not ln.lstrip().startswith(("#", "-"))
+               and not ln[:1].isspace()]
+        if top and not any(_KEY.match(ln) for ln in top):
+            age = ""
+            try:
+                d = _dt.date.fromtimestamp(tf.stat().st_mtime)
+                age = f", с {d.strftime('%d.%m.%Y')}"
+            except Exception:
+                pass
+            # Сервис уже настроен в config.yaml? Тогда файл — мусор, а не поломка.
+            cfg_key = _CFG_KEY.get(tf.stem)
+            if cfg_key and str(_cfg_get(cfg_key) or "").strip():
+                cosmetic.append(f"{tf.name}{age}")
+            else:
+                bad.append(f"{tf.name} (не key: value{age})")
+    if bad:
+        warn(f"Сервис настроен ТОЛЬКО файлом, а файл не читается: {'; '.join(bad)}"
+             f" — нужен формат 'ключ: значение', иначе сервис без токена")
+    elif cosmetic:
+        # Не warn: ничего не сломано, чинить нечего, а красная строка про рабочий
+        # сервис приучает не читать отчёт.
+        ok(f"Лишние файлы в tokens/ (сервис работает из config.yaml, файл не "
+           f"читается и не нужен): {'; '.join(cosmetic)}")
+    else:
+        ok(f"Файлы токенов читаются ({len(list(tdir.glob('*.yaml')))} шт.)")
+
+
+def check_spotify_bearer():
+    """Свежесть web-player Bearer'а Spotify — а не «лежит ли файл».
+
+    ЗАЧЕМ ОТДЕЛЬНАЯ ПРОВЕРКА. 10.08.2026 Bearer не обновлялся 6 часов (радар и
+    OGG-загрузки мертвы), а сводка была зелёной: `check_tokens` смотрит поля
+    конфига, `check_engine_probe` — свои пробы, и ни одна не знает про файл
+    `orpheus/config/spotify-token.txt`, который живёт ~60 минут. Нашлось только
+    ручным разбором бакета ошибок. Причина была в интерпретаторе: app.py
+    перезапустили под `C:\\Python314`, где нет `librespot`, и минт молча падал.
+    Кипер теперь сам выбирает интерпретатор, но проверка ГОДНОСТИ ПО ВОЗРАСТУ
+    нужна независимо от причины — она поймает и следующую, ещё неизвестную.
+    """
+    tok = ROOT / "orpheus" / "config" / "spotify-token.txt"
+    blob = ROOT / "orpheus" / "config" / ".librespot_cache" / "reusable_credentials.json"
+    if not blob.exists():
+        return                      # не спарен — кипер намеренно спит, это не поломка
+    age = (time.time() - tok.stat().st_mtime) / 60 if tok.exists() else 1e9
+    if age < 55:
+        ok(f"Spotify Bearer свежий ({int(age)} мин из ~60) — радар и OGG живы")
+        return
+    stale = "отсутствует" if age > 1e8 else f"протух ({int(age)} мин, живёт ~60)"
+    if NO_FIX:
+        warn(f"Spotify Bearer {stale} — радар и OGG-загрузки не работают")
+        return
+    try:
+        sys.path.insert(0, str(ROOT))
+        import asyncio as _a
+        from ripster import spotify_token_keeper as _k
+        got = _a.run(_k.mint_now(ROOT))
+    except Exception as e:
+        got = False
+        _last = f"{type(e).__name__}: {e}"
+    else:
+        _last = ""
+    if got and tok.exists() and (time.time() - tok.stat().st_mtime) < 300:
+        fixed(f"Spotify Bearer перевыпущен (был {stale})")
+    else:
+        bad(f"Spotify Bearer {stale}, перевыпустить НЕ удалось{(' — ' + _last) if _last else ''}. "
+            f"Радар/OGG стоят. Проверь `librespot` хотя бы в одном интерпретаторе "
+            f"(.venv) и блоб: tools/spotify_pair.py")
+
+
 def check_engine_probe():
     """Реально ли работают сервисы — по настоящим пробам, а не по наличию токена.
 
@@ -590,6 +725,46 @@ def _serveo_sshd_note() -> str:
     return ""
 
 
+def _tunnel_probe(url: str) -> int:
+    """HTTP-код туннеля, 0 = соединение не состоялось."""
+    try:
+        req = urllib.request.Request(url, method="GET", headers={"User-Agent": "hc"})
+        with urllib.request.urlopen(req, timeout=12, context=_trust_ctx()) as r:
+            return r.status
+    except urllib.error.HTTPError as he:
+        return he.code
+    except Exception:
+        return 0
+
+
+def _tunnel_restart_window() -> str:
+    """Была ли за последние 5 минут пересборка туннеля после старта приложения.
+
+    15.08.2026. Каждый запуск app.py зовёт auto_start_tunnel(), а прежняя
+    ssh-сессия ещё удерживает поддомен, поэтому новая падает с 'remote port
+    forwarding failed for listen port 80'; сторож поднимает связь секунд через
+    20. Всё это время край serveo отвечает 502 — апстрима у него нет. Это окно
+    перезапуска, а не авария, и путать их нельзя."""
+    log = ROOT / "tunnel.log"
+    try:
+        tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+    except Exception:
+        return ""
+    now = datetime.now()
+    for line in reversed(tail):
+        if "listen port 80" not in line and "tunnel down" not in line:
+            continue
+        try:
+            t = datetime.strptime(line[:8], "%H:%M:%S").replace(
+                year=now.year, month=now.month, day=now.day)
+        except Exception:
+            continue
+        if 0 <= (now - t).total_seconds() <= 300:
+            return (f" В {t:%H:%M:%S} приложение перезапускалось и туннель "
+                    f"пересобирался — это окно перезапуска, а не авария.")
+    return ""
+
+
 def check_tunnel():
     url = _cfg_get("public-url")
     if not url or _cfg_get("remote-enabled") not in ("true", "True", "1"):
@@ -605,7 +780,33 @@ def check_tunnel():
         if he.code < 500:
             _streak("tunnel_serveo_side", False)
             ok(f"Туннель отвечает ({url}, HTTP {he.code})"); return
-        warn(f"Туннель вернул {he.code} (5xx) — сервер за туннелем нездоров")
+        # 🔴 15.08.2026. Здесь стояло «сервер за туннелем нездоров» — вердикт,
+        # который проверка не имела права выносить: в том же проходе app (7799)
+        # ответил 200. 502 отдаёт КРАЙ serveo, когда у него нет апстрима, а нет
+        # его ровно те ~20 секунд, пока пересобирается ssh после перезапуска
+        # приложения. Мы сообщали владельцу поломку сервера там, где был
+        # короткий провал связи — и не сообщали, если бы сервер лёг по-настоящему.
+        # Теперь: перепроверяем после паузы, отделяем НАШУ сторону от их края и
+        # считаем серию, как это давно делает ветка «TCP есть, HTTP молчит».
+        local_ok = _app_alive()
+        note = _tunnel_restart_window()
+        time.sleep(20)
+        again = _tunnel_probe(url)
+        if again and again < 500:
+            _streak("tunnel_serveo_side", False)
+            ok(f"Туннель отвечает ({url}, HTTP {again}); {he.code} был кратким "
+               f"провалом — на перепроверке через 20 с всё поднялось.{note}")
+            return
+        n = _streak("tunnel_serveo_side", True)
+        tail = (f" Это {n}-я проверка подряд — само не чинится."
+                if n >= 2 else "")
+        if local_ok:
+            warn(f"Туннель отдаёт {he.code}, хотя app (7799) отвечает — лежит не "
+                 f"наш сервер, а связь с ним: у края serveo нет апстрима "
+                 f"(ssh-сессия не держится).{note}{tail}")
+        else:
+            bad(f"Туннель отдаёт {he.code} И app (7799) не отвечает — лежит сам "
+                f"сервер, туннелю нечего отдавать.{tail}")
     except Exception as e:
         # A TLS trust failure is NOT the tunnel being down: serveo's wildcard cert
         # is theirs to renew, and reconnecting the ssh session does nothing for it
@@ -909,6 +1110,16 @@ _ERR_BUCKETS = [
     # маршрутизации там, где её нет.
     ("apple-album-unavailable", ("failed to get album response",
                                  "error getting album response")),
+    # «У трека нет текста» — НОРМА, а не поломка: печатается на КАЖДЫЙ трек, и
+    # 10.08.2026 семнадцать таких строк составили большинство бакета `other`,
+    # пряча в нём настоящую находку (мёртвый минт Spotify). Отдельное имя нужно
+    # ещё и потому, что раньше причину было не отличить: и 401 без подписки, и
+    # 404 не в том магазине, и честное «текста нет» давали одну строку «failed to
+    # get lyrics». Теперь сообщение называет статус и магазин, а права видно по
+    # ключу `media-user-token rejected` — вот ЕГО в этом бакете быть не должно,
+    # он попадёт в `other` и потребует разбора.
+    ("lyrics-none",         ("lyrics not found", "no lyrics resource there",
+                             "no lyrics in response", "lyrics entry present but empty")),
     ("apple-hires-wrapper", ("wm.wol.moe", "wrapper-manager", "decrypt stream", "деш",
                               "wrappermanagerexception", "no healthy and ready instances",
                               "caught internally by rip_song")),
@@ -940,8 +1151,13 @@ _ERR_BUCKETS = [
     # запросе ПОТОКА (логин при этом проходит, подписка активна) — это права на
     # конкретный релиз, а не регион и не поломка. 29.07.2026 дало 21 безымянную
     # строку в `other` от одного релиза, качавшегося по кругу.
+    # 09.08.2026: строка САМОЙ отсечки («Прогон прерван: … отказал в правах на 10
+    # треках подряд») сюда не попадала — формулировка другая, — и все 7 строк
+    # `other` за сутки оказались этим же Beatport'ом. `other` обязан значить
+    # «такого я ещё не видел», иначе новый сбой в нём не заметен.
     ("beatport-entitlement", ("do not have permission to perform this action",
-                              "не хватает прав на скачивание")),
+                              "не хватает прав на скачивание",
+                              "отказал в правах")),
     ("beatport-region",     ("region locked", "territory restricted")),
     # Deezer отдаёт трек, но не в запрошенном качестве (нет FLAC/320 у источника).
     # Это состояние источника/ARL, а не поломка: сообщение уже само советует, что
@@ -963,6 +1179,89 @@ _ERR_BUCKETS = [
     # дойдёт. Смысл `other` — «такого я ещё не видел», и он должен быть честным.
     ("noise-tail",          ("exit code 0", "=== track ")),
 ]
+
+
+def check_retry_storms():
+    """Задача, которая повторялась и КАЖДЫЙ раз сохранила ноль файлов.
+
+    Отдельный класс от «много ошибок»: повтор осмыслен, когда второй проход
+    добирает недостающее, и бессмыслен, когда отказ детерминированный (нет прав
+    у аккаунта, релиза нет в магазине, сервер лежит). Отличить их должен
+    `_RE_NO_RETRY` / фаст-фейл в runner.py — но именно эти детекторы дважды
+    оказывались МЁРТВЫМИ, потому что были заякорены на строку, которая до
+    проверки не доходит: 08.08 отсечка враппера ждала фразу, которую tenacity
+    обрезает (24 мин, 830 ERROR, 0 файлов), 09.08 отсечка по правам Beatport
+    ловила `do not have permission` и `отказал в правах`, а в `msg` приходило
+    «не хватает прав» (4 прогона × 10 отказов).
+
+    Детектор, не сработавший ни разу, неотличим от «проблемы не бывает», поэтому
+    здесь проверяется СИМПТОМ, а не конкретная формулировка: сколько раз за сутки
+    раннер объявлял авто-повтор, уже имея ноль сохранённых треков. Это ловит
+    следующий мёртвый детектор, каким бы ни был его текст.
+    """
+    log = ROOT / "logs" / "console.log"
+    if not log.exists():
+        return
+    try:
+        import re as _re
+        cutoff = datetime.now().timestamp() - 24 * 3600
+        lines = log.read_text(encoding="utf-8", errors="ignore").splitlines()[-8000:]
+        fresh = []
+        for ln in lines:
+            m = _re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)", ln)
+            if m:
+                try:
+                    if datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp() < cutoff:
+                        continue
+                except Exception:
+                    pass
+            fresh.append(ln)
+        # «Прогон прерван» = движок сам вынес вердикт «дальше бессмысленно».
+        # Если следом идёт авто-повтор — внешний слой этот вердикт выбросил.
+        # Инциденты ДО старта текущего app.py случились под другим кодом. Если
+        # отсечку с тех пор починили и приложение перезапустили, симптом уже не
+        # воспроизводится — но суточное окно держало бы предупреждение ещё сутки,
+        # и следующее пробуждение выводило бы диагноз по несуществующей проблеме
+        # (ровно так и вышло 10.08: все 5 инцидентов были от 09.08 17:10–17:45,
+        # правка легла в 22:48, приложение перезапущено в 23:49).
+        app_ts = _app_started_ts()
+        storms = live = 0
+        for i, ln in enumerate(fresh):
+            if "Прогон прерван" not in ln:
+                continue
+            # Только РЕАЛЬНЫЙ повтор («повтор 2/3 через 45с», «⟳ Авто-повтор 2/3»),
+            # не совет в тексте ошибки («повтори с другим треком, чтобы понять
+            # масштаб») — иначе проверка сама себе завышает счёт.
+            nxt = " ".join(fresh[i + 1:i + 3])
+            if not _re.search(r"Авто-повтор|повтор\s+\d+\s*/\s*\d+", nxt):
+                continue
+            storms += 1
+            m = _re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)", ln)
+            when = 0.0
+            if m:
+                try:
+                    when = datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+                except Exception:
+                    pass
+            # Без надёжной отметки времени считаем инцидент живым — умалчивать
+            # опаснее, чем лишний раз предупредить.
+            if not app_ts or not when or when >= app_ts:
+                live += 1
+        if live >= 3:
+            warn(f"Повторы вхолостую: {live} раз за сутки движок объявил «прогон прерван» "
+                 f"(ноль сохранённых), а раннер всё равно пошёл на авто-повтор. Значит, отсечка "
+                 f"не узнала отказ. С 10.08 раннер читает сам вердикт движка (`abort_reason`) "
+                 f"помимо `_RE_NO_RETRY` — если счёт живой, вердикт до раннера не доходит: "
+                 f"grep «Прогон прерван» в logs/console.log")
+        elif live:
+            ok(f"Повторы вхолостую: {live} — единичные, отсечка в целом держит")
+        elif storms:
+            ok(f"Повторы вхолостую: {storms} за сутки, но все ДО перезапуска app.py — "
+               f"под текущим кодом ни одного, окно дочистится само")
+        else:
+            ok("Повторов вхолостую нет — отсечка безнадёжных прогонов работает")
+    except Exception as e:
+        _report.append(f"↻ Повторы вхолостую: не смог посчитать ({str(e)[:50]})")
 
 
 def check_errors_24h():
@@ -1112,6 +1411,8 @@ def main():
         check_apple_wrapper()
         check_gamdl_cookies()
         check_tokens()
+        check_token_files()
+        check_spotify_bearer()
         check_engine_probe()
         check_tunnel()
         check_queue()
@@ -1120,6 +1421,7 @@ def main():
         check_botapi_responsive()
         check_external_apis()
         check_disk()
+        check_retry_storms()
         check_errors_24h()
     status = "🟢 ВСЁ ЗДОРОВО" if _issues == 0 else f"🟠 НАЙДЕНО ПРОБЛЕМ: {_issues}"
     if _fixes:

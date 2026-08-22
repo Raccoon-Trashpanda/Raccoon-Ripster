@@ -21,6 +21,7 @@ from pathlib import Path
 
 from .base import EngineBase, EngineResult
 from .registry import register
+from ripster.py_runtime import app_python
 
 _QUALITIES = [
     {"id": "flac",    "label": "FLAC",     "sub": "Lossless (CD quality)", "badge": "LOSSLESS", "color": "#3ecfaa", "bitrate": "1411 kbps", "ext": "flac", "req": "plus"},
@@ -71,14 +72,16 @@ class YandexEngine(EngineBase):
     async def get_album(self, album_id: str, config: dict):
         token = (config.get("yandex-token") or "").strip()
         if not token:
-            return {"error": "Укажи токен Яндекса в Settings → Яндекс"}
+            return {"error_key": "err.ya_no_token",
+                    "error": "Укажи токен Яндекса в Settings → Яндекс"}
         from fastapi.concurrency import run_in_threadpool
 
         def _do():
             c = _ym_get_client(token)
             alb = c.albums_with_tracks(album_id)
             if not alb:
-                return {"error": "Альбом не найден"}
+                return {"error_key": "err.album_not_found",
+                        "error": "Альбом не найден"}
             tracks, n = [], 0
             for vol in (alb.volumes or []):
                 for t in (vol or []):
@@ -110,7 +113,9 @@ class YandexEngine(EngineBase):
     async def get_artist(self, artist_id: str, types: str, config: dict):
         token = (config.get("yandex-token") or "").strip()
         if not token:
-            return {"error": "Укажи токен Яндекса в Settings → Яндекс", "releases": []}
+            return {"error_key": "err.ya_no_token",
+                    "error": "Укажи токен Яндекса в Settings → Яндекс",
+                    "releases": []}
         from fastapi.concurrency import run_in_threadpool
 
         def _do():
@@ -156,7 +161,7 @@ class YandexEngine(EngineBase):
         # --cover-resolution 1000: embed a uniform 1000×1000 in-audio cover
         # (per request, all services). ymd defaults to 400; Yandex serves up to
         # 1000 natively, so this is its max.
-        cmd = [sys.executable, "-m", "ymd", "-u", url, "--quality", q,
+        cmd = [app_python(), "-m", "ymd", "-u", url, "--quality", q,
                "--dir", str(out_path), "--skip-existing", "--embed-cover",
                "--cover-resolution", "1000"]
         if token:

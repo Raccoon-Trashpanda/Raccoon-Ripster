@@ -993,6 +993,13 @@ async def ensure_git() -> Optional[str]:
 async def clone_downloader() -> bool:
     """Clone or update zhaarey/apple-music-downloader next to app.py."""
     main_go = _base_dir / "main.go"
+    # Бандленный exe (см. installer/ripster.iss — apple-music-downloader.exe теперь
+    # входит в установщик) самодостаточен: это НАШ форк со всеми правками, и Go на
+    # машине пользователя не нужен. Если он есть — upstream zhaarey не клонируем.
+    exe = _base_dir / "apple-music-downloader.exe"
+    if exe.exists():
+        await ilog("✓ apple-music-downloader.exe present (bundled) — skipping clone", "success")
+        return True
     git     = await ensure_git() or "git"
     if main_go.exists():
         await ilog("✓ main.go already present — skipping clone", "success")

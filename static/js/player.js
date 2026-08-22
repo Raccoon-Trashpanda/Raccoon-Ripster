@@ -1601,6 +1601,31 @@ function _mixPosGet(key) {
   return (e && e.p) ? e.p : 0;
 }
 
+// Подзаголовок мини-плеера: АРТИСТ первичен, источник (поток) — рядом, вторично.
+// Раньше приоритет был у item.label ("Qobuz · <альбом>") → артист пропадал совсем,
+// а название дублировалось. И логика была ПРОДУБЛИРОВАНА в двух ветках (обычной и
+// WebAudio) — починили одну, вторая продолжала показывать старое. Теперь обе зовут
+// эту функцию: одна правка → одинаковое поведение.
+function _ppArtistSub(item) {
+  const SRC = {qobuz:'Qobuz',apple:'Apple Music',deezer:'Deezer',tidal:'Tidal',
+    soundcloud:'SoundCloud',spotify:'Spotify',bbc:'BBC',yandex:'Яндекс.Музыка',
+    amazon:'Amazon Music',beatport:'Beatport'};
+  const src = SRC[item.service] || (item.service ? item.service.charAt(0).toUpperCase()+item.service.slice(1) : '');
+  if (item.artist) {
+    return item.full ? item.artist + (src ? ' · ' + src : '')
+                     : item.artist + ' · ' + t('player.preview_30');
+  }
+  if (item.label && item.label.trim()) {
+    let lbl = item.label.trim();
+    // не дублировать название трека, если label = "Источник · <трек>"
+    if (item.title && lbl.replace(/\s+/g,' ').endsWith('· ' + item.title)) {
+      lbl = src || lbl.split('·')[0].trim();
+    }
+    return lbl;
+  }
+  return src || t(item.full ? 'p.full_track_cap' : 'p.preview_cap');
+}
+
 function _setupAudioEvents() {
   // Idempotent re-arm seek-bar drag handlers — by the time we hit play, the
   // dock has definitely rendered.
@@ -1915,9 +1940,7 @@ async function _playPreviewAt(idx) {
       main.setAttribute(isExpanded ? 'data-preview-expanded' : 'data-preview-open', '1');
     }
     // Sync mini player title/artist/cover (WA path skips the normal assignment below)
-    const _waArtistSub = item.full
-      ? (item.label || (item.artist ? item.artist+' · '+t('player.full_track') : t('p.full_track_cap')))
-      : (item.artist ? item.artist+' · '+t('player.preview_30') : t('p.preview_cap'));
+    const _waArtistSub = _ppArtistSub(item);
     const _waPpTitle   = document.getElementById('pp-title');
     const _waPpArtist  = document.getElementById('pp-artist');
     const _waPpTitleB  = document.getElementById('pp-title-big');
@@ -2093,9 +2116,7 @@ async function _playPreviewAt(idx) {
     });
   }
 
-  const artistSub = item.full
-    ? (item.label || (item.artist ? item.artist+' · '+t('player.full_track') : t('p.full_track_cap')))
-    : (item.artist ? item.artist+' · '+t('player.preview_30') : t('p.preview_cap'));
+  const artistSub = _ppArtistSub(item);
 
   document.getElementById('pp-title').textContent  = item.title   || '—';
   document.getElementById('pp-artist').textContent = artistSub;
@@ -3311,3 +3332,155 @@ function _offerMixResume() {
     );
   } catch {}
 }
+
+// ══ Волна вместо полосы перемотки ═══════════════════════════════════════════
+// Форма и отрисовка живут в static/js/player_wave.js (rwBars / rwDraw /
+// rwPalette / rwBarCount). Здесь — ТОЛЬКО связь с плеером, и связь
+// односторонняя: волна читает то, что уже нарисовано, и сама ничего не двигает.
+//
+// ПОЧЕМУ СВОЕЙ ПЕРЕМОТКИ ТУТ НЕТ. Холст лежит ВНУТРИ существующих полос
+// #fp-progress / #pp-progress и накрыт pointer-events:none. Клик, протяжка
+// (_wireSeekBar), метки глав (_renderChapterTicks), previewSeek и стрелки на
+// клавиатуре остаются ровно теми же — меняется только то, ЧЕМ полоса
+// нарисована. Второй обработчик здесь означал бы два расчёта позиции, которые
+// однажды разойдутся, и «перемотка мажет» без видимой причины.
+//
+// ОТКУДА ПОЗИЦИЯ: из ширины УЖЕ СУЩЕСТВУЮЩЕЙ заливки (#fp-fill / #pp-fill)
+// через getComputedStyle. Это не второй источник правды, а тот же самый:
+// заливку двигают пять мест (player.js, player_fps.js, bbc.js) и протяжка
+// полосы; читая её, волна наследует их все — включая CSS-переход width .25s,
+// поэтому getComputedStyle отдаёт АНИМИРУЕМОЕ значение и волна едет так же
+// плавно, как ехала полоса.
+const _RW_TARGETS = [
+  // Полноэкранный плеер: волна во всю дорожку, столбик потолще, свечение сильнее.
+  { cv: 'fp-wave', bar: 'fp-progress', fill: 'fp-fill', buf: 'fp-buffered',
+    bw: 3, gap: 2, pad: 3, glow: 6, soft: 0.05,
+    open: () => { const e = document.getElementById('fullscreen-player');
+                  return !!(e && e.classList.contains('open')); } },
+  // Мини-док: ТА ЖЕ rwDraw, другие размеры. Второй реализации нет и не будет.
+  // anchor — строка кнопок: #pp-progress растянут на весь плеер (вместе с
+  // раскрытой панелью), и без якоря волна села бы в центр этой панели, а не на
+  // строку, которую человек и считает мини-плеером.
+  { cv: 'pp-wave', bar: 'pp-progress', fill: 'pp-fill', buf: 'pp-buffered',
+    anchor: 'pp-bar', bw: 2, gap: 1.5, pad: 2, glow: 3, band: 30, soft: 0.06,
+    open: () => { const e = document.getElementById('preview-player');
+                  return !!(e && e.classList.contains('visible')); } }
+];
+const _RW_STATE = new Map();
+let _RW_PAL = null, _RW_PAL_AT = 0, _RW_RUNNING = false;
+
+// Тема и цвет сервиса меняются редко — читать переменные каждый кадр значит
+// дёргать getComputedStyle на <html> без всякой нужды.
+function _rwPal() {
+  const now = Date.now();
+  if (!_RW_PAL || now - _RW_PAL_AT > 900) { _RW_PAL = rwPalette(); _RW_PAL_AT = now; }
+  return _RW_PAL;
+}
+
+// Трек для сида. Берём поля ОЧЕРЕДИ, а не подписи из DOM: у #pp-artist подпись
+// по умолчанию переведена ('Предпрослушка' / 'Preview'), и сид поехал бы от
+// смены языка — один трек давал бы разные волны в русском и английском
+// интерфейсе. Это ровно тот случай, который решение владельца запрещает.
+function _rwTrack() {
+  let item = {};
+  try { item = (Preview && Preview.queue && Preview.queue[Preview.idx]) || {}; } catch (_) {}
+  let dur = 0;
+  try { dur = _playerDuration() || 0; } catch (_) {}
+  if (!isFinite(dur) || dur < 0) dur = 0;
+  return {
+    artist: String(item.artist || item.label || ''),
+    title:  String(item.title || ''),
+    duration: Math.round(dur)
+  };
+}
+
+// Доля 0..1 из ширины элемента внутри полосы.
+function _rwFracOf(id, barEl) {
+  const el = document.getElementById(id);
+  if (!el || !barEl) return 0;
+  const w = barEl.clientWidth || 0;
+  if (!w) return 0;
+  const px = parseFloat(getComputedStyle(el).width) || 0;
+  return Math.max(0, Math.min(1, px / w));
+}
+
+function _rwFrame() {
+  requestAnimationFrame(_rwFrame);
+  if (typeof rwDraw !== 'function' || typeof rwBarCount !== 'function') return;
+  const tr = _rwTrack();
+  const pal = _rwPal();
+  const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  for (let k = 0; k < _RW_TARGETS.length; k++) {
+    const cfg = _RW_TARGETS[k];
+    if (cfg.open && !cfg.open()) continue;          // экран закрыт — не жжём кадры
+    const cv = document.getElementById(cfg.cv);
+    const bar = document.getElementById(cfg.bar);
+    if (!cv || !bar) continue;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) continue;
+
+    const prog = _rwFracOf(cfg.fill, bar);
+    const buffered = _rwFracOf(cfg.buf, bar);
+
+    let centerY = null;
+    if (cfg.anchor) {
+      const a = document.getElementById(cfg.anchor);
+      if (a) {
+        const ra = a.getBoundingClientRect(), rc = cv.getBoundingClientRect();
+        if (ra.height) centerY = (ra.top - rc.top) + ra.height / 2;
+      }
+    }
+
+    // Перерисовываем не каждый кадр, а когда МЕНЯЕТСЯ КАРТИНКА: сдвинулся
+    // столбик под курсором, изменилась ширина/плотность пикселей, поехал буфер,
+    // сменился трек или тема. Иначе 150 заливок со свечением крутились бы 60
+    // раз в секунду впустую.
+    const n = rwBarCount(w, cfg.bw, cfg.gap);
+    const sig = [w, h, Math.round(dpr * 100), n,
+                 Math.round(prog * n), Math.round(buffered * n),
+                 centerY == null ? -1 : Math.round(centerY),
+                 tr.artist, tr.title, tr.duration,
+                 pal.a, pal.b, pal.c, pal.idle].join('');
+    if (_RW_STATE.get(cfg.cv) === sig) continue;
+    _RW_STATE.set(cfg.cv, sig);
+
+    rwDraw(cv, {
+      artist: tr.artist, title: tr.title, duration: tr.duration,
+      progress: prog, buffered: buffered, palette: pal,
+      barWidth: cfg.bw, barGap: cfg.gap, pad: cfg.pad, glow: cfg.glow,
+      soft: cfg.soft, band: cfg.band, centerY: centerY, dpr: dpr
+    });
+  }
+}
+
+// Класс rw-on ставится ТОЛЬКО если ядро волны загрузилось. Не загрузилось (404,
+// чужой кэш, вырезанный из сборки файл) — класса нет, CSS не прячет старую
+// полосу, и человек видит рабочую полосу перемотки, а не пустое место.
+function _rwInit() {
+  if (typeof rwDraw !== 'function') return;
+  // ⚠️ ВОЛНА ВЫКЛЮЧЕНА. Решение владельца 16.08.2026: «раз уж нет волны, то и
+  // нехер мудрить — никакой волны у потока, волна у скачанного допустима».
+  //
+  // Форма волны — утверждение о звуке. Пока пики берутся из хэша метаданных, а
+  // не из самого файла, эта форма выдумана, и владелец распознал подделку с
+  // первого взгляда. Оставить её включённой «до лучших времён» значит держать
+  // враньё в интерфейсе; поэтому выключено здесь, а не спрятано под настройку.
+  //
+  // Отрисовка (rwDraw, холсты, привязка к позиции) НЕ удалена намеренно: она
+  // умеет рисовать любые пики, в том числе настоящие. Включать обратно ТОЛЬКО
+  // когда появятся пики скачанного файла, посчитанные ffmpeg при скачивании, и
+  // ТОЛЬКО для таких треков. Правила и ловушки — скилл ripster-waveform-sources.
+  if (!window.RW_REAL_PEAKS) return;
+  let any = false;
+  for (let k = 0; k < _RW_TARGETS.length; k++) {
+    const cfg = _RW_TARGETS[k];
+    const bar = document.getElementById(cfg.bar);
+    const cv = document.getElementById(cfg.cv);
+    if (!bar || !cv) continue;
+    bar.classList.add('rw-on');
+    any = true;
+  }
+  if (any && !_RW_RUNNING) { _RW_RUNNING = true; requestAnimationFrame(_rwFrame); }
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _rwInit);
+else _rwInit();

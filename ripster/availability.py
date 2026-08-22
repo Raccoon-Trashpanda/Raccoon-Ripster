@@ -30,11 +30,18 @@ from typing import Optional
 
 # Сервисы, у которых есть точный поиск по идентификатору. Spotify держим
 # отдельно: он каталог, а не источник файлов.
-SERVICES = ("apple", "deezer", "qobuz", "tidal")
+SERVICES = ("apple", "deezer", "qobuz", "tidal", "beatport")
 
 REASON_NOT_YET  = "not_in_catalog_yet"
 REASON_REGION   = "region_locked"
 REASON_NO_TOKEN = "no_token"
+# Релиз В КАТАЛОГЕ есть, а скачать эта учётка его не может: прав на поток нет.
+# Отдельно от region_locked намеренно — это разные ответы человеку и разные
+# действия программы. Регион лечится другой страной аккаунта; отсутствие прав —
+# ДРУГОЙ УЧЁТКОЙ ТОГО ЖЕ сервиса (см. фоллбэк по аккаунтам) или покупкой, а
+# прокси не добавляет прав вообще. 14.08.2026 Beatport отдавал 403-на-потоке на
+# релизах, у которых is_available_for_streaming=True — по витрине не отличить.
+REASON_NO_RIGHTS = "no_entitlement"
 # Спросить было НЕЧЕМ. У Qobuz и Tidal нет поиска по штрихкоду — им нужен ISRC, и
 # без него ответ «ещё не появился» был бы враньём: мы туда вообще не ходили.
 # Отдельная причина, потому что лечится она не ожиданием, а добычей ISRC.
@@ -44,6 +51,10 @@ REASON_NO_ID    = "no_identifier"
 _TTL_MISS   = 30 * 60          # ещё не подъехало — заглядываем каждые полчаса
 _TTL_REGION = 7 * 24 * 3600    # региональный отказ — раз в неделю, не чаще
 _TTL_TOKEN  = 10 * 60          # наша проблема: почини токен — увидим сразу
+# Прав нет — но подписку могли продлить, а релиз мог выйти из эксклюзива. Сутки:
+# чаще смысла нет (ответ детерминированный), реже — застрянем на «нельзя», когда
+# уже можно.
+_TTL_RIGHTS = 24 * 3600
 
 _cfg: dict = {}
 _base_dir: Path = Path(".")
@@ -92,7 +103,8 @@ def _fresh(rec: dict) -> bool:
         return True                     # найденное не пропадает
     age = time.time() - float(rec.get("checked_ts") or 0)
     reason = rec.get("reason") or REASON_NOT_YET
-    ttl = {REASON_REGION: _TTL_REGION, REASON_NO_TOKEN: _TTL_TOKEN}.get(reason, _TTL_MISS)
+    ttl = {REASON_REGION: _TTL_REGION, REASON_NO_TOKEN: _TTL_TOKEN,
+           REASON_NO_RIGHTS: _TTL_RIGHTS}.get(reason, _TTL_MISS)
     return age < ttl
 
 
@@ -108,6 +120,11 @@ def _has_credentials(service: str) -> bool:
         return bool(str(c.get("qobuz-auth-token") or "").strip())
     if service == "tidal":
         return bool(str(c.get("tidal-token") or "").strip()) or True  # есть путь через OrpheusDL
+    if service == "beatport":
+        # Каталог Beatport закрыт целиком: без логина не отвечает даже поиск, так
+        # что «не нашли» без учётки было бы неправдой.
+        return bool(str(c.get("beatport-username") or "").strip()
+                    and str(c.get("beatport-password") or "").strip())
     return False
 
 
@@ -156,7 +173,12 @@ async def _probe_one(service: str, upc: str, isrc: str) -> dict:
         elif service == "deezer" and upc:
             hit = await _disc._find_by_upc(upc, service,
                                            str((_cfg or {}).get("storefront", "us")))
-        if hit is None and isrc and service in ("qobuz", "tidal"):
+        elif service == "beatport" and upc:
+            # Beatport умеет ОБА точных ключа (проверено 14.08.2026 на живом API:
+            # /catalog/releases/?upc= и /catalog/tracks/?isrc= оба отдают count=1),
+            # поэтому штрихкод первым, ISRC — запасной ход ниже.
+            hit = await _disc._find_by_upc(upc, service)
+        if hit is None and isrc and service in ("qobuz", "tidal", "beatport"):
             # Список ISRC (несколько первых треков) — одного мало: его может не
             # быть в каталоге при том, что релиз там есть.
             for one in (isrc.split(",") if isinstance(isrc, str) else list(isrc)):
@@ -167,6 +189,8 @@ async def _probe_one(service: str, upc: str, isrc: str) -> dict:
                 if hit:
                     break
         if hit is None and service in ("qobuz", "tidal") and not isrc:
+            return {"available": False, "reason": REASON_NO_ID, "checked_ts": now}
+        if hit is None and service == "beatport" and not upc and not isrc:
             return {"available": False, "reason": REASON_NO_ID, "checked_ts": now}
         if hit:
             return {"available": True, "url": hit.get("url", ""),
@@ -180,6 +204,14 @@ async def _probe_one(service: str, upc: str, isrc: str) -> dict:
     except Exception as e:                                     # noqa: BLE001
         return {"available": False, "reason": REASON_NOT_YET,
                 "error": str(e)[:120], "checked_ts": now}
+    # «Ещё не появился» — это ВЫВОД ИЗ ПРОВЕРКИ, а не значение по умолчанию.
+    # apple/deezer опрашиваются только `if upc` (см. выше); без штрихкода обе
+    # ветки пропускались, и сюда падал вердикт «ещё не появился» про сервисы,
+    # которых никто не спрашивал — ложь, неотличимая от настоящего результата
+    # (в кэше это видно по одинаковым до микросекунды checked_ts у всех служб).
+    # Говорим правду: идентификатора не было.
+    if service in ("apple", "deezer") and not upc:
+        return {"available": False, "reason": REASON_NO_ID, "checked_ts": now}
     return {"available": False, "reason": REASON_NOT_YET, "checked_ts": now}
 
 
@@ -198,6 +230,29 @@ async def _derive_isrc(service: str, hit: dict) -> str:
             import re
             m = re.search(r"/album/(\d+)", url)
             aid = m.group(1) if m else ""
+        if service == "beatport":
+            # Beatport отдаёт ISRC прямо в треках релиза — это САМЫЙ дешёвый
+            # источник идентификатора для Qobuz и Tidal, у которых своего ключа
+            # нет. Без него релиз, найденный только в Beatport, оставлял их в
+            # состоянии «не спрашивал, нет ISRC» навсегда.
+            import re
+            m = re.search(r"/release/[^/]*/(\d+)", url)
+            rid = m.group(1) if m else str(hit.get("id") or "")
+            if not rid:
+                return ""
+            from ripster.routes import beatport as _bp
+            from ripster import http_client as _HTTP
+            tok = await _bp._get_token()
+            if not tok:
+                return ""
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"{_bp._BASE}/catalog/releases/{rid}/tracks/",
+                                headers=_bp._auth_headers(tok))
+            if r.status_code != 200:
+                return ""
+            vals = [str(t.get("isrc") or "").strip()
+                    for t in ((r.json() or {}).get("results") or [])[:4]]
+            return ",".join(v for v in vals if v)
         if not aid:
             return ""
         vals = await _disc._seed_isrcs({"id": aid, "service": service}) or []
@@ -219,29 +274,95 @@ async def matrix(upc: str = "", isrc: str = "", title: str = "", artist: str = "
     rec = _cache.get(k) or {"services": {}}
     out = dict(rec.get("services") or {})
 
-    # По штрихкоду умеют только Apple и Deezer, поэтому идём ими первыми: если
-    # релиз там нашёлся, из него добываем ISRC первого трека — и тогда Qobuz с
+    # По штрихкоду умеют Apple, Deezer и Beatport, поэтому идём ими первыми: если
+    # релиз там нашёлся, из него добываем ISRC первых треков — и тогда Qobuz с
     # Tidal можно спросить по-настоящему, а не отписаться «нечем спросить».
-    ordered = [s for s in ("deezer", "apple") if s in svcs] + \
-              [s for s in svcs if s not in ("deezer", "apple")]
+    # Beatport добавлен в эту голову (а не в хвост) именно ради ISRC: у клубного
+    # релиза он часто ЕДИНСТВЕННЫЙ, кто уже знает про пластинку.
+    _SEEDERS = ("deezer", "apple", "beatport")
+    ordered = [s for s in _SEEDERS if s in svcs] + \
+              [s for s in svcs if s not in _SEEDERS]
+
+    # ISRC, добытый КОГДА-ТО, годится всегда: он свойство записи, а не сервиса.
+    # Раньше он поднимался из кэша только при живом «доступен» у сервиса-донора —
+    # и стоило донору стать недоступным (403 по правам, ушёл из витрины), как
+    # Qobuz с Tidal снова получали «не спрашивал, нет ISRC», хотя нужный ISRC
+    # лежал в этой же записи. Программа знала и выбрасывала.
+    isrc = isrc or str(rec.get("isrc") or "")
 
     for svc in ordered:
         cur = out.get(svc)
         if cur and not force and _fresh(cur):
-            if svc in ("deezer", "apple") and cur.get("available") and not isrc:
-                isrc = isrc or (rec.get("isrc") or "")
             continue
         out[svc] = await _probe_one(svc, upc, isrc)
-        if (svc in ("deezer", "apple") and out[svc].get("available") and not isrc):
+        if (svc in _SEEDERS and out[svc].get("available") and not isrc):
             isrc = await _derive_isrc(svc, out[svc])
 
-    _cache[k] = {"services": out, "upc": upc, "isrc": isrc,
-                 "title": title, "artist": artist, "ts": time.time()}
-    # ISRC достали по ходу — сохраняем, иначе следующая проверка снова пойдёт
-    # его добывать.
+    # Запись ДОПОЛНЯЕТСЯ, а не переписывается. Один и тот же релиз спрашивают из
+    # разных мест с разной полнотой данных: карточка — со штрихкодом и названием,
+    # рантайм после загрузки — только со штрихкодом. Пока здесь стояла замена,
+    # бедный вызов затирал ISRC, добытый богатым, и следующая проверка снова
+    # отвечала «не спрашивал, нет ISRC» — про то, что уже знала.
+    _cache[k] = {**rec, "services": out,
+                 "upc": upc or rec.get("upc", ""),
+                 "isrc": isrc or rec.get("isrc", ""),
+                 "title": title or rec.get("title", ""),
+                 "artist": artist or rec.get("artist", ""),
+                 "ts": time.time()}
     _save()
     return {"key": k, "upc": upc, "isrc": isrc, "services": out,
             "available_in": [s for s, v in out.items() if v.get("available")]}
+
+
+# Токены причин из `runner._classify_partial_reason` → состояния матрицы. Здесь
+# только те, что ГОВОРЯТ О ДОСТУПНОСТИ. Сетевые и врапперные отказы
+# (_RE_WRAPPER_DEAD, _RE_PATIENT, _RE_DECRYPT_DOWN, «postprocess») сюда не
+# попадают намеренно: авария нашей стороны — не факт о витрине, и записать её как
+# «нельзя скачать» значит на сутки соврать самим себе.
+_OUTCOME_TO_REASON = {
+    "entitlement": REASON_NO_RIGHTS,
+    "region":      REASON_REGION,
+}
+
+
+def record_outcome(service: str, outcome: str, *, upc: str = "", isrc: str = "",
+                   title: str = "", artist: str = "", account: str = "") -> bool:
+    """Записать в матрицу РЕАЛЬНЫЙ итог загрузки, а не итог опроса витрины.
+
+    Опрос отвечает «есть ли в каталоге», и для Beatport этого мало: релиз с
+    is_available_for_streaming=True всё равно отдаёт 403 на потоке, если у учётки
+    нет прав. Единственный источник правды здесь — попытка скачать, поэтому
+    рантайм после каждой отдаёт вердикт сюда.
+
+    `outcome` — токен из `runner._classify_partial_reason` либо "ok".
+    Возвращает True, если запись изменилась (то есть вердикт был про доступность).
+    """
+    if not service:
+        return False
+    _load()
+    k = _key(upc, isrc, title, artist)
+    rec = _cache.get(k) or {"services": {}}
+    svcs = dict(rec.get("services") or {})
+    now = time.time()
+    if outcome == "ok":
+        cur = dict(svcs.get(service) or {})
+        cur.update({"available": True, "checked_ts": now, "verified_by": "download"})
+        if account:
+            cur["account"] = account
+        svcs[service] = cur
+    else:
+        reason = _OUTCOME_TO_REASON.get(outcome)
+        if not reason:
+            return False
+        svcs[service] = {"available": False, "reason": reason, "checked_ts": now,
+                         "verified_by": "download",
+                         **({"account": account} if account else {})}
+    _cache[k] = {**rec, "services": svcs, "upc": upc or rec.get("upc", ""),
+                 "isrc": isrc or rec.get("isrc", ""),
+                 "title": title or rec.get("title", ""),
+                 "artist": artist or rec.get("artist", ""), "ts": now}
+    _save()
+    return True
 
 
 def pick_source(matrix_services: dict, preference: Optional[list] = None) -> str:
@@ -250,10 +371,22 @@ def pick_source(matrix_services: dict, preference: Optional[list] = None) -> str
     Порядок по умолчанию — от лучшего качества к худшему. Ждать «свой» сервис,
     когда релиз уже доступен в другом, значит потерять сутки.
     """
+    # Beatport последним: он покупочный магазин, и именно у него чаще всего
+    # каталог есть, а прав на скачивание нет — брать его раньше значит менять
+    # рабочий источник на тот, что вероятнее упрётся в 403.
     pref = preference or list((_cfg or {}).get("availability-preference")
-                              or ["apple", "qobuz", "deezer", "tidal"])
+                              or ["apple", "qobuz", "deezer", "tidal", "beatport"])
     for svc in pref:
         if (matrix_services.get(svc) or {}).get("available"):
+            return svc
+    # Предпочтения — это ПОРЯДОК, а не белый список. В config.yaml лежит
+    # `availability-preference: [tidal, qobuz, apple]` — трёх сервисов из пяти там
+    # нет вовсе, и релиз, доступный ТОЛЬКО в deezer (или теперь в beatport),
+    # получал пустой ответ: «доступно, но качать неоткуда». Ровно та жалоба, из-за
+    # которой затевался фоллбэк. Дальше идём по всем оставшимся доступным в
+    # порядке SERVICES — молча и без ошибки.
+    for svc in SERVICES:
+        if svc not in pref and (matrix_services.get(svc) or {}).get("available"):
             return svc
     return ""
 
@@ -265,6 +398,8 @@ def summary_ru(matrix_services: dict) -> str:
                if not v.get("available") and v.get("reason") == REASON_NOT_YET]
     blocked = [s for s, v in matrix_services.items()
                if v.get("reason") == REASON_REGION]
+    no_rights = [s for s, v in matrix_services.items()
+                 if v.get("reason") == REASON_NO_RIGHTS]
     no_tok = [s for s, v in matrix_services.items()
               if v.get("reason") == REASON_NO_TOKEN]
     no_id = [s for s, v in matrix_services.items()
@@ -276,6 +411,8 @@ def summary_ru(matrix_services: dict) -> str:
         parts.append("⏳ " + ", ".join(waiting) + " — ещё не появился")
     if blocked:
         parts.append("🚫 " + ", ".join(blocked) + " — нет в регионе аккаунта")
+    if no_rights:
+        parts.append("🔒 " + ", ".join(no_rights) + " — есть в каталоге, но у аккаунта нет прав")
     if no_tok:
         parts.append("🔑 " + ", ".join(no_tok) + " — нет токена")
     if no_id:

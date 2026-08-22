@@ -173,7 +173,7 @@ async def qobuz_releases(days: int = 30):
     app_id = _qobuz_app_id()
     token  = _qobuz_token()
     if not token:
-        return {"ok": False, "error": "Qobuz auth-token не настроен (Settings → Qobuz)", "releases": []}
+        return {"ok": False, "error_key": "err.qobuz_no_token", "error": "Qobuz auth-token не настроен (Settings → Qobuz)", "releases": []}
 
     headers = {"X-User-Auth-Token": token, "X-App-Id": app_id}
     cutoff  = _cutoff(days)
@@ -188,7 +188,7 @@ async def qobuz_releases(days: int = 30):
                     params={"type": "artists", "limit": 50, "offset": offset, "app_id": app_id},
                     headers=headers)
                 if r.status_code == 401:
-                    return {"ok": False, "error": "Qobuz: токен истёк. Обнови qobuz-auth-token в Settings.", "releases": []}
+                    return {"ok": False, "error_key": "err.qobuz_token_expired", "error": "Qobuz: токен истёк. Обнови qobuz-auth-token в Settings.", "releases": []}
                 if r.status_code != 200:
                     return {"ok": False, "error": f"Qobuz API {r.status_code}", "releases": []}
                 data  = r.json()
@@ -308,7 +308,7 @@ async def _tidal_fetch_artist(sem: asyncio.Semaphore, c: httpx.AsyncClient,
 async def tidal_releases(days: int = 30):
     token = _tidal_token()
     if not token:
-        return {"ok": False, "error": "Tidal token не настроен (Settings → Tidal)", "releases": []}
+        return {"ok": False, "error_key": "err.tidal_no_token", "error": "Tidal token не настроен (Settings → Tidal)", "releases": []}
 
     hdr    = {"Authorization": f"Bearer {token}"}
     cc     = _tidal_country()
@@ -317,7 +317,7 @@ async def tidal_releases(days: int = 30):
     try:
         user_id = await _tidal_user_id()
         if not user_id:
-            return {"ok": False, "error": "Не удалось определить Tidal user_id", "releases": []}
+            return {"ok": False, "error_key": "err.tidal_no_user_id", "error": "Не удалось определить Tidal user_id", "releases": []}
 
         # 1 — paginate favourite artists
         artists: list[dict] = []
@@ -328,7 +328,7 @@ async def tidal_releases(days: int = 30):
                     params={"limit": 100, "offset": offset, "countryCode": cc},
                     headers=hdr)
                 if r.status_code == 401:
-                    return {"ok": False, "error": "Tidal: токен истёк. Обнови в Settings → Tidal.", "releases": []}
+                    return {"ok": False, "error_key": "err.tidal_token_expired_settings", "error": "Tidal: токен истёк. Обнови в Settings → Tidal.", "releases": []}
                 if r.status_code != 200:
                     return {"ok": False, "error": f"Tidal API {r.status_code}", "releases": []}
                 data  = r.json()
@@ -453,11 +453,11 @@ async def _deezer_fetch_artist(sem: asyncio.Semaphore, c: httpx.AsyncClient,
 async def deezer_releases(days: int = 30):
     arl = (_config.get("deezer-arl") or "").strip() if _config else ""
     if not arl:
-        return {"ok": False, "error": "Deezer ARL не настроен (Settings → Deezer)", "releases": []}
+        return {"ok": False, "error_key": "err.deezer_no_arl", "error": "Deezer ARL не настроен (Settings → Deezer)", "releases": []}
 
     uid = await _deezer_user_id(arl)
     if not uid:
-        return {"ok": False, "error": "Deezer: ARL недействителен или истёк — обнови его в Settings.",
+        return {"ok": False, "error_key": "err.deezer_arl_invalid", "error": "Deezer: ARL недействителен или истёк — обнови его в Settings.",
                 "releases": []}
 
     cutoff = _cutoff(days)

@@ -218,7 +218,7 @@ async def yandex_auth_start():
                                    "device_id": dev_id, "device_name": "Ripster"})
         j = r.json()
     except Exception as e:
-        return {"ok": False, "error": f"Yandex недоступен: {e}"}
+        return {"ok": False, "error_key": "err.ya_down", "error_args": {"e": str(e)}, "error": f"Yandex недоступен: {e}"}
     if j.get("error") or not j.get("device_code"):
         return {"ok": False, "error": j.get("error_description") or j.get("error") or "device/code failed"}
     return {"ok": True, "user_code": j.get("user_code"),
@@ -240,7 +240,7 @@ async def yandex_auth_poll(body: dict):
                                    "client_id": _YM_CLIENT_ID, "client_secret": _YM_CLIENT_SECRET})
         j = r.json()
     except Exception as e:
-        return {"ok": False, "error": f"Yandex недоступен: {e}"}
+        return {"ok": False, "error_key": "err.ya_down", "error_args": {"e": str(e)}, "error": f"Yandex недоступен: {e}"}
     if j.get("access_token"):
         _cfg["yandex-token"] = j["access_token"]
         if _save_cfg:
@@ -334,14 +334,14 @@ async def tidal_auth_start():
     from ripster.engines.tidal import _tv_client
     cid, _csec = _tv_client()
     if not cid:
-        return {"ok": False, "error": "Нет TV client_id (orpheus settings.json → modules.tidal.tv_atmos_token)"}
+        return {"ok": False, "error_key": "err.tidal_no_tv_client_id", "error": "Нет TV client_id (orpheus settings.json → modules.tidal.tv_atmos_token)"}
     try:
         async with _httpx.AsyncClient(timeout=15) as c:
             r = await c.post(_TIDAL_AUTH_BASE + "oauth2/device_authorization",
                              data={"client_id": cid, "scope": "r_usr w_usr"})
         j = r.json()
     except Exception as e:
-        return {"ok": False, "error": f"Tidal недоступен: {e}"}
+        return {"ok": False, "error_key": "err.tidal_down", "error_args": {"e": str(e)}, "error": f"Tidal недоступен: {e}"}
     if r.status_code != 200 or not j.get("deviceCode"):
         return {"ok": False, "error": j.get("error_description") or j.get("error") or "device_authorization failed"}
     user_code = j.get("userCode") or ""
@@ -369,7 +369,7 @@ async def tidal_auth_poll(body: dict):
                                    "scope": "r_usr w_usr"})
         j = r.json()
     except Exception as e:
-        return {"ok": False, "error": f"Tidal недоступен: {e}"}
+        return {"ok": False, "error_key": "err.tidal_down", "error_args": {"e": str(e)}, "error": f"Tidal недоступен: {e}"}
     if r.status_code == 200 and j.get("access_token"):
         at = j["access_token"]
         rt = j.get("refresh_token", "")
@@ -387,7 +387,7 @@ async def tidal_auth_poll(body: dict):
         except Exception:
             pass
         if not _save_tidal_session("TV", at, rt, exp, user_id, country):
-            return {"ok": False, "error": "Авторизация прошла, но не удалось записать сессию"}
+            return {"ok": False, "error_key": "err.session_write_failed", "error": "Авторизация прошла, но не удалось записать сессию"}
         # Also derive the MOBILE_ATMOS session from the same refresh_token so the
         # one TV login unlocks real AC-4 Atmos too (best-effort, never blocks login).
         atmos_ok = await _derive_tidal_mobile_atmos(rt, user_id, country)
@@ -436,7 +436,7 @@ async def spotify_auth_start(body: dict = None):
     import os as _os, sys as _sys, subprocess, asyncio as _aio
     P = _sp_oauth_paths()
     if not P["helper"].exists():
-        return {"ok": False, "error": "tools/spotify_oauth_login.py отсутствует"}
+        return {"ok": False, "error_key": "err.sp_oauth_script_missing", "error": "tools/spotify_oauth_login.py отсутствует"}
     # Kill any prior helper so the 127.0.0.1:5588 callback port is free.
     prev = _SP_OAUTH.get("proc")
     if prev and prev.poll() is None:
@@ -472,7 +472,7 @@ async def spotify_auth_start(body: dict = None):
         proc = subprocess.Popen([_sys.executable, str(P["helper"])],
                                 cwd=str(P["base"]), env=env, creationflags=flags)
     except Exception as e:
-        return {"ok": False, "error": f"не удалось запустить вход: {e}"}
+        return {"ok": False, "error_key": "err.login_start_failed", "error_args": {"e": str(e)}, "error": f"не удалось запустить вход: {e}"}
     _SP_OAUTH["proc"] = proc
     # Wait for librespot to emit the auth URL (it writes it before blocking).
     for _ in range(50):   # ~25 s
@@ -492,7 +492,7 @@ async def spotify_auth_start(body: dict = None):
             msg = P["err"].read_text(encoding="utf-8").strip()
         except Exception:
             pass
-    return {"ok": False, "error": msg or "нет auth URL — проверь, свободен ли порт 5588 и установлен ли librespot"}
+    return {"ok": False, "error_key": "err.sp_no_auth_url", "error": msg or "нет auth URL — проверь, свободен ли порт 5588 и установлен ли librespot"}
 
 
 @router.post("/api/spotify/auth/status")
@@ -525,7 +525,7 @@ async def spotify_auth_status():
                 msg = P["err"].read_text(encoding="utf-8").strip()
             except Exception:
                 pass
-        return {"ok": False, "error": msg or "вход не удался"}
+        return {"ok": False, "error_key": "err.login_failed", "error": msg or "вход не удался"}
     return {"ok": True, "pending": True}
 
 

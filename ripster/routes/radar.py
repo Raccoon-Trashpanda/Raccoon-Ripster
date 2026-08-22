@@ -18,6 +18,10 @@ What each source watches, and why that is the right thing to watch:
   apple       the Apple artists on the watchlist, via the compilation-aware
               lookup in watchlist.py, so label compilations show up here too
               (see ripster/compilations.py for why that needs saying).
+  labels      the LABELS on the watchlist, via watchlist._label_releases. A
+              label is not an artist and has no id to resolve, so it needs its
+              own source. Off by default (`show-radar-labels`): the radar feed
+              is live and must not change until the owner asks for it.
 
 Every source is best-effort and independent: one failing service returns an empty
 list with an `error`, and the rest of the feed still renders. Results are cached
@@ -477,4 +481,125 @@ async def releases_apple(days: int = Query(90, ge=1, le=365),
     uniq.sort(key=lambda x: x["date"], reverse=True)
     # Склад: то, что источник уже не показывает, всё равно остаётся.
     uniq = _durable_merge("apple", uniq, days)
+    return _store(key, {"ok": True, "releases": uniq, "sources": len(entries)})
+
+
+# ── Лейблы ────────────────────────────────────────────────────────────────────
+# Лейбл — не артист: у него нет id, xref его не резолвит, и именно поэтому
+# радар отбрасывал записи `kind == "label"` (releases.py:_watchlist_artists).
+# Отдельный источник — единственный честный способ их показать: спрашиваем не
+# «что выпустил артист», а «что выпустил лейбл», через тот же `_label_releases`,
+# которым живёт подписка на лейбл в вишлисте.
+#
+# Источник ВЫКЛЮЧЕН по умолчанию и включается ключом `show-radar-labels`.
+# Пока владелец его не включил, эндпоинт не ходит ни в один каталог и отдаёт
+# пустоту: живая лента радара не должна меняться молча.
+
+def _label_entries() -> list:
+    return [e for e in (_s.get("watchlist") or [])
+            if e.get("kind") == "label" and str(e.get("name") or "").strip()]
+
+
+def _label_date(rel: dict) -> str:
+    """Дата релиза в виде YYYY-MM-DD.
+
+    Каталоги отдают лейбловые релизы то полной датой, то одним годом. Год без
+    месяца нельзя сравнивать со срезом окна как строку («2024» < «2026-01-01»
+    случайно верно, а «2026» < «2026-01-01» — уже нет), поэтому нормализуем.
+    """
+    d = str(rel.get("date") or "").strip()
+    if len(d) >= 10:
+        return d[:10]
+    if len(d) == 7:
+        return d + "-01"
+    if len(d) == 4:
+        return d + "-01-01"
+    y = str(rel.get("year") or "").strip()
+    return (y + "-01-01") if len(y) == 4 else ""
+
+
+@router.get("/api/releases/labels")
+async def releases_labels(days: int = Query(90, ge=1, le=9999),
+                          force: int = Query(0)):
+    """Новые релизы лейблов из вишлиста — если источник включён владельцем."""
+    cfg = _s.get("config") or {}
+    if cfg.get("show-radar-labels") is not True:
+        # Выключено: ни запросов, ни записей в кэш, ни строчки в ленте.
+        return {"ok": True, "releases": [], "sources": 0, "hint": "labels_off"}
+
+    # labels2, а не labels: с 16.08 у источника изменилась верхняя граница дат
+    # (см. ниже про +2 дня). Старые записи кэша собраны по прежнему правилу и
+    # НЕ содержат завтрашних релизов — оставить прежний ключ значило бы кормить
+    # владельца прежним ответом ещё сутки и выглядеть как «правка не помогла».
+    key = f"labels2|{days}"
+    if not force:
+        hit = _serve_or_refresh(key, lambda: releases_labels(days=days, force=1))
+        if hit is not None:
+            return hit
+
+    from ripster.routes.watchlist import _label_releases
+
+    entries = _label_entries()
+    if not entries:
+        return _store(key, {"ok": True, "releases": [], "sources": 0,
+                            "hint": "no_labels"})
+
+    cutoff = _cutoff(days)
+    # Верхняя граница НЕ «сегодня», а сегодня + 2 дня. Отсечку `date > today`
+    # источник лейблов унаследовал от Apple, где рядом написано «pre-orders carry
+    # a future date — they are not out yet». Для предзаказов на месяцы вперёд это
+    # верно, а для лейблов ломает главное: релиз, датированный завтра по местному
+    # календарю, в Новой Зеландии уже вышел и уже качается. Ровно это опережение
+    # на полсуток и описано в докстринге releases.py как смысл кросс-сервисного
+    # радара — а здесь оно молча выбрасывалось. +2 дня ловят и часовые пояса, и
+    # завтрашний релиз, но оставляют настоящие предзаказы за бортом.
+    today  = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%d")
+    sem    = asyncio.Semaphore(3)
+
+    async def _one(entry: dict) -> list:
+        name = str(entry.get("name") or "").strip()
+        async with sem:
+            try:
+                rels = await _label_releases(name, 40)
+            except Exception as e:
+                print(f"[radar] label {name}: {e}", flush=True)
+                return []
+        out = []
+        for r in rels:
+            date = _label_date(r)
+            # Предзаказ (дата в будущем) ещё не вышел — как и у Apple-источника.
+            if not date or date < cutoff or date > today:
+                continue
+            out.append({
+                "id":        str(r.get("id") or r.get("url") or ""),
+                "title":     r.get("title", ""),
+                "artist":    r.get("artist", ""),
+                "artist_id": "",              # у лейблового сида id артиста нет
+                "label":     name,            # чем помечен: именем лейбла…
+                "via_label": True,            # …и признаком «пришёл от лейбла»
+                "type":      (r.get("type") or "album"),
+                "group":     "album",
+                "date":      date,
+                "year":      date[:4],
+                "tracks":    r.get("tracks"),
+                "cover":     r.get("cover", ""),
+                "url":       r.get("url", ""),
+                "service":   r.get("service") or "spotify",
+            })
+        return out
+
+    results = await asyncio.gather(*(_one(e) for e in entries),
+                                   return_exceptions=True)
+    releases = [r for res in results if isinstance(res, list) for r in res]
+    # Один и тот же релиз приходит и из Spotify, и из Deezer, и через два лейбла.
+    seen, uniq = set(), []
+    for r in releases:
+        uid = _rel_uid(r)
+        if uid in seen:
+            continue
+        seen.add(uid)
+        uniq.append(r)
+    uniq.sort(key=lambda x: x["date"], reverse=True)
+    # Склад: то, что источник уже не показывает, всё равно остаётся.
+    uniq = _durable_merge("labels", uniq, days)
     return _store(key, {"ok": True, "releases": uniq, "sources": len(entries)})

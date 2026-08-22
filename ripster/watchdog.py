@@ -110,14 +110,20 @@ async def _sp_alive() -> bool:
 
 
 async def _sp_revive() -> bool:
+    """Перевыпустить Bearer тем же путём, что и фоновый кипер.
+
+    ВНИМАНИЕ, ГРАБЛИ. До 10.08.2026 здесь искались `mint_now`/`refresh` — в
+    `spotify_token_keeper` НЕТ И НИКОГДА НЕ БЫЛО ни той, ни другой. `getattr`
+    возвращал None, ветка молча возвращала False, и сторож честно тратил три
+    попытки НА НИЧЕГО, после чего каждые 30 минут писал «жду вмешательства».
+    То есть ремонтник не работал ни разу за всё время жизни файла. Зовём
+    настоящую точку входа — `mint_now` (она в кипере и заведена под этот вызов).
+    """
     try:
         from ripster import spotify_token_keeper as _k
-        fn = getattr(_k, "mint_now", None) or getattr(_k, "refresh", None)
-        if fn:
-            await asyncio.to_thread(fn)
-            return True
+        return bool(await _k.mint_now())
     except Exception as e:
-        await _say(f"Spotify: обновить токен не вышло — {type(e).__name__}", "error")
+        await _say(f"Spotify: обновить токен не вышло — {type(e).__name__}: {e}", "error")
     return False
 
 

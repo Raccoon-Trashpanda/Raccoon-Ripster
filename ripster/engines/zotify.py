@@ -21,6 +21,7 @@ from pathlib import Path
 
 from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
 from .registry import register
+from ripster.py_runtime import app_python
 
 _ZOTIFY_BAD_CREDS_MARKER = "ZOTIFY_BAD_CREDS"
 
@@ -172,7 +173,7 @@ class ZotifyEngine(EngineBase):
             )
 
         cfg_p = _write_zotify_cfg({**config, "zotify-quality": quality})
-        cmd = [sys.executable, "-m", "zotify", "--config-location", str(cfg_p)]
+        cmd = [app_python(), "-m", "zotify", "--config-location", str(cfg_p)]
         if username:
             cmd += ["--username", username]
         if password:

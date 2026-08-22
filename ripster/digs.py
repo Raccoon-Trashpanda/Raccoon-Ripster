@@ -153,11 +153,18 @@ def _collect_downloads(acc: dict) -> int:
 
 
 def _series_signature(lows: list[str]) -> tuple[float, int]:
-    """(доля выпусков под самым частым заголовком, сколько у него разных номеров).
+    """(доля выпусков, попавших в СЕРИИ, сколько номеров у самой длинной серии).
 
     Заголовок = название с вырезанными числами, первые четыре слова. У серии
     таких заголовков один на всех, а номера разные; у исполнителя наоборот —
     заголовки все разные, а числа случайные (даты, годы).
+
+    Считаем ВСЕ серии канала, а не только самую частую. У канала их бывает
+    несколько параллельно: «Balance Music» ведёт и «Balance Croatia», и
+    «Balance Selections», поэтому на самый частый стебель приходилось 0.37 при
+    пороге 0.4 — и лейбл проходил за живого исполнителя, а его жанр из iTunes
+    («Christian», по одноимённой христианской группе) попадал в пласты вкуса.
+    Две серии делают канал ОЧЕВИДНЕЕ шоу, а не наоборот.
     """
     import collections
     stems: collections.Counter = collections.Counter()
@@ -175,10 +182,13 @@ def _series_signature(lows: list[str]) -> tuple[float, int]:
             continue
         stems[head] += 1
         nums.setdefault(head, set()).add(m.group(1))
-    if not stems:
+    # Серией считается стебель с ТРЕМЯ разными номерами — та же планка, что и
+    # была; изменилось только то, что таких стеблей может быть больше одного.
+    series = [s for s in stems if len(nums.get(s, ())) >= 3]
+    if not series:
         return 0.0, 0
-    stem, cnt = stems.most_common(1)[0]
-    return cnt / len(lows), len(nums.get(stem, ()))
+    covered = sum(stems[s] for s in series)
+    return covered / len(lows), max(len(nums[s]) for s in series)
 
 
 def _looks_like_show(name: str, titles: list[str]) -> bool:

@@ -30,14 +30,26 @@ async def open_url(request: Request, body: dict):
     нельзя) и только http/https — `file:`/протокольные ссылки запускают
     посторонние программы.
     """
+    # Туннель приходит С LOCALHOST — cloudflared/serveo подключаются к серверу
+    # петлёй, поэтому request.client.host у удалённого гостя равен 127.0.0.1, и
+    # проверка ниже одна обещание докстринга не выполняет (тот же разбор, что в
+    # auth.py:_client_ip). Признак туннеля — заголовки пересылки, которые ставит
+    # сам туннель.
+    #
+    # Да, эти заголовки подделываются кем угодно — и именно поэтому здесь их
+    # можно читать. В auth.py доверять XFF нельзя, потому что там он ОСЛАБЛЯЕТ
+    # ограничение (даёт атакующему свежий счётчик). Здесь он только УЖЕСТОЧАЕТ:
+    # подделка приводит к отказу, а не к разрешению. Правило на отказ безопасно
+    # строить на недоверенных данных, правило на допуск — нет.
+    fwd = [k for k in request.headers.keys() if k.lower().startswith("x-forwarded-")]
     host = (request.client.host if request.client else "") or ""
-    if host not in ("127.0.0.1", "::1", "localhost"):
-        return {"ok": False, "error": "Открыть браузер можно только на этой машине"}
+    if fwd or host not in ("127.0.0.1", "::1", "localhost"):
+        return {"ok": False, "error_key": "err.browser_local_only_short", "error": "Открыть браузер можно только на этой машине"}
     url = str((body or {}).get("url") or "").strip()
     if not url.lower().startswith(("http://", "https://")):
-        return {"ok": False, "error": "Разрешены только адреса http/https"}
+        return {"ok": False, "error_key": "err.only_http_urls", "error": "Разрешены только адреса http/https"}
     if len(url) > 2000:
-        return {"ok": False, "error": "Слишком длинный адрес"}
+        return {"ok": False, "error_key": "err.url_too_long", "error": "Слишком длинный адрес"}
 
     def _open() -> bool:
         import webbrowser
@@ -55,7 +67,7 @@ async def open_url(request: Request, body: dict):
 
     import asyncio
     if not await asyncio.to_thread(_open):
-        return {"ok": False, "error": "Не удалось открыть браузер"}
+        return {"ok": False, "error_key": "err.browser_open_failed", "error": "Не удалось открыть браузер"}
     return {"ok": True}
 
 

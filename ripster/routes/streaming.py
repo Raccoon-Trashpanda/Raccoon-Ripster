@@ -16,6 +16,8 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
+
+from ripster.i18n_msg import imsg
 from fastapi.responses import StreamingResponse
 
 router = APIRouter()
@@ -264,9 +266,9 @@ async def stream_qobuz(track_id: str, request: Request, format_id: int = 27,
     secret = (_cfg.get("qobuz-secrets") or _cfg.get("qobuz-secret") or "").strip()
 
     if not token:
-        raise HTTPException(400, "Qobuz auth-token не настроен (Settings → Qobuz)")
+        raise HTTPException(400, imsg("err.qobuz_no_token", "Qobuz auth-token не настроен (Settings → Qobuz)"))
     if not secret:
-        raise HTTPException(400, "Qobuz secret не настроен (Settings → Qobuz)")
+        raise HTTPException(400, imsg("err.qobuz_no_secret", "Qobuz secret не настроен (Settings → Qobuz)"))
 
     ts  = str(int(time.time()))
     sig = _hashlib.md5(
@@ -401,7 +403,7 @@ async def stream_tidal(track_id: str, request: Request, quality: str = "LOSSLESS
 
     token, country = await _tidal_stream_token(track_id)
     if not token:
-        raise HTTPException(400, "Tidal token не настроен (Settings → Tidal)")
+        raise HTTPException(400, imsg("err.tidal_no_token", "Tidal token не настроен (Settings → Tidal)"))
     try:
         r = await _tidal_playbackinfo(track_id, quality, token, country)
     except Exception as e:
@@ -409,10 +411,10 @@ async def stream_tidal(track_id: str, request: Request, quality: str = "LOSSLESS
         raise HTTPException(502, f"Tidal API error: {e}")
     if r.status_code == 401:
         print(f"[tidal] playbackinfo 401 for track={track_id} (token rejected)", flush=True)
-        raise HTTPException(401, "Tidal: сессия отклонена (401). Переустанови вход Tidal в Настройки → Tidal.")
+        raise HTTPException(401, imsg("err.tidal_session_rejected", "Tidal: сессия отклонена (401). Переустанови вход Tidal в Настройки → Tidal."))
     if r.status_code in (404, 400):
         print(f"[tidal] playbackinfo {r.status_code} for track={track_id}: {r.text[:120]}", flush=True)
-        raise HTTPException(404, "Tidal: трек недоступен в твоём регионе или снят.")
+        raise HTTPException(404, imsg("err.tidal_track_unavailable", "Tidal: трек недоступен в твоём регионе или снят."))
     if r.status_code != 200:
         print(f"[tidal] playbackinfo {r.status_code} for track={track_id}: {r.text[:120]}", flush=True)
         raise HTTPException(502, f"Tidal API {r.status_code}")
@@ -447,7 +449,7 @@ async def stream_tidal(track_id: str, request: Request, quality: str = "LOSSLESS
                 "format": "flac", "mime": "audio/mp4", "quality": quality}
 
     print(f"[tidal] unsupported manifest ({mime_type}) for track={track_id}", flush=True)
-    raise HTTPException(502, "Tidal: неизвестный формат манифеста.")
+    raise HTTPException(502, imsg("err.tidal_manifest_format", "Tidal: неизвестный формат манифеста."))
 
 
 @router.get("/api/stream/tidal-dash/{track_id}")
@@ -462,7 +464,7 @@ async def stream_tidal_dash(track_id: str, request: Request, quality: str = "LOS
     r = await _tidal_playbackinfo(track_id, quality, token, country)
     if r.status_code != 200:
         raise HTTPException(r.status_code if r.status_code in (401, 404) else 502,
-                            "Tidal: не удалось получить манифест.")
+                            imsg("err.tidal_manifest_fail", "Tidal: не удалось получить манифест."))
     import base64 as _b64
     try:
         decoded = _b64.b64decode(r.json().get("manifest") or "").decode("utf-8", errors="replace")
@@ -470,7 +472,7 @@ async def stream_tidal_dash(track_id: str, request: Request, quality: str = "LOS
         decoded = ""
     parsed = _tidal_parse_dash(decoded)
     if not parsed:
-        raise HTTPException(502, "Tidal: манифест не разобран.")
+        raise HTTPException(502, imsg("err.tidal_manifest_parse", "Tidal: манифест не разобран."))
     init_url, seg_urls = parsed
 
     urls = [init_url] + seg_urls
@@ -536,7 +538,7 @@ async def stream_deezer(track_id: str, request: Request, quality: int = 3,
 
     arl = (_cfg.get("deezer-arl") or "").strip()
     if not arl:
-        raise HTTPException(400, "Deezer ARL не настроен (Settings → Deezer)")
+        raise HTTPException(400, imsg("err.deezer_no_arl", "Deezer ARL не настроен (Settings → Deezer)"))
 
     _GW  = "https://www.deezer.com/ajax/gw-light.php"
     _MED = "https://media.deezer.com/v1/get_url"
@@ -581,7 +583,7 @@ async def stream_deezer(track_id: str, request: Request, quality: int = 3,
                             "обнови в Settings → Deezer.")
                     if not license_token:
                         raise HTTPException(403,
-                            "Deezer: нет license_token (нужна Premium-подписка для стриминга).")
+                            imsg("err.deezer_no_license", "Deezer: нет license_token (нужна Premium-подписка для стриминга)."))
                     _DZ_AUTH.update(ts=_now, api_token=api_token,
                                     license_token=license_token)
 
@@ -614,11 +616,11 @@ async def stream_deezer(track_id: str, request: Request, quality: int = 3,
                                         license_token=license_token)
                     track = await _get_song()
                 if not track:
-                    raise HTTPException(404, f"Deezer: трек {track_id} не найден")
+                    raise HTTPException(404, imsg("err.deezer_track_not_found", f"Deezer: трек {track_id} не найден", id=track_id))
                 track_token = track.get("TRACK_TOKEN", "")
                 if not track_token:
                     raise HTTPException(503,
-                        "Deezer: TRACK_TOKEN пуст — повтори (возможно рейт-лимит)")
+                        imsg("err.deezer_track_token_empty", "Deezer: TRACK_TOKEN пуст — повтори (возможно рейт-лимит)"))
 
                 # Pick best available format ≤ requested quality.
                 q = quality

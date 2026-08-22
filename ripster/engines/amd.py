@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
 from .registry import register
+from ripster.py_runtime import app_python
 
 _QUALITIES = [
     {"id":"alac-hires",  "label":"ALAC Hi-Res","sub":"Hi-Res Lossless до 24/192 · публичный wrapper","badge":"HI-RES",  "color":"#ffd60a","bitrate":"≤9216 kbps",    "ext":"m4a","req":"public"},
@@ -104,7 +105,7 @@ class AMDEngine(EngineBase):
         _p = _up.urlparse(url)
         _qs = {k: v for k, v in _up.parse_qs(_p.query).items() if k in ("i",)}
         clean_url = _up.urlunparse(_p._replace(query=_up.urlencode(_qs, doseq=True)))
-        return [sys.executable, str(runner), clean_url, codec, lang]
+        return [app_python(), str(runner), clean_url, codec, lang]
 
     def working_dir(self) -> str | None:
         from ripster import amd as _amd_mod

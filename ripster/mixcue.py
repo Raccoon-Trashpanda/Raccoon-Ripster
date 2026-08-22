@@ -394,7 +394,7 @@ def build_mix(tracks: list[str], out_dir: str, out_name: str,
                 if cover:
                     try: cover.unlink()
                     except Exception: pass
-                return {"ok": False, "cancelled": True, "error": "отменено"}
+                return {"ok": False, "cancelled": True, "error_key": "err.cancelled", "error": "отменено"}
             line = raw.decode("utf-8", "ignore").strip()
             if line.startswith("out_time_us=") and total_dur > 0 and progress:
                 try:
@@ -478,7 +478,7 @@ def build_mixes(tracks: list[str], out_dir: str, out_name: str,
     ffprobe = _ffprobe_for(ffmpeg)
     paths = [Path(t) for t in tracks if Path(t).is_file()]
     if not paths:
-        return {"ok": False, "error": "нет треков"}
+        return {"ok": False, "error_key": "err.no_tracks", "error": "нет треков"}
     info = []
     for p in paths:
         m = _probe(ffprobe, p)
@@ -578,11 +578,11 @@ def split_cue(cue_path: str, out_dir: str, fmt: str = "source",
     re-encodes. Each output is tagged title/artist/album/album_artist/track."""
     cue = Path(cue_path)
     if not cue.is_file():
-        return {"ok": False, "error": "CUE-файл не найден"}
+        return {"ok": False, "error_key": "err.cd_cue_missing", "error": "CUE-файл не найден"}
     info = parse_cue(cue_path)
     tracks = info["tracks"]
     if not tracks:
-        return {"ok": False, "error": "В CUE нет треков"}
+        return {"ok": False, "error_key": "err.cue_no_tracks", "error": "В CUE нет треков"}
     # Resolve the referenced audio file (next to the cue); fall back to a lone
     # audio file in the same folder if the FILE line is missing/wrong.
     audio = None
@@ -596,7 +596,7 @@ def split_cue(cue_path: str, out_dir: str, fmt: str = "source",
         if len(auds) == 1:
             audio = auds[0]
     if audio is None or not audio.is_file():
-        return {"ok": False, "error": f"Аудиофайл из CUE не найден: {info.get('audio') or '?'}"}
+        return {"ok": False, "error_key": "err.cue_audio_missing", "error_args": {"path": info.get("audio") or "?"}, "error": f"Аудиофайл из CUE не найден: {info.get('audio') or '?'}"}
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)

@@ -14,6 +14,7 @@ from datetime import datetime
 
 import httpx
 from fastapi import APIRouter, HTTPException
+from ripster.i18n_msg import imsg
 
 router = APIRouter()
 
@@ -190,7 +191,10 @@ async def accounts_survey(fresh: int = 0):
         "deezer":     ("deezer-arl",),
         "spotify":    ("spotify-client-id", "spotify-sp-dc"),
         "soundcloud": ("soundcloud-oauth-token",),
-        "apple":      ("wrapper-apple-id", "media-user-token"),
+        "apple":      ("media-user-token", "authorization-token"),
+        # У слотов враппера ключей в конфиге нет — они живут в контейнерах,
+        # поэтому пустой кортеж: «настроено всегда», а жив ли — скажет проба.
+        "apple_wrapper": (),
         "beatport":   ("beatport-username",),
         "yandex":     ("yandex-token",),
         "amazon":     ("amazon-cookies",),
@@ -214,7 +218,9 @@ async def accounts_survey(fresh: int = 0):
             r = await probes[svc]()
         except Exception as e:
             # Исключение пробы — это НЕ «учётка мертва». Разные диагнозы.
-            return {"service": svc, "ok": False, "error": f"проба упала: {type(e).__name__}: {e}"}
+            return {"service": svc, "ok": False, "error_key": "pr.probe_crash",
+                    "error_args": {"e": f"{type(e).__name__}: {e}"},
+                    "error": f"проба упала: {type(e).__name__}: {e}"}
         out = {"service": svc, "ok": bool(r.get("ok"))}
         if r.get("error"):
             out["error"] = str(r["error"])[:200]
@@ -228,6 +234,45 @@ async def accounts_survey(fresh: int = 0):
     rows = sorted(rows, key=lambda x: (x["ok"], x["service"]))
     dead = [r["service"] for r in rows if not r["ok"]]
     return {"checked": len(rows), "dead": dead, "accounts": rows}
+
+
+async def _probe_apple_wrapper(overlay: dict | None = None) -> dict:
+    """Живы ли СЛОТЫ ВРАППЕРА — а это другая учётка, чем веб-токены Apple.
+
+    21.08.2026 владелец: «в настройках нет валидных токенов на Apple, хотя Apple
+    тянется». Обе половины фразы были правдой, и в этом весь дефект.
+
+    У Apple в Ripster ДВЕ независимые учётные сущности:
+
+      media-user-token + Bearer   веб-API (`api.music.apple.com`) — поиск,
+                                  метаданные, библиотека. Их и проверял
+                                  `_probe_apple`.
+      сессии в контейнерах        `amd-wrapper` / `rip-wrapper-N` — ими идёт
+                                  САМА ЗАГРУЗКА. Их не проверял никто.
+
+    Одна строка «apple: 🔴» на две разные вещи означала: интерфейс сообщает про
+    веб-токены, человек читает это как «Apple не работает», а Apple при этом
+    качает. Сводить два независимых ответа в один нельзя — не потому что
+    неаккуратно, а потому что получившийся ответ неверен при любом значении.
+    Поэтому строк теперь две.
+    """
+    try:
+        from ripster import apple_accounts as _aa
+        slots = _aa.all_slots(include_stopped=True)
+    except Exception as e:
+        return {"ok": False, "error_key": "pr.probe_crash",
+                "error_args": {"e": f"{type(e).__name__}: {e}"},
+                "error": f"проба упала: {type(e).__name__}: {e}"}
+    if not slots:
+        return {"ok": False, "error_key": "pr.ap_no_slots",
+                "error": "Ни один слот враппера не поднят — загрузка Apple пойдёт "
+                         "через чужой публичный wrapper или не пойдёт вовсе."}
+    live = [x for x in slots if x.get("running")]
+    ccs = ", ".join(sorted({(x.get("country") or "?").upper() for x in slots}))
+    if not live:
+        return {"ok": False, "error_key": "pr.ap_slots_down",
+                "error": f"Слоты настроены ({len(slots)}), но ни один не отвечает. Витрины: {ccs}"}
+    return {"ok": True, "user": {"name": f"{len(live)} из {len(slots)}", "country": ccs}}
 
 
 def _probes() -> dict:
@@ -244,6 +289,9 @@ def _probes() -> dict:
         "spotify":    _probe_spotify,
         "soundcloud": _probe_soundcloud,
         "apple":      _probe_apple,
+        # Отдельная строка, а не флаг внутри apple: веб-токены и слоты
+        # враппера умирают независимо друг от друга.
+        "apple_wrapper": _probe_apple_wrapper,
         "beatport":   _probe_beatport,
         "yandex":     _probe_yandex,
         "amazon":     _probe_amazon,
@@ -390,6 +438,7 @@ def _qobuz_eligibility_error(user_block: dict) -> dict | None:
     return {
         "ok": False,
         "user": user_block,
+        "error_key": "pr.qb_free", "error_args": {"why": why},
         "error": ("Токен валиден, НО " + why + " Скачивание невозможно — streamrip "
                   "упадёт с IneligibleError «Free accounts are not eligible to "
                   "download tracks»."),
@@ -1203,22 +1252,25 @@ async def import_token(service: str, body: dict):
     """
     s = service.lower()
     if s != "tidal":
-        raise HTTPException(400, f"Импорт токена не поддерживается для {service}. "
-                                 "Пока есть только Tidal.")
+        raise HTTPException(400, imsg("err.import_unsupported",
+            f"Импорт токена не поддерживается для {service}. Пока есть только Tidal.",
+            service=service))
 
     token_obj = (body or {}).get("token")
     raw       = (body or {}).get("content", "")
     if token_obj is None:
         if not isinstance(raw, str) or not raw.strip():
-            raise HTTPException(400, "Пустое тело. Передай 'content' с содержимым token.json.")
+            raise HTTPException(400, imsg("err.empty_body",
+                "Пустое тело. Передай 'content' с содержимым token.json."))
         try:
             token_obj = json.loads(raw)
         except json.JSONDecodeError as e:
-            raise HTTPException(400,
-                f"Невалидный JSON: {e.msg} (строка {e.lineno}, колонка {e.colno})")
+            raise HTTPException(400, imsg("err.bad_json",
+                f"Невалидный JSON: {e.msg} (строка {e.lineno}, колонка {e.colno})",
+                msg=e.msg, line=e.lineno, col=e.colno))
 
     if not isinstance(token_obj, dict):
-        raise HTTPException(400, "Ожидался JSON-объект с токенами")
+        raise HTTPException(400, imsg("err.expect_json_obj", "Ожидался JSON-объект с токенами"))
 
     access  = (token_obj.get("access_token")  or token_obj.get("accessToken")  or "").strip()
     refresh = (token_obj.get("refresh_token") or token_obj.get("refreshToken") or "").strip()
@@ -1226,7 +1278,8 @@ async def import_token(service: str, body: dict):
     country = (token_obj.get("country_code") or token_obj.get("countryCode") or "").strip().upper()
 
     if not access:
-        raise HTTPException(400, "В token.json не найдено поле 'access_token'.")
+        raise HTTPException(400, imsg("err.no_access_token",
+            "В token.json не найдено поле 'access_token'."))
 
     expiry_unix = ""
     if token_obj.get("token_expiry"):

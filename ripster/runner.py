@@ -17,6 +17,14 @@ from pathlib import Path
 
 # Errors that are not worth retrying (auth, subscription, missing binary, etc.)
 _RE_NO_RETRY = _re.compile(
+    # Поломка ОКРУЖЕНИЯ, а не сети. 22.08.2026: у человека после переустановки
+    # зависимостей `import pywidevine` падал с `subcon should be a Construct
+    # field`, и Ripster повторил это ТРИЖДЫ — 45 с, потом 120 с ожидания на
+    # ошибку, которая детерминирована и от повтора измениться не может.
+    # Повтор здесь не осторожность, а трата времени человека и маскировка
+    # причины: в консоли три одинаковых трейсбека вместо одного диагноза.
+    r'subcon should be a Construct field|ModuleNotFoundError|'
+    r'ImportError:|No module named|DLL load failed|'
     r'auth.*fail|invalid.*token|token.*invalid|invalid.*arl|arl.*invalid|'
     r'unauthorized|not\s+logged|login\s+failed|AuthenticationError|'
     r'бесплатный\s+аккаунт|free\s+account|IneligibleError|subscription|'
@@ -58,7 +66,13 @@ _RE_NO_RETRY = _re.compile(
     # — 08.08.2026 он повторялся ТРИЖДЫ с паузами 15/45/120с, и гость три с
     # половиной минуты ждал ровно того же «нет». Повтор осмыслен для временных
     # отказов, а не для «в этом магазине такого релиза не существует».
-    r'каталог\s+не\s+отдал\s+этот\s+релиз|Failed\s+to\s+(get\s+album\s+response|rip\s+album)',
+    r'каталог\s+не\s+отдал\s+этот\s+релиз|Failed\s+to\s+(get\s+album\s+response|rip\s+album)|'
+    # Мёртвая сессия Tidal. Повторять её бессмысленно ПО ОПРЕДЕЛЕНИЮ: пока человек
+    # не переавторизуется, все три попытки дадут ровно то же. 15.08.2026 альбом на
+    # 33 трека оборвался на 17-м, и задача ушла на три круга по 15/45/120 с.
+    # Якорь — по строкам, которые реально попадают в `msg` (это `result.error`, а
+    # не лог движка): их порождает `engines/tidal.py`.
+    r'сесси\w*\s+(истекла|оборвалась|недействительн)|переавторизуйся',
     _re.I,
 )
 _MAX_AUTO_RETRIES = 3
@@ -125,10 +139,34 @@ _MAX_DEAD_RETRIES = 1   # one quick re-check, then stop with clear guidance
 # card / web history can show it ("3/5 — region-locked") instead of a vague
 # "some tracks missing". Ordered most-specific → generic; first match wins.
 _PARTIAL_REASON_PATTERNS = [
+    # Сломано ОКРУЖЕНИЕ. Стоит ПЕРВЫМ намеренно: трейсбек про construct/pywidevine
+    # не содержит ни одного слова из паттернов ниже и доезжал до финального
+    # `return "region" if permanent else "postprocess"` — человеку сообщали
+    # «сбой постобработки, повтори», хотя чинить надо pip. 22.08.2026.
+    ("deps",       _re.compile(r"subcon should be a Construct field|"
+                               r"ModuleNotFoundError|No module named|"
+                               r"ImportError:|DLL load failed", _re.I)),
     ("decryption", _re.compile(r"Decryption is not available|AAC.*wrapper|"
                                r"-1002|AUDIO-SESSION-KEY", _re.I)),
+    # Отказ ПО ПРАВАМ аккаунта — не гео-лок. Стоит ДО "region" намеренно:
+    # 403-на-потоке Beatport («аккаунту не хватает прав») не совпадает ни с одним
+    # паттерном ниже, доезжал до финального `return "region" if permanent else ...`
+    # — и человек читал «недоступно в регионе» там, где регион ни при чём, и шёл
+    # искать прокси, который прав не добавляет. 14.08.2026: два таких прогона.
+    ("entitlement", _re.compile(r"не\s+хватает\s+прав|do\s+not\s+have\s+permission|"
+                                r"отказал\s+в\s+правах|not\s+entitled|entitlement", _re.I)),
+    # Сессия сервиса умерла ПОСРЕДИ релиза. Отдельный токен нужен потому, что без
+    # него такой недобор доезжал до финального фоллбэка и получал `postprocess` —
+    # «сбой постобработки, повтори, доберётся». Человеку говорили «повтори» там,
+    # где без переавторизации повтор даст ровно то же. Близнец дефекта 14.08, где
+    # отказ по правам показывался как гео-лок. Стоит ДО "region": строка про
+    # сессию не содержит слова «регион», но зато `unauthorized` из сырого лога
+    # ниже по списку совпало бы с чем угодно.
+    ("session",    _re.compile(r"сесси\w*\s+(истекла|оборвалась|недействительн)|"
+                               r"переавторизуйся|TidalAuthError|token\s+has\s+expired",
+                               _re.I)),
     ("region",     _re.compile(r"not available in your country|region|"
-                               r"unavailable in|geo", _re.I)),
+                               r"unavailable in|geo|Territory\s+Restricted", _re.I)),
     ("no-flac",    _re.compile(r"desired bitrate|no\s+FLAC|not.*available.*bitrate", _re.I)),
     ("removed",    _re.compile(r"Resource not found|no longer available|"
                                r"removed|gone|404", _re.I)),
@@ -139,7 +177,7 @@ _PARTIAL_REASON_PATTERNS = [
 def _classify_partial_reason(log_text: str, permanent: bool) -> str:
     """Return a short canonical reason token for a partial download.
 
-    Tokens: decryption | region | no-flac | removed | unavailable | postprocess.
+    Tokens: decryption | entitlement | region | no-flac | removed | unavailable | postprocess.
     `permanent` is the runner's existing region/decryption signal — when nothing
     more specific matches we fall back to it so a known-permanent shortfall never
     reads as a transient post-processing glitch."""
@@ -148,6 +186,40 @@ def _classify_partial_reason(log_text: str, permanent: bool) -> str:
         if pat.search(txt):
             return token
     return "region" if permanent else "postprocess"
+
+
+# ── Итог загрузки → матрица доступности ─────────────────────────────────────────
+# Опрос витрины отвечает только «есть ли в каталоге». Скачали мы или нет — знает
+# ОДНА попытка загрузки, и до сих пор этот ответ никуда не записывался: карточка
+# релиза продолжала показывать «✅ можно скачать» на сервисе, который час назад
+# ответил 403. Пишем вердикт туда же, откуда карточка его читает, — и только те
+# вердикты, что говорят о ДОСТУПНОСТИ (фильтр внутри availability.record_outcome:
+# сетевые и врапперные аварии не про витрину и записаны не будут).
+async def _record_availability(task: dict, outcome: str) -> None:
+    """Отдать матрице итог по этой задаче. Ошибка здесь не должна ронять загрузку."""
+    try:
+        from ripster import availability as _av
+        svc = str(task.get("service") or "").strip()
+        if not svc or svc not in _av.SERVICES:
+            return
+        # Ключ должен совпасть с тем, которым спрашивает карточка (upc:/isrc:),
+        # иначе запись ляжет рядом и её никто не найдёт. Резолвим один раз на
+        # задачу: это сетевой запрос.
+        cid = task.get("_content_id")
+        if cid is None:
+            from ripster.routes.discovery import _resolve_release_id
+            cid = await _resolve_release_id(task.get("url") or "")
+            task["_content_id"] = cid
+        upc = cid[4:] if str(cid).startswith("upc:") else ""
+        isrc = cid[5:] if str(cid).startswith("isrc:") else ""
+        meta = task.get("meta") or {}
+        _av.record_outcome(
+            svc, outcome, upc=upc, isrc=isrc,
+            title=str(meta.get("title") or task.get("title") or ""),
+            artist=str(meta.get("artist") or ""),
+            account=str(task.get("_force_slot") or ""))
+    except Exception as e:                                          # noqa: BLE001
+        print(f"[availability] outcome not recorded: {e!r}", flush=True)
 
 
 # ── Per-track failure extractor (issue #5b, phase 1) ────────────────────────────
@@ -243,6 +315,10 @@ from ripster.task_state import (
     TaskStatus,
     advance     as _advance_task,
     try_advance as _try_advance_task,
+    # Лестница витрин Apple: провал ступени `_run_engine_task` записывает как
+    # ERROR всей задачи, а ERROR терминален. Без возврата в очередь успех
+    # следующей ступени не смог бы вывести задачу из ошибки.
+    revive_for_retry as _revive_task,
 )
 from ripster.engines import get_engine
 from ripster import i18n as _i18n
@@ -367,6 +443,15 @@ _RE_AMD_CODEC_ERR = _re.compile(
 )
 # AMD wrapper-quality IDs — only these trigger zhaarey fallback (AAC won't)
 _AMD_WRAPPER_QUALS = frozenset({"alac", "atmos", "ac3", "aac-binaural", "aac-downmix"})
+
+# gamdl не смог разобрать манифест на лосси-пути (без wrapper'а). Признак именно
+# СТРУКТУРНЫЙ, а не «ошибка вообще»: у выбранного варианта в манифесте Apple нет
+# полей ключей, и повтор того же пути даст ровно тот же отказ.
+_RE_GAMDL_MANIFEST_ERR = _re.compile(
+    r'AUDIO-SESSION-KEY-IDS'
+    r'|KeyError.*variant_id',
+    _re.I,
+)
 
 
 # ── History ──────────────────────────────────────────────────────────────────
@@ -1478,6 +1563,25 @@ def _relocate_to_service_folder(save_dir: str, service: str, quality: str, confi
 
 # ── Engine-based runner ──────────────────────────────────────────────────────
 
+def _attempt_succeeded(task: dict) -> bool:
+    """Закончилась ли последняя попытка успехом.
+
+    Нужен потому, что `_run_engine_task` НИЧЕГО не возвращает: провал он
+    записывает в статус задачи. Из-за этого в цепочке витрин
+    `_retried_sf = True` ставился сразу после `await`, то есть означал «попытка
+    состоялась», а читался как «попытка удалась».
+
+    22.08.2026, лог владельца, PAINLESS (Deluxe Edition): витрина `us` не дала
+    ключ (нет прав), Ripster честно перешёл на свою `ca` — а там альбома нет в
+    каталоге («Failed to get album response»). Это не отказ по ключу, значит
+    `_NeedAMDFallback` не поднялся, значит `_retried_sf` остался True — и
+    ПРОПУЩЕНЫ обе оставшиеся ступени разом: и другие свои слоты, и спасение
+    через AMD. Наружу вышло «каталог не отдал релиз», то есть жалоба ВТОРОЙ
+    попытки, поданная как приговор всей задаче.
+    """
+    return str(task.get("status") or "").lower() == TaskStatus.DONE.value
+
+
 async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str) -> None:
     """Run task via a registered engine plugin (ProcessRunner)."""
     tid = task.get("id", "")
@@ -1605,9 +1709,12 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 from ripster import deezer_pool as _dzp
                 _dz_pool = _dzp.get_pool(_config)
                 if _dz_pool is not None:
-                    _dz_acq = await asyncio.to_thread(_dz_pool.acquire)
+                    from ripster import account_fallback as _afb
+                    _dz_acq = await asyncio.to_thread(
+                        _dz_pool.acquire, tuple(_afb.tried_slots(task, "deezer")))
                     if _dz_acq:
                         _dz_slot, _dz_arl, _dz_cfg_dir = _dz_acq
+                        _afb.mark_tried(task, "deezer", _dz_slot)
                         # Пул выдаёт свободный слот, но НЕ проверяет, жив ли его
                         # ARL. Мёртвая учётка уходила в загрузку и роняла её без
                         # внятной причины, хотя рядом лежала рабочая. Спрашиваем
@@ -1660,9 +1767,12 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 from ripster import qobuz_pool as _qzp
                 _qz_pool = _qzp.get_pool(_config)
                 if _qz_pool is not None:
-                    _qz_acq = await asyncio.to_thread(_qz_pool.acquire)
+                    from ripster import account_fallback as _afb
+                    _qz_acq = await asyncio.to_thread(
+                        _qz_pool.acquire, tuple(_afb.tried_slots(task, "qobuz")))
                     if _qz_acq:
                         _qz_slot, _qz_acct, _qz_cfg_dir = _qz_acq
+                        _afb.mark_tried(task, "qobuz", _qz_slot)
                         _cfg_view["qobuz-user-id"]    = _qz_acct["qobuz-user-id"]
                         _cfg_view["qobuz-auth-token"] = _qz_acct["qobuz-auth-token"]
                         _cfg_view["qobuz-email"]      = _qz_acct["qobuz-email"]
@@ -1687,9 +1797,12 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 from ripster import soundcloud_pool as _scp
                 _sc_pool = _scp.get_pool(_config)
                 if _sc_pool is not None:
-                    _sc_acq = await asyncio.to_thread(_sc_pool.acquire)
+                    from ripster import account_fallback as _afb
+                    _sc_acq = await asyncio.to_thread(
+                        _sc_pool.acquire, tuple(_afb.tried_slots(task, "soundcloud")))
                     if _sc_acq:
                         _sc_slot, _sc_token = _sc_acq
+                        _afb.mark_tried(task, "soundcloud", _sc_slot)
                         _cfg_view["soundcloud-oauth-token"] = _sc_token
                         task["log"].append(f"🟠 soundcloud-pool: slot {_sc_slot}")
                         try:
@@ -1705,9 +1818,12 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 from ripster import yandex_pool as _yxp
                 _yx_pool = _yxp.get_pool(_config)
                 if _yx_pool is not None:
-                    _yx_acq = await asyncio.to_thread(_yx_pool.acquire)
+                    from ripster import account_fallback as _afb
+                    _yx_acq = await asyncio.to_thread(
+                        _yx_pool.acquire, tuple(_afb.tried_slots(task, "yandex")))
                     if _yx_acq:
                         _yx_slot, _yx_token = _yx_acq
+                        _afb.mark_tried(task, "yandex", _yx_slot)
                         _cfg_view["yandex-token"] = _yx_token
                         task["log"].append(f"🟡 yandex-pool: slot {_yx_slot}")
                         try:
@@ -1775,6 +1891,14 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             extra_env = {"PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python", "PYTHONIOENCODING": "utf-8"}
         else:
             extra_env = {"PYTHONIOENCODING": "utf-8"}
+        # Движки Orpheus (beatport/spotify/tidal) не должны видеть user-site
+        # интерпретатора: в %APPDATA%\\Roaming\\Python\\Python3XX\\site-packages лежит
+        # пакет `ffmpeg` вместо `ffmpeg-python`, и он ломает импорт OrpheusDL
+        # (11.08.2026, 12 прогонов). _orpheus_python() уже прибит к .venv — это
+        # вторая линия: даже системный python не подтянет чужие пакеты.
+        # AMD намеренно НЕ трогаем: его зависимости могут стоять как раз в user-site.
+        if engine_name in ("orpheus_beatport", "orpheus_spotify", "tidal"):
+            extra_env["PYTHONNOUSERSITE"] = "1"
         if engine_name == "deezer" and _cfg_view.get("_deezer_cfg_dir"):
             # Multi-account pool slot (>0): point the deemix SUBPROCESS itself
             # at the same isolated config dir _write_arl()/_write_deemix_config()
@@ -2065,15 +2189,45 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         ):
             raise _NeedZhaareyFallback("aac")
 
+        # gamdl на ЛОССИ-пути упал разбором манифеста → добираем через wrapper.
+        #
+        # 15.08.2026, гость: «Gold Chain» в AAC падал у gamdl дважды подряд с
+        # `KeyError: AUDIO-SESSION-KEY-IDS` — в манифесте Apple у выбранного
+        # варианта просто нет этого поля. Сам gamdl честно предупреждает строкой
+        # выше: «experimental song codec without enabling wrapper». Владелец тот
+        # же самый релиз забрал СЕКУНДЫ спустя через zhaarey, потому что у него
+        # качество вело на wrapper. То есть релиз доступен, а отказ — свойство
+        # лосси-пути, и повторять его бессмысленно (и было повторено).
+        #
+        # Фоллбэк идёт в ALAC, а не в AAC: wrapper всё равно нужен, а раз он
+        # есть — отдаём лучшее, что он умеет. Направление обратно тому, что
+        # выше (ALAC→AAC), и флаг у них общий, поэтому зациклиться нельзя.
+        if (
+            engine_name == "gamdl"
+            and quality not in ("mv",)          # видео умеет только gamdl
+            and not task.get("_amd_fallback")
+            and result.tracks_ok == 0
+            and _RE_GAMDL_MANIFEST_ERR.search(log_text)
+        ):
+            from ripster.apple_router import local_wrapper_session_alive as _lw_alive
+            if _lw_alive(_config):
+                raise _NeedZhaareyFallback("alac")
+
         # Сервер декрипта ЛЁГ, и не скачалось ВООБЩЕ ничего. Ветка «частичной»
         # дозагрузки ниже исходит из того, что часть треков упала по своим
         # причинам и второй проход их подберёт — но когда сервера нет, второй
         # проход гарантированно повторит тот же отказ, только ещё раз по 20+
         # минут (до 4 раз подряд). Отдаём честную ошибку сразу: причина не в
         # релизе, ждать нечего, лечится локальным ALAC или временем.
+        # `tracks_err > 0` намеренно НЕ требуется: движок считает ошибочные треки
+        # по своим маркерам, и при лежащем сервере счётчик остаётся нулевым (ни
+        # один трек даже не начался). Тогда `tracks_ok == 0 and tracks_err == 0`
+        # мимо ветки частичной дозагрузки проходило, но попадало в обычный
+        # авто-повтор с ПУСТЫМ result.error — а пустая строка не совпадает ни с
+        # одной отсечкой, так что прогон повторялся все три раза. Признак «сервер
+        # лежит и не сохранено ничего» самодостаточен.
         _wrapper_down_empty = (
             result.tracks_ok == 0
-            and result.tracks_err > 0
             and bool(_RE_WRAPPER_DEAD.search(log_text))
         )
         if _wrapper_down_empty and not result.error:
@@ -2081,10 +2235,39 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                             "живого инстанса — это его сторона, не релиз. Возьми локальное "
                             "качество ALAC или повтори позже")
 
+        # ── Вердикт самого движка важнее текста ошибки ────────────────────────
+        # Движок ставит `abort_reason`, когда УЖЕ знает, что дальше бессмысленно
+        # (10 отказов по правам подряд и ноль сохранённых, пустой пул wrapper'а).
+        # Раннер этот вердикт до сих пор не читал вообще: он сверял с регулярками
+        # только `result.error`, который собирается ОТДЕЛЬНО — в `is_finished()`
+        # по логу. Из-за этого один и тот же класс поломки всплывал трижды:
+        # 08.08 отсечка враппера (24 мин, 830 ERROR, 0 файлов), 09.08 отсечка прав
+        # Beatport, и Tidal, где `is_finished` поверх абортированного прогона
+        # возвращал «трек не докачался (DASH/сеть прервалась) — повтори», то есть
+        # не просто терял вердикт, а ЗАМЕНЯЛ его противоположным по смыслу.
+        #
+        # Чинить это добавлением ещё одной строки в `_RE_NO_RETRY` бессмысленно —
+        # так уже чинили дважды, и оба раза следующая формулировка снова не
+        # совпадала. Читаем сам факт аборта: он не зависит ни от одной фразы.
+        _engine_aborted = bool(getattr(eng, "abort_reason", ""))
+        if _engine_aborted and not result.success:
+            # Вердикт движка — самая точная причина из имеющихся, поэтому он
+            # вытесняет обобщённый текст `is_finished()`, а не дописывается к нему.
+            result.error = getattr(eng, "abort_reason", "") or result.error
+
         if result.success:
             _try_advance_task(task, TaskStatus.DONE)
             task["progress"]   = 100
             task["_done_time"] = time.time()
+            # ВНИМАНИЕ: статус DONE ставится ЗДЕСЬ, а файлы кладутся, переносятся,
+            # перетегируются, переименовываются и попадают в манифест НИЖЕ. То
+            # есть «готово» человек видит раньше, чем результат существует в
+            # окончательном виде: обрыв в этом окне (падение, перезапуск) оставит
+            # зелёную задачу без единого файла и без записи в манифесте — ровно
+            # это и получилось 15.08.2026, когда сервер перезапустили сразу после
+            # «done» (повтор той же загрузки отработал начисто, движок ни при чём).
+            # Поэтому «получилось» в матрицу доступности пишем НЕ отсюда, а ниже —
+            # из ветки, где файлы уже НАЙДЕНЫ на диске.
             # Capture the exact output directory from engine JSON/log output
             # so /api/download-file can find the files without guessing.
             save_dir = eng.extract_save_dir(log_text)
@@ -2225,6 +2408,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     task["_files"] = [f.name for f in audio]
                     _dm.record(tid, str(d), audio, task)
                     print(f"[manifest] {_dm.short_id(tid)} → {d.name} ({len(audio)} files)", flush=True)
+                    # ВОТ ТЕПЕРЬ «получилось» — файлы найдены на диске, а не
+                    # заявлены движком. Матрица доступности должна опираться на
+                    # самое твёрдое доказательство, какое у нас есть.
+                    if audio:
+                        await _record_availability(task, "ok")
                     # Integrity verify: "done" only proves the engine THINKS it
                     # saved the file — decode-check it for real. ALAC failures get
                     # one auto-repair pass (utils/alacfix, via the compiled Go
@@ -2329,6 +2517,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 _reason = _classify_partial_reason(log_text, _permanent_miss)
                 task["_partial_reason"] = _reason
                 task.setdefault("meta", {})["_partial_reason"] = _reason
+                await _record_availability(task, _reason)
                 # Issue #5b: which tracks fell short (best-effort, engines that
                 # emit per-track failure lines). Empty for engines without a known
                 # format → card shows the aggregate reason above.
@@ -2366,6 +2555,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         elif (result.tracks_err > 0
               and not task.get("_auto_retry")
               and not _wrapper_down_empty
+              and not _engine_aborted   # движок уже сказал «дальше бессмысленно»
               and not (engine_name == "soundcloud"
                        and "FairPlay" in (result.error or "")
                        and result.tracks_ok == 0)):
@@ -2426,6 +2616,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             can_retry = (
                 retry_n < max_r
                 and not _RE_NO_RETRY.search(msg)
+                and not _engine_aborted   # вердикт движка сильнее любой регулярки
                 and not task.get("_auto_retry")   # don't chain onto partial-fail retry
             )
             if can_retry:
@@ -2494,6 +2685,47 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
 
                 if not salvaged:
                     task["error"] = msg
+                    # Причина отказа нужна и при ПОЛНОМ провале, а не только при
+                    # частичной загрузке. 14.08.2026 два Beatport-релиза упали с
+                    # 403 «нет прав» — токен причины не проставился ни у одного,
+                    # потому что классификатор жил только в ветке недокачки. А
+                    # полный отказ по правам — как раз главный повод взять другую
+                    # учётку, и решать это не по чему.
+                    _fail_reason = _classify_partial_reason(msg, False)
+                    task["_partial_reason"] = _fail_reason
+                    task.setdefault("meta", {})["_partial_reason"] = _fail_reason
+                    # ── СЛЕДУЮЩАЯ УЧЁТКА ТОГО ЖЕ СЕРВИСА ────────────────────
+                    # «Нет смысла от пяти акков, если релиз, доступный по
+                    # дополнительным, выдаёт ошибку». Перебор МОЛЧАЛИВЫЙ: человек
+                    # видит итог, а не промежуточные отказы, — поэтому здесь нет
+                    # ни тоста, ни console-события, только запись в task["log"].
+                    # Что считать поводом, а что нет — в ripster/account_fallback.py
+                    # (сетевые и врапперные аварии не повод: сожжём все учётки на
+                    # одной аварии). Предел и терминальный статус обязательны,
+                    # иначе получим ровно `ripster-runaway-runs`.
+                    try:
+                        from ripster import account_fallback as _afb
+                        if _afb.should_try_next(task, engine_name, _fail_reason, _config):
+                            _n = len(_afb.tried_slots(task, engine_name))
+                            task["log"].append(
+                                f"─── учётка {_n} отказала ({_fail_reason}) → "
+                                f"пробую следующую ───")
+                            print(f"[account-fallback] {engine_name}: слот "
+                                  f"{_afb.tried_slots(task, engine_name)} → следующий "
+                                  f"(причина {_fail_reason})", flush=True)
+                            task["status"]   = "queued"
+                            task["progress"] = 0
+                            task["log"]      = []
+                            for _k in ("_start_time", "_done_time", "_save_dir",
+                                       "_prog_total", "_prog_current"):
+                                task.pop(_k, None)
+                            task["_in_retry"] = True   # finally пропустит историю
+                            await _broadcast({"type": "queue_update",
+                                              "queue": _queue_snapshot()})
+                            return
+                    except Exception as _e_afb:                     # noqa: BLE001
+                        print(f"[account-fallback] не сработал: {_e_afb!r}", flush=True)
+                    await _record_availability(task, _fail_reason)
                     _try_advance_task(task, TaskStatus.ERROR)
                     await _broadcast({"type": "log", "msg": f"✗ {msg}", "level": "error", "task_id": tid})
 
@@ -2828,7 +3060,17 @@ async def run_task(task: dict) -> None:
                                 task["log"].append(
                                     f"─── витрина '{_url_sf}' → '{_acct_sf}' (свой аккаунт) ───")
                                 await _run_engine_task(task, engine, _new_url, qid)
-                                _retried_sf = True
+                                _retried_sf = _attempt_succeeded(task)
+                                if not _retried_sf:
+                                    task["log"].append(
+                                        _i18n.tr("console.sf_rung_failed", cc=_acct_sf))
+                                    await _broadcast(_i18n.log_event(
+                                        "console.sf_rung_failed", level="warn",
+                                        cc=_acct_sf, task_id=task.get("id", "")))
+                                    # Ступень провалилась — вернуть задачу в очередь,
+                                    # иначе следующая отработает «в мёртвую»: её успех
+                                    # не сможет вывести задачу из терминальной ошибки.
+                                    _revive_task(task, _acct_sf)
                         except _NeedAMDFallback:
                             _retried_sf = False      # и своя витрина не дала ключа
                         except Exception:
@@ -2900,7 +3142,16 @@ async def run_task(task: dict) -> None:
                                     frm=_failed_cc or "?", to=_cc, slot=_slot["slot"],
                                     task_id=task.get("id", "")))
                                 await _run_engine_task(task, engine, _u2, qid)
-                                _retried_sf = True
+                                _retried_sf = _attempt_succeeded(task)
+                                if not _retried_sf:
+                                    task["log"].append(_i18n.tr(
+                                        "console.slot_rung_failed",
+                                        slot=_slot["slot"], cc=_cc))
+                                    await _broadcast(_i18n.log_event(
+                                        "console.slot_rung_failed", level="warn",
+                                        slot=_slot["slot"], cc=_cc,
+                                        task_id=task.get("id", "")))
+                                    _revive_task(task, _cc)
                             else:
                                 # Третий исход, который раньше был НЕМЫМ: слот не
                                 # подобрался. Отсутствие записи неотличимо от
@@ -2912,6 +3163,23 @@ async def run_task(task: dict) -> None:
                                       f"{[(s['slot'], s['country']) for s in _all]}, "
                                       f"release available in={sorted(_avail)}, "
                                       f"excluded='{_failed_cc}'", flush=True)
+                                # …и то же самое ЧЕЛОВЕКУ. Строка выше уходит в
+                                # stdout, а владелец смотрит в консоль задачи —
+                                # и видел там переход на публичный wrapper без
+                                # причины. Вопрос «у меня же несколько учёток,
+                                # неужели ни одна не может» задан 22.08.2026 на
+                                # японском релизе: свои витрины ca/gb/gb, релиз
+                                # издан только в jp. Ответ у кода был, наружу он
+                                # не выходил.
+                                _have = ", ".join(sorted(_avail)) or "—"
+                                _mine = ", ".join(sorted({s["country"] for s in _all
+                                                          if s.get("country")})) or "—"
+                                task["log"].append(_i18n.tr("console.no_own_slot",
+                                                            have=_have, mine=_mine))
+                                await _broadcast(_i18n.log_event(
+                                    "console.no_own_slot", level="warn",
+                                    have=_have, mine=_mine,
+                                    task_id=task.get("id", "")))
                         except _NeedAMDFallback:
                             _retried_sf = False          # и чужой слот не дал ключа
                         except Exception as _e_slot:
@@ -2927,6 +3195,10 @@ async def run_task(task: dict) -> None:
                             "console.wrapper_local_region_amd", level="warn",
                             task_id=task.get("id", "")))
                         task["log"].append("─── local-only: нет прав в регионе → спасаю через AMD ───")
+                        # Последняя ступень. Если предыдущие уже записали ошибку,
+                        # AMD стартовал бы поверх терминального статуса и его успех
+                        # остался бы незамеченным.
+                        _revive_task(task, "local-wrapper")
                         await _run_engine_task(task, "amd", url, qid)
                 else:
                     await _broadcast(_i18n.log_event(

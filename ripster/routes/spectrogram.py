@@ -16,6 +16,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from ripster.i18n_msg import imsg
+
 # Windows: don't flash a console window for the ffprobe/ffmpeg spawns when the
 # server runs windowless (frozen build). 0 on non-Windows.
 _CNW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -598,13 +600,13 @@ async def analyze_by_path(req: PathRequest):
     if not p:
         raise HTTPException(400, "path is required")
     if not os.path.isfile(p):
-        raise HTTPException(404, f"Файл не найден: {p}")
+        raise HTTPException(404, imsg("err.file_not_found_path", f"Файл не найден: {p}", path=str(p)))
     if os.path.getsize(p) > _MAX_UPLOAD:
-        raise HTTPException(413, "Файл слишком большой (лимит 200 МБ)")
+        raise HTTPException(413, imsg("err.file_too_big", "Файл слишком большой (лимит 200 МБ)"))
     try:
         return await asyncio.to_thread(_analyze, p, req.lang)
     except FileNotFoundError:
-        raise HTTPException(500, "ffmpeg/ffprobe не найден — установи ffmpeg и добавь в PATH")
+        raise HTTPException(500, imsg("err.ffmpeg_missing", "ffmpeg/ffprobe не найден — установи ffmpeg и добавь в PATH"))
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -625,17 +627,17 @@ async def analyze_upload(file: UploadFile = File(...), lang: str = Form("ru"),
                     ".aif", ".aiff", ".wv", ".opus", ".ape", ".wma"}
     ext = Path(file.filename or "").suffix.lower()
     if ext not in allowed_exts:
-        raise HTTPException(400, f"Неподдерживаемый формат: {ext}")
+        raise HTTPException(400, imsg("err.unsupported_format", f"Неподдерживаемый формат: {ext}", ext=ext))
 
     with tempfile.TemporaryDirectory(prefix="ripster_spec_") as tmp:
         dst = os.path.join(tmp, f"upload{ext}")
         content = await file.read()
         if len(content) > _MAX_UPLOAD:
-            raise HTTPException(413, "Файл слишком большой (лимит 200 МБ)")
+            raise HTTPException(413, imsg("err.file_too_big", "Файл слишком большой (лимит 200 МБ)"))
         Path(dst).write_bytes(content)
         try:
             return await asyncio.to_thread(_analyze, dst, lang, style, all_styles)
         except FileNotFoundError:
-            raise HTTPException(500, "ffmpeg/ffprobe не найден — установи ffmpeg и добавь в PATH")
+            raise HTTPException(500, imsg("err.ffmpeg_missing", "ffmpeg/ffprobe не найден — установи ffmpeg и добавь в PATH"))
         except Exception as e:
             raise HTTPException(500, str(e))

@@ -15,6 +15,7 @@ from pathlib import Path
 from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
 from .errors import classify_download_error
 from .registry import register
+from ripster.py_runtime import app_python
 
 # ── paths ─────────────────────────────────────────────────────────────────────
 def _base_dir() -> Path:
@@ -35,7 +36,20 @@ def _orpheus_python() -> str:
         cand = base / "tools" / "orpheusvenv" / sub[0] / sub[1]
         if cand.is_file():
             return str(cand)
-    return sys.executable
+    # tools/orpheusvenv отсутствует в этой установке — и тогда раньше молча брался
+    # sys.executable, то есть ЛЮБОЙ интерпретатор, которым подняли app.py. 10-11.08.2026
+    # app.py стартовал из C:\Python314 (не из .venv), и OrpheusDL получил его user-site,
+    # где лежит пакет `ffmpeg` вместо `ffmpeg-python` → `ImportError: cannot import name
+    # 'Error' from 'ffmpeg'` на КАЖДОМ движке Orpheus (beatport/spotify/tidal), 12 прогонов
+    # подряд. В логе это видно буквально: все 203 прогона из .venv отработали без этой
+    # ошибки, все 12 из C:\Python314 — с ней. Поэтому берём venv проекта ЯВНО, а не
+    # «тот, которым запустились»: интерпретатор движка не должен зависеть от того, как
+    # именно подняли сервер.
+    # Дальше — ОБЩЕЕ правило приложения (ripster/py_runtime.py): venv проекта с
+    # проверкой запускаемости, переопределение через RIPSTER_ENGINE_PYTHON, иначе
+    # текущий интерпретатор. Здесь лежала третья копия одного и того же перебора,
+    # и именно про такие копии предупреждал разбор 16.08: расходятся они молча.
+    return app_python()
 
 def _creds_path() -> Path:
     return _orpheus_dir() / "config" / "credentials.json"
@@ -452,9 +466,35 @@ class OrpheusSpotifyEngine(EngineBase):
         # "=== Track ... failed ===" is the definitive failure marker per track.
         track_failed = len(re.findall(r'=== Track .+ failed ===', log_text, re.I))
         downloads = len(re.findall(r'Downloading track file', log_text, re.I))
-        # Librespot auth failure means no audio was actually saved.
-        librespot_fail = bool(re.search(r'Librespot.{0,40}fail|BadCredentials|credentials.*missing', log_text, re.I))
         ok = max(0, downloads - track_failed)
+
+        # НЕДОСТУПНОСТЬ ТРЕКА — НЕ ОТКАЗ АВТОРИЗАЦИИ, и проверяется ПЕРВОЙ.
+        # 15.08.2026: гостю выдали «токен истёк, войди снова» на альбом, где вход
+        # прошёл идеально — в логе есть и год выпуска, и длительность, и кодек
+        # Vorbis 160k, то есть метаданные получены. Провалились сами треки:
+        # «is unavailable (Cannot get alternative track)» на КАЖДОМ. Это лицензия
+        # или регион, и перелогин не поможет НИКОГДА — а человек будет входить
+        # заново раз за разом, потому что ему так написали.
+        unavailable = len(re.findall(
+            r'is unavailable\b|Cannot get alternative track', log_text, re.I))
+        if ok == 0 and unavailable:
+            n = track_failed or 1
+            return EngineResult(
+                False,
+                error=(f"Spotify: недоступно для этой учётной записи "
+                       f"(треков не отдано: {n}). Вход исправен, метаданные получены — "
+                       "это ограничение по региону или правам, и перелогин не поможет. "
+                       "Забери этот релиз из другого сервиса."),
+            )
+
+        # Отказ авторизации librespot — только по ЯВНЫМ признакам. Раньше здесь
+        # стояло `Librespot.{0,40}fail`, и под него попадала рядовая строка о
+        # переподключении к точке доступа: клиент честно писал про повтор, а
+        # приложение объявляло это смертью токена.
+        librespot_fail = bool(re.search(
+            r'BadCredentials|credentials.*missing|Failed to authenticate|'
+            r'AuthenticationFailed|login\s+failed|bad\s+credentials',
+            log_text, re.I))
         if librespot_fail and ok == 0:
             return EngineResult(
                 False,

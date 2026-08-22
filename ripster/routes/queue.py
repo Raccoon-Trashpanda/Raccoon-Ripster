@@ -20,6 +20,7 @@ import uuid
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Request
+from ripster.i18n_msg import imsg
 
 
 def _make_task(url: str, quality: str, engine: str, svc: str,
@@ -157,10 +158,11 @@ async def add_to_queue(body: dict, request: Request):
     _ul = url.lower()
     if svc == "apple" and ("/station/" in _ul
                            or _ul.rstrip("/").split("/")[-1].split("?")[0].startswith("ra.")):
-        raise HTTPException(422,
+        raise HTTPException(422, imsg(
+            "err.apple_radio_station",
             "Apple-радио и станции (DJ-миксы, ссылки ra.*) скачать нельзя — это "
             "защищённый DRM radio-поток, а не трек/альбом каталога. Дай ссылку на "
-            "трек, альбом или плейлист.")
+            "трек, альбом или плейлист."))
 
     # Guests always use the owner's engine — they cannot switch
     sid = _guest_session_id(request)
@@ -173,7 +175,7 @@ async def add_to_queue(body: dict, request: Request):
             gm = get_manager()
             if not gm.check_quota(sid):
                 gm.log_activity(sid, {"event": "add_blocked", "reason": "quota_exceeded", "url": url, "service": svc})
-                raise HTTPException(429, "Квота исчерпана")
+                raise HTTPException(429, imsg("err.quota_exhausted", "Квота исчерпана"))
             # Count-quota counts COMPLETED downloads (consume_quota fires on 'done'
             # in runner.py), so a guest could burst many adds before any completes
             # and overrun the limit. Also count this session's IN-FLIGHT (queued/
@@ -187,10 +189,10 @@ async def add_to_queue(body: dict, request: Request):
                                 and _t.get("status") in ("queued", "running"))
                 if _qq.get("used", 0) + _inflight >= int(_qq.get("limit", 0) or 0):
                     gm.log_activity(sid, {"event": "add_blocked", "reason": "quota_inflight", "url": url, "service": svc})
-                    raise HTTPException(429, "Квота исчерпана (есть незавершённые загрузки)")
+                    raise HTTPException(429, imsg("err.quota_exhausted_pending", "Квота исчерпана (есть незавершённые загрузки)"))
             if not gm.check_rate(sid):
                 gm.log_activity(sid, {"event": "add_blocked", "reason": "rate_limit", "url": url, "service": svc})
-                raise HTTPException(429, "Слишком много запросов, подожди минуту")
+                raise HTTPException(429, imsg("err.rate_limited", "Слишком много запросов, подожди минуту"))
             gm.record_rate(sid)
         except HTTPException:
             raise

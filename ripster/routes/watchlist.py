@@ -13,6 +13,7 @@ from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, HTTPException, Query
+from ripster.i18n_msg import imsg
 
 from ripster import compilations as _comps
 from ripster import watchlist_suggest as _wls
@@ -199,7 +200,7 @@ async def api_watchlist_add(body: dict):
     # create an entry that silently never fires.
     if kind == "label":
         if not name:
-            raise HTTPException(400, "название лейбла обязательно")
+            raise HTTPException(400, imsg("err.label_name_required", "название лейбла обязательно"))
         rels = await _label_releases(name, 10)
         entry = {
             "id":           f"wl_{int(datetime.now().timestamp()*1000)}",
@@ -341,15 +342,15 @@ async def api_watchlist_download_latest(item_id: str, body: dict | None = None):
     "I want the current one" action."""
     entry = next((e for e in _s["items"] if e.get("id") == item_id), None)
     if not entry:
-        raise HTTPException(404, "запись не найдена")
+        raise HTTPException(404, imsg("err.entry_not_found", "запись не найдена"))
     if entry.get("kind") != "label":
-        raise HTTPException(400, "только для лейблов")
+        raise HTTPException(400, imsg("err.labels_only", "только для лейблов"))
 
     how_many = int((body or {}).get("count") or 1)
     how_many = max(1, min(how_many, 5))
     rels = await _label_releases(entry["name"], 20)
     if not rels:
-        return {"ok": False, "error": f"У лейбла «{entry['name']}» не нашлось релизов"}
+        return {"ok": False, "error_key": "err.label_no_releases", "error_args": {"name": entry["name"]}, "error": f"У лейбла «{entry['name']}» не нашлось релизов"}
 
     from ripster.routes import discovery as _disc
     cfg, queue, snapshot = _s["config"], _s["queue"], _s["queue_snapshot"]
@@ -376,6 +377,10 @@ async def api_watchlist_download_latest(item_id: str, body: dict | None = None):
         await _s["broadcast"]({"type": "queue_update", "queue": snapshot()})
     return {"ok": bool(queued), "queued": queued, "skipped": skipped,
             "label": entry["name"],
+            # error_key ставим только когда есть о чём сообщать: пустой ключ при
+            # успехе заставил бы клиент показать пустую строку как ошибку.
+            **({} if queued else {"error_key": "err.releases_not_found_in",
+                                  "error_args": {"svc": svc}}),
             "error": ("" if queued else f"Не нашёл этих релизов в {svc}")}
 
 
@@ -502,6 +507,45 @@ async def api_watchlist_delete(item_id: str):
 async def api_watchlist_check():
     asyncio.create_task(_check_watchlist())
     return {"ok": True, "msg": "Checking in background…"}
+
+
+@router.get("/api/label/{name}")
+async def api_label_detail(name: str, limit: int = Query(60, ge=1, le=200)):
+    """Карточка лейбла: то же, что страница артиста, только ключ — имя.
+
+    Форма ответа намеренно повторяет /api/artist/{service}/{id} ({artist|label,
+    releases}), чтобы интерфейс рисовал дискографию лейбла ТЕМ ЖЕ рендером
+    карточек, что и дискографию артиста, а не заводил второй.
+
+    Источник один и тот же — `_label_releases`: Spotify и Deezer единственные
+    отвечают на вопрос «что выпустил лейбл», и разводить второй источник ради
+    страницы значило бы получить два разных ответа на один вопрос.
+    """
+    name = (name or "").strip()
+    if not name:
+        raise HTTPException(400, imsg("err.label_name_required", "название лейбла обязательно"))
+    rels = await _label_releases(name, limit)
+    releases = [{
+        "id":      str(r.get("id") or r.get("url") or ""),
+        "title":   r.get("title", ""),
+        "artist":  r.get("artist", ""),
+        "type":    (r.get("type") or "album"),
+        "date":    r.get("date", ""),
+        "year":    str(r.get("year") or str(r.get("date") or "")[:4]),
+        "cover":   r.get("cover", ""),
+        "url":     r.get("url", ""),
+        "tracks":  r.get("tracks"),
+        "service": r.get("service") or "spotify",
+        "label":   name,
+    } for r in rels]
+    watched = any(e.get("kind") == "label"
+                  and (e.get("name") or "").strip().lower() == name.lower()
+                  for e in (_s.get("items") or []))
+    return {"ok": True,
+            "label": {"name": name, "watched": watched,
+                      "releases_total": len(releases),
+                      "service": (releases[0]["service"] if releases else "spotify")},
+            "releases": releases}
 
 
 async def _apple_artist_collections(client, artist_id: str, storefront: str,
@@ -885,7 +929,7 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
 
     # «auto» с фронта = нет жёсткого предпочтения: берём порядок качества владельца
     # и матрица сама выберет первый ДОСТУПНЫЙ (где релиз уже отдаётся раньше всех).
-    _avail = cfg.get("availability-preference") or ["apple", "qobuz", "deezer", "tidal"]
+    _avail = cfg.get("availability-preference") or ["apple", "qobuz", "deezer", "tidal", "beatport"]
     if want_svc in ("", "auto", None):
         want_svc = _avail[0] if _avail else "apple"
 
@@ -901,7 +945,7 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
 
     if upc:
         pref = [want_svc] + [x for x in (cfg.get("availability-preference")
-                                         or ["apple", "qobuz", "deezer", "tidal"])
+                                         or ["apple", "qobuz", "deezer", "tidal", "beatport"])
                              if x != want_svc]
         m = await _av.matrix(upc=upc, title=title, artist=rel.get("artist", ""))
         best = _av.pick_source(m["services"], pref)
@@ -970,6 +1014,52 @@ def _seen_add(entry: dict, title: str) -> None:
 
 def _seen_has(entry: dict, title: str) -> bool:
     return _rel_key(title) in (entry.get("seen") or [])
+
+
+# ── «Объявили, но взять не смогли» ──────────────────────────────────────────────
+# `seen` защищает от ПОВТОРНОГО УВЕДОМЛЕНИЯ — и правильно делает: один релиз не
+# должен звенеть дважды, сегодня из Tidal, завтра из Apple. Но пометка ставится
+# ДО попытки скачивания, поэтому релиз, который объявили, а скачать было неоткуда
+# (витрина ещё не наполнилась, `_pick_download_url` вернул пусто), навсегда
+# считался обработанным. Через сутки он появлялся в Apple — и не происходило
+# НИЧЕГО: ни уведомления (правильно), ни загрузки (а вот это потеря).
+#
+# Держим такие релизы отдельным списком. Следующие проходы молча пробуют их
+# добрать — без нового уведомления, как и просил владелец. Список с пределом и
+# сроком: релиз, не подъехавший за неделю, перестаём дёргать, иначе получим
+# вечный опрос витрин по накопленному хвосту.
+_PENDING_CAP  = 40
+_PENDING_TTL  = 7 * 24 * 3600
+
+
+def _pending_add(entry: dict, title: str, rel: dict) -> None:
+    k = _rel_key(title)
+    if not k:
+        return
+    import time as _t
+    lst = [p for p in (entry.get("pending") or [])
+           if isinstance(p, dict) and p.get("key") != k]
+    lst.insert(0, {"key": k, "title": title, "ts": _t.time(),
+                   "rel": {x: rel.get(x) for x in ("title", "artist", "url",
+                                                   "service", "id", "upc")}})
+    entry["pending"] = lst[:_PENDING_CAP]
+
+
+def _pending_drop(entry: dict, key: str) -> None:
+    entry["pending"] = [p for p in (entry.get("pending") or [])
+                        if isinstance(p, dict) and p.get("key") != key]
+
+
+def _pending_live(entry: dict) -> list:
+    """Ещё не протухшие записи. Протухшие вычищаются здесь же — отдельного
+    сборщика заводить не за чем."""
+    import time as _t
+    now = _t.time()
+    live = [p for p in (entry.get("pending") or [])
+            if isinstance(p, dict) and (now - float(p.get("ts") or 0)) < _PENDING_TTL]
+    if len(live) != len(entry.get("pending") or []):
+        entry["pending"] = live
+    return live
 
 
 def _early_services(cfg: dict) -> list:
@@ -1059,6 +1149,29 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
                         _seen_add(entry, r.get("title", ""))
                     continue
 
+                # Сначала — молчаливая дозагрузка того, что уже объявляли, но
+                # взять было неоткуда. Ни тоста, ни события: человек про этот
+                # релиз уже знает, ему нужен файл, а не второе уведомление.
+                if entry.get("auto_download") and early_dl:
+                    for p in list(_pending_live(entry)):
+                        _rel = dict(p.get("rel") or {})
+                        _ttl = _rel.get("title") or p.get("title") or ""
+                        if not _ttl:
+                            _pending_drop(entry, p.get("key", ""))
+                            continue
+                        _u = await _pick_download_url(
+                            _rel, entry.get("service", "apple"), "", cfg, _ttl)
+                        if not _u:
+                            continue
+                        _tsk = _make_task(_u, entry.get("quality", ""), cfg,
+                                          "watchlist-early")
+                        _enrich_soon(_tsk)
+                        queue.append(_tsk)
+                        _pending_drop(entry, p.get("key", ""))
+                        await broadcast({"type": "queue_update", "queue": snapshot()})
+                        print(f"[watchlist] ⤵ добрал '{_ttl}' ({nm}) — "
+                              f"появился там, где можно взять", flush=True)
+
                 for r in rels:
                     title = r.get("title", "")
                     if not title or _seen_has(entry, title):
@@ -1084,6 +1197,10 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
                         r, entry.get("service", "apple"), "", cfg, title
                     ) or r.get("url", "")
                     if not dl_url:
+                        # Нигде ещё не отдаётся. Раньше здесь релиз просто
+                        # терялся: в `seen` он уже лежит, значит больше его никто
+                        # не увидит. Откладываем — доберём молча, когда появится.
+                        _pending_add(entry, title, r)
                         continue
                     task = _make_task(dl_url, entry.get("quality", ""), cfg,
                                       "watchlist-early")

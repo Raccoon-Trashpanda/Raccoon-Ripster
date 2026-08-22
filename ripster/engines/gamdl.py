@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from .base import EngineBase, EngineResult
 from .registry import register
+from ripster.py_runtime import app_python
 
 # Windows: never pop a console window for the short `gamdl --help` probe. Without
 # this the flag-detection probe flashes a black gamdl/python console on the
@@ -53,7 +54,7 @@ def _venv_gamdl() -> list[str]:
     embeddable Python (exits 1 with ZERO output). gamdl ships __main__, so
     `python -m gamdl` is correct in a venv AND in the bundle. Callers splat:
     `[*_venv_gamdl(), ...]`."""
-    return [sys.executable, "-m", "gamdl"]
+    return [app_python(), "-m", "gamdl"]
 
 
 def _get_flags() -> set[str]:

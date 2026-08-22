@@ -19,6 +19,7 @@ import urllib.parse as _urlparse
 import httpx
 from ripster import http_client as _HTTP
 from fastapi import APIRouter, HTTPException, Query, Request
+from ripster.i18n_msg import imsg
 from fastapi.responses import Response
 
 router = APIRouter()
@@ -169,12 +170,12 @@ async def sc_search(q: str = Query(""), kind: str = Query("all"),
                     limit: int = Query(30)):
     q = (q or "").strip()
     if not q:
-        return {"ok": False, "error": "Пустой запрос", "results": []}
+        return {"ok": False, "error_key": "err.empty_query", "error": "Пустой запрос", "results": []}
 
     cid = await _get_client_id()
     if not cid:
         return {"ok": False,
-                "error": "Не удалось получить client_id SoundCloud — попробуй позже.",
+                "error_key": "err.sc_no_client_id_retry", "error": "Не удалось получить client_id SoundCloud — попробуй позже.",
                 "results": []}
 
     limit = max(1, min(limit, 50))
@@ -225,7 +226,7 @@ async def sc_search(q: str = Query(""), kind: str = Query("all"),
         print(f"[soundcloud] search attempt {attempt+1}: {last_err}", flush=True)
         await asyncio.sleep(0.5)
     if data is None:
-        return {"ok": False, "error": last_err or "Не удалось получить ответ", "results": []}
+        return {"ok": False, "error_key": "err.no_response", "error": last_err or "Не удалось получить ответ", "results": []}
 
     results: list[dict] = []
     for item in data.get("collection") or []:
@@ -246,11 +247,11 @@ async def sc_user_tracks(permalink: str, kind: str = Query("all"), limit: int = 
     SC's public /resolve, then paginates /users/{id}/tracks (already newest-first)."""
     permalink = (permalink or "").strip().strip("/")
     if not permalink:
-        return {"ok": False, "error": "Пустой юзернейм", "results": []}
+        return {"ok": False, "error_key": "err.empty_username", "error": "Пустой юзернейм", "results": []}
 
     cid = await _get_client_id()
     if not cid:
-        return {"ok": False, "error": "Не удалось получить client_id SoundCloud — попробуй позже.",
+        return {"ok": False, "error_key": "err.sc_no_client_id_retry", "error": "Не удалось получить client_id SoundCloud — попробуй позже.",
                 "results": []}
 
     limit = max(1, min(limit, 50))
@@ -280,21 +281,21 @@ async def sc_user_tracks(permalink: str, kind: str = Query("all"), limit: int = 
                 break
             continue
         if r.status_code == 404:
-            return {"ok": False, "error": f"Канал '{permalink}' не найден", "results": []}
+            return {"ok": False, "error_key": "err.sc_channel_not_found", "error_args": {"name": permalink}, "error": f"Канал '{permalink}' не найден", "results": []}
         if r.status_code != 200:
             last_err = f"SoundCloud API {r.status_code}"
             await asyncio.sleep(0.5)
             continue
         user = r.json() or {}
         if (user.get("kind") or "") != "user":
-            return {"ok": False, "error": f"'{permalink}' — не канал/юзер", "results": []}
+            return {"ok": False, "error_key": "err.sc_not_a_channel", "error_args": {"name": permalink}, "error": f"'{permalink}' — не канал/юзер", "results": []}
         user_id = user.get("id")
         if not user_id:
-            return {"ok": False, "error": "Не удалось определить id канала", "results": []}
+            return {"ok": False, "error_key": "err.sc_no_channel_id", "error": "Не удалось определить id канала", "results": []}
         try:
             tr = await _tracks(user_id, cid)
         except Exception as e:
-            return {"ok": False, "error": f"Сеть: {e}", "results": []}
+            return {"ok": False, "error_key": "err.net", "error_args": {"e": str(e)}, "error": f"Сеть: {e}", "results": []}
         if tr.status_code != 200:
             return {"ok": False, "error": f"SoundCloud API {tr.status_code}", "results": []}
         data = tr.json() or {}
@@ -307,7 +308,7 @@ async def sc_user_tracks(permalink: str, kind: str = Query("all"), limit: int = 
                             "avatar": user.get("avatar_url", ""),
                             "permalink": permalink,
                             "followers": user.get("followers_count")}}
-    return {"ok": False, "error": last_err or "Не удалось получить ответ", "results": []}
+    return {"ok": False, "error_key": "err.no_response", "error": last_err or "Не удалось получить ответ", "results": []}
 
 
 # ── Tracklist from the track's own description ───────────────────────────────────
@@ -421,7 +422,7 @@ async def sc_playlist(playlist_id: str):
     used by the player to build a play queue from one click."""
     cid = await _get_client_id()
     if not cid:
-        raise HTTPException(400, "Не удалось получить client_id SoundCloud")
+        raise HTTPException(400, imsg("err.sc_no_client_id", "Не удалось получить client_id SoundCloud"))
     try:
         _to = httpx.Timeout(connect=4.0, read=6.0, write=6.0, pool=6.0)
         async with httpx.AsyncClient(timeout=_to, headers={"User-Agent": _UA}) as c:
@@ -430,7 +431,7 @@ async def sc_playlist(playlist_id: str):
                 cid = await _get_client_id(force=True)
                 r = await c.get(f"{_API}/playlists/{playlist_id}", params={"client_id": cid})
             if r.status_code != 200:
-                raise HTTPException(404, f"SoundCloud: плейлист не найден ({r.status_code})")
+                raise HTTPException(404, imsg("err.sc_playlist_not_found", f"SoundCloud: плейлист не найден ({r.status_code})", code=r.status_code))
             data = r.json()
     except HTTPException:
         raise
@@ -552,7 +553,7 @@ async def sc_stream(track_id: str, request: Request, name: str = "", artist: str
     """
     cid = await _get_client_id()
     if not cid:
-        raise HTTPException(400, "Не удалось получить client_id SoundCloud")
+        raise HTTPException(400, imsg("err.sc_no_client_id", "Не удалось получить client_id SoundCloud"))
     oauth = (_cfg.get("soundcloud-oauth-token") or "").strip()
     headers = {"User-Agent": _UA}
     if oauth:
@@ -585,8 +586,10 @@ async def sc_stream(track_id: str, request: Request, name: str = "", artist: str
             if r.status_code != 200:
                 print(f"[soundcloud] /tracks/{track_id} → {r.status_code}: "
                       f"{r.text[:160]}", flush=True)
-                raise HTTPException(404,
-                    f"SoundCloud: трек не найден ({r.status_code})")
+                raise HTTPException(404, imsg(
+                    "err.sc_track_not_found",
+                    f"SoundCloud: трек не найден ({r.status_code})",
+                    code=r.status_code))
             track_json = r.json()
             trans = ((track_json.get("media") or {}).get("transcodings") or [])
             # Prefer non-preview transcodings (SC sometimes returns 30-sec snippets)
@@ -621,7 +624,7 @@ async def sc_stream(track_id: str, request: Request, name: str = "", artist: str
                 print(f"[soundcloud] no transcodings for {track_id} "
                       f"(streamable={track_json.get('streamable')}, "
                       f"policy={track_json.get('policy')})", flush=True)
-                raise HTTPException(404, "SoundCloud: трек недоступен для стриминга")
+                raise HTTPException(404, imsg("err.sc_track_no_stream", "SoundCloud: трек недоступен для стриминга"))
 
             # Resolve all candidates in parallel — first successful wins. This
             # cuts user-facing latency: progressive(MP3) + HLS used to take 2x
@@ -674,9 +677,11 @@ async def sc_stream(track_id: str, request: Request, name: str = "", artist: str
                         "Track is DRM-protected - add an OAuth token in Settings -> SoundCloud.")
                 print(f"[soundcloud] all transcodings failed for {track_id} "
                       f"(last={last_status} body={last_body})", flush=True)
-                raise HTTPException(502,
+                raise HTTPException(502, imsg(
+                    "err.sc_stream_failed",
                     f"SoundCloud stream {last_status} — "
-                    f"возможно нужен OAuth (Settings → SoundCloud)")
+                    f"возможно нужен OAuth (Settings → SoundCloud)",
+                    code=last_status))
     except HTTPException:
         raise
     except Exception as e:
@@ -684,7 +689,7 @@ async def sc_stream(track_id: str, request: Request, name: str = "", artist: str
         raise HTTPException(502, f"SoundCloud API error: {e}")
 
     if not stream_url:
-        raise HTTPException(502, "SoundCloud не вернул URL потока")
+        raise HTTPException(502, imsg("err.sc_no_stream_url", "SoundCloud не вернул URL потока"))
 
     fmt = "mp3" if chosen is prog else "hls"
     mime = "audio/mpeg" if fmt == "mp3" else "application/vnd.apple.mpegurl"
@@ -918,8 +923,10 @@ async def sc_fps_license_proxy(token: str, request: Request):
             print(f"[soundcloud] fps_license → {r.status_code}: {r.text[:300]!r} "
                   f"token_len={len(token)} oauth={'yes' if oauth else 'no'} "
                   f"spc_b64_len={len(spc_b64)}", flush=True)
-            raise HTTPException(r.status_code,
-                f"SC FPS license server: {r.status_code} — токен мог истечь")
+            raise HTTPException(r.status_code, imsg(
+                "err.sc_fps_license",
+                f"SC FPS license server: {r.status_code} — токен мог истечь",
+                code=r.status_code))
         # Response may be base64-encoded CKC — decode if so
         ckc = r.content
         try:
@@ -1002,7 +1009,7 @@ async def _sc_sign_in(email: str, password: str) -> dict:
     return {
         "ok": False,
         "removed_api": True,
-        "error": ("SoundCloud отключил вход по паролю (все 3 endpoint'а мертвы). "
+        "error_key": "err.sc_password_login_dead", "error": ("SoundCloud отключил вход по паролю (все 3 endpoint'а мертвы). "
                   "Скопируй oauth_token из браузера: F12 → Application → Cookies "
                   "→ soundcloud.com → oauth_token — и вставь в поле ниже.")
     }
@@ -1186,7 +1193,7 @@ async def sc_login(body: dict):
     email = (body.get("email") or "").strip()
     pwd   = body.get("password") or ""
     if not email or not pwd:
-        raise HTTPException(400, "email и password обязательны")
+        raise HTTPException(400, imsg("err.need_email_password", "email и password обязательны"))
     res = await _sc_sign_in(email, pwd)
     if not res.get("ok"):
         # Pass full payload back so UI can show captcha hint

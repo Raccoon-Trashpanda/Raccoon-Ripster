@@ -16,6 +16,8 @@ setup behaves exactly as before this pool existed). Slots 1+ come from the
 from __future__ import annotations
 
 import threading
+
+from ripster import account_fallback as _afb
 from pathlib import Path
 
 
@@ -41,11 +43,11 @@ def _configured_accounts(config: dict) -> list[dict]:
     accounts: list[dict] = []
     primary = _account_from_dict(config, "primary")
     if primary:
-        accounts.append(primary)
+        accounts.append(_afb.stamp(primary, _afb.primary_src(config, "qobuz"), 0))
     for a in (config.get("qobuz-accounts") or []):
         acct = _account_from_dict(a, f"account{len(accounts)+1}")
         if acct:
-            accounts.append(acct)
+            accounts.append(_afb.stamp(acct, a, len(accounts)))
     return accounts
 
 
@@ -60,12 +62,17 @@ class QobuzPool:
         self._busy = [False] * len(accounts)
         self._lock = threading.Lock()
 
-    def acquire(self) -> tuple[int, dict, Path | None] | None:
+    def acquire(self, exclude=()) -> tuple[int, dict, Path | None] | None:
         """Return (slot, account_dict, cfg_dir_override) for a free account,
-        or None if every configured account is currently busy."""
+        or None if every configured account is currently busy.
+
+        `exclude` — слоты, которые уже пробовали в ЭТОЙ задаче и получили отказ
+        по правам/региону. Без него повтор снова получал первую свободную учётку,
+        то есть ту же самую, и перебор не двигался с места."""
+        ex = set(exclude or ())
         with self._lock:
-            for i, busy in enumerate(self._busy):
-                if not busy:
+            for i in _afb.order_indices(self.accounts):
+                if not self._busy[i] and i not in ex:
                     self._busy[i] = True
                     cfg_dir = None if i == 0 else (self.base_dir / f"acct{i}")
                     return i, self.accounts[i], cfg_dir
@@ -80,7 +87,9 @@ class QobuzPool:
             return {
                 "pool_enabled": True,
                 "accounts": [
-                    {"slot": i, "label": a["label"], "primary": i == 0, "busy": self._busy[i]}
+                    {"slot": i, "label": a["label"], "primary": i == 0, "busy": self._busy[i],
+                     "enabled": a.get("enabled", True), "priority": a.get("priority", i),
+                     "order": _afb.order_indices(self.accounts).index(i)}
                     for i, a in enumerate(self.accounts)
                 ],
             }
@@ -109,7 +118,9 @@ def live_status(config: dict) -> dict:
     if p is None:
         accounts = _configured_accounts(config)
         return {"pool_enabled": False, "accounts": [
-            {"slot": i, "label": a["label"], "primary": i == 0, "busy": False}
+            {"slot": i, "label": a["label"], "primary": i == 0, "busy": False,
+             "enabled": a.get("enabled", True), "priority": a.get("priority", i),
+             "order": _afb.order_indices(accounts).index(i)}
             for i, a in enumerate(accounts)
         ]}
     return p.status()

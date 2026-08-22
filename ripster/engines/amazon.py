@@ -23,6 +23,7 @@ from pathlib import Path
 
 from .base import EngineBase, EngineResult
 from .registry import register
+from ripster.py_runtime import app_python
 
 _QUALITIES = [
     {"id": "Max",        "label": "Ultra HD",     "sub": "24-bit / ≤192 kHz", "badge": "24-BIT",   "color": "#1ad5c0", "bitrate": "≥4600 kbps", "ext": "flac", "req": "unlimited"},
@@ -33,7 +34,11 @@ _QUALITIES = [
 _VALID = {q["id"] for q in _QUALITIES} | {"Normal", "Medium", "Low", "Free", "Atmos_AC-4"}
 
 _RE_ERR   = re.compile(r"\berror\b|\bfailed\b|exception|traceback|unauthor|invalid token|token.*(expired|invalid)", re.I)
-_RE_AUTH  = re.compile(r"\btoken\b.*(expired|invalid|missing|required)|unauthor|401|403|login", re.I)
+_RE_AUTH  = re.compile(r"\btoken\b.*(expired|invalid|missing|required)|unauthor|401|login", re.I)
+# Forbidden / 403 from Amazon's API: usually an expired/invalid token, but ALSO a
+# region wall (the release isn't licensed in the token's marketplace — e.g. a
+# .co.uk link against a US token). Surface both causes so it's actionable.
+_RE_FORBIDDEN = re.compile(r"\bforbidden\b|\b403\b", re.I)
 _RE_OK    = re.compile(r"\b(downloaded|completed|success|saved|done)\b", re.I)
 _RE_PCT   = re.compile(r"(\d{1,3})\s*%")
 _RE_FRAC  = re.compile(r"(\d+)\s*/\s*(\d+)")
@@ -46,7 +51,7 @@ def _amz_exe() -> list[str]:
     ships no __main__, so call its entry point directly (`amz = amz.cli:main`).
     Callers splat; an explicit `amazon-cli-path` override (a real exe) is handled
     at the call site."""
-    return [sys.executable, "-c", "from amz.cli import main; sys.exit(main())"]
+    return [app_python(), "-c", "import sys; from amz.cli import main; sys.exit(main())"]
 
 
 @register
@@ -97,6 +102,14 @@ class AmazonEngine(EngineBase):
                 False,
                 error="Amazon: токен недействителен/истёк — обнови в Settings → Amazon "
                       "(получи на amz.dezalty.com/login).",
+            )
+        if _RE_FORBIDDEN.search(log_text):
+            return EngineResult(
+                False,
+                error="Amazon: запрос отклонён (Forbidden) — токен истёк/недействителен "
+                      "ИЛИ релиз недоступен в регионе токена (напр. ссылка .co.uk при "
+                      "US-токене). Обнови токен на amz.dezalty.com/login или открой "
+                      "ссылку своего региона (music.amazon.com).",
             )
         ok = len(_RE_OK.findall(log_text))
         if rc == 0:

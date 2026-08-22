@@ -366,7 +366,7 @@ async function bbcPlay(pid, vpid, title, artist, art) {
   try {
     const qs = `pid=${encodeURIComponent(pid)}${vpid ? '&vpid=' + encodeURIComponent(vpid) : ''}&name=${encodeURIComponent(title || pid)}`;
     const info = await api('GET', `/api/bbc/stream?${qs}`);
-    if (!info.url) throw new Error(info.detail || t('b.no_stream_url'));
+    if (!info.url) throw new Error((typeof errText==='function'?errText(info.detail):info.detail) || t('b.no_stream_url'));
     BBC.duration = info.duration || 0;
     _bbcStartStream(info.url);
     // 1001Tracklists — authoritative tracklist + cue-time chapters for the mix.

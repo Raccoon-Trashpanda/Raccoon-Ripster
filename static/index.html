@@ -20,7 +20,7 @@
 <script src="/static/vendor/hls.min.js?v=1520"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&family=Atkinson+Hyperlegible:wght@400;700&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/css/main.css?v=104"/>
+<link rel="stylesheet" href="/static/css/main.css?v=113"/>
 </head>
 <body>
 <div id="net-progress"></div>
@@ -295,6 +295,7 @@
     <!-- ══ Full-width seek strip — spans the whole dock (top of the mini bar) ══ -->
     <div id="pp-progress" onclick="previewSeek(event)" data-i18n-title="pp.seek" title="Перемотка"
       style="height:12px;background:rgba(255,255,255,.1);cursor:pointer;position:relative;overflow:hidden">
+      <canvas id="pp-wave" aria-hidden="true"></canvas>
       <div id="pp-buffered" style="position:absolute;top:0;left:0;height:100%;width:0%;background:rgba(255,255,255,.22);pointer-events:none;z-index:0"></div>
       <div id="pp-fill" style="position:absolute;top:0;left:0;height:100%;background:var(--red);width:0%;pointer-events:none;z-index:1"></div>
     </div>
@@ -387,7 +388,11 @@
 
     <!-- Seek -->
     <div class="fp-seek-wrap">
-      <div id="fp-progress" class="fp-seek" onclick="previewSeek(event)" role="slider" aria-label="Перемотка">
+      <div id="fp-progress" class="fp-seek" onclick="previewSeek(event)" role="slider"
+           aria-label="Перемотка" data-i18n-title="pp.seek" title="Перемотка">
+        <!-- Волна = полоса перемотки (референс neon-reference-mobile.png).
+             pointer-events:none — клик и протяжка достаются полосе, перемотка штатная. -->
+        <canvas id="fp-wave" aria-hidden="true"></canvas>
         <div id="fp-buffered" style="position:absolute;left:0;top:50%;transform:translateY(-50%);height:6px;width:0%;background:rgba(255,255,255,.22);border-radius:3px;pointer-events:none;z-index:0"></div>
         <div id="fp-fill" class="fp-fill" style="z-index:1"></div>
         <div id="fp-thumb" class="fp-thumb"></div>
@@ -455,20 +460,21 @@
   <button type="button" onclick="closeLightbox()" style="position:absolute;top:16px;right:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:none;cursor:pointer;font-size:16px;backdrop-filter:blur(4px)">✕</button>
 </div>
 
-<script src="/static/js/i18n.js?v=10112"></script>
+<script src="/static/js/i18n.js?v=10141"></script>
 <script src="/static/js/boot_splash.js?v=2"></script>
-<script src="/static/js/views.js?v=10077"></script>
+<script src="/static/js/views.js?v=10094"></script>
 <script src="/static/js/scrolltop.js?v=1"></script>
 <script src="/static/js/cover_tint.js?v=2"></script>
+<script src="/static/js/dlorb.js?v=2"></script>
 <script src="/static/js/artist_follow.js?v=1"></script>
 <script src="/static/js/render_perf.js?v=1"></script>
 <script src="/static/js/nudges.js?v=1"></script>
-<script src="/static/js/app.js?v=10125"></script>
+<script src="/static/js/app.js?v=10130"></script>
 <script src="/static/js/wrapper.js?v=7"></script>
 <script src="/static/js/coder.js?v=7"></script>
 <script src="/static/js/guest.js?v=1"></script>
 <script src="/static/js/setup_ui.js?v=7"></script>
-<script src="/static/js/selfupdate_ui.js?v=6"></script>
+<script src="/static/js/selfupdate_ui.js?v=7"></script>
 <!-- search.js was merged into cookies_ui.js locally but stayed behind in the
      mirror. Both declare `let _srchItems`, so with search.js loaded first the
      browser threw "Identifier '_srchItems' has already been declared" on
@@ -481,27 +487,28 @@
 <script src="/static/js/console_ui.js?v=6"></script>
 <script src="/static/js/stats_ui.js?v=5"></script>
 <script src="/static/js/orpheus_ui.js?v=9"></script>
-<script src="/static/js/service_login.js?v=4"></script>
-<script src="/static/js/sc_tab.js?v=28"></script>
-<script src="/static/js/cookies_ui.js?v=19"></script>
-<script src="/static/js/lightbox.js?v=15"></script>
-<script src="/static/js/urlbar_detect.js?v=13"></script>
+<script src="/static/js/service_login.js?v=6"></script>
+<script src="/static/js/sc_tab.js?v=36"></script>
+<script src="/static/js/cookies_ui.js?v=23"></script>
+<script src="/static/js/lightbox.js?v=16"></script>
+<script src="/static/js/urlbar_detect.js?v=14"></script>
 <script src="/static/js/auth_ui.js?v=19"></script>
-<script src="/static/js/digs.js?v=14"></script>
-<script src="/static/js/player_lib.js?v=49"></script>
+<script src="/static/js/digs.js?v=22"></script>
+<script src="/static/js/player_lib.js?v=50"></script>
 <script src="/static/js/remote_ui.js?v=5"></script>
 <script src="/static/js/service_colors_ui.js?v=14"></script>
 <script src="/static/js/deps_ui.js?v=5"></script>
 <script src="/static/js/tokens_ui.js?v=1"></script>
 <script src="/static/js/config_yaml_ui.js?v=1"></script>
-<script src="/static/js/player.js?v=10052"></script>
+<script src="/static/js/player_wave.js?v=1"></script>
+<script src="/static/js/player.js?v=10055"></script>
 <script src="/static/js/digs_radio.js?v=4"></script>
 <script src="/static/js/digs_tour.js?v=4"></script>
 <script src="/static/js/player_queue.js?v=15"></script>
 <script src="/static/js/player_fps.js?v=13"></script>
-<script src="/static/js/bbc.js?v=10010"></script>
-<script src="/static/js/sc.js?v=10020"></script>
-<script src="/static/js/fx_ui.js?v=7"></script>
+<script src="/static/js/bbc.js?v=10011"></script>
+<script src="/static/js/sc.js?v=10021"></script>
+<script src="/static/js/fx_ui.js?v=8"></script>
 
 <!-- Mobile sidebar drawer overlay -->
 <div id="drawer-overlay" class="drawer-overlay" onclick="closeMobileDrawer()"></div>

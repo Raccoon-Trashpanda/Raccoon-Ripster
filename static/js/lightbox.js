@@ -263,7 +263,8 @@ function wlRenderList() {
   list.innerHTML = items.map(w => `
     <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:7px">
       <div style="flex:1;min-width:0">
-        <div style="font-size:13px;font-weight:600;color:var(--text)">${w.kind==='label'?'🏷 ':''}${esc(w.name||w.url)}</div>
+        <div style="font-size:13px;font-weight:600;color:var(--text)${w.kind==='label'?';cursor:pointer':''}"
+          ${w.kind==='label'?`onclick="openLabelPage('${escJ(w.name||'')}')" title="${t('lbl.open_page')}" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"`:''}>${w.kind==='label'?'🏷 ':''}${esc(w.name||w.url)}</div>
         <div style="font-size:11px;color:var(--muted);margin-top:2px">
           ${w.service||'apple'} · ${w.auto_download?t('wl.auto_dl'):t('wl.notify_only')}
           ${w.last_check?' · '+t('wl.checked_at')+' '+new Date(w.last_check).toLocaleString('ru'):''}
@@ -430,6 +431,42 @@ async function wlToggleArtist(service, name, url){
   // every follow from the search tab would fire a pointless fetch.
   const wlView = document.getElementById('view-watchlist');
   if(wlView && wlView.style.display !== 'none') loadWatchlist();
+}
+
+// ── Follow a LABEL ────────────────────────────────────────────────────────
+// Отдельно от артиста, потому что у записи другой `kind`: бэкенд по нему
+// выбирает другой способ проверки — по названию через каталоги, а не по id
+// артиста, которого у лейбла нет.
+function wlLabelFollowButton(name){
+  const it = _wlIdx && _wlIdx.get(_wlNorm(name));
+  const on = !!(it && it.kind === 'label');
+  return `<button onclick="wlToggleLabel('${escJ(name)}')"
+    style="padding:8px 16px;border-radius:9px;background:${on?'var(--surface)':'transparent'};color:${on?'var(--green)':'var(--muted)'};border:1px solid ${on?'var(--green)':'var(--border)'};font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font);display:inline-flex;align-items:center;gap:6px">
+    ${on?'★':'☆'} ${on ? t('lbl.following') : t('lbl.follow')}
+  </button>`;
+}
+
+async function wlToggleLabel(name){
+  await wlIndex();
+  const ex = _wlIdx.get(_wlNorm(name));
+  if(ex && ex.kind === 'label'){
+    await api('DELETE','/api/watchlist/'+ex.id);
+    await wlIndex(true);
+    toast(ti('wl.unfollowed',{name}));
+  } else {
+    // service:'auto' — «качать оттуда, где релиз реально есть»: следим-то мы
+    // всегда через Spotify/Deezer, это единственные каталоги, отвечающие на
+    // вопрос «что выпустил лейбл».
+    const r = await api('POST','/api/watchlist',{name, kind:'label', service:'auto', auto_download:false});
+    await wlIndex(true);
+    if(r && r.ok && r.found)  toast(ti('wl.followed',{name}), 'var(--green)');
+    else if(r && r.ok)        toast(r.warning || ti('wl.follow_unresolved',{name}), 'var(--orange)', '', 7000);
+    else                      toast(t('t.error_c')+((r&&r.detail)||''), 'var(--red)');
+  }
+  if(typeof renderLabelPage === 'function' && typeof Detail !== 'undefined' && Detail.currentLabel)
+    renderLabelPage();
+  const wlView2 = document.getElementById('view-watchlist');
+  if(wlView2 && wlView2.style.display !== 'none') loadWatchlist();
 }
 
 // ── Smart suggestions ─────────────────────────────────────────────────────

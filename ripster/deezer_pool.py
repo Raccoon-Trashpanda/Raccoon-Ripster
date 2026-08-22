@@ -18,6 +18,8 @@ setup behaves exactly as before this pool existed). Slots 1+ come from the
 from __future__ import annotations
 
 import threading
+
+from ripster import account_fallback as _afb
 from pathlib import Path
 
 
@@ -26,11 +28,15 @@ def _configured_accounts(config: dict) -> list[dict]:
     primary_arl = (config.get("deezer-arl") or "").strip()
     accounts: list[dict] = []
     if primary_arl:
-        accounts.append({"arl": primary_arl, "label": config.get("deezer-arl-label", "primary")})
+        accounts.append(_afb.stamp(
+            {"arl": primary_arl, "label": config.get("deezer-arl-label", "primary")},
+            config, 0))
     for a in (config.get("deezer-accounts") or []):
         arl = (a.get("arl") or "").strip()
         if arl:
-            accounts.append({"arl": arl, "label": a.get("label") or f"account{len(accounts)+1}"})
+            accounts.append(_afb.stamp(
+                {"arl": arl, "label": a.get("label") or f"account{len(accounts)+1}"},
+                a, len(accounts)))
     return accounts
 
 
@@ -45,13 +51,17 @@ class DeezerPool:
         self._busy = [False] * len(accounts)
         self._lock = threading.Lock()
 
-    def acquire(self) -> tuple[int, str, Path | None] | None:
+    def acquire(self, exclude=()) -> tuple[int, str, Path | None] | None:
         """Return (slot, arl, cfg_dir_override) for a free account, or None if
         every configured account is currently busy (caller falls back to
-        waiting in the normal queue lane, same as before the pool existed)."""
+        waiting in the normal queue lane, same as before the pool existed).
+
+        `exclude` — слоты, уже отказавшие в этой задаче по правам/региону
+        (ripster/account_fallback.py)."""
+        ex = set(exclude or ())
         with self._lock:
-            for i, busy in enumerate(self._busy):
-                if not busy:
+            for i in _afb.order_indices(self.accounts):
+                if not self._busy[i] and i not in ex:
                     self._busy[i] = True
                     arl = self.accounts[i]["arl"]
                     # Slot 0 = primary = deemix's own default config dir (no
@@ -70,7 +80,9 @@ class DeezerPool:
             return {
                 "pool_enabled": True,
                 "accounts": [
-                    {"slot": i, "label": a["label"], "primary": i == 0, "busy": self._busy[i]}
+                    {"slot": i, "label": a["label"], "primary": i == 0, "busy": self._busy[i],
+                     "enabled": a.get("enabled", True), "priority": a.get("priority", i),
+                     "order": _afb.order_indices(self.accounts).index(i)}
                     for i, a in enumerate(self.accounts)
                 ],
             }
@@ -101,7 +113,9 @@ def live_status(config: dict) -> dict:
     if p is None:
         accounts = _configured_accounts(config)
         return {"pool_enabled": False, "accounts": [
-            {"slot": i, "label": a["label"], "primary": i == 0, "busy": False}
+            {"slot": i, "label": a["label"], "primary": i == 0, "busy": False,
+             "enabled": a.get("enabled", True), "priority": a.get("priority", i),
+             "order": _afb.order_indices(accounts).index(i)}
             for i, a in enumerate(accounts)
         ]}
     return p.status()

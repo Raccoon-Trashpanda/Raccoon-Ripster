@@ -134,18 +134,59 @@ def _check_engines() -> tuple[bool, str]:
         return False, f"{type(e).__name__}: {e}"
 
 
+def _searchable_services(disco: str) -> set:
+    """Сервисы, по которым поиск умеет ходить.
+
+    Разбираем ОБЕ формы ветвления: `service == "x"` и `service in ("x", "y")`.
+    Пока читалась только первая, deezer с qobuz (они идут одной веткой `in`)
+    в проверку не попадали вовсе — детектор смотрел мимо половины сервисов.
+    """
+    out = set(re.findall(r'service\s*==\s*"([a-z]+)"', disco))
+    for grp in re.findall(r'service\s+in\s+\(([^)]*)\)', disco):
+        out |= set(re.findall(r'"([a-z]+)"', grp))
+    return {s for s in out if s and s != "label"}
+
+
 def _check_search_services() -> tuple[bool, str]:
     """Сервис, который умеет искать, должен предлагаться в поиске.
 
     Tidal умел с самого начала и год не значился в списке (01.08.2026).
     """
     disco = _read(_BASE / "ripster" / "routes" / "discovery.py")
-    can = set(re.findall(r'service == "([a-z]+)"', disco))
+    can = _searchable_services(disco)
     ui = set(re.findall(r"value: '([a-z]+)'", _read(_BASE / "static" / "js" / "cookies_ui.js")))
-    gap = sorted(s for s in can if s and s not in ui and s not in ("label",))
+    gap = sorted(s for s in can if s not in ui)
     if gap:
         return False, "умеем, но не предлагаем: " + ", ".join(gap)
     return True, f"{len(ui)} сервисов в поиске"
+
+
+# Сервисы со СВОИМ интерфейсом и своими роутами — карточка через
+# /api/album/{service} им не нужна, и их отсутствие не пробел.
+_OWN_UI_SERVICES = {"soundcloud", "bbc", "beatport"}
+
+
+def _check_search_cards() -> tuple[bool, str]:
+    """Найденное должно ОТКРЫВАТЬСЯ.
+
+    Поиск по Яндексу работал, отдавал результаты с `service: "yandex"`, а клик по
+    ним упирался в 400 «Unsupported service»: сервиса не было в
+    `_ENGINE_SERVICES`, хотя движок реализует и get_album, и get_artist ровно под
+    этот роут. Предыдущая проверка сводила «умеем искать» со списком в интерфейсе
+    и такой разрыв не видела — между «предложили» и «открылось» стоит ещё один
+    список (15.08.2026).
+    """
+    disco = _read(_BASE / "ripster" / "routes" / "discovery.py")
+    can = _searchable_services(disco) - _OWN_UI_SERVICES
+    m = re.search(r"_ENGINE_SERVICES\s*=\s*\{(.*?)\}", disco, re.S)
+    if not m:
+        return False, "не нашёл _ENGINE_SERVICES"
+    cards = set(re.findall(r'"([a-z]+)"\s*:', m.group(1)))
+    gap = sorted(s for s in can if s not in cards)
+    if gap:
+        return False, ("находим, но карточка не открывается (400): "
+                       + ", ".join(gap))
+    return True, f"{len(cards)} сервисов открываются карточкой"
 
 
 CHECKS = (
@@ -155,6 +196,7 @@ CHECKS = (
     ("языки",             _check_i18n_parity),
     ("движки",            _check_engines),
     ("сервисы поиска",    _check_search_services),
+    ("карточки поиска",   _check_search_cards),
 )
 
 

@@ -109,6 +109,40 @@ def try_advance(task: dict, new: TaskStatus) -> bool:
         return False
 
 
+def revive_for_retry(task: dict, why: str = "") -> bool:
+    """Вернуть в очередь задачу, чья ОЧЕРЕДНАЯ ПОПЫТКА провалилась.
+
+    Единственное узаконенное исключение из «error терминален», и оно здесь
+    именно затем, чтобы быть единственным: правило про терминальность
+    защищает от «перезапустить готовое», а не от «у задачи было пять
+    запланированных ступеней, первая не вышла».
+
+    Так устроена лестница Apple: витрина ссылки → своя витрина → другие свои
+    слоты → AMD. Каждая ступень — это `_run_engine_task`, и провал ступени она
+    записывает как ERROR всей задачи. Без этой функции лестница обрывается на
+    первой неудаче: следующие ступени отработают, но их успех уже не сможет
+    перевести задачу из терминального состояния, и человек увидит «ошибка» при
+    успешно скачанном альбоме. Это хуже исходного дефекта, а не лучше.
+
+    Возвращает True, если задача действительно была в ERROR и возвращена в
+    QUEUED. Отменённую и завершённую не трогает НИКОГДА: отмена — это воля
+    человека, а done — это результат.
+    """
+    if current(task) is not TaskStatus.ERROR:
+        return False
+    task["status"] = TaskStatus.QUEUED.value
+    task.pop("error", None)
+    if why:
+        # Текст живёт в реестре ripster/i18n.py, а не здесь: в Ripster ни одна
+        # видимая человеку строка не хардкодится по месту.
+        try:
+            from ripster import i18n as _i18n
+            task.setdefault("log", []).append(_i18n.tr("console.rung_revived", why=why))
+        except Exception:
+            pass
+    return True
+
+
 def is_terminal(task: dict) -> bool:
     """True iff the task can no longer transition to any other state."""
     return current(task) in TERMINAL_STATES

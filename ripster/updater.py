@@ -216,7 +216,8 @@ async def check_for_update(config, current_version: str) -> dict:
     """Query GitHub for the latest release and compare to current_version."""
     repo = _repo(config)
     if not repo:
-        return {"ok": False, "error": "репозиторий не настроен (ripster-repo в Settings)"}
+        return {"ok": False, "error_key": "err.repo_not_configured",
+                "error": "репозиторий не настроен (ripster-repo в Settings)"}
     import httpx
     try:
         async with httpx.AsyncClient(timeout=10) as c:

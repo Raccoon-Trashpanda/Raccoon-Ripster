@@ -18,18 +18,29 @@ const SVC_LABELS = {
   amazon:     '🅰️ Amazon Music',
 };
 
+// Чистое определение сервиса по ссылке — БЕЗ трогания разметки. Отдельно от
+// detectUrlService затем, что то же знание требовалось другим вкладкам, и они
+// заводили свои перечни: у Раскопок он знал шесть сервисов из десяти, и клик по
+// находке с Beatport/Яндекса уходил в плеер без имени сервиса. Зеркало этой
+// функции на бэкенде — service_layer.detect_service.
+function svcFromUrl(val) {
+  val = String(val || '');
+  if(val.includes('music.apple.com'))      return 'apple';
+  if(val.includes('qobuz.com'))            return 'qobuz';
+  if(val.includes('deezer.com'))           return 'deezer';
+  if(val.includes('deezer.page'))          return 'deezer';
+  if(val.includes('tidal.com'))            return 'tidal';
+  if(val.includes('soundcloud.com'))       return 'soundcloud';
+  if(val.includes('spotify.com'))          return 'spotify';
+  if(val.includes('beatport.com'))         return 'beatport';
+  if(val.includes('music.yandex.'))        return 'yandex';
+  if(val.includes('music.amazon.'))        return 'amazon';
+  if(val.includes('bbc.co.uk'))            return 'bbc';
+  return '';
+}
+
 function detectUrlService(val) {
-  let svc = '';
-  if(val.includes('music.apple.com'))      svc='apple';
-  else if(val.includes('qobuz.com'))       svc='qobuz';
-  else if(val.includes('deezer.com'))      svc='deezer';
-  else if(val.includes('deezer.page'))     svc='deezer';
-  else if(val.includes('tidal.com'))       svc='tidal';
-  else if(val.includes('soundcloud.com'))  svc='soundcloud';
-  else if(val.includes('spotify.com'))     svc='spotify';
-  else if(val.includes('beatport.com'))    svc='beatport';
-  else if(val.includes('music.yandex.'))   svc='yandex';
-  else if(val.includes('music.amazon.'))   svc='amazon';
+  const svc = svcFromUrl(val);
 
   const dot = document.getElementById('url-svc-dot');
   const lbl = document.getElementById('url-svc-label');
@@ -85,16 +96,24 @@ function detectSpotifyInUrl(val) {
   }
 }
 // ══ SETTINGS TABS ════════════════════════════════════════════════
+// Сворачиваемые блоки «Дополнительно» (класс .block.coll): клик по заголовку
+// разворачивает/сворачивает. help-q внутри заголовка сам делает stopPropagation,
+// так что «?» не триггерит сворачивание. DOM не трогаем — только класс .coll-open.
+document.addEventListener('click', function(e){
+  const title = e.target.closest && e.target.closest('.block.coll > .block-title');
+  if(!title) return;
+  title.parentElement.classList.toggle('coll-open');
+});
+
 function showStab(id, btn) {
   document.querySelectorAll('.stab-panel').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('.stab').forEach(b=>b.classList.remove('active'));
   if(id==='global') {
-    ['stab-global','stab-global-shared'].forEach(sid=>{
-      const el=document.getElementById(sid); if(el) el.classList.add('active');
-    });
-    try { renderSvcColorGrid?.(); } catch {}
+    const el=document.getElementById('stab-global'); if(el) el.classList.add('active');
   } else {
     const el=document.getElementById('stab-'+id); if(el) el.classList.add('active');
+    // «Файлы» (бывш. stab-global-shared) держит сетку цветов сервисов — рисуем её здесь.
+    if(id==='files') { try { renderSvcColorGrid?.(); } catch {} }
   }
   if(btn) btn.classList.add('active');
   const vb = document.querySelector('#view-settings .view-body');

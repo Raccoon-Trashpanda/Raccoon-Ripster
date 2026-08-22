@@ -152,7 +152,7 @@ async def send_report(cfg: dict, base_dir: Path, version: str, note: str = "") -
     """Отправить архив владельцу. Возвращает короткий код для человека."""
     base = _t.ingest_url()
     if not base:
-        return {"ok": False, "error": "Адрес приёма не настроен в этой сборке"}
+        return {"ok": False, "error_key": "err.report_endpoint_unset", "error": "Адрес приёма не настроен в этой сборке"}
     if not base.startswith(("http://", "https://")):
         base = "https://" + base
 
@@ -172,13 +172,13 @@ async def send_report(cfg: dict, base_dir: Path, version: str, note: str = "") -
         async with httpx.AsyncClient(timeout=120) as client:
             r = await client.post(f"{base}/api/telemetry/report", content=blob, headers=headers)
         if r.status_code != 200:
-            return {"ok": False, "error": f"Сервер разработчика ответил {r.status_code}"}
+            return {"ok": False, "error_key": "err.dev_server_http", "error_args": {"code": r.status_code}, "error": f"Сервер разработчика ответил {r.status_code}"}
         data = r.json()
         if not data.get("ok"):
-            return {"ok": False, "error": str(data.get("error") or "отказано в приёме")}
+            return {"ok": False, "error_key": "err.report_rejected", "error": str(data.get("error") or "отказано в приёме")}
         return {"ok": True, "code": data.get("code", ""), "size": len(blob)}
     except Exception as e:                                    # noqa: BLE001
-        return {"ok": False, "error": f"Не удалось связаться с разработчиком: {str(e)[:140]}"}
+        return {"ok": False, "error_key": "err.dev_unreachable", "error_args": {"e": str(e)[:140]}, "error": f"Не удалось связаться с разработчиком: {str(e)[:140]}"}
 
 
 def _hdr(s: str) -> str:

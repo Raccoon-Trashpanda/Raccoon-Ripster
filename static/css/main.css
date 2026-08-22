@@ -12,6 +12,7 @@
   --surface3:#2a2a3a;   /* deepest raised surface (dropdown hover) — theme-aware */
   --border:#3a3a58;
   --border2:#4a4a68;
+  --sb-thumb:color-mix(in srgb, var(--border2) 85%, transparent);
   --accent:var(--red);  /* semantic accent (toasts, bot/admin links) → brand red per theme */
   --fg:var(--text);     /* alias for text colour used by a few legacy rules */
   --text:#e8e8f8;
@@ -37,6 +38,7 @@
   --panel:#1c1e2a;                    /* raised card/panel bg (telemetry, modals) — theme-aware */
   --pp-cache:rgba(255,255,255,.14);   /* seek-bar cache shading — light tint shows on dark dock */
   --pp-track:rgba(255,255,255,.06);   /* seek-bar empty-rail base */
+  --rw-idle:rgba(255,255,255,.34);    /* волна: несыгранный остаток (тёмные схемы) */
   --font:system-ui,-apple-system,'Segoe UI',sans-serif;
   --mono:'JetBrains Mono','Fira Code','Cascadia Code',monospace;
   --display:system-ui,-apple-system,'Segoe UI',sans-serif;
@@ -65,6 +67,7 @@ html.light{
   --surface3:#e8e8ee;   /* deepest raised surface (dropdown hover) — light (was falling back to dark #2a2a3a) */
   --border:rgba(0,0,0,.1);
   --border2:rgba(0,0,0,.16);
+  --sb-thumb:color-mix(in srgb, var(--border2) 85%, transparent);
   --text:#18181f;
   --muted:rgba(18,18,30,.62);
   --muted2:rgba(18,18,30,.52);
@@ -87,6 +90,7 @@ html.light{
   --pp-cache:rgba(0,0,0,.08);   /* seek-bar cache shading — dark tint shows on light dock */
   --pp-track:rgba(0,0,0,.02);   /* seek-bar empty-rail base — barely-there so the dock
                                    itself doesn't read as "darkened" (only the cache band shows) */
+  --rw-idle:rgba(40,30,20,.30);  /* волна: несыгранный остаток (светлые схемы) */
 }
 /* ── Extra colour schemes ───────────────────────────────────────────────────
    The light theme above proved that a scheme here is PURELY a set of variable
@@ -108,6 +112,7 @@ html[data-theme="midnight"]{
   --surface3:#1d1d23;
   --border:#212128;
   --border2:#2f2f38;
+  --sb-thumb:color-mix(in srgb, var(--border2) 85%, transparent);
   --text:#ece7e1;          /* warm off-white — pure #fff glares on true black */
   --muted:#9c958d;
   --muted2:#6f6a64;
@@ -134,6 +139,7 @@ html[data-theme="ember"]{
   --surface3:#271f18;
   --border:#2c241c;
   --border2:#3b3026;
+  --sb-thumb:color-mix(in srgb, var(--border2) 85%, transparent);
   --text:#f2e8dd;
   --muted:#b3a396;
   --muted2:#847467;
@@ -163,6 +169,7 @@ html[data-theme="sepia"]{
   --surface3:#ece2d1;
   --border:rgba(70,50,25,.14);
   --border2:rgba(70,50,25,.22);
+  --sb-thumb:color-mix(in srgb, var(--border2) 85%, transparent);
   --text:#2c2620;
   --muted:rgba(52,42,30,.66);
   --muted2:rgba(52,42,30,.52);
@@ -182,6 +189,202 @@ html[data-theme="sepia"]{
   --pp-cache:rgba(70,50,25,.10);
   --pp-track:rgba(70,50,25,.03);
 }
+
+/* Neon — near-black with a magenta glow. Дизайн-система «Ripster Neon»
+   (10.08.2026, design/design-system-neon.md): единственный акцент — неоновая
+   маджента, у активных/primary-элементов лёгкое свечение. Тёмная схема. */
+html[data-theme="neon"]{
+  --fx-glow:rgba(255,77,143,.20);
+  --bg:#08070c;
+  --bg2:#0b0910;
+  --bg3:#14101c;
+  --surface:#181420;
+  --surface2:#201a2a;
+  --surface3:#2a2236;
+  --border:#2a2336;
+  --border2:#3a3048;
+  --sb-thumb:color-mix(in srgb, var(--border2) 85%, transparent);
+  --text:#f4eef4;
+  --muted:#a79caf;
+  --muted2:#726a7e;
+  --red:#ff4d8f;            /* accent → неон маджента; --accent:var(--red) тянет весь UI */
+  --red2:#c23b6e;
+  --green:#38e0a0;
+  --blue:#5aa2ff;
+  --orange:#ff9f5c;
+  --purple:#b98cff;
+  --yellow:#ffd36b;
+  --topbar-bg:rgba(12,9,16,.82);
+  --sidebar-bg:rgba(12,9,16,.86);
+  --console-bg:rgba(255,77,143,.05);
+  --player-bg:rgba(12,9,16,.97);
+  --panel:#181420;
+  --shadow:0 12px 40px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.4);
+  --pp-cache:rgba(255,120,180,.22);
+  --pp-track:rgba(255,255,255,.06);
+}
+/* лёгкое свечение primary-кнопок только в неон-теме (аддитивно, безопасно) */
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   СЛОЙ РОЛЕЙ — 22.08.2026
+   ---------------------------------------------------------------------------
+   Зачем. Переменные выше названы по КРАСКЕ (--yellow, --purple), и поэтому
+   применялись куда попало. Измерение (design/AUDIT_colors.md) дало 16 провалов
+   контраста из 60 проверок: --muted2 не проходил порог НИ В ОДНОЙ из шести тем,
+   --yellow на бумажных темах давал 1.38 — жёлтый на белом, невидимый буквально.
+
+   Корень не в значениях. Тема — это «скопируй блок и поправь что вспомнишь»:
+   что не переопределено, молча наследует тёмное значение. Так --rw-idle с
+   пометкой «для тёмных схем» приезжал в sepia.
+
+   Лечение — роли. Ключ здесь один: у каждого состояния ТРИ формы —
+     -text   цвет НАДПИСИ на поверхности, порог 4.5
+     -fill   СПЛОШНАЯ заливка (кнопка, точка, кольцо), порог 3.0
+     -tint   прозрачная подложка чипа
+   Именно отсутствие этой развилки и давало 1.38: одно значение обслуживало и
+   заливку иконки, и подпись, и выигрывала заливка.
+
+   Блоки идут ПОСЛЕ исходных и имеют ту же специфичность, поэтому побеждают по
+   порядку. Старые имена не удалены — они стали псевдонимами, и 158 КБ CSS выше
+   продолжают работать без единой правки.
+   ═════════════════════════════════════════════════════════════════════════ */
+
+:root, html[data-theme="dark"]{
+  --surface-canvas:#111318;  --surface-sunken:#0d0f13;
+  --surface-raised:#1c1e2a;  --surface-overlay:#252836;
+  --surface-hover:#2a2a3a;   --surface-active:#232531;
+  --text-primary:#e8e8f8; --text-secondary:#a8a8c0; --text-tertiary:#9494ae;
+  --text-disabled:#6a6a84; --text-on-fill:#0d0f13;
+  --border-subtle:#2a2c3c; --border-default:#3a3a58; --border-strong:#6e6e94;
+  --focus-ring:#7aa8ff;
+  --success-text:#3ecfaa;  --success-fill:#2fb894;  --success-tint:rgba(62,207,170,.14);
+  --warning-text:#ffd60a;  --warning-fill:#e0a800;  --warning-tint:rgba(255,214,10,.14);
+  --danger-text:#ff6b64;   --danger-fill:#e05a52;   --danger-tint:rgba(226,75,74,.14);
+  --progress-text:#4da3ff; --progress-fill:#2f7fd8; --progress-tint:rgba(10,132,255,.14);
+  --info-text:#9aa0d8;     --info-fill:#7a80c0;     --info-tint:rgba(154,160,216,.14);
+  --accent-text:#c084a0; --accent-fill:#a86a88;
+  --accent-hover:#b87c9a; --accent-active:#a87490; --accent-tint:rgba(192,132,160,.14);
+}
+html.light, html[data-theme="light"]{
+  --surface-canvas:#f4f4f8;  --surface-sunken:#ebebf0;
+  --surface-raised:#ffffff;  --surface-overlay:#f0f0f5;
+  --surface-hover:#efeff4;   --surface-active:#e8e8ee;
+  --text-primary:#18181f; --text-secondary:#4a4a5c; --text-tertiary:#5d5d70;
+  --text-disabled:#8a8a9a; --text-on-fill:#ffffff;
+  --border-subtle:rgba(0,0,0,.07); --border-default:rgba(0,0,0,.14);
+  --border-strong:rgba(0,0,0,.46); --focus-ring:#0060d0;
+  --success-text:#0f7233;  --success-fill:#0f7233;  --success-tint:rgba(15,114,51,.10);
+  /* Заливка светлее #b5730d на белом не проходит порог 3.0 для графики
+     (замер: #e0a800 даёт 2.15). Жёлтый характер сохранён настолько,
+     насколько его вообще можно сохранить на белом фоне. */
+  --warning-text:#8a5a00;  --warning-fill:#b5730d;  --warning-tint:rgba(138,90,0,.10);
+  --danger-text:#c0281f;   --danger-fill:#c0281f;   --danger-tint:rgba(192,40,31,.10);
+  --progress-text:#0060d0; --progress-fill:#0060d0; --progress-tint:rgba(0,96,208,.10);
+  --info-text:#5a4fb0;     --info-fill:#5a4fb0;     --info-tint:rgba(90,79,176,.10);
+  --accent-text:#9c4f78; --accent-fill:#9c4f78;
+  --accent-hover:#8c4569; --accent-active:#7a3a5a; --accent-tint:rgba(156,79,120,.10);
+}
+html[data-theme="midnight"]{
+  --surface-canvas:#000000;  --surface-sunken:#050506;
+  --surface-raised:#0c0c0f;  --surface-overlay:#15151a;
+  --surface-hover:#1d1d23;   --surface-active:#15151a;
+  --text-primary:#ece7e1; --text-secondary:#b0a9a1; --text-tertiary:#948d85;
+  --text-disabled:#656059; --text-on-fill:#000000;
+  --border-subtle:#17171c; --border-default:#26262e; --border-strong:#626270;
+  --focus-ring:#7ab8ff;
+  --success-text:#4ad3b0;  --success-fill:#2fbf9c;  --success-tint:rgba(74,211,176,.14);
+  --warning-text:#f0b040;  --warning-fill:#d99a2e;  --warning-tint:rgba(240,176,64,.14);
+  --danger-text:#ff7a72;   --danger-fill:#d94f48;   --danger-tint:rgba(255,122,114,.14);
+  --progress-text:#64b0ff; --progress-fill:#2f7fd8; --progress-tint:rgba(100,176,255,.14);
+  --info-text:#a89ad0;     --info-fill:#8a7cb4;     --info-tint:rgba(168,154,208,.14);
+  --accent-text:#c98fa6; --accent-fill:#b4738c;
+  --accent-hover:#bd8399; --accent-active:#a86e82; --accent-tint:rgba(201,143,166,.14);
+}
+html[data-theme="ember"]{
+  --surface-canvas:#0b0908;  --surface-sunken:#0f0c0a;
+  --surface-raised:#15110d;  --surface-overlay:#1e1812;
+  --surface-hover:#271f18;   --surface-active:#1e1812;
+  --text-primary:#f2e8dd; --text-secondary:#bdae9f; --text-tertiary:#a0907f;
+  --text-disabled:#6f6155; --text-on-fill:#0b0908;
+  --border-subtle:#221b15; --border-default:#332a20; --border-strong:#78654e;
+  --focus-ring:#8fbce8;
+  --success-text:#7fc9a4;  --success-fill:#3fa87e;  --success-tint:rgba(127,201,164,.14);
+  --warning-text:#efa03a;  --warning-fill:#d98b20;  --warning-tint:rgba(239,160,58,.14);
+  --danger-text:#f0806a;   --danger-fill:#d15540;   --danger-tint:rgba(240,128,106,.14);
+  --progress-text:#79b0e0; --progress-fill:#3f7fb8; --progress-tint:rgba(121,176,224,.14);
+  --info-text:#c4a8cc;     --info-fill:#9c82a8;     --info-tint:rgba(196,168,204,.14);
+  --accent-text:#dfa07a; --accent-fill:#c07a4e;
+  --accent-hover:#d4915f; --accent-active:#b3714a; --accent-tint:rgba(223,160,122,.14);
+}
+html[data-theme="sepia"]{
+  --surface-canvas:#f5efe4;  --surface-sunken:#efe7d9;
+  --surface-raised:#fffcf5;  --surface-overlay:#f6efe2;
+  --surface-hover:#f2ebdc;   --surface-active:#ece2d1;
+  --text-primary:#2c2620; --text-secondary:#544537; --text-tertiary:#665442;
+  --text-disabled:#8a7c68; --text-on-fill:#fffcf5;
+  --border-subtle:rgba(70,50,25,.10); --border-default:rgba(70,50,25,.20);
+  --border-strong:rgba(70,50,25,.60); --focus-ring:#2a5f9e;
+  --success-text:#1b6b40;  --success-fill:#1b6b40;  --success-tint:rgba(27,107,64,.10);
+  --warning-text:#8a5a10;  --warning-fill:#b5730d;  --warning-tint:rgba(138,90,16,.10);
+  --danger-text:#a8301f;   --danger-fill:#a8301f;   --danger-tint:rgba(168,48,31,.10);
+  --progress-text:#2a5f9e; --progress-fill:#2a5f9e; --progress-tint:rgba(42,95,158,.10);
+  --info-text:#5b4a9c;     --info-fill:#5b4a9c;     --info-tint:rgba(91,74,156,.10);
+  --accent-text:#8e4a66; --accent-fill:#8e4a66;
+  --accent-hover:#7f4159; --accent-active:#6d364c; --accent-tint:rgba(142,74,102,.10);
+}
+html[data-theme="neon"]{
+  --surface-canvas:#08070c;  --surface-sunken:#0b0910;
+  --surface-raised:#181420;  --surface-overlay:#201a2a;
+  --surface-hover:#2a2236;   --surface-active:#201a2a;
+  --text-primary:#f4eef4; --text-secondary:#b6a9bd; --text-tertiary:#9a8ba3;
+  --text-disabled:#6b6276; --text-on-fill:#08070c;
+  --border-subtle:#221b2c; --border-default:#332a42; --border-strong:#786594;
+  --focus-ring:#ff4d8f;
+  --success-text:#38e0a0;  --success-fill:#18c98a;  --success-tint:rgba(56,224,160,.14);
+  --warning-text:#ffd36b;  --warning-fill:#e0a83a;  --warning-tint:rgba(255,211,107,.14);
+  --danger-text:#ff5c72;   --danger-fill:#e8405c;   --danger-tint:rgba(255,92,114,.14);
+  --progress-text:#6aa8ff; --progress-fill:#3f7fe0; --progress-tint:rgba(106,168,255,.14);
+  --info-text:#b98cff;     --info-fill:#9564e0;     --info-tint:rgba(185,140,255,.14);
+  --accent-text:#ff4d8f; --accent-fill:#ff4d8f;
+  --accent-hover:#ff6ba1; --accent-active:#e8446f; --accent-tint:rgba(255,77,143,.14);
+}
+
+/* ── Псевдонимы: старые имена → роли ────────────────────────────────────────
+   Здесь НЕТ ни одного цветового литерала, только var()-указатели. var()
+   разрешается в момент применения, поэтому псевдоним берёт значение ТЕКУЩЕЙ
+   темы. Объявлять по темам не нужно — и нельзя: это вернуло бы ту самую
+   копипасту, из-за которой всё и сломалось.
+
+   Цели выбраны по ФАКТУ применения, а не по названию:
+     --yellow  в проекте не используется НИГДЕ (проверено грепом) → -fill,
+               чтобы жёлтый характер остался доступен и ничего не изменилось;
+     --purple  используется один раз, как background точки → -fill;
+     --orange  и как текст, и как заливка → -text (строгий порог), заливки при
+               встрече переводить на --warning-fill поимённо.
+   ------------------------------------------------------------------------ */
+/* Селектор намеренно :root:root — специфичность (0,2,0). Простой :root это
+   (0,1,0), и он ПРОИГРЫВАЛ бы html.light и html[data-theme=…] со своими (0,1,1):
+   старые литералы в блоках тем выше перебивали бы псевдонимы, и вся работа
+   свелась бы к нулю во всех темах кроме тёмной. Проверка это и поймала.
+   Дублировать псевдонимы по шести блокам — вернуть ту самую копипасту, из-за
+   которой темы и разъехались; поэтому блок один, но весомее. */
+:root:root{
+  --bg:var(--surface-canvas);        --bg2:var(--surface-sunken);
+  --bg3:var(--surface-raised);       --surface:var(--surface-raised);
+  --surface2:var(--surface-overlay); --surface3:var(--surface-hover);
+  --panel:var(--surface-raised);
+  --text:var(--text-primary);        --fg:var(--text-primary);
+  --muted:var(--text-secondary);     --muted2:var(--text-tertiary);
+  --border:var(--border-default);    --border2:var(--border-strong);
+  --accent:var(--accent-text);       --red:var(--accent-text);
+  --red2:var(--accent-active);
+  --danger:var(--danger-text);       --danger-dim:var(--danger-tint);
+  --green:var(--success-text);       --blue:var(--progress-text);
+  --orange:var(--warning-text);      --yellow:var(--warning-fill);
+  --purple:var(--info-fill);
+}
+
+html[data-theme="neon"] .btn-red{box-shadow:0 6px 22px rgba(255,77,143,.30)}
 
 html{overflow:hidden;height:100%}
 html,body{background:var(--bg);color:var(--text);font-family:var(--font);overflow:hidden;height:100%;
@@ -291,7 +494,11 @@ body{height:100%;margin:0}
 }
 .tb-restart{background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:14px;padding:2px 7px;cursor:pointer;line-height:1;flex-shrink:0}
 .tb-restart:hover{color:var(--fg);border-color:var(--muted)}
-.sidebar{background:var(--sidebar-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;padding:12px 10px;gap:2px;min-height:0;scrollbar-width:thin}
+.sidebar{background:var(--sidebar-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;padding:12px 10px 0;gap:2px;min-height:0;scrollbar-width:thin}
+/* padding-bottom:0 — вторая половина той же щели: нижний отступ панели входит
+   в прокручиваемую область, и меню проползало через него ПОД закреплённым
+   доком. Док сам прижат к самому низу, поэтому отступ там больше не нужен.
+   Мобильное правило (ниже, 700px) свой padding-bottom задаёт отдельно. */
 /* .main — defined in MAIN CONTENT section below with position:relative */
 
 /* ── TOPBAR ── */
@@ -329,9 +536,17 @@ body{height:100%;margin:0}
 .nav-item:hover{background:var(--surface);color:var(--text)}
 .nav-item.active{background:rgba(192,132,160,.12);color:var(--red);font-weight:600;box-shadow:inset 2px 0 0 var(--red);border-radius:10px}
 .nav-item .icon{font-size:14px;width:20px;text-align:center;flex-shrink:0}
-.stab{padding:7px 14px;font-size:12px;font-weight:600;border:none;border-bottom:2px solid transparent;background:transparent;color:var(--muted);cursor:pointer;font-family:var(--font);transition:all .15s;border-radius:0}
-.stab.active{color:var(--red);border-bottom-color:var(--red)}
-.stab:hover:not(.active){color:var(--text)}
+/* Сегментированный стеклянный таб-бар настроек (разбор Grok v001, приоритет №4):
+   горизонтальный скролл вместо переноса 15 вкладок на вторую строку-сироту. */
+.stab-bar{display:flex;gap:4px;margin-top:10px;padding:4px;border-radius:12px;
+  background:var(--surface);border:1px solid var(--border);overflow-x:auto;overflow-y:hidden;
+  scrollbar-width:thin;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+.stab-bar::-webkit-scrollbar{height:6px}
+.stab-bar::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+.stab{padding:7px 13px;font-size:12px;font-weight:600;border:none;background:transparent;color:var(--muted);cursor:pointer;font-family:var(--font);transition:all .15s;border-radius:9px;white-space:nowrap;flex:0 0 auto}
+.stab.active{color:var(--red);background:var(--surface2);box-shadow:inset 0 0 0 1px var(--border)}
+.stab:hover:not(.active){color:var(--text);background:var(--surface2)}
+html[data-theme="neon"] .stab.active{box-shadow:inset 0 0 0 1px var(--red2),0 4px 16px rgba(255,77,143,.22)}
 .stab.svc-tab{display:inline-flex;align-items:center;gap:6px}
 .svc-ico{width:15px;height:15px;flex:0 0 auto;display:inline-block;vertical-align:middle}
 .svc-ico.is-stroke{fill:none}
@@ -377,9 +592,9 @@ body{height:100%;margin:0}
 .view-header{padding:22px 28px 16px;flex-shrink:0;border-bottom:1px solid var(--border)}
 .view-title{font-family:var(--display);font-size:22px;font-weight:800;letter-spacing:-.5px}
 .view-sub{font-size:12px;color:var(--muted);margin-top:3px}
-.view-body{flex:1 1 auto;overflow-y:auto;padding:20px 28px;min-height:0;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.1) transparent}
-.view-body::-webkit-scrollbar{width:4px}
-.view-body::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:2px}
+.view-body{flex:1 1 auto;overflow-y:auto;padding:20px 28px;min-height:0;scrollbar-width:thin;scrollbar-color:var(--sb-thumb) transparent}
+.view-body::-webkit-scrollbar{width:9px}
+.view-body::-webkit-scrollbar-thumb{background:var(--sb-thumb);border-radius:4px}
 /* The mini-player (#preview-player) is position:fixed;bottom:0 and floats OVER
    the layout, so at small window heights it hides the bottom of the scrollable
    content and the last sidebar items. When it's visible, reserve its height as
@@ -396,10 +611,10 @@ body:has(#preview-player.visible) .sidebar{padding-bottom:72px}
   overflow-y:auto;
   min-height:0;
   scrollbar-width:thin;
-  scrollbar-color:rgba(255,255,255,.1) transparent;
+  scrollbar-color:var(--sb-thumb) transparent;
 }
-.view.active > div:not(.view-header):not(.view-body):not(.console-toolbar)::-webkit-scrollbar{width:4px}
-.view.active > div:not(.view-header):not(.view-body):not(.console-toolbar)::-webkit-scrollbar-thumb{background:rgba(255,255,255,.1);border-radius:2px}
+.view.active > div:not(.view-header):not(.view-body):not(.console-toolbar)::-webkit-scrollbar{width:9px}
+.view.active > div:not(.view-header):not(.view-body):not(.console-toolbar)::-webkit-scrollbar-thumb{background:var(--sb-thumb);border-radius:4px}
 
 /* ── INPUTS ── */
 input,select,textarea{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:9px 12px;color:var(--text);font-family:var(--font);font-size:13px;outline:none;transition:border-color .15s;width:100%}
@@ -521,6 +736,13 @@ button:focus-visible{ outline: 2px solid rgba(192,132,160,.55); outline-offset: 
     inset 0 1px 0 rgba(255,255,255,.04);
 }
 .block-title{font-size:10px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.9px;margin-bottom:12px;font-family:var(--display)}
+/* Сворачиваемый блок «Дополнительно» (разбор Grok v001, приоритет №3): тяжёлые
+   продвинутые секции (Apple wrapper/Docker, SoundCloud L3) свёрнуты по умолчанию.
+   Только класс + клик по заголовку — DOM/id/биндинги не трогаются. */
+.block.coll > .block-title{cursor:pointer;user-select:none;display:flex;align-items:center;gap:8px}
+.block.coll > .block-title::before{content:"\25B8";color:var(--muted);font-size:11px;transition:transform .18s;flex:none}
+.block.coll.coll-open > .block-title::before{transform:rotate(90deg)}
+.block.coll:not(.coll-open) > *:not(.block-title){display:none!important}
 .card{
   background:var(--surface);
   border:1px solid var(--border);
@@ -554,10 +776,10 @@ button:focus-visible{ outline: 2px solid rgba(192,132,160,.55); outline-offset: 
 
 /* ── QUEUE ── */
 .queue-input-area{padding:20px 28px 16px;background:var(--bg2);border-bottom:1px solid var(--border);flex-shrink:0}
-.queue-list{flex:1;overflow-y:auto;padding:12px 20px;display:flex;flex-direction:column;gap:6px;align-content:start;scrollbar-width:thin;scrollbar-color:rgba(255,255,255,.08) transparent}
+.queue-list{flex:1;overflow-y:auto;padding:12px 20px;display:flex;flex-direction:column;gap:6px;align-content:start;scrollbar-width:thin;scrollbar-color:var(--sb-thumb) transparent}
 .queue-list .empty-state{margin:auto}
-.queue-list::-webkit-scrollbar{width:4px}
-.queue-list::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:2px}
+.queue-list::-webkit-scrollbar{width:9px}
+.queue-list::-webkit-scrollbar-thumb{background:var(--sb-thumb);border-radius:4px}
 
 /* ── compact ROW layout ── */
 .qi{display:flex;flex-direction:row;align-items:center;gap:11px;background:var(--surface);border:1px solid var(--border);border-radius:11px;padding:7px 10px 7px 13px;transition:border-color .15s,box-shadow .15s,background .15s;position:relative;overflow:hidden;box-shadow:0 1px 2px rgba(0,0,0,.2);flex-shrink:0}
@@ -713,8 +935,8 @@ img[data-cover].loaded{
 .view--console{gap:10px;padding:0 20px 20px}
 .view--console > .view-header{padding:22px 0 10px;border-bottom:1px solid var(--border)}
 .view--console > .console-toolbar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:4px 0;flex-shrink:0}
-.console::-webkit-scrollbar{width:4px}
-.console::-webkit-scrollbar-thumb{background:rgba(255,255,255,.08);border-radius:2px}
+.console::-webkit-scrollbar{width:9px}
+.console::-webkit-scrollbar-thumb{background:var(--sb-thumb);border-radius:4px}
 .log-info{color:var(--muted)}
 .log-success{color:var(--green)}
 .log-error{color:var(--danger)}
@@ -905,7 +1127,16 @@ img[data-cover].loaded{
    requests) reads as flickery/broken. A looping sweep reads as "still
    working" without ever looking like it stalled or restarted. */
 #net-progress{
-  position:fixed; top:0; left:-30%; width:30%; height:3px; z-index:99999;
+  /* Едет ТРАНСФОРМОМ, а не свойством left. Анимация left заставляет браузер
+     пересчитывать раскладку на каждом кадре — отсюда рывки и ощущение «меньше
+     24 кадров в секунду», которое и заметил владелец. transform считается
+     композитором на видеокарте, раскладку не трогает и идёт ровно.
+     Путь: от -100% своей ширины (правый край отрезка на нуле экрана) до
+     333.34% — это 100vw при ширине отрезка 30vw, то есть левый край ушёл за
+     правую кромку. */
+  position:fixed; top:0; left:0; width:30%; height:3px; z-index:99999;
+  transform:translateX(-100%);
+  will-change:transform;
   opacity:0; pointer-events:none;
   background:linear-gradient(90deg, var(--red), #d8a4bf);
   box-shadow:0 0 10px var(--red), 0 0 4px var(--red);
@@ -914,8 +1145,8 @@ img[data-cover].loaded{
 }
 #net-progress.running{ opacity:1; animation:net-progress-run 1.1s ease-in-out infinite; }
 @keyframes net-progress-run{
-  0%   { left:-30%; }
-  100% { left:100%; }
+  0%   { transform:translateX(-100%); }
+  100% { transform:translateX(333.34%); }
 }
 /* ══ Cursor-following soft glow on buttons (tracks the mouse via --mx/--my) ══ */
 .fx-glow{ position:relative; }
@@ -1511,6 +1742,36 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
        thumb is replaced by the unified .fp-fill::after dot. */
     .fp-seek::before { height: 8px !important; border-radius: 4px !important; }
     .fp-thumb { display: none !important; }
+    /* ══ Волна вместо полосы перемотки ══════════════════════════════════════
+       Референс design/approved/neon-reference-mobile.png: под треком идёт не
+       полоска, а симметричная waveform. Класс rw-on ставит JS и ТОЛЬКО когда
+       ядро волны (player_wave.js) действительно загрузилось — не загрузилось,
+       ни одно правило ниже не применяется и человек видит рабочую старую
+       полосу, а не пустое место.
+       Старые слои НЕ удалены, а спрятаны через opacity: их ширину по-прежнему
+       двигают пять мест в JS, и волна читает позицию именно оттуда
+       (_rwFracOf в player.js). display:none стёр бы вычисляемую ширину — и
+       позиция навсегда стала бы нулём. */
+    #fp-wave, #pp-wave {
+      position: absolute; left: 0; top: 0; width: 100%; height: 100%;
+      display: block;
+      pointer-events: none;   /* клик и протяжка достаются полосе ПОД холстом:
+                                 перемотка остаётся штатной (_wireSeekBar) */
+    }
+    #fp-wave { z-index: 1; }
+    #pp-wave { z-index: 0; }
+    /* Полноэкранный плеер: волне нужна высота, полоса была 32px. */
+    .fp-seek.rw-on { height: 56px !important; }
+    .fp-seek.rw-on::before   { opacity: 0 !important; }
+    .fp-seek.rw-on .fp-fill  { opacity: 0 !important; }
+    .fp-seek.rw-on #fp-buffered { opacity: 0 !important; }
+    /* Буфер и позиция не пропали, они нарисованы В САМОЙ ВОЛНЕ: сыгранное —
+       градиентом, загруженное-но-не-сыгранное — заметнее незагруженного. */
+    /* Мини-док: полупрозрачная заливка на всю высоту дока замылила бы волну,
+       поэтому от неё остаётся только вертикальная палочка позиции
+       (#pp-fill::after). Метки глав (.pp-tick, z-index:2) — поверх волны. */
+    #pp-progress.rw-on #pp-fill     { background: transparent !important; }
+    #pp-progress.rw-on #pp-buffered { opacity: 0 !important; }
     .fp-times{
       display:flex; justify-content:space-between; font-size:11px;
       color:rgba(255,255,255,.55); font-family:var(--mono);
@@ -2210,4 +2471,183 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 @media (prefers-reduced-motion: reduce){
   [data-mq].mq-on .mq-i{animation:none;transform:none}
   [data-mq].mq-on{text-overflow:ellipsis}
+}
+
+/* ── Сетка карточек: ОДНА константа ширины на все витрины ───────────
+   Однотипные на вид карточки (радар релизов, поиск, BBC, SoundCloud,
+   дискография артиста) жили на ТРЁХ разных minmax — 160/165/170px, разнесённых
+   по inline-стилям в пяти файлах. Теперь ширина задаётся здесь и только здесь.
+   16.08.2026: поднята до 185px (≈+10% от прежних значений) по просьбе владельца.
+   На узких экранах остаётся 160px — минимум из прежних значений. Треки тут 1fr,
+   поэтому реальная ширина карточки равна (контейнер − зазоры)/N и от минимума не
+   зависит: минимум решает только, СКОЛЬКО колонок поместится. 185px на телефоне
+   уронил бы витрину с двух колонок на одну (карточка во весь экран), 160px
+   сохраняет ровно ту раскладку, что была до правки. align-items:stretch — чтобы
+   карточки в ряду были одной высоты (у части релизов есть селектор качества). */
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--card-min,185px),1fr));gap:12px;align-items:stretch}
+@media(max-width:699px){.card-grid{--card-min:160px}}
+
+/* Ряд действий на карточке релиза — СЕТКА РАВНЫХ колонок, не flex-wrap.
+   Было display:flex;flex-wrap:wrap — и пятая кнопка («открыть релиз») уезжала на
+   вторую строку всякий раз, когда не хватало ширины. Поднять ширину карточки —
+   лечение симптома: граница просто сдвигается к следующему размеру окна или
+   длине подписи. grid-auto-flow:column с minmax(0,1fr) делает перенос невозможным
+   по построению: колонка всегда ровно одна на кнопку, сколько бы кнопок ни было
+   (afButton условная — число колонок подстраивается само). min-width:0 разрешает
+   кнопке сжаться ниже ширины содержимого, overflow:hidden прячет хвост аккуратно. */
+.rel-act-row{display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);gap:5px;margin-top:5px}
+.rel-act-row > *{min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  display:flex;align-items:center;justify-content:center;padding:5px 2px;box-sizing:border-box}
+/* Кнопка скачивания — отдельной строкой над рядом: у неё текстовая подпись,
+   и в равной колонке с иконками она бы превратилась в огрызок. */
+.rel-dl-btn{display:block;width:100%;box-sizing:border-box;margin-top:7px;overflow:hidden;
+  white-space:nowrap;text-overflow:ellipsis}
+
+/* ══ DL-ORB — круглый индикатор загрузки в пустом низу левой панели ══
+   Правая граница панели — СТЕНА. Держится не арифметикой, а тремя вещами:
+   1) .dlorb-dock{overflow:hidden} режет всё, что вышло за прямоугольник;
+   2) contain:layout paint запрещает потомкам рисоваться снаружи (тени, blur,
+      свечение варианта neon — тоже);
+   3) .sidebar{overflow-x:hidden} уже стоит в разметке панели — второй рубеж.
+   Даже если расчёт X ошибётся или окно окажется уже ожидаемого, на карточки
+   круг не вылезет: ему физически нечем туда попасть. */
+.dlorb-dock{
+  margin-top:auto;          /* .sidebar — flex-колонка: док прижат к низу */
+  /* ЗАКРЕПЛЁН, а не просто «прижат». .sidebar прокручиваемая (overflow-y:auto),
+     и при низком окне пунктов меню хватало, чтобы вытолкнуть док ниже видимой
+     части: круги технически были, но до них надо было докручивать — снаружи это
+     читается как «круги пропали». sticky держит док у нижней кромки видимой
+     области панели независимо от прокрутки и высоты окна.
+     Фон обязателен: без него пункты меню просвечивают под кругами при прокрутке.
+     sticky — позиционированный элемент, поэтому absolute-круги внутри
+     продолжают считаться от дока, как и при relative. */
+  position:sticky;
+  /* bottom:0, а НЕ 4px. При 4px между доком и низом панели оставалась щель, и
+     прокручиваемое меню просвечивало через неё полоской — владелец видел срезанное
+     по горизонтали слово «Admin». Щель в органе, который специально закреплён,
+     читается как дефект, а не как отступ. */
+  bottom:0;
+  z-index:3;
+  background:var(--sidebar-bg);
+  flex:0 0 112px;    /* не ужимать: 0 1 позволял высоте уехать к min-height и ниже */
+  height:112px;
+  min-height:64px;
+  margin-bottom:0;   /* см. bottom:0 выше — отступ снизу и был второй половиной щели */
+  overflow:hidden;
+  contain:layout paint;
+  pointer-events:none;
+  isolation:isolate;
+}
+.dlorb{
+  position:absolute;left:0;top:50%;
+  width:44px;height:44px;
+  transform:translate3d(-76px,-50%,0);
+  transition:transform .62s cubic-bezier(.22,.85,.3,1), opacity .34s ease;
+  will-change:transform;
+  opacity:0;
+}
+.dlorb.is-in{opacity:1}
+.dlorb-body{
+  position:absolute;inset:0;border-radius:50%;
+  background:rgba(255,255,255,.045);
+  border:1px solid var(--border);
+  box-shadow:inset 0 0 10px rgba(0,0,0,.38);
+}
+/* Силуэт = скин с нулевой непрозрачностью. Цвет «наливается» переходом
+   opacity, а не сменой background: градиенты не анимируются, рывок был бы
+   виден именно в момент, ради которого всё и затевалось. */
+.dlorb-skin{
+  position:absolute;inset:3px;border-radius:50%;
+  opacity:0;
+  transition:opacity .8s ease;
+  background:var(--orb-c,transparent);
+}
+.dlorb.is-current .dlorb-skin{opacity:1}
+.dlorb-ring{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg);overflow:visible}
+.dlorb-track{fill:none;stroke:rgba(255,255,255,.10);stroke-width:3}
+.dlorb-arc{
+  fill:none;stroke:var(--orb-c,rgba(255,255,255,.22));stroke-width:3;stroke-linecap:round;
+  transition:stroke-dashoffset .45s linear, stroke .8s ease;
+}
+.dlorb.is-ghost .dlorb-arc{stroke:rgba(255,255,255,.14)}
+.dlorb-txt{
+  position:absolute;inset:0;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:1px;
+  opacity:0;transition:opacity .5s ease;
+}
+.dlorb.is-current .dlorb-txt{opacity:1}
+.dlorb-pct{
+  font-family:var(--display);font-size:11px;font-weight:800;letter-spacing:-.3px;
+  color:#fff;text-shadow:0 1px 3px rgba(0,0,0,.8);line-height:1;
+}
+.dlorb-cnt{
+  font-family:var(--mono);font-size:7.5px;font-weight:700;line-height:1;
+  color:rgba(255,255,255,.82);text-shadow:0 1px 3px rgba(0,0,0,.8);
+}
+.dlorb-more{
+  position:absolute;left:0;top:50%;
+  transform:translate3d(-76px,-50%,0);
+  font-family:var(--display);font-size:9.5px;font-weight:800;
+  color:var(--muted);opacity:0;transition:transform .62s cubic-bezier(.22,.85,.3,1),opacity .3s ease;
+}
+.dlorb-more.is-in{opacity:1}
+
+@keyframes dlorb-spin{to{transform:rotate(360deg)}}
+@keyframes dlorb-breathe{0%,100%{filter:saturate(1.15) brightness(1)}50%{filter:saturate(1.5) brightness(1.16)}}
+@keyframes dlorb-drift{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+
+/* ── Вариант 1: neon (доминирующий тон обложки) ──
+   «Мягкое переливание внутри, как в неоне Яндекса» — два смещённых радиальных
+   пятна поверх конического, всё это медленно вращается и дышит. */
+[data-orb-variant="neon"] .dlorb.is-current .dlorb-skin{
+  background:
+    radial-gradient(circle at 32% 26%, var(--orb-c-lt,#fff) 0%, transparent 56%),
+    radial-gradient(circle at 74% 76%, var(--orb-c-dk,#000) 0%, transparent 60%),
+    conic-gradient(from 0deg, var(--orb-c), var(--orb-c-lt), var(--orb-c-dk), var(--orb-c));
+  animation:dlorb-spin 7.5s linear infinite, dlorb-breathe 3.4s ease-in-out infinite;
+  box-shadow:0 0 12px -2px var(--orb-c), 0 0 22px -8px var(--orb-c);
+}
+/* ── Вариант 2: aurora (СРЕДНИЙ цвет обложки + дополняющий тон) ── */
+[data-orb-variant="aurora"] .dlorb.is-current .dlorb-skin{
+  background:linear-gradient(115deg, var(--orb-c-dk), var(--orb-c), var(--orb-c2), var(--orb-c-lt), var(--orb-c-dk));
+  background-size:340% 340%;
+  animation:dlorb-drift 5.2s ease-in-out infinite, dlorb-spin 13s linear infinite;
+  box-shadow:0 0 14px -3px var(--orb-c2);
+}
+/* ── Вариант 3: vinyl (СРЕДНИЙ цвет — только на этикетке) ── */
+[data-orb-variant="vinyl"] .dlorb.is-current .dlorb-skin{
+  background:
+    radial-gradient(circle at 50% 50%, var(--orb-c) 0 26%, transparent 27%),
+    repeating-radial-gradient(circle at 50% 50%, rgba(255,255,255,.07) 0 1px, rgba(0,0,0,.55) 1px 3px),
+    #0b0b0e;
+  animation:dlorb-spin 4.6s linear infinite;
+  box-shadow:0 0 10px -4px var(--orb-c);
+}
+/* ── Вариант 4: mono (доминирующий тон, только кольцо; без переливания) ── */
+[data-orb-variant="mono"] .dlorb.is-current .dlorb-skin{
+  background:rgba(255,255,255,.05);
+  animation:none;
+  box-shadow:none;
+}
+[data-orb-variant="mono"] .dlorb.is-current .dlorb-arc{stroke-width:4}
+
+/* Образцы в настройках — та же разметка круга, тот же CSS, ничего не дублируем. */
+.dlorb-vgrid{display:flex;gap:8px;flex-wrap:wrap}
+.dlorb-vcard{
+  flex:1 1 92px;min-width:92px;padding:10px 6px 8px;border-radius:12px;
+  background:var(--surface);border:2px solid transparent;cursor:pointer;
+  text-align:center;transition:border-color .15s,background .15s;
+}
+.dlorb-vcard:hover{background:var(--surface2,var(--surface));border-color:var(--border2,var(--border))}
+.dlorb-vcard.active{border-color:var(--red)}
+.dlorb-vstage{position:relative;height:52px;overflow:hidden;contain:layout paint}
+.dlorb-vstage .dlorb{left:50%;margin-left:-22px;transform:translate3d(0,-50%,0)!important}
+.dlorb-vname{font-size:10px;font-weight:700;color:var(--text);margin-top:4px;font-family:var(--display)}
+.dlorb-vmode{font-size:8.5px;color:var(--muted);margin-top:1px}
+
+@media(max-width:699px){.dlorb-dock{display:none}}
+@media(prefers-reduced-motion:reduce){
+  .dlorb{transition:none}
+  .dlorb-skin{animation:none!important}
+  .dlorb-more{transition:none}
 }

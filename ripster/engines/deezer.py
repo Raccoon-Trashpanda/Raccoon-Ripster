@@ -17,6 +17,7 @@ from pathlib import Path
 from .base import EngineBase, EngineResult
 from .registry import register
 from ripster import http_client as _HTTP
+from ripster.py_runtime import app_python
 
 _QUALITIES = [
     {"id": "flac",    "label": "FLAC",    "sub": "Lossless CD quality", "badge": "LOSSLESS", "color": "#3ecfaa", "bitrate": "1411 kbps", "ext": "flac", "req": "premium"},
@@ -160,7 +161,7 @@ class DeezerEngine(EngineBase):
         # PATH (so AMD can find ffmpeg), so which("deemix") SUCCEEDS in-server and
         # returns that broken shim — it's None only in a bare shell, which is why
         # standalone tests passed. deemix ships __main__, so `-m deemix` is correct.
-        deemix_cmd = [sys.executable, "-m", "deemix"]
+        deemix_cmd = [app_python(), "-m", "deemix"]
 
         # Ensure output folder exists so deemix doesn't bail on a missing path
         try:

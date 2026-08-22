@@ -120,3 +120,52 @@ def test_tidal_finished_region_locked():
 def test_tidal_finished_skip_with_rc0():
     r = TidalEngine().is_finished("track already exists", rc=0)
     assert r.success is True and r.tracks_ok == 0
+
+
+# ── auth-verdict guard (15.08.2026) ──────────────────────────────────────────
+# Альбом на 33 трека умер на 17-м с «переавторизуйся» ПОСЛЕ 16 выкачанных FLAC:
+# строка отдельного трека совпала с `\b401\b`. Сессия, которая только что
+# сохранила трек, жива — и говорить человеку «войди заново» нельзя.
+def _drive(eng, lines):
+    out = []
+    for ln in lines:
+        out += list(eng.iter_events(ln, progress=(0, 0)))
+    return out
+
+
+def test_tidal_auth_line_after_saved_track_is_not_session_death():
+    from ripster.engines.base import EventKind
+    eng = TidalEngine()
+    evs = _drive(eng, [
+        "=== Track 552077346 downloaded ===",
+        "HTTP 401 unauthorized",
+    ])
+    kinds = [e.kind for e in evs]
+    assert EventKind.FATAL not in kinds
+    assert EventKind.TRACK_ERROR in kinds
+    # сырая строка обязана остаться видимой
+    assert any("401" in e.message for e in evs if e.kind is EventKind.TRACK_ERROR)
+    assert not eng.abort_reason
+
+
+def test_tidal_auth_line_before_any_save_is_still_fatal():
+    from ripster.engines.base import EventKind
+    eng = TidalEngine()
+    evs = _drive(eng, ["HTTP 401 unauthorized"])
+    assert any(e.kind is EventKind.FATAL for e in evs)
+
+
+def test_tidal_auth_fails_streak_aborts_run():
+    eng = TidalEngine()
+    _drive(eng, ["=== Track 1 downloaded ==="])
+    _drive(eng, ["HTTP 401 unauthorized"] * 10)
+    assert eng.abort_reason and "сохранённых" in eng.abort_reason
+
+
+def test_tidal_auth_streak_resets_on_new_save():
+    eng = TidalEngine()
+    _drive(eng, ["=== Track 1 downloaded ==="])
+    _drive(eng, ["HTTP 401 unauthorized"] * 9)
+    _drive(eng, ["=== Track 2 downloaded ==="])
+    _drive(eng, ["HTTP 401 unauthorized"] * 9)
+    assert not eng.abort_reason

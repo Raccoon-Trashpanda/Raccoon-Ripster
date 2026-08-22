@@ -161,7 +161,10 @@ const _SEARCH_SVCS = [
   {value: 'spotify',  label: '🟢 Spotify',       key: 'spotify'},
   {value: 'soundcloud', label: '☁️ SoundCloud',  key: 'soundcloud'},
   {value: 'beatport', label: '🎧 Beatport',      key: 'beatport'},
-  {value: 'yandex',   label: '🟡 Яндекс.Музыка', key: 'yandex'},
+  // Геттер, а не строка: t() должен вызваться В МОМЕНТ отрисовки списка, иначе
+  // (модульный const вычисляется при загрузке) в англ. интерфейсе навсегда
+  // осталось бы русское «Яндекс.Музыка».
+  {value: 'yandex',   get label(){ return '🟡 ' + (typeof t === 'function' ? t('s.svc_yandex') : 'Яндекс.Музыка'); }, key: 'yandex'},
 ];
 
 // Первый показ вкладки за эту загрузку страницы стартовал ВСЕГДА с Apple —
@@ -420,7 +423,7 @@ function _renderSearchCard(item, svc) {
     const hiresBadge = item.hires ? `<span style="font-size:8px;padding:1px 4px;border-radius:3px;background:rgba(255,214,10,.15);color:#ffd60a;font-weight:700;margin-left:3px">HI-RES</span>` : '';
 
     const linkBtn = item.url
-      ? `<a href="${esc(item.url)}" target="_blank" onclick="event.stopPropagation()" style="padding:5px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);text-decoration:none;display:flex;align-items:center;flex-shrink:0">↗</a>`
+      ? `<a href="${esc(item.url)}" title="${esc(item.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" style="padding:5px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);text-decoration:none;display:flex;align-items:center;flex-shrink:0">↗</a>`
       : '';
     const copyBtn = item.url
       ? `<button onclick="event.stopPropagation();navigator.clipboard.writeText('${escJ(item.url)}');toast(t('toast.link_copied'),'var(--green)')" title="${t('ck.copy_link')}" style="padding:5px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;font-size:11px;color:var(--muted);cursor:pointer;flex-shrink:0">⎘</button>`
@@ -467,7 +470,7 @@ function _renderSearchCard(item, svc) {
       // Same scope-fix as the track branch above.
       if(item.type === 'release' && item.service === 'beatport') {
         const tcLabel = item.trackCount ? `<span style="font-size:10px;color:var(--muted2);flex-shrink:0">${escapeHtml(item.trackCount)} ${t('p.trk_abbr')}</span>` : '';
-        const labelRow = item.label ? `<div style="font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${esc(item.label)}</div>` : '';
+        const labelRow = item.label ? `<div style="font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px;cursor:pointer" title="${escJ(item.label)} — ${t('lbl.open_page')}" onclick="event.stopPropagation();openLabelPage('${escJ(item.label)}')" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">🏷 ${esc(item.label)}</div>` : '';
         const upcomingBadge = item.is_upcoming ? `<span style="font-size:8px;background:rgba(255,214,10,.15);color:#ffd60a;padding:1px 4px;border-radius:3px;font-weight:700">PRE</span>` : '';
         return `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s;position:relative" onmouseover="this.style.borderColor='#01f49c'" onmouseout="this.style.borderColor='var(--border)'">
@@ -510,7 +513,7 @@ function _renderSearchCard(item, svc) {
       if(item.type === 'album' || item.type === 'playlist') {
         const tcLabel = item.tracks ? `<span style="font-size:10px;color:var(--muted2);flex-shrink:0">${escapeHtml(item.tracks)} ${t('p.trk_abbr')}</span>` : '';
         const typeTag = item.type === 'playlist' ? t('card.playlist') : t('card.album');
-        const labelRow = item.label ? `<div style="font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px" title="${escJ(item.label)}">${esc(item.label)}</div>` : '';
+        const labelRow = item.label ? `<div style="font-size:10px;color:var(--muted2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px;cursor:pointer" title="${escJ(item.label)} — ${t('lbl.open_page')}" onclick="event.stopPropagation();openLabelPage('${escJ(item.label)}')" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">🏷 ${esc(item.label)}</div>` : '';
         const canStream = (item.service === 'qobuz' || item.service === 'tidal' || item.service === 'deezer');
         // Apple не стримится сам (DRM), но играет КРОСС-СЕРВИСНО: playRelease
         // резолвит ту же запись по UPC на Deezer. URL берём из результата, иначе
@@ -603,6 +606,7 @@ function escJ(s) {
 const Detail = {
   currentArtist: null,   // {service, id, releases, filter}
   currentAlbum:  null,   // {service, id, tracks}
+  currentLabel:  null,   // {name, label, releases, filter} — лейбл, ключ = имя
   _stack:        [],     // navigation history for ← back
 };
 
@@ -622,6 +626,11 @@ function detailGoBack() {
     Detail.currentAlbum  = prev;
     Detail.currentArtist = null;
     renderAlbumPage();
+  } else if(prev.type === 'label') {
+    Detail.currentLabel  = prev;
+    Detail.currentArtist = null;
+    Detail.currentAlbum  = null;
+    renderLabelPage();
   }
   _detailUpdateBack();
 }
@@ -633,6 +642,7 @@ function closeDetail(){
   setTimeout(() => { if(!el.classList.contains('open')) el.style.display = 'none'; }, 300);
   Detail.currentArtist = null;
   Detail.currentAlbum  = null;
+  Detail.currentLabel  = null;
   Detail._stack        = [];
   _detailUpdateBack();
 }
@@ -709,7 +719,7 @@ function renderArtistPage(){
         <div style="font-size:12px;color:var(--muted);margin-top:8px">
           ${artist.albums_total ? `${escapeHtml(artist.albums_total)} ${t('ck.releases_word')} · ` : ''}${artist.fans ? escapeHtml(artist.fans.toLocaleString('ru'))+' '+t('ck.listeners_word')+' · ' : ''}${artist.genre ? esc(artist.genre) : ''}
         </div>
-        ${artist.url ? `<a href="${escapeHtml(artist.url)}" target="_blank" style="font-size:11px;color:var(--red);margin-top:6px;display:inline-block">↗ ${t('ck.open_on')} ${escapeHtml(artist.service)}</a>` : ''}
+        ${artist.url ? `<a href="${escapeHtml(artist.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" style="font-size:11px;color:var(--red);margin-top:6px;display:inline-block">↗ ${t('ck.open_on')} ${escapeHtml(artist.service)}</a>` : ''}
       </div>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px">
@@ -732,10 +742,21 @@ function renderArtistPage(){
           : ''}
     </div>`;
 
-  const grid = filtered.length === 0
+  const grid = _discoGridHTML(filtered, artist.name || '');
+
+  const bc = document.getElementById('detail-breadcrumb');
+  if(bc) bc.textContent = artist.name || t('card.artist');
+  document.getElementById('detail-content').innerHTML = header + grid;
+}
+
+// Сетка релизов — ОДИН рендер на дискографию артиста и на дискографию лейбла.
+// Второй рендер означал бы, что кнопки и вёрстка разъедутся на первой же правке
+// (у лейбла тот же .card-grid, те же ⬇ и ≡, тот же порядок полей).
+function _discoGridHTML(list, ownerName){
+  return (list || []).length === 0
     ? `<div style="text-align:center;padding:60px 0;color:var(--muted)">${t('ck.cat_empty')}</div>`
-    : `<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(165px,1fr));gap:12px">
-        ${filtered.map(r => `
+    : `<div class="card-grid">
+        ${list.map(r => `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s" onmouseover="this.style.borderColor='var(--red)'" onmouseout="this.style.borderColor='var(--border)'">
             ${r.cover ? `<img src="${escapeHtml(r.cover)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" onerror="this.style.display='none'"/>` : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:26px">♪</div>`}
             <div style="padding:8px 10px">
@@ -746,16 +767,91 @@ function renderArtistPage(){
               </div>
               ${r.label ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.label)}">${esc(r.label)}</div>` : ''}
               <div style="display:flex;gap:5px">
-                <button onclick="artistReleaseDownload('${escJ(r.service)}','${esc(r.id)}','${escJ(r.title)}','${escJ(artist.name)}')" style="flex:1;padding:5px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
+                <button onclick="artistReleaseDownload('${escJ(r.service)}','${esc(r.id)}','${escJ(r.title)}','${escJ(ownerName || r.artist || '')}')" style="flex:1;padding:5px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
                 <button onclick="openAlbumPage('${escJ(r.service)}','${esc(r.id)}')" style="padding:5px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('btn.tracks')}">≡</button>
               </div>
             </div>
           </div>`).join('')}
       </div>`;
+}
+
+// ─── Label page ──────────────────────────────────────────────────────────
+// У лейбла нет id и нет страницы в каталоге — ключ это его имя, поэтому бэкенд
+// отвечает тем же `_label_releases`, которым живёт подписка на лейбл в вишлисте
+// (второго источника «что выпустил лейбл» не существует: отвечают только
+// Spotify и Deezer). Карточки рисует общий `_discoGridHTML`.
+async function openLabelPage(name){
+  name = (name || '').trim();
+  if(!name) return;
+  Detail._stack = [];          // root navigation — clear history
+  _detailUpdateBack();
+  _detailLoading(t('lbl.loading'));
+  try {
+    const r = await fetch(`/api/label/${encodeURIComponent(name)}`);
+    const d = await r.json();
+    if(d.error || d.detail){ _detailError(d.error || d.detail); return; }
+    Detail.currentArtist = null;
+    Detail.currentAlbum  = null;
+    Detail.currentLabel  = {name, label: d.label || {name}, releases: d.releases || [], filter: 'all'};
+    // Как и на странице артиста: состояние кнопки «следить» нужно ДО первой
+    // отрисовки, иначе она перещёлкнется на глазах.
+    if(typeof wlIndex === 'function') { try { await wlIndex(true); } catch {} }
+    renderLabelPage();
+  } catch(e){ _detailError(e.message); }
+}
+
+function renderLabelPage(){
+  if(!Detail.currentLabel) return;
+  const {label, releases, filter} = Detail.currentLabel;
+  if (typeof tintDetailPanel === 'function') {
+    tintDetailPanel((releases[0] || {}).cover || '');
+  }
+  const counts = releases.reduce((acc, r) => {
+    acc.all = (acc.all||0)+1;
+    acc[r.type] = (acc[r.type]||0)+1;
+    return acc;
+  }, {});
+  const filtered = filter==='all' ? releases : releases.filter(r => r.type===filter);
+
+  const pill = (key, txt) => {
+    const n = counts[key] || 0;
+    if(key !== 'all' && n === 0) return '';
+    const active = filter===key;
+    return `<button onclick="setLabelFilter('${key}')" style="padding:6px 13px;border-radius:8px;background:${active?'var(--red)':'var(--surface)'};color:${active?'#fff':'var(--muted)'};border:1px solid ${active?'var(--red)':'var(--border)'};font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font)">${txt} <span style="opacity:.7">${n}</span></button>`;
+  };
+
+  const header = `
+    <div style="display:flex;gap:20px;margin-bottom:24px;align-items:flex-start;flex-wrap:wrap">
+      <div style="width:140px;height:140px;border-radius:16px;background:rgba(62,207,170,.10);border:1px solid rgba(62,207,170,.25);display:flex;align-items:center;justify-content:center;font-size:52px;flex-shrink:0">🏷</div>
+      <div style="flex:1;min-width:260px">
+        <div style="font-size:11px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;font-family:var(--display)">${t('lbl.badge')}</div>
+        <div style="font-family:var(--display);font-size:32px;font-weight:800;color:var(--text);margin-top:4px;line-height:1.1">${esc(label.name||'—')}</div>
+        <div style="font-size:12px;color:var(--muted);margin-top:8px">${releases.length} ${t('ck.releases_word')} · ${t('lbl.source')}</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:18px">
+      ${pill('all', t('ck.f_all'))}
+      ${pill('album', t('ck.f_albums'))}
+      ${pill('ep', 'EP')}
+      ${pill('single', t('ck.f_singles'))}
+      ${pill('compilation', t('ck.f_comps'))}
+    </div>
+    <div style="margin-bottom:18px;display:flex;gap:8px;flex-wrap:wrap">
+      ${typeof wlLabelFollowButton === 'function' ? wlLabelFollowButton(label.name || '') : ''}
+    </div>`;
 
   const bc = document.getElementById('detail-breadcrumb');
-  if(bc) bc.textContent = artist.name || t('card.artist');
-  document.getElementById('detail-content').innerHTML = header + grid;
+  if(bc) bc.textContent = label.name || t('lbl.badge');
+  document.getElementById('detail-content').innerHTML =
+    // Владельца карточки не подставляем: на лейбле у каждого релиза СВОЙ
+    // артист, и подпись «скачать от лейбла» была бы неправдой.
+    header + _discoGridHTML(filtered, '');
+}
+
+function setLabelFilter(f){
+  if(!Detail.currentLabel) return;
+  Detail.currentLabel.filter = f;
+  renderLabelPage();
 }
 
 function setArtistFilter(f){
@@ -770,6 +866,9 @@ async function openAlbumPage(service, albumId){
   if(Detail.currentArtist) {
     Detail._stack.push({type:'artist', ...Detail.currentArtist});
     _detailUpdateBack();
+  } else if(Detail.currentLabel) {
+    Detail._stack.push({type:'label', ...Detail.currentLabel});
+    _detailUpdateBack();
   } else if(Detail.currentAlbum) {
     Detail._stack.push({type:'album', ...Detail.currentAlbum});
     _detailUpdateBack();
@@ -781,6 +880,7 @@ async function openAlbumPage(service, albumId){
     if(d.error){ _detailError(d.error); return; }
     Detail.currentAlbum  = {service, id: albumId, album: d.album||{}, tracks: d.tracks||[]};
     Detail.currentArtist = null;
+    Detail.currentLabel  = null;
     renderAlbumPage();
   } catch(e){ _detailError(e.message); }
 }
@@ -820,7 +920,7 @@ function renderAlbumPage(){
     : `<div style="width:220px;height:220px;border-radius:8px;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:48px;flex-shrink:0">♪</div>`;
 
   const meta = [
-    album.label ? `${t('ck.lbl_label')}: <span style="color:var(--text)">${esc(album.label)}</span>` : '',
+    album.label ? `${t('ck.lbl_label')}: <span style="color:var(--text);cursor:pointer;text-decoration:underline dotted" title="${t('lbl.open_page')}" onclick="openLabelPage('${escJ(album.label)}')">${esc(album.label)}</span>` : '',
     album.date ? `${t('ck.lbl_release')}: <span style="color:var(--text)">${esc(album.date)}</span>` : '',
     album.genre ? `${t('ck.lbl_genre')}: <span style="color:var(--text)">${esc(album.genre)}</span>` : '',
     album.upc ? `UPC: <span style="color:var(--text);font-family:var(--mono);font-size:11px">${esc(album.upc)}</span>` : '',
@@ -842,7 +942,7 @@ function renderAlbumPage(){
           <button onclick="pqPlayNext(_buildAlbumStreamQueue())" style="padding:8px 14px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('pq.add_next')}">↳ ${t('pq.add_next')}</button>` : ''}
           ${service === 'apple' ? `<button onclick="playRelease('apple','${escJ(album.url || ('https://music.apple.com/us/album/_/' + album.id))}','${escJ(album.title||'')}','${escJ(album.artist||'')}','${escJ(album.cover||'')}')" style="padding:8px 16px;background:rgba(250,45,85,.14);color:#fa2d55;border:1px solid rgba(250,45,85,.4);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)" title="${t('ck.listen_album')}">▶ ${t('btn.play_album')}</button>` : ''}
           ${service === 'apple' ? `<button onclick="downloadAndPlayApple('${escJ(album.url || ('https://music.apple.com/us/album/_/' + album.id))}','${escJ(album.title||'')}','${escJ(album.artist||'')}','${escJ(album.cover||'')}',${Number(album.tracks)||0})" style="padding:8px 16px;background:rgba(192,132,160,.16);color:#c084a0;border:1px solid rgba(192,132,160,.4);border-radius:8px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)" title="${t('btn.dl_play_hint')}">⬇▶ ${t('btn.dl_play')}</button>` : ''}
-          ${album.url ? `<a href="${escapeHtml(album.url)}" target="_blank" style="padding:8px 14px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;font-family:var(--font)">↗ ${t('ck.open_on')} ${escapeHtml(album.service)}</a>` : ''}
+          ${album.url ? `<a href="${escapeHtml(album.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" style="padding:8px 14px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:8px;font-size:12px;font-weight:600;text-decoration:none;font-family:var(--font)">↗ ${t('ck.open_on')} ${escapeHtml(album.service)}</a>` : ''}
         </div>
       </div>
     </div>`;

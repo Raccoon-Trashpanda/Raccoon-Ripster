@@ -198,7 +198,7 @@ async def resolve_isrc(body: dict):
 
     isrc = ((meta or {}).get("isrc") or "").strip().upper()
     if not isrc:
-        return {"ok": False, "error": "ISRC не найден в метаданных"}
+        return {"ok": False, "error_key": "err.isrc_not_in_meta", "error": "ISRC не найден в метаданных"}
 
     qobuz_token = (_config.get("qobuz-auth-token") or "").strip()
     qobuz_appid = (_config.get("qobuz-app-id") or "312369995").strip()
@@ -322,7 +322,56 @@ async def smart_resolve(body: dict):
     if ap:
         matches["apple"] = ap
 
-    order  = ["apple", "qobuz", "tidal", "deezer"]
+    # Порядок и отсев — через матрицу доступности, а не своим жёстким списком.
+    # Здесь была ВТОРАЯ независимая реализация «выбери источник»: собственный
+    # порядок `apple, qobuz, tidal, deezer`, мимо `availability-preference`, мимо
+    # Beatport и — главное — мимо вердиктов настоящих загрузок. Кнопка ⚡ бодро
+    # выбирала сервис, который час назад ответил 403 «нет прав», потому что о
+    # той попытке знала матрица, а не она.
+    order = ["apple", "qobuz", "tidal", "deezer"]
+    blocked: set = set()
+    try:
+        from ripster import availability as _av
+        pref = list((_config.get("availability-preference") or [])) or None
+        # Ключ матрицы должен совпасть с тем, под которым в неё писал рантайм
+        # (`upc:` / `isrc:`), иначе вердикты лежат рядом и не находятся. По
+        # названию мы бы спросили `name:u & i|culture shock`, а 403 записан под
+        # `upc:885288068405` — и отсев молча не срабатывал.
+        _upc = ""
+        if url:
+            try:
+                from ripster.routes.discovery import _resolve_release_id
+                _cid = await _resolve_release_id(url)
+                if _cid.startswith("upc:"):
+                    _upc = _cid[4:]
+                elif _cid.startswith("isrc:") and not isrc:
+                    isrc = _cid[5:]
+            except Exception:
+                pass
+        if _upc or isrc or title:
+            _m = await _av.matrix(upc=_upc, isrc=isrc, title=title, artist=artist)
+            _svcs = _m.get("services") or {}
+            # Отсеиваем ТОЛЬКО то, что проверено загрузкой: «витрина ещё не
+            # наполнилась» — не повод игнорировать наш собственный поиск, он мог
+            # найти релиз там, куда матрица не ходила.
+            blocked = {s for s, v in _svcs.items()
+                       if v.get("verified_by") == "download" and not v.get("available")}
+            # Матрица нашла сервис, которого нет в наших matches (например
+            # Beatport — своего ISRC-поиска здесь нет), но ссылка у неё есть.
+            for s, v in _svcs.items():
+                if s not in matches and v.get("available") and v.get("url"):
+                    matches[s] = {"service": s, "url": v["url"],
+                                  "title": v.get("title") or title,
+                                  "artist": v.get("artist") or artist}
+        if pref:
+            order = pref + [s for s in order if s not in pref]
+        order = [s for s in order if s not in blocked] + \
+                [s for s in matches if s not in order and s not in blocked]
+    except Exception as _e:                                        # noqa: BLE001
+        # Матрица не должна ломать кнопку: без неё это ровно прежнее поведение.
+        print(f"[smart-resolve] матрица недоступна, беру прежний порядок: {_e!r}",
+              flush=True)
     chosen = next((matches[s] for s in order if s in matches), None)
     return {"ok": bool(chosen), "isrc": isrc, "title": title, "artist": artist,
-            "chosen": chosen, "matches": matches}
+            "chosen": chosen, "matches": matches, "order": order,
+            "skipped_no_rights": sorted(blocked)}

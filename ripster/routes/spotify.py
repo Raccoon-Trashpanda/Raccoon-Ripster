@@ -1079,7 +1079,7 @@ async def sp_status():
                 return {"connected": True, "display_name": "sp_dc", "email": "",
                         "image": "", "error": "", "sp_dc_mode": True}
             return {"connected": False,
-                    "error": "sp_dc кука истекла — обнови в настройках",
+                    "error_key": "err.sp_dc_expired", "error": "sp_dc кука истекла — обнови в настройках",
                     "sp_dc_expired": True}
         return {"connected": False, "error": ""}
     me = await _sp_get("/me")
@@ -2008,7 +2008,7 @@ def _find_sp_dc_in_browsers() -> dict:
                     except OSError: pass
 
     if not found:
-        return {"ok": False, "error": "sp_dc не найдена ни в одном браузере. Убедись, что вошёл в Spotify в Firefox или Chrome."}
+        return {"ok": False, "error_key": "err.sp_dc_not_found", "error": "sp_dc не найдена ни в одном браузере. Убедись, что вошёл в Spotify в Firefox или Chrome."}
 
     # Prefer the first valid-looking value (not expired tokens are long strings)
     best = max(found, key=lambda x: len(x["value"]))

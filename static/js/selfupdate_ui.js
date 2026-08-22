@@ -28,7 +28,7 @@ async function checkRipsterUpdate(silent){
       if(st){
         const _lat = esc(String(d.latest||'').replace(/^v/i,''));   // tag is "v3.0.25" → strip leading v (no "vv")
         const _cur = esc(String(d.current||'').replace(/^v/i,''));
-        const dl = d.url ? `<a href="${esc(d.url)}" target="_blank" rel="noopener" style="color:#30d158;font-weight:700;text-decoration:underline">↓ ${t('su.dl_install')} v${_lat}</a>` : '';
+        const dl = d.url ? `<a href="${esc(d.url)}" rel="noopener" title="${esc(d.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" style="color:#30d158;font-weight:700;text-decoration:underline">↓ ${t('su.dl_install')} v${_lat}</a>` : '';
         st.innerHTML = ti('su.avail',{latest:_lat,cur:_cur})
           + '<br><span style="color:var(--muted);font-size:11px">' + t('su.help') + (dl ? '' : t('su.need_installer')) + '</span>'
           + (dl ? ` ${dl}` : '');

@@ -287,7 +287,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "3.6.2"
+RELEASE_VERSION = "3.6.3"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -790,6 +790,33 @@ _guest_mgr = _NoGuestManager()
 _app_auth.set_guest_checker(lambda r: _guest_mgr.is_guest_request(r))
 _app_auth.add_public_path("/api/session-info")
 _app_auth.add_public_path("/api/ping")
+
+
+# Гостевого режима в публичной сборке нет, а `guest.js` спрашивает про него на
+# КАЖДОЙ загрузке страницы. Маршрут был объявлен публичным, но не существовал —
+# и каждый пользователь получал в консоли 404 на старте. Сам по себе он безвреден
+# (`checkSessionMode` тихо выходит на !r.ok), но это красная строка в консоли
+# ровно того вида, по которому ищут чёрный экран, и она забивала счётчик ошибок
+# в `tools/check_boot.js`. Отвечаем честным «гостей тут нет».
+@app.get("/api/session-info")
+async def _session_info():
+    return {"mode": "owner", "guest": False}
+
+
+# Тот же случай, что и выше, ещё дважды. Публичная сборка НЕ содержит удалённого
+# доступа и гостевых ссылок: в её настройках нет ни одного элемента этих панелей,
+# но `remote_ui.js` грузится (его функции зовут guest.js и urlbar_detect.js, так
+# что просто выкинуть файл — это ReferenceError на старте) и на каждой загрузке
+# спрашивает два несуществующих маршрута. Отвечаем тем состоянием, которое и есть
+# правда для этой сборки: выключено.
+@app.get("/api/remote/status")
+async def _remote_status_stub():
+    return {"enabled": False, "public_url": "", "active_links": 0}
+
+
+@app.get("/api/tunnel/status")
+async def _tunnel_status_stub():
+    return {"running": False, "connecting": False, "url": ""}
 
 
 # Unauthenticated liveness/identity probe. The launcher hits this to tell OUR

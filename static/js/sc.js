@@ -333,7 +333,7 @@ function renderScTile(it) {
       <div style="display:flex;gap:5px;margin-top:7px">
         <button onclick="scDownload('${it.id}')"
           style="flex:1;padding:5px 0;background:rgba(255,85,0,.12);border:1px solid rgba(255,85,0,.22);border-radius:7px;font-size:11px;font-weight:600;color:#ff7a33;cursor:pointer;font-family:var(--font)">${t('btn.download')}</button>
-        <a href="${esc(it.url)}" target="_blank" style="padding:5px 9px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--muted);text-decoration:none;display:flex;align-items:center" title="${t('sc2.open_on_sc')}">↗</a>
+        <a href="${esc(it.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" style="padding:5px 9px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--muted);text-decoration:none;display:flex;align-items:center" title="${t('sc2.open_on_sc')}">↗</a>
       </div>
     </div>
   </div>`;
@@ -804,7 +804,7 @@ function _scDetailHTML(it) {
       <div style="display:flex;gap:7px;margin-top:14px">
         <button onclick="${playCall}" style="${btn('rgba(255,85,0,.14)','rgba(255,85,0,.25)','#ff7a33')}">▶ ${t('btn.play')||'Играть'}</button>
         <button onclick="scDownload('${it.id}')" style="${btn('rgba(255,255,255,.06)','var(--border)','var(--text)')}">${t('btn.download')}</button>
-        <a href="${esc(it.url)}" target="_blank" title="${t('sc2.open_on_sc')}" style="padding:8px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);text-decoration:none;display:flex;align-items:center">↗</a>
+        <a href="${esc(it.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" title="${t('sc2.open_on_sc')}" style="padding:8px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);text-decoration:none;display:flex;align-items:center">↗</a>
       </div>
       <div style="font-size:11px;font-weight:700;color:var(--muted);margin:18px 0 8px;text-transform:uppercase;letter-spacing:.4px">${t('b.tl_word')}</div>
       <div id="scd-tl"></div>

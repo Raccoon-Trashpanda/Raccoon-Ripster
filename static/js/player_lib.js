@@ -684,7 +684,7 @@ async function specAnalyzePath() {
       body: JSON.stringify({path: p, lang: S.lang || 'ru'})
     });
     const d = await r.json();
-    if (!r.ok || d.detail || d.error) throw new Error(d.detail || d.error || t('err.generic'));
+    if (!r.ok || d.detail || d.error) throw new Error((typeof errText==='function'?errText(d.detail):d.detail) || d.error || t('err.generic'));
     specShowResult(d);
   } catch(e) {
     specShowError(e.message);
@@ -701,7 +701,7 @@ async function specAnalyzeFile(file) {
     fd.append('lang', S.lang || 'ru');
     const r = await fetch('/api/spectrogram/upload', {method:'POST', body: fd});
     const d = await r.json();
-    if (!r.ok || d.detail || d.error) throw new Error(d.detail || d.error || t('err.generic'));
+    if (!r.ok || d.detail || d.error) throw new Error((typeof errText==='function'?errText(d.detail):d.detail) || d.error || t('err.generic'));
     specShowResult(d);
   } catch(e) {
     specShowError(e.message);

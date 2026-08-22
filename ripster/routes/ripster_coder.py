@@ -22,10 +22,21 @@ from fastapi.concurrency import run_in_threadpool
 from ripster.mixcue import (build_mix, build_mixes, clean_mix_name, clean_mix_title,
                             convert_tracks, split_cue, _CONVERT,
                             request_cancel, reset_cancel)
+from ripster.i18n_msg import imsg
 
 router = APIRouter()
 _cfg: dict = {}
 _broadcast = None
+
+
+def _fail_detail(res: dict, key: str, ru: str):
+    """detail для отказа, пришедшего из mixcue. Порядок важен: сначала ключ от
+    mixcue (конкретная причина, переводимая), затем его же русская строка (тоже
+    конкретная, но непереводимая — лучше, чем подменить её общей фразой), и лишь
+    если причины нет вовсе — общий ключ этого роута."""
+    if res.get("error_key"):
+        return imsg(res["error_key"], res.get("error") or ru, **(res.get("error_args") or {}))
+    return res.get("error") or imsg(key, ru)
 
 
 def install(app, ctx) -> None:
@@ -107,9 +118,9 @@ async def coder_preview(body: dict, request: Request):
     d, files, album, artist = _resolve((body.get("task_id") or "").strip(),
                                        (body.get("dir") or "").strip())
     if not d:
-        raise HTTPException(404, "Папка релиза не найдена")
+        raise HTTPException(404, imsg("err.cd_release_dir_missing", "Папка релиза не найдена"))
     if len(files) < 2:
-        raise HTTPException(400, "Нужно минимум 2 трека для склейки")
+        raise HTTPException(400, imsg("err.cd_need_two_tracks", "Нужно минимум 2 трека для склейки"))
     name = clean_mix_name(album, artist)
     src_ext = files[0].suffix.lower().lstrip(".")
     # Probe the first track's real codec — .m4a can be ALAC (lossless) or AAC
@@ -141,7 +152,7 @@ async def coder_files(body: dict, request: Request):
     d, files, album, artist = _resolve((body.get("task_id") or "").strip(),
                                        (body.get("dir") or "").strip())
     if not d:
-        raise HTTPException(404, "Папка не найдена")
+        raise HTTPException(404, imsg("err.dir_not_found", "Папка не найдена"))
 
     def _scan() -> dict:
         # mutagen gives per-file duration without spawning ffprobe N times.
@@ -208,7 +219,7 @@ async def coder_browse(path: str = ""):
         p = Path(path)
         # Sandbox: only inside a save root.
         if not any(str(p).startswith(str(r)) for r in roots) or not p.is_dir():
-            raise HTTPException(403, "Папка вне разрешённых корней")
+            raise HTTPException(403, imsg("err.dir_outside_roots", "Папка вне разрешённых корней"))
         try:
             subs = sorted((c for c in p.iterdir() if c.is_dir()),
                           key=lambda x: x.name.lower())
@@ -274,9 +285,9 @@ async def coder_convert(body: dict, request: Request):
     task_id = (body.get("task_id") or "").strip()
     d, files, album, artist = _resolve(task_id, (body.get("dir") or "").strip())
     if not d:
-        raise HTTPException(404, "Папка не найдена")
+        raise HTTPException(404, imsg("err.dir_not_found", "Папка не найдена"))
     if not files:
-        raise HTTPException(400, "Нет аудиофайлов")
+        raise HTTPException(400, imsg("err.no_audio_files", "Нет аудиофайлов"))
     # XRECODE-style table: convert only the rows the user ticked. `only` is a
     # list of filenames (basenames) — when present, restrict to that subset.
     only = body.get("only")
@@ -284,7 +295,7 @@ async def coder_convert(body: dict, request: Request):
         _sel = set(only)
         files = [f for f in files if f.name in _sel]
         if not files:
-            raise HTTPException(400, "Не выбрано ни одного файла")
+            raise HTTPException(400, imsg("err.cd_nothing_selected", "Не выбрано ни одного файла"))
     fmt     = (body.get("fmt") or "mp3").strip().lower()
     bitrate = (body.get("bitrate") or "320k").strip()
     keepcov = body.get("keep_cover", True)
@@ -318,7 +329,8 @@ async def coder_convert(body: dict, request: Request):
         if _broadcast:
             await _broadcast({"type": "log", "level": "error",
                               "msg": f"Ripster Coder: ошибка конвертации — {result.get('error','')}"})
-        raise HTTPException(500, result.get("error") or "Конвертация не удалась")
+        raise HTTPException(500, _fail_detail(result, "err.cd_convert_failed",
+                                              "Конвертация не удалась"))
     if _broadcast:
         await _broadcast({"type": "log", "level": "success",
                           "msg": f"✓ Ripster Coder: {result['converted']} файл(ов) → {fmt.upper()} в {out_dir}"
@@ -344,7 +356,8 @@ async def coder_split(body: dict, request: Request):
         if cues:
             cue_path = cues[0]
     if not cue_path:
-        raise HTTPException(404, "CUE-файл не найден (выбери папку с .cue или укажи файл)")
+        raise HTTPException(404, imsg("err.cd_cue_not_found",
+                                      "CUE-файл не найден (выбери папку с .cue или укажи файл)"))
     out_dir = (body.get("out_dir") or "").strip() or str(cue_path.parent / "split")
     if _broadcast:
         await _broadcast({"type": "log", "level": "info",
@@ -363,7 +376,7 @@ async def coder_split(body: dict, request: Request):
         if _broadcast:
             await _broadcast({"type": "log", "level": "error",
                               "msg": f"Ripster Coder: сплит не удался — {res.get('error','')}"})
-        raise HTTPException(500, res.get("error") or "Сплит не удался")
+        raise HTTPException(500, _fail_detail(res, "err.cd_split_failed", "Сплит не удался"))
     if _broadcast:
         await _broadcast({"type": "log", "level": "success",
                           "msg": f"✓ Ripster Coder: {res['converted']} треков из CUE → {out_dir}"
@@ -392,7 +405,7 @@ async def coder_retag(body: dict, request: Request):
     d, _files, _album, _artist = _resolve((body.get("task_id") or "").strip(),
                                           (body.get("dir") or "").strip())
     if not d:
-        raise HTTPException(404, "Папка не найдена")
+        raise HTTPException(404, imsg("err.dir_not_found", "Папка не найдена"))
     from ripster import tagger as _tg
     logs: list = []
     if _broadcast:
@@ -411,9 +424,9 @@ async def coder_mix(body: dict, request: Request):
     task_id = (body.get("task_id") or "").strip()
     d, files, album, artist = _resolve(task_id, (body.get("dir") or "").strip())
     if not d:
-        raise HTTPException(404, "Папка релиза не найдена")
+        raise HTTPException(404, imsg("err.cd_release_dir_missing", "Папка релиза не найдена"))
     if len(files) < 2:
-        raise HTTPException(400, "Нужно минимум 2 трека для склейки")
+        raise HTTPException(400, imsg("err.cd_need_two_tracks", "Нужно минимум 2 трека для склейки"))
 
     name = (body.get("name") or "").strip() or clean_mix_name(album, artist)
     fmt  = (body.get("fmt") or "mp3").strip().lower()

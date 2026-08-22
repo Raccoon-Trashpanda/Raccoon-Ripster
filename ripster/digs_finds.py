@@ -273,17 +273,46 @@ def missing_releases(profile_artists: list, by_artist: dict, foreign: set,
             title = rel.get("title", "")
             if not title or _has(by_artist, key, title):
                 continue
+            # Причина должна быть ПРАВДОЙ, а не шаблоном с подставленным числом.
+            # Артист попадает в профиль не только загрузками: за ним можно просто
+            # следить или отметить его своим — и тогда на карточке появлялось
+            # «качал 0 его релизов, этот пропустил», то есть готовая нелепость на
+            # самом видном месте. У каждого происхождения своя формулировка.
+            dl = int(prof.get("downloads") or 0)
+            if dl > 0:
+                key_r, args = "digs.r_missed", {"n": dl}
+                ru = f"качал {dl} его релизов, этот пропустил"
+            elif prof.get("watched"):
+                key_r, args = "digs.r_missed_watch", {}
+                ru = "следишь за ним, а этот релиз пропустил"
+            else:
+                key_r, args = "digs.r_missed_fav", {}
+                ru = "твой артист, а этот релиз пропустил"
             out.append({"kind": "missing_release", "artist": rec.get("name", ""),
                         "title": title, "date": rel.get("date", ""),
                         "cover": rel.get("cover", ""), "url": rel.get("url", ""),
                         "type": rel.get("type", ""), "_w": prof["score"],
-                        "reason_key": "digs.r_missed",
-                        "reason_args": {"n": int(prof["downloads"])},
-                        "reason": f"качал {prof['downloads']} его релизов, этот пропустил"})
+                        "reason_key": key_r, "reason_args": args, "reason": ru})
+    # Сортировка по весу артиста складывала весь список из ОДНОГО имени: у самого
+    # весомого артиста пропущенных релизов десятки, и они занимали выдачу целиком
+    # — вкладка предлагала «ещё Lane 8» вместо раскопок. Поэтому по кругу: сначала
+    # лучший релиз каждого артиста, потом вторые, и так далее. Порядок артистов
+    # по-прежнему по весу, меняется только чередование.
     out.sort(key=lambda r: (r["_w"], r.get("date", "")), reverse=True)
+    by_name: dict = {}
     for r in out:
+        by_name.setdefault(r["artist"], []).append(r)
+    ordered: list = []
+    while len(ordered) < limit and by_name:
+        for name in list(by_name):
+            ordered.append(by_name[name].pop(0))
+            if not by_name[name]:
+                del by_name[name]
+            if len(ordered) >= limit:
+                break
+    for r in ordered:
         r.pop("_w", None)
-    return out[:limit]
+    return ordered
 
 
 def show_guests(shows: list, by_artist: dict, foreign: set, limit: int) -> list[dict]:
@@ -484,6 +513,51 @@ def anniversary(foreign: set, limit: int) -> list[dict]:
     return out
 
 
+def _service_of(url: str) -> str:
+    """Сервис по ссылке — ЕДИНОЙ функцией приложения.
+
+    Здесь стоял свой перебор из шести имён, и он был не просто дублем: Beatport,
+    BBC, Яндекс и Amazon в него не входили, поэтому фильтр «показывать находки
+    только выбранных сервисов» такие ссылки принимал за «сервис неизвестен» и
+    пропускал их МИМО фильтра. Канон знает все и умеет `deezer.page`.
+    """
+    from ripster.service_layer import detect_service
+    svc = detect_service(url or "")
+    return "" if svc == "unknown" else svc
+
+
+async def _fill_covers(digs: dict) -> None:
+    """Дорисовать лица тем находкам, у которых обложки нет.
+
+    Обложка приезжает только с релизом (`missing_release`) и только из истории
+    загрузок — то есть у тех, кого владелец УЖЕ качал. А находка по определению
+    про того, кого он не качал: гости шоу и забытое приходили с пустым кружком,
+    и вкладка выглядела стеной одинаковых заглушек «♪». Лицо здесь не украшение:
+    по нему артиста узнают до чтения имени.
+
+    Берём тот же кэш фото, что и дерево похожих (`digs_artist_pics.json`), —
+    заводить второй источник картинок значило бы держать две судьбы одного
+    запроса. Не нашлось — оставляем пусто, это не ошибка.
+    """
+    need: list[str] = []
+    for items in digs.values():
+        for it in items:
+            nm = (it.get("artist") or "").strip()
+            if nm and not it.get("cover") and nm not in need:
+                need.append(nm)
+    if not need:
+        return
+    try:
+        from ripster.digs_similar import artist_pics
+        pics = await artist_pics(need)
+    except Exception:
+        return                      # без лиц вкладка живёт, без находок — нет
+    for items in digs.values():
+        for it in items:
+            if not it.get("cover"):
+                it["cover"] = pics.get((it.get("artist") or "").strip(), "")
+
+
 async def find_all(cfg: dict | None = None, per_kind: int = 12) -> dict:
     prof = await build_profile(limit=60, with_genres=True)
     foreign = foreign_artists(cfg)
@@ -504,28 +578,31 @@ async def find_all(cfg: dict | None = None, per_kind: int = 12) -> dict:
         out = []
         for it in items:
             svc = (it.get("service") or "").lower()
-            url = (it.get("url") or "").lower()
-            if not svc and url:
+            if not svc and it.get("url"):
                 # У находок из стора радара сервис в поле не лежит — он в ссылке.
-                for name in ("spotify", "deezer", "tidal", "qobuz", "soundcloud", "apple"):
-                    if name in url:
-                        svc = name
-                        break
+                svc = _service_of(it["url"])
             if not svc or svc in want_svc:
                 out.append(it)
         return out
 
+    digs = {
+        # «Год назад» стоит ПЕРВЫМ по смыслу: узнавание сильнее рекомендации.
+        "anniversary":      keep(anniversary(foreign, per_kind * 2))[:per_kind],
+        "played_not_owned": keep(played_not_owned(by_artist, foreign, per_kind * 2, show_keys))[:per_kind],
+        "missing_release":  keep(missing_releases(prof["artists"], by_artist, foreign, per_kind * 3))[:per_kind],
+        "show_guest":       show_guests(prof["shows"], by_artist, foreign, per_kind),
+        "forgotten":        forgotten(prof["artists"], foreign, per_kind),
+    }
+    await _fill_covers(digs)
+
     return {
         "profile": prof,
         "foreign_filtered": len(foreign),
-        "digs": {
-            # «Год назад» стоит ПЕРВЫМ по смыслу: узнавание сильнее рекомендации.
-            "anniversary":      keep(anniversary(foreign, per_kind * 2))[:per_kind],
-            "played_not_owned": keep(played_not_owned(by_artist, foreign, per_kind * 2, show_keys))[:per_kind],
-            "missing_release":  keep(missing_releases(prof["artists"], by_artist, foreign, per_kind * 3))[:per_kind],
-            "show_guest":       show_guests(prof["shows"], by_artist, foreign, per_kind),
-            "forgotten":        forgotten(prof["artists"], foreign, per_kind),
-        },
+        # Сколько альбомов реально лежит на диске. Раньше вкладка показывала на
+        # этом месте число СОБЫТИЙ загрузки — оно больше и отвечает на другой
+        # вопрос («сколько раз качал»), а подпись обещает «уже у тебя».
+        "owned_albums": len({t for titles in by_artist.values() for t in titles}),
+        "digs": digs,
         # Оформление отдаём вместе с данными, чтобы вкладка рисовалась сразу в
         # выбранном виде, а не мигала дефолтом и потом перекрашивалась.
         "look": {

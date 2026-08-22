@@ -82,6 +82,8 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "decrypt-port", "m3u8-port",
     "url-quality", "album-folder", "single-disc",
     "show-", "auto-", "_last_svc",
+    "default-search-service",   # владельческий дефолт поиска — первое открытие
+                                 # без запомненного _last_svc падает сюда, а не в Apple
     "use-go-run",
     "transcode-",
     "coder-",
@@ -184,6 +186,11 @@ GUEST_BLOCKED_PATHS: tuple[str, ...] = (
                             # entire local music collection under the save-path roots.
                             # library.py is documented owner-only but had no enforcement
                             # of its own (relies on this allowlist).
+    "/api/open-url",   # открывает страницу в браузере НА МАШИНЕ ВЛАДЕЛЬЦА.
+                       # Докстринг роута обещал «через туннель нельзя», но
+                       # обеспечить это проверкой request.client.host он не мог:
+                       # туннель (cloudflared/serveo) подключается с localhost —
+                       # см. разбор в auth.py:_client_ip. Гостю тут делать нечего.
     "/api/history",         # owner's GLOBAL download log (all users' titles/timestamps).
                             # Guests have their own scoped view at /api/guest/history and
                             # never need this; leaving GET open leaked the owner's log.

@@ -209,15 +209,13 @@ _NUDGE_REPEAT = 12 * 3600       # столько не повторяем одн�
 
 def _svc_from_url(url: str) -> str:
     """Сервис по ссылке. Находки Раскопок поля `service` не несут, а кнопке
-    воспроизведения оно нужно, чтобы знать, каким движком разворачивать релиз."""
-    u = (url or "").lower()
-    for needle, svc in (("open.spotify.com", "spotify"), ("deezer.com", "deezer"),
-                        ("music.apple.com", "apple"), ("qobuz.com", "qobuz"),
-                        ("tidal.com", "tidal"), ("soundcloud.com", "soundcloud"),
-                        ("bbc.co.uk", "bbc"), ("music.yandex", "yandex")):
-        if needle in u:
-            return svc
-    return ""
+    воспроизведения оно нужно, чтобы знать, каким движком разворачивать релиз.
+
+    Своего перебора здесь больше нет: он был третьей копией одного знания в
+    приложении, и каждая копия знала СВОЙ набор сервисов.
+    """
+    from ripster.digs_finds import _service_of
+    return _service_of(url)
 
 
 @router.get("/api/nudge")

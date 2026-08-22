@@ -24,6 +24,7 @@ from pathlib import Path
 
 from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
 from .registry import register
+from ripster.py_runtime import app_python
 
 _RE_PCT   = re.compile(r'\[download\]\s+(\d{1,3}(?:\.\d+)?)%')
 _RE_ERROR = re.compile(r'ERROR', re.IGNORECASE)
@@ -43,7 +44,7 @@ def find_yt_dlp() -> str | None:
     if found:
         return found
     # Fallback: sits next to the running interpreter on some installs.
-    candidate = Path(sys.executable).parent / "yt-dlp.exe"
+    candidate = Path(app_python()).parent / "yt-dlp.exe"
     return str(candidate) if candidate.exists() else None
 
 

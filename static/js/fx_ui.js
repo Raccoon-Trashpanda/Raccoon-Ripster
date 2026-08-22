@@ -17,9 +17,40 @@
   }
   function begin() {
     inflight++;
+    // Пришёл новый запрос, пока полоска дожидалась края — она нужна дальше.
+    cancelFinish();
     // Debounce: don't flash the bar for quick background polls — only show it
     // when a request is genuinely slow (still in flight after 280ms).
     if (inflight === 1) { clearTimeout(startT); startT = setTimeout(show, 280); }
+  }
+
+  // Полоска гаснет НЕ в тот момент, когда закончился запрос, а когда бегущий
+  // отрезок добежал до правого края.
+  //
+  // Раньше `end()` снимал класс мгновенно, анимация обрывалась там, где её
+  // застали, и движение читалось как рывок: отрезок исчезал на полпути, будто
+  // что-то сломалось, хотя всё отработало. Начало и конец полоски вообще не
+  // должны быть привязаны к моменту действия — она про «идёт работа», а не про
+  // конкретный запрос.
+  //
+  // Край ловим событием `animationiteration`: оно приходит ровно тогда, когда
+  // цикл дошёл до 100% и пошёл на второй круг. То есть гасим кадр в кадр с
+  // уходом отрезка за правую границу — обрыва не видно никогда.
+  let finishTimer = null;
+  function cancelFinish() {
+    const b = el();
+    if (b) b.removeEventListener('animationiteration', onEdge);
+    clearTimeout(finishTimer); finishTimer = null;
+  }
+  function stopNow() {
+    cancelFinish();
+    const b = el();
+    if (b) b.classList.remove('running');
+    shown = false;
+  }
+  function onEdge() {
+    if (inflight > 0) { cancelFinish(); return; }   // работа возобновилась
+    stopNow();
   }
   function end() {
     inflight = Math.max(0, inflight - 1);
@@ -27,8 +58,13 @@
     clearTimeout(startT);
     if (!shown) return;       // fast poll finished before the bar ever appeared
     const b = el();
-    if (b) b.classList.remove('running');
-    shown = false;
+    if (!b) { shown = false; return; }
+    if (finishTimer) return;  // край уже дожидаемся, второй раз не подписываемся
+    b.addEventListener('animationiteration', onEdge);
+    // Страховка. `animationiteration` не придёт, если анимации нет вовсе
+    // (prefers-reduced-motion) или вкладка ушла в фон и кадры не считаются —
+    // без неё полоска осталась бы висеть навсегда. Чуть больше длины цикла.
+    finishTimer = setTimeout(stopNow, 1400);
   }
   // Background status/queue polls run every few seconds — they must NOT flash
   // the bar. Only genuine content/navigation loads drive it.

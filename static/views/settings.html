@@ -1,8 +1,9 @@
       <div class="view-header" style="padding-bottom:0">
         <div class="view-title" data-i18n="v.settings">Настройки</div>
         <!-- Service tabs inside settings -->
-        <div style="display:flex;gap:2px;margin-top:10px;border-bottom:1px solid var(--border);padding-bottom:0;flex-wrap:wrap">
+        <div class="stab-bar">
           <button class="stab active" data-stab="global" onclick="showStab('global',this)" data-i18n="st.general">Общие</button>
+          <button class="stab" data-stab="files"   onclick="showStab('files',this)" data-i18n="st.files">📁 Файлы</button>
           <button class="stab" data-stab="player"  onclick="showStab('player',this)" data-i18n="st.player">🎧 Плеер</button>
           <button class="stab svc-tab" data-stab="apple"   onclick="showStab('apple',this)"><svg class="svc-ico" width="15" height="15" viewBox="0 0 24 24" style="fill:var(--red)"><path d="M23.994 6.124a9.23 9.23 0 00-.24-2.19c-.317-1.31-1.062-2.31-2.18-3.043a5.022 5.022 0 00-1.877-.726 10.496 10.496 0 00-1.564-.15c-.04-.003-.083-.01-.124-.013H5.986c-.152.01-.303.017-.455.026-.747.043-1.49.123-2.193.4-1.336.53-2.3 1.452-2.865 2.78-.192.448-.292.925-.363 1.408-.056.392-.088.785-.1 1.18 0 .032-.007.062-.01.093v12.223c.01.14.017.283.027.424.05.815.154 1.624.497 2.373.65 1.42 1.738 2.353 3.234 2.801.42.127.856.187 1.293.228.555.053 1.11.06 1.667.06h11.03a12.5 12.5 0 001.57-.1c.822-.106 1.596-.35 2.295-.81a5.046 5.046 0 001.88-2.207c.186-.42.293-.87.37-1.324.113-.675.138-1.358.137-2.04-.002-3.8 0-7.595-.003-11.393zm-6.423 3.99v5.712c0 .417-.058.827-.244 1.206-.29.59-.76.962-1.388 1.14-.35.1-.706.157-1.07.173-.95.045-1.773-.6-1.943-1.536a1.88 1.88 0 011.038-2.022c.323-.16.67-.25 1.018-.324.378-.082.758-.153 1.134-.24.274-.063.457-.23.51-.516a.904.904 0 00.02-.193c0-1.815 0-3.63-.002-5.443a.725.725 0 00-.026-.185c-.04-.15-.15-.243-.304-.234-.16.01-.318.035-.475.066-.76.15-1.52.303-2.28.456l-2.325.47-1.374.278c-.016.003-.032.01-.048.013-.277.077-.377.203-.39.49-.002.042 0 .086 0 .13-.002 2.602 0 5.204-.003 7.805 0 .42-.047.836-.215 1.227-.278.64-.77 1.04-1.434 1.233-.35.1-.71.16-1.075.172-.96.036-1.755-.6-1.92-1.544-.14-.812.23-1.685 1.154-2.075.357-.15.73-.232 1.108-.31.287-.06.575-.116.86-.177.383-.083.583-.323.6-.714v-.15c0-2.96 0-5.922.002-8.882 0-.123.013-.25.042-.37.07-.285.273-.448.546-.518.255-.066.515-.112.774-.165.733-.15 1.466-.296 2.2-.444l2.27-.46c.67-.134 1.34-.27 2.01-.403.22-.043.442-.088.663-.106.31-.025.523.17.554.482.008.073.012.148.012.223.002 1.91.002 3.822 0 5.732z"/></svg>Apple Music</button>
           <button class="stab svc-tab" data-stab="qobuz"   onclick="showStab('qobuz',this)"><svg class="svc-ico is-stroke" width="15" height="15" viewBox="0 0 192 192" fill="none" style="stroke:#e6b800" stroke-linecap="round" stroke-linejoin="round" stroke-miterlimit="15"><path stroke-width="8" d="M140.672 157.486a76.004 76.004 0 0 1-102.464-12.128 76.001 76.001 0 0 1 107.15-107.15 76.004 76.004 0 0 1 12.128 102.464"/><path stroke-width="8" d="M124.807 142.105a54.364 54.364 0 1 1 17.296-17.296"/><path stroke-width="8" d="M95.997 117.193c11.705 0 21.193-9.488 21.193-21.193 0-11.704-9.488-21.193-21.193-21.193-11.704 0-21.193 9.489-21.193 21.193 0 11.705 9.489 21.193 21.193 21.193Z"/><path style="fill:#e6b800" stroke-width="3.799" d="M95.997 98.103a2.103 2.103 0 1 0 0-4.205 2.103 2.103 0 0 0 0 4.205Z"/><path stroke-width="12" d="m121.193 121.196 41.871 41.625"/></svg>Qobuz</button>
@@ -49,6 +50,10 @@
                   <div style="font-size:17px">☀️</div>
                   <div style="font-size:10px;font-weight:700;color:#18181f;margin-top:3px">Light</div>
                 </div>
+                <div class="theme-card" id="theme-neon" onclick="setTheme('neon')" style="flex:1 1 60px;padding:10px 6px;border-radius:10px;background:radial-gradient(34px 34px at 68% 30%,#ff4d8f,#14101c 72%);border:2px solid transparent;cursor:pointer;text-align:center;transition:all .15s">
+                  <div style="font-size:17px">💗</div>
+                  <div style="font-size:10px;font-weight:700;color:#ff8ab5;margin-top:3px">Neon</div>
+                </div>
               </div>
             </div>
             <div class="field-group flex1">
@@ -73,6 +78,25 @@
             </div>
           </div>
         </div>
+
+        <!-- ── Круг загрузки в левой панели ── -->
+        <div class="block mt12">
+          <div class="block-title" data-i18n="dlorb.section">🌀 Круг загрузки в панели</div>
+          <div class="toggle-row">
+            <div class="toggle-info">
+              <div class="toggle-label" data-i18n="dlorb.enable">Показывать круг загрузки</div>
+              <div class="toggle-sub" data-i18n="dlorb.enable_sub">Выкатывается в пустом низу левой панели, когда вкладка задач не открыта. Только свои ручные загрузки — гости и автоматика его не запускают.</div>
+            </div>
+            <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-dlorb-enabled" checked
+              onchange="DLOrb.setEnabled(this.checked)"><div class="toggle-slider"></div></label>
+          </div>
+          <div class="field-group mt8">
+            <label class="lbl" data-i18n="dlorb.variant">Оформление круга</label>
+            <div class="toggle-sub" data-i18n="dlorb.variant_sub" style="margin-bottom:8px">Четыре варианта. Отличаются не только видом, но и тем, откуда берётся цвет: доминирующий тон обложки или её средний цвет.</div>
+            <div id="dlorb-variants" class="dlorb-vgrid"></div>
+          </div>
+        </div>
+        <script>try{window.DLOrb&&DLOrb.renderPreviews('dlorb-variants');}catch(e){}</script>
 
         <!-- ── Аккаунты: страны, часовые пояса, ранняя доступность ── -->
         <div class="block mt12" id="accounts-overview-block">
@@ -229,7 +253,7 @@
             <span style="font-size:11px;padding:3px 9px;border-radius:20px;background:rgba(29,185,84,.1);color:#1db954;border:1px solid rgba(29,185,84,.2)">✓ Spotify</span>
             <span style="font-size:11px;padding:3px 9px;border-radius:20px;background:rgba(255,85,0,.1);color:#ff5500;border:1px solid rgba(255,85,0,.2)">✓ SoundCloud</span>
             <span style="font-size:11px;padding:3px 9px;border-radius:20px;background:rgba(1,244,156,.1);color:#01f49c;border:1px solid rgba(1,244,156,.2)">✓ Beatport</span>
-            <span style="font-size:11px;padding:3px 9px;border-radius:20px;background:rgba(255,204,0,.1);color:#e6b800;border:1px solid rgba(255,204,0,.2)">✓ Яндекс.Музыка</span>
+            <span style="font-size:11px;padding:3px 9px;border-radius:20px;background:rgba(255,204,0,.1);color:#e6b800;border:1px solid rgba(255,204,0,.2)"><span data-i18n-html="ab.svc_yandex">✓ Яндекс.Музыка</span></span>
           </div>
           <div style="font-size:12px;color:var(--muted);margin-bottom:16px;line-height:1.7" data-i18n="ab.intro">
             Скачивает музыку из подключённых сервисов вплоть до Hi-Res FLAC и
@@ -282,8 +306,8 @@
         </div>
         </div><!-- end stab-about -->
 
-        <!-- ══ GLOBAL stab: Paths, Artwork, Lyrics, Tools ══ -->
-        <div class="stab-panel" id="stab-global-shared">
+        <!-- ══ FILES stab: Paths, Artwork, Lyrics, Tools (вынесено из «Общих», разбор Grok v001) ══ -->
+        <div class="stab-panel" id="stab-files">
         <div class="block mt12">
           <div class="block-title" data-i18n="s.paths">📁 Пути сохранения</div>
           <div class="settings-grid">
@@ -297,11 +321,11 @@
             </div>
           </div>
           <div class="toggle-row mt8">
-            <div class="toggle-info"><div class="toggle-label">Папки по качеству</div><div class="toggle-sub"><span data-i18n="s.folder_by_fmt">alac/, flac/, 320/ … — любой сервис кладёт файлы в папку по формату, не по имени сервиса</span></div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="s.folder_by_fmt_label">Папки по качеству</div><div class="toggle-sub"><span data-i18n="s.folder_by_fmt">alac/, flac/, 320/ … — любой сервис кладёт файлы в папку по формату, не по имени сервиса</span></div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-quality-subfolders" onchange="saveSetting('quality-subfolders',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="field-group mt8">
-            <label class="lbl"><span data-i18n="s.out_fmt"><span data-i18n="s.out_fmt">Формат вывода (конвертация для ВСЕХ сервисов)</span></span></label>
+            <label class="lbl"><span data-i18n="s.out_fmt">Формат вывода (конвертация для ВСЕХ сервисов)</span></label>
             <select id="s-transcode-format" onchange="saveSetting('transcode-format',this.value)">
               <option value=""><span data-i18n="s.native_q">Нативное качество — без конвертации</span></option>
               <option value="alac">ALAC — Apple Lossless (.m4a)</option>
@@ -311,11 +335,11 @@
             <div class="toggle-sub" style="margin-top:6px"><span data-i18n="s.transcode_desc">После скачивания каждый файл перекодируется в выбранный формат (ffmpeg, метаданные+обложка переносятся). «Нативное» = отдаётся как есть. Из lossy в lossless качество не вырастет — это для единого формата.</span></div>
           </div>
           <div class="toggle-row mt8">
-            <div class="toggle-info"><div class="toggle-label">Сохранять оригинал</div><div class="toggle-sub"><span data-i18n="s.keep_orig">Оставлять исходный файл рядом с результатом конвертации (по умолчанию оригинал удаляется). Игнорируется при «Нативное качество».</span></div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="s.keep_orig_label">Сохранять оригинал</div><div class="toggle-sub"><span data-i18n="s.keep_orig">Оставлять исходный файл рядом с результатом конвертации (по умолчанию оригинал удаляется). Игнорируется при «Нативное качество».</span></div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-transcode-keep" onchange="saveSetting('transcode-keep-original',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row mt8">
-            <div class="toggle-info"><div class="toggle-label">Запуск через go run (разработка)</div><div class="toggle-sub"><span data-i18n="s.go_run">Запускает исходный код командой go run main.go</span></div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="s.go_run_label">Запуск через go run (разработка)</div><div class="toggle-sub"><span data-i18n="s.go_run">Запускает исходный код командой go run main.go</span></div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gorun" onchange="saveSetting('use-go-run',this.checked)"><div class="toggle-slider"></div></label>
           </div>
         </div>
@@ -329,35 +353,35 @@
               oninput="saveSetting('file-rename-template',this.value)"/>
           </div>
           <div style="font-size:10px;color:var(--muted);margin-top:5px;line-height:1.6">
-            Доступные переменные:
+            <span data-i18n="s.vars_available">Доступные переменные:</span>
             <code>{tracknumber:02d}</code> · <code>{title}</code> · <code>{artist}</code> ·
             <code>{albumartist}</code> · <code>{album}</code> · <code>{year}</code> · <code>{discnumber}</code><br>
-            Примеры: <code>{tracknumber:02d}. {title}</code> &nbsp;·&nbsp;
+            <span data-i18n="s.vars_examples">Примеры:</span> <code>{tracknumber:02d}. {title}</code> &nbsp;·&nbsp;
             <code>{tracknumber:02d}. {artist} - {title}</code>
           </div>
         </div>
 
         <div class="block mt12">
-          <div class="block-title">🖼 Artwork</div>
+          <div class="block-title" data-i18n="s.artwork">🖼 Artwork</div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Embed artwork in audio file</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="s.embed_artwork">Embed artwork in audio file</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-embedcover" onchange="saveSetting('embed-cover',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Save cover.jpg to folder</div><div class="toggle-sub">Saves artwork image alongside music files</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="s.save_cover">Save cover.jpg to folder</div><div class="toggle-sub" data-i18n="s.save_cover_sub">Saves artwork image alongside music files</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-savecover" onchange="saveSetting('save-cover-to-folder',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <!-- zhaarey / AMD -->
           <div class="settings-row mt8" id="cover-std-opts">
             <div class="field-group flex1">
-              <label class="lbl">Cover size</label>
+              <label class="lbl" data-i18n="s.cover_size">Cover size</label>
               <select id="s-coversize" onchange="saveSetting('cover-size',this.value)">
                 <option>100x100</option><option>600x600</option><option>1200x1200</option>
                 <option>3000x3000</option><option>5000x5000</option><option>original</option>
               </select>
             </div>
             <div class="field-group" style="width:120px">
-              <label class="lbl">Format</label>
+              <label class="lbl" data-i18n="s.format">Format</label>
               <select id="s-coverfmt" onchange="saveSetting('cover-format',this.value)">
                 <option>jpg</option><option>png</option><option>original</option>
               </select>
@@ -382,25 +406,25 @@
         </div>
 
         <div class="block mt12">
-          <div class="block-title">🏷 Tags &amp; Lyrics</div>
+          <div class="block-title" data-i18n="s.tags_lyrics">🏷 Tags &amp; Lyrics</div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Embed LRC in audio file</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="s.embed_lrc">Embed LRC in audio file</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-embedlrc" onchange="saveSetting('embed-lrc',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="toggle-row">
-            <div class="toggle-info"><div class="toggle-label">Save .lrc file</div></div>
+            <div class="toggle-info"><div class="toggle-label" data-i18n="s.save_lrc">Save .lrc file</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-savelrc" onchange="saveSetting('save-lrc-file',this.checked)"><div class="toggle-slider"></div></label>
           </div>
           <div class="settings-row mt8" id="lrc-std-opts">
             <div class="field-group flex1">
-              <label class="lbl">Lyric type</label>
+              <label class="lbl" data-i18n="s.lyric_type">Lyric type</label>
               <select id="s-lrctype" onchange="saveSetting('lrc-type',this.value)">
                 <option value="lyrics">lyrics (synced)</option>
                 <option value="syllable-lyrics">syllable-lyrics (word-by-word)</option>
               </select>
             </div>
             <div class="field-group" style="width:120px">
-              <label class="lbl">Format</label>
+              <label class="lbl" data-i18n="s.format">Format</label>
               <select id="s-lrcfmt" onchange="saveSetting('lrc-format',this.value)">
                 <option>lrc</option><option>ttml</option>
               </select>
@@ -413,27 +437,27 @@
             <div style="font-size:10px;color:var(--blue);font-weight:600;margin:6px 0 4px">gamdl</div>
             <div class="settings-row">
               <div class="field-group flex1">
-                <label class="lbl">Synced lyrics format</label>
+                <label class="lbl" data-i18n="s.synced_lrc_fmt">Synced lyrics format</label>
                 <select id="s-gamdl-lrc" onchange="saveSetting('gamdl-synced-lyrics-format',this.value)">
                   <option value="lrc">LRC</option><option value="srt">SRT</option><option value="ttml">TTML</option>
                 </select>
               </div>
             </div>
             <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label">No synced lyrics</div></div>
+              <div class="toggle-info"><div class="toggle-label" data-i18n="s.no_synced">No synced lyrics</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-nolrc" onchange="saveSetting('gamdl-no-synced-lyrics',this.checked)"><div class="toggle-slider"></div></label>
             </div>
             <div class="toggle-row">
-              <div class="toggle-info"><div class="toggle-label">Lyrics only mode</div><div class="toggle-sub">Download only lyrics, skip audio</div></div>
+              <div class="toggle-info"><div class="toggle-label" data-i18n="s.lrc_only">Lyrics only mode</div><div class="toggle-sub" data-i18n="s.lrc_only_sub">Download only lyrics, skip audio</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-lrconly" onchange="saveSetting('gamdl-lyrics-only',this.checked)"><div class="toggle-slider"></div></label>
             </div>
             <div class="field-group mt8">
-              <label class="lbl">Exclude tags (comma-sep)</label>
+              <label class="lbl" data-i18n="s.exclude_tags">Exclude tags (comma-sep)</label>
               <input id="s-gamdl-exclude" placeholder="comment,compilation" style="font-family:var(--mono);font-size:11px"
                 oninput="saveSetting('gamdl-exclude-tags',this.value)"/>
             </div>
             <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label">Fetch extra tags</div><div class="toggle-sub">Normalization &amp; smooth playback data</div></div>
+              <div class="toggle-info"><div class="toggle-label" data-i18n="s.extra_tags">Fetch extra tags</div><div class="toggle-sub" data-i18n="s.extra_tags_sub">Normalization &amp; smooth playback data</div></div>
               <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-gamdl-extratags" onchange="saveSetting('gamdl-fetch-extra-tags',this.checked)"><div class="toggle-slider"></div></label>
             </div>
           </div>
@@ -461,7 +485,7 @@
         <!-- ═══ Service colors ═══ -->
         <div class="block mt12">
           <div class="block-title"><span data-i18n="s.svc_colors">🎨 Цвета сервисов</span></div>
-          <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5">
+          <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.5" data-i18n="s.svc_colors_hint">
             По умолчанию — бренд-цвета. Можно переопределить под себя.
           </div>
           <div id="svc-color-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:8px">
@@ -785,7 +809,7 @@
           <div class="block-title" data-i18n="s.quality">🎚 Качество</div>
           <div id="quality-grid" class="qgrid"></div>
         </div>
-        <div class="block mt12" id="zhaarey-settings-block">
+        <div class="block mt12 coll" id="zhaarey-settings-block">
           <div class="block-title" data-i18n="s.wrapper_title">⚙️ Wrapper / Decryption</div>
           <div data-i18n-html="s.wrapper_help" style="font-size:10.5px;color:var(--muted);line-height:1.6;margin:2px 0 12px;padding:9px 12px;background:rgba(192,132,160,.06);border:1px solid rgba(192,132,160,.18);border-radius:8px">
             🔓 Wrapper расшифровывает <b style="color:var(--text)">lossless (ALAC / Atmos)</b> и держит <b>свою</b> Apple-сессию — это НЕ токены/cookies из «🔑 Токены».<br>
@@ -857,19 +881,19 @@
                (each gets its own Docker wrapper slot with its own device identity —
                see the ripster-apple-wrapper skill for why one account can't share a slot) -->
           <div style="background:rgba(10,132,255,.08);border:1px solid rgba(10,132,255,.2);border-radius:9px;padding:12px 14px;margin-bottom:12px">
-            <div style="font-size:11px;font-weight:700;color:var(--blue);margin-bottom:8px">➕ Доп. аккаунты (балансировка загрузок)</div>
-            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+            <div style="font-size:11px;font-weight:700;color:var(--blue);margin-bottom:8px"><span data-i18n="s.extra_accounts">➕ Доп. аккаунты (балансировка загрузок)</span></div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5" data-i18n="s.pool_hint_apple">
               Добавь ещё Apple ID — параллельные ALAC/Atmos-загрузки (режим «Локальный») будут распределяться между аккаунтами вместо очереди на одном. Каждый получает свой Docker-контейнер.
             </div>
             <div id="apple-accounts-list" style="margin-bottom:8px"></div>
             <div style="display:flex;gap:5px;flex-wrap:wrap">
-              <input id="s-apple-pool-email" type="email" placeholder="Apple ID второго аккаунта…"
+              <input id="s-apple-pool-email" type="email" placeholder="Apple ID второго аккаунта…" data-i18n-ph="s.apple_pool_email_ph"
                 style="font-size:11px;flex:1;min-width:140px"/>
-              <input id="s-apple-pool-pass" type="password" placeholder="Пароль…"
+              <input id="s-apple-pool-pass" type="password" placeholder="Пароль…" data-i18n-ph="s.password_cap_ph"
                 style="font-size:11px;flex:1;min-width:100px"/>
-              <input id="s-apple-pool-label" type="text" placeholder="Метка"
+              <input id="s-apple-pool-label" type="text" placeholder="Метка" data-i18n-ph="s.label_ph"
                 style="font-size:11px;flex:1;min-width:80px"/>
-              <button class="btn-sm" onclick="addAppleAccount()" style="padding:6px 12px;background:rgba(10,132,255,.18);color:var(--blue);border:1px solid rgba(10,132,255,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">+ Добавить</button>
+              <button class="btn-sm" onclick="addAppleAccount()" style="padding:6px 12px;background:rgba(10,132,255,.18);color:var(--blue);border:1px solid rgba(10,132,255,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"><span data-i18n="s.add_btn">+ Добавить</span></button>
             </div>
           </div>
 
@@ -1130,7 +1154,7 @@
           </div>
         </div>
 
-        <div class="block mt12" style="background:rgba(0,0,0,.3)">
+        <div class="block mt12 coll" style="background:rgba(0,0,0,.3)">
             <div class="block-title">🐳 Docker Wrapper<span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'s.help.docker_session')" role="button" tabindex="0">?</span></div>
 
             <!-- Session status -->
@@ -1185,7 +1209,7 @@
             <div class="settings-grid">
               <div class="field-group">
                 <label class="lbl">user-id</label>
-                <input id="s-qobuz-userid" placeholder="Цифры из cookie user-id"
+                <input id="s-qobuz-userid" placeholder="Цифры из cookie user-id" data-i18n-ph="s.qobuz_userid_ph"
                   style="font-family:var(--mono);font-size:11px"
                   oninput="saveSetting('qobuz-user-id',this.value)"/>
               </div>
@@ -1196,7 +1220,7 @@
                   oninput="saveSetting('qobuz-auth-token',this.value)"/>
               </div>
             </div>
-            <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5">
+            <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5" data-i18n-html="s.qobuz_cookie_help">
               play.qobuz.com → DevTools (F12) → Application → Cookies → <code>user-id</code> и <code>user-auth-token</code>
             </div>
             <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
@@ -1233,25 +1257,25 @@
 
           <!-- Multi-account pool: several accounts, downloads load-balanced across them -->
           <div style="background:rgba(27,104,211,.06);border:1px solid rgba(27,104,211,.15);border-radius:9px;padding:10px 12px;margin-bottom:10px">
-            <div style="font-size:11px;font-weight:700;color:#1b68d3;margin-bottom:8px">➕ Доп. аккаунты (балансировка загрузок)</div>
-            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+            <div style="font-size:11px;font-weight:700;color:#1b68d3;margin-bottom:8px"><span data-i18n="s.extra_accounts">➕ Доп. аккаунты (балансировка загрузок)</span></div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5" data-i18n="s.qobuz_pool_hint">
               Добавь ещё аккаунты (токен ИЛИ email+пароль) — параллельные Qobuz-загрузки будут распределяться между всеми вместо очереди на одном.
             </div>
             <div id="qobuz-accounts-list" style="margin-bottom:8px"></div>
             <div style="display:flex;gap:5px;flex-wrap:wrap;margin-bottom:5px">
-              <input id="s-qobuz-pool-userid" type="text" placeholder="user-id (токен-режим)…"
+              <input id="s-qobuz-pool-userid" type="text" placeholder="user-id (токен-режим)…" data-i18n-ph="s.qobuz_pool_userid_ph"
                 style="font-family:var(--mono);font-size:11px;flex:1;min-width:120px"/>
-              <input id="s-qobuz-pool-authtok" type="password" placeholder="user-auth-token…"
+              <input id="s-qobuz-pool-authtok" type="password" placeholder="user-auth-token…" data-i18n-ph="s.qobuz_pool_authtok_ph"
                 style="font-family:var(--mono);font-size:11px;flex:1;min-width:120px"/>
             </div>
             <div style="display:flex;gap:5px;flex-wrap:wrap">
-              <input id="s-qobuz-pool-email" type="email" placeholder="или email…"
+              <input id="s-qobuz-pool-email" type="email" placeholder="или email…" data-i18n-ph="s.pool_or_email_ph"
                 style="font-size:11px;flex:1;min-width:120px"/>
-              <input id="s-qobuz-pool-pass" type="password" placeholder="пароль…"
+              <input id="s-qobuz-pool-pass" type="password" placeholder="пароль…" data-i18n-ph="s.password_ph"
                 style="font-size:11px;flex:1;min-width:100px"/>
-              <input id="s-qobuz-pool-label" type="text" placeholder="Метка"
+              <input id="s-qobuz-pool-label" type="text" placeholder="Метка" data-i18n-ph="s.label_ph"
                 style="font-size:11px;flex:1;min-width:80px"/>
-              <button class="btn-sm" onclick="addQobuzAccount()" style="padding:6px 12px;background:rgba(27,104,211,.18);color:#1b68d3;border:1px solid rgba(27,104,211,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">+ Добавить</button>
+              <button class="btn-sm" onclick="addQobuzAccount()" style="padding:6px 12px;background:rgba(27,104,211,.18);color:#1b68d3;border:1px solid rgba(27,104,211,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"><span data-i18n="s.add_btn">+ Добавить</span></button>
             </div>
           </div>
 
@@ -1288,7 +1312,7 @@
             </div>
             <div class="field-group">
               <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
-              <input id="s-qobuz-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('qobuz-save-path',this.value)"/>
+              <input id="s-qobuz-path" type="text" placeholder="по умолчанию (общая папка)" data-i18n-ph="s.default_folder_ph" oninput="saveSetting('qobuz-save-path',this.value)"/>
             </div>
           </div>
         </div>
@@ -1328,17 +1352,17 @@
 
           <!-- Multi-account pool: several ARLs, downloads load-balanced across them -->
           <div style="background:rgba(162,56,255,.06);border:1px solid rgba(162,56,255,.15);border-radius:9px;padding:10px 12px;margin-bottom:10px">
-            <div style="font-size:11px;font-weight:700;color:#a238ff;margin-bottom:8px">➕ Доп. аккаунты (балансировка загрузок)</div>
-            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+            <div style="font-size:11px;font-weight:700;color:#a238ff;margin-bottom:8px"><span data-i18n="s.extra_accounts">➕ Доп. аккаунты (балансировка загрузок)</span></div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5" data-i18n="s.pool_hint_deezer">
               Добавь ещё ARL-токены — параллельные Deezer-загрузки будут распределяться между всеми аккаунтами вместо очереди на одном.
             </div>
             <div id="deezer-accounts-list" style="margin-bottom:8px"></div>
             <div style="display:flex;gap:5px;flex-wrap:wrap">
-              <input id="s-deezer-pool-arl" type="password" placeholder="ARL второго аккаунта…"
+              <input id="s-deezer-pool-arl" type="password" placeholder="ARL второго аккаунта…" data-i18n-ph="s.deezer_pool_arl_ph"
                 style="font-family:var(--mono);font-size:11px;flex:2;min-width:160px"/>
-              <input id="s-deezer-pool-label" type="text" placeholder="Метка (необязательно)"
+              <input id="s-deezer-pool-label" type="text" placeholder="Метка (необязательно)" data-i18n-ph="s.label_opt_ph"
                 style="font-size:11px;flex:1;min-width:100px"/>
-              <button class="btn-sm" onclick="addDeezerAccount()" style="padding:6px 12px;background:rgba(162,56,255,.18);color:#a238ff;border:1px solid rgba(162,56,255,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">+ Добавить</button>
+              <button class="btn-sm" onclick="addDeezerAccount()" style="padding:6px 12px;background:rgba(162,56,255,.18);color:#a238ff;border:1px solid rgba(162,56,255,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"><span data-i18n="s.add_btn">+ Добавить</span></button>
             </div>
           </div>
 
@@ -1353,7 +1377,7 @@
             </div>
             <div class="field-group">
               <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
-              <input id="s-deezer-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('deezer-save-path',this.value)"/>
+              <input id="s-deezer-path" type="text" placeholder="по умолчанию (общая папка)" data-i18n-ph="s.default_folder_ph" oninput="saveSetting('deezer-save-path',this.value)"/>
             </div>
           </div>
         </div>
@@ -1396,7 +1420,7 @@
             </div>
             <div class="field-group">
               <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
-              <input id="s-amazon-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('amazon-save-path',this.value)"/>
+              <input id="s-amazon-path" type="text" placeholder="по умолчанию (общая папка)" data-i18n-ph="s.default_folder_ph" oninput="saveSetting('amazon-save-path',this.value)"/>
             </div>
           </div>
         </div>
@@ -1448,7 +1472,7 @@
               </div>
               <div class="field-group">
                 <label class="lbl">user_id</label>
-                <input id="s-tidal-userid" placeholder="цифры"
+                <input id="s-tidal-userid" placeholder="цифры" data-i18n-ph="s.digits_ph"
                   style="font-family:var(--mono);font-size:11px"
                   oninput="saveSetting('tidal-user-id',this.value)"/>
               </div>
@@ -1460,12 +1484,12 @@
               </div>
               <div class="field-group" style="grid-column:1/-1">
                 <label class="lbl" data-i18n="s.tidal_expiry">token_expiry (Unix timestamp, опционально)</label>
-                <input id="s-tidal-expiry" placeholder="9999999999 (= никогда)"
+                <input id="s-tidal-expiry" placeholder="9999999999 (= никогда)" data-i18n-ph="s.tidal_expiry_ph"
                   style="font-family:var(--mono);font-size:11px"
                   oninput="saveSetting('tidal-token-expiry',this.value)"/>
               </div>
             </div>
-            <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.6">
+            <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.6" data-i18n-html="td.ls_hint">
               listen.tidal.com → DevTools (F12) → Application → Local Storage<br>
               Ищи ключи <code>_TIDAL_activeSession</code> и <code>_TIDAL_session_accessToken</code>.<br>
               Или поставь расширение «Tidal Token Extractor» и получи всё скопом.
@@ -1480,7 +1504,7 @@
 
             <!-- Hidden textarea panel for pasting token.json content -->
             <div id="tidal-import-panel" style="display:none;margin-top:10px;padding:10px;background:rgba(0,0,0,.2);border:1px dashed rgba(0,212,179,.3);border-radius:8px">
-              <div style="font-size:11px;color:var(--muted);margin-bottom:6px;line-height:1.5">
+              <div style="font-size:11px;color:var(--muted);margin-bottom:6px;line-height:1.5" data-i18n-html="td.import_hint">
                 Вставь содержимое <code>token.json</code> от <a href="https://github.com/exislow/tidal-dl-ng" target="_blank" style="color:#00d4b3">tidal-dl-ng</a> или аналогичного инструмента.
                 Поля <code>user_id</code>, <code>country_code</code> и <code>token_expiry</code> подтянутся автоматически,
                 если их нет в файле — Ripster дёрнет Tidal API и заполнит сам.
@@ -1508,7 +1532,7 @@
             </div>
             <div class="field-group">
               <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
-              <input id="s-tidal-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('tidal-save-path',this.value)"/>
+              <input id="s-tidal-path" type="text" placeholder="по умолчанию (общая папка)" data-i18n-ph="s.default_folder_ph" oninput="saveSetting('tidal-save-path',this.value)"/>
             </div>
           </div>
         </div>
@@ -1614,7 +1638,7 @@
                      не нужен. Не возвращать сюда: два элемента с id sp-ogg-btn
                      сломают и кнопку, и подсказку. -->
 
-                <div style="font-size:10px;color:var(--muted);line-height:1.6;background:rgba(255,159,10,.08);border:1px solid rgba(255,159,10,.25);border-radius:7px;padding:8px 10px;margin-bottom:10px" data-i18n="sp.devapp_warn">
+                <div style="font-size:10px;color:var(--muted);line-height:1.6;background:rgba(255,159,10,.08);border:1px solid rgba(255,159,10,.25);border-radius:7px;padding:8px 10px;margin-bottom:10px" data-i18n-html="sp.devapp_warn">
                   ⚠ Developer App для скачивания <b>не нужен</b> — и часто вообще не работает: Spotify отказывает в Web API, если у владельца приложения нет Premium («Active premium subscription required for the owner of the app»). Заполняй, только если нужен резервный скан релизов.
                 </div>
 
@@ -1654,7 +1678,7 @@
               <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
                 <div style="flex:1;min-width:200px">
                   <div style="font-size:12px;color:var(--text);font-weight:600" data-i18n="s.sp_saved_target">Сохранённый выбор конвертации</div>
-                  <div style="font-size:11px;color:var(--muted);margin-top:2px">
+                  <div style="font-size:11px;color:var(--muted);margin-top:2px" data-i18n-html="sp.auto_target">
                     Spotify-ссылки автоматически идут через <span id="sp-saved-target-name" style="color:var(--text)">—</span> без вопроса.
                   </div>
                 </div>
@@ -1833,21 +1857,21 @@
 
             <!-- Multi-account pool: several OAuth tokens, downloads load-balanced -->
             <div style="margin-top:12px;padding-top:10px;border-top:1px solid rgba(255,85,0,.15)">
-              <div style="font-size:11px;font-weight:700;color:#ff5500;margin-bottom:8px">➕ Доп. аккаунты (балансировка загрузок)</div>
-              <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+              <div style="font-size:11px;font-weight:700;color:#ff5500;margin-bottom:8px"><span data-i18n="s.extra_accounts">➕ Доп. аккаунты (балансировка загрузок)</span></div>
+              <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5" data-i18n="s.pool_hint_sc">
                 Добавь ещё OAuth-токены — параллельные SoundCloud-загрузки будут распределяться между аккаунтами вместо очереди на одном.
               </div>
               <div id="soundcloud-accounts-list" style="margin-bottom:8px"></div>
               <div style="display:flex;gap:5px;flex-wrap:wrap">
-                <input id="s-sc-pool-token" type="password" placeholder="oauth_token второго аккаунта…"
+                <input id="s-sc-pool-token" type="password" placeholder="oauth_token второго аккаунта…" data-i18n-ph="s.sc_pool_token_ph"
                   style="font-family:var(--mono);font-size:11px;flex:2;min-width:160px"/>
-                <input id="s-sc-pool-label" type="text" placeholder="Метка"
+                <input id="s-sc-pool-label" type="text" placeholder="Метка" data-i18n-ph="s.label_ph"
                   style="font-size:11px;flex:1;min-width:80px"/>
-                <button class="btn-sm" onclick="addSoundcloudAccount()" style="padding:6px 12px;background:rgba(255,85,0,.18);color:#ff5500;border:1px solid rgba(255,85,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">+ Добавить</button>
+                <button class="btn-sm" onclick="addSoundcloudAccount()" style="padding:6px 12px;background:rgba(255,85,0,.18);color:#ff5500;border:1px solid rgba(255,85,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"><span data-i18n="s.add_btn">+ Добавить</span></button>
               </div>
             </div>
             <!-- ── Widevine L3 CDM (для DRM треков, миксов и приватных ссылок) ── -->
-            <div class="block" style="margin-top:10px;background:rgba(255,85,0,.04);border:1px solid rgba(255,85,0,.18)">
+            <div class="block coll" style="margin-top:10px;background:rgba(255,85,0,.04);border:1px solid rgba(255,85,0,.18)">
               <div class="block-title" style="color:#ff7a33;font-size:11px" data-i18n="sc.wvd_title">🔐 Widevine L3 CDM (опционально)</div>
               <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:8px" data-i18n-html="sc.wvd_desc">
                 Lucida не дешифрует DRM-защищённые SC треки (миксы, приваты, большинство Go+ с 2024).
@@ -1894,7 +1918,7 @@
             <div class="settings-grid">
               <div class="field-group">
                 <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
-                <input id="s-sc-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('soundcloud-save-path',this.value)"/>
+                <input id="s-sc-path" type="text" placeholder="по умолчанию (общая папка)" data-i18n-ph="s.default_folder_ph" oninput="saveSetting('soundcloud-save-path',this.value)"/>
               </div>
             </div>
 
@@ -1927,7 +1951,7 @@
           <!-- Clone instruction + install button -->
           <div id="bp-clone-section" style="margin-bottom:12px;padding:10px 12px;background:rgba(1,244,156,.05);border:1px solid rgba(1,244,156,.14);border-radius:8px">
             <div style="font-size:11px;font-weight:700;color:#01f49c;margin-bottom:4px" data-i18n="s.bp_install">Установка модуля</div>
-            <div style="font-size:10px;color:var(--muted);margin-bottom:8px">
+            <div style="font-size:10px;color:var(--muted);margin-bottom:8px" data-i18n-html="s.bp_manual_dir">
               Или вручную в папку <code style="background:rgba(255,255,255,.06);padding:1px 4px;border-radius:3px">orpheus/modules/beatport/</code>:
             </div>
             <div style="background:rgba(0,0,0,.3);border-radius:6px;padding:8px 10px;font-family:var(--mono);font-size:10px;color:#01f49c;word-break:break-all;margin-bottom:8px">
@@ -1935,7 +1959,7 @@
             </div>
             <button id="btn-bp-install" onclick="installBeatportModule()"
               style="padding:6px 14px;background:rgba(1,244,156,.2);color:#01f49c;border:1px solid rgba(1,244,156,.4);border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font)">
-              ⬇ Установить автоматически
+              <span data-i18n="s.bp_install_auto">⬇ Установить автоматически</span>
             </button>
           </div>
           <!-- Reinstall button (shown when module is installed) -->
@@ -1957,18 +1981,18 @@
             </div>
             <div class="field-group" style="margin-bottom:8px">
               <label class="lbl"><span data-i18n="s.password">Пароль</span></label>
-              <input id="s-bp-pass" type="password" placeholder="Пароль Beatport"
+              <input id="s-bp-pass" type="password" placeholder="Пароль Beatport" data-i18n-ph="s.bp_pass_ph"
                 oninput="saveSetting('beatport-password',this.value)"
                 style="font-family:var(--mono);font-size:11px"/>
             </div>
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" onclick="saveServiceTab('beatport')"
                 style="padding:6px 12px;background:rgba(1,244,156,.18);color:#01f49c;border:1px solid rgba(1,244,156,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">
-                💾 Сохранить
+                <span data-i18n="s.save_btn">💾 Сохранить</span>
               </button>
               <button class="btn-sm" onclick="testAuth('beatport')"
                 style="padding:6px 12px;background:rgba(1,244,156,.08);color:#01f49c;border:1px solid rgba(1,244,156,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">
-                🔑 Проверить
+                <span data-i18n="s.check">🔑 Проверить</span>
               </button>
               <button class="btn-sm" onclick="logoutService('beatport',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
               <div id="test-auth-beatport" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
@@ -1988,7 +2012,7 @@
 
           <div class="field-group mt8">
             <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
-            <input id="s-bp-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('beatport-save-path',this.value)"/>
+            <input id="s-bp-path" type="text" placeholder="по умолчанию (общая папка)" data-i18n-ph="s.default_folder_ph" oninput="saveSetting('beatport-save-path',this.value)"/>
           </div>
 
         </div>
@@ -2027,7 +2051,7 @@
             </div>
             <div class="field-group" style="margin-top:10px">
               <label class="lbl" data-i18n="ya.paste_label">Вставь URL после входа (или сам токен)</label>
-              <input id="s-yandex-paste" placeholder="music.yandex.ru/#access_token=…  или  AQAA…"
+              <input id="s-yandex-paste" placeholder="music.yandex.ru/#access_token=…  или  AQAA…" data-i18n-ph="s.yandex_paste_ph"
                 style="font-family:var(--mono);font-size:11px"
                 oninput="yandexSaveToken(this.value)"/>
             </div>
@@ -2035,17 +2059,17 @@
 
           <!-- Multi-account pool: several OAuth tokens, downloads load-balanced -->
           <div style="background:rgba(255,204,0,.06);border:1px solid rgba(255,204,0,.18);border-radius:9px;padding:10px 12px;margin-bottom:10px">
-            <div style="font-size:11px;font-weight:700;color:#ffcc00;margin-bottom:8px">➕ Доп. аккаунты (балансировка загрузок)</div>
-            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5">
+            <div style="font-size:11px;font-weight:700;color:#ffcc00;margin-bottom:8px"><span data-i18n="s.extra_accounts">➕ Доп. аккаунты (балансировка загрузок)</span></div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5" data-i18n="s.pool_hint_yandex">
               Добавь ещё OAuth-токены — параллельные Yandex-загрузки будут распределяться между аккаунтами вместо очереди на одном.
             </div>
             <div id="yandex-accounts-list" style="margin-bottom:8px"></div>
             <div style="display:flex;gap:5px;flex-wrap:wrap">
-              <input id="s-yandex-pool-token" type="password" placeholder="Токен второго аккаунта…"
+              <input id="s-yandex-pool-token" type="password" placeholder="Токен второго аккаунта…" data-i18n-ph="s.pool_token_ph"
                 style="font-family:var(--mono);font-size:11px;flex:2;min-width:160px"/>
-              <input id="s-yandex-pool-label" type="text" placeholder="Метка"
+              <input id="s-yandex-pool-label" type="text" placeholder="Метка" data-i18n-ph="s.label_ph"
                 style="font-size:11px;flex:1;min-width:80px"/>
-              <button class="btn-sm" onclick="addYandexAccount()" style="padding:6px 12px;background:rgba(255,204,0,.18);color:#ffcc00;border:1px solid rgba(255,204,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">+ Добавить</button>
+              <button class="btn-sm" onclick="addYandexAccount()" style="padding:6px 12px;background:rgba(255,204,0,.18);color:#ffcc00;border:1px solid rgba(255,204,0,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"><span data-i18n="s.add_btn">+ Добавить</span></button>
             </div>
           </div>
 
@@ -2060,7 +2084,7 @@
             </div>
             <div class="field-group">
               <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
-              <input id="s-yandex-path" type="text" placeholder="по умолчанию (общая папка)" oninput="saveSetting('yandex-save-path',this.value)"/>
+              <input id="s-yandex-path" type="text" placeholder="по умолчанию (общая папка)" data-i18n-ph="s.default_folder_ph" oninput="saveSetting('yandex-save-path',this.value)"/>
             </div>
           </div>
           <div style="font-size:10px;color:var(--muted);margin-top:8px;line-height:1.5" data-i18n-html="ya.queue_hint">
@@ -2244,7 +2268,19 @@
               <span style="font-size:12px;font-weight:600;color:var(--text)">Apple Music</span>
               <span style="font-size:10px;color:var(--muted);margin-left:auto" data-i18n="rl.src_apple">артисты из вишлиста</span>
             </label>
+            <!-- Лейблы — не сервис, а отдельный источник: у лейбла нет id
+                 артиста, и радар его сознательно пропускал. Ключ свой
+                 (`show-radar-labels`), по умолчанию ВЫКЛЮЧЕН: лента живая,
+                 менять её молча нельзя. -->
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+              <input type="checkbox" id="rel-cfg-labels" onchange="saveRadarLabels(this.checked)"
+                style="width:15px;height:15px;accent-color:#3ecfaa;cursor:pointer"/>
+              <span style="width:8px;height:8px;border-radius:50%;background:#3ecfaa;flex-shrink:0"></span>
+              <span style="font-size:12px;font-weight:600;color:var(--text)">🏷 <span data-i18n="rl.labels_badge">Лейблы</span></span>
+              <span style="font-size:10px;color:var(--muted);margin-left:auto" data-i18n="rl.src_labels">лейблы из вишлиста</span>
+            </label>
           </div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:12px" data-i18n="rl.labels_hint">Лейблы отслеживаются по названию через каталоги Spotify и Deezer — это единственные, кто отвечает на вопрос «что выпустил лейбл». Пока выключено, лента радара ровно такая же, как была.</div>
 
           <div style="display:flex;gap:10px;flex-wrap:wrap">
             <div class="field-group" style="flex:1;min-width:140px">

@@ -10,8 +10,10 @@ def test_make_task_shape():
     # the contract: a fixed key set so every producer yields the same shape
     assert set(t) == {
         "id", "url", "quality", "engine", "service", "status", "progress",
-        "meta", "log", "added", "source", "session_id",
+        "meta", "log", "added", "source", "session_id", "lyrics",
     }
+    # None = взять глобальную настройку; True/False = галка на карточке релиза
+    assert t["lyrics"] is None
     assert t["status"] == "queued"
     assert t["progress"] == 0
     assert t["url"] == "https://x/y"

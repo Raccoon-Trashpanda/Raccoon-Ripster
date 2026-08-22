@@ -11,17 +11,21 @@ from __future__ import annotations
 
 import threading
 
+from ripster import account_fallback as _afb
+
 
 def _configured_accounts(config: dict) -> list[dict]:
     """Primary account (slot 0) + any extras from `soundcloud-accounts`."""
     accounts: list[dict] = []
     primary = (config.get("soundcloud-oauth-token") or "").strip()
     if primary:
-        accounts.append({"token": primary, "label": "primary"})
+        accounts.append(_afb.stamp({"token": primary, "label": "primary"}, _afb.primary_src(config, "soundcloud"), 0))
     for a in (config.get("soundcloud-accounts") or []):
         tok = (a.get("token") or "").strip()
         if tok:
-            accounts.append({"token": tok, "label": a.get("label") or f"account{len(accounts)+1}"})
+            accounts.append(_afb.stamp(
+                {"token": tok, "label": a.get("label") or f"account{len(accounts)+1}"},
+                a, len(accounts)))
     return accounts
 
 
@@ -35,10 +39,13 @@ class SoundcloudPool:
         self._busy = [False] * len(accounts)
         self._lock = threading.Lock()
 
-    def acquire(self) -> tuple[int, str] | None:
+    def acquire(self, exclude=()) -> tuple[int, str] | None:
+        """`exclude` — слоты, уже отказавшие в этой задаче по правам/региону
+        (ripster/account_fallback.py); без него перебор топчется на первом."""
+        ex = set(exclude or ())
         with self._lock:
-            for i, busy in enumerate(self._busy):
-                if not busy:
+            for i in _afb.order_indices(self.accounts):
+                if not self._busy[i] and i not in ex:
                     self._busy[i] = True
                     return i, self.accounts[i]["token"]
 
@@ -52,7 +59,9 @@ class SoundcloudPool:
             return {
                 "pool_enabled": True,
                 "accounts": [
-                    {"slot": i, "label": a["label"], "primary": i == 0, "busy": self._busy[i]}
+                    {"slot": i, "label": a["label"], "primary": i == 0, "busy": self._busy[i],
+                     "enabled": a.get("enabled", True), "priority": a.get("priority", i),
+                     "order": _afb.order_indices(self.accounts).index(i)}
                     for i, a in enumerate(self.accounts)
                 ],
             }
@@ -79,7 +88,9 @@ def live_status(config: dict) -> dict:
     if p is None:
         accounts = _configured_accounts(config)
         return {"pool_enabled": False, "accounts": [
-            {"slot": i, "label": a["label"], "primary": i == 0, "busy": False}
+            {"slot": i, "label": a["label"], "primary": i == 0, "busy": False,
+             "enabled": a.get("enabled", True), "priority": a.get("priority", i),
+             "order": _afb.order_indices(accounts).index(i)}
             for i, a in enumerate(accounts)
         ]}
     return p.status()

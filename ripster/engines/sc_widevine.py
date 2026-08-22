@@ -21,6 +21,7 @@ from pathlib import Path
 
 from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
 from .registry import register
+from ripster.py_runtime import app_python
 
 
 _RE_PROGRESS = re.compile(r'\[(\d+)/(\d+)\]')
@@ -49,7 +50,7 @@ def _wvd_python() -> str:
         cand = base / "tools" / "wvdvenv" / sub[0] / sub[1]
         if cand.is_file():
             return str(cand)
-    return sys.executable
+    return app_python()
 
 
 def _wvd_path(config: dict) -> Path:
