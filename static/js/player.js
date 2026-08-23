@@ -1195,6 +1195,35 @@ function _waScheduleNext() {
   _WA.schedStartT = endAt;
 }
 
+// Название, артист и обложка в НИЖНЕЙ панели (и в развёрнутом виде).
+//
+// Вынесено отдельно 23.08.2026. Эти шесть присваиваний жили только внутри
+// `_playAt`, то есть срабатывали, когда трек запускают. При бесшовном стыке
+// трек НЕ запускают — звук уже играет, меняется только учёт, — поэтому нижняя
+// панель оставалась на первом треке, пока из колонок шёл третий. Ровно то же
+// уже случилось с подсветкой в очереди, и лечилось тем же: у перехода два
+// входа, а обновление стояло на одном.
+function _ppSyncNowPlaying(item, idx) {
+  if (!item) return;
+  const sub = _ppArtistSub(item);
+  const set = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+  set('pp-title',      item.title || '—');
+  set('pp-artist',     sub);
+  set('pp-title-big',  item.title || '—');
+  set('pp-artist-big', sub);
+  const html = item.cover
+    ? `<img src="${esc(item.cover)}" data-cover onload="this.classList.add('loaded')" style="width:100%;height:100%;object-fit:cover"/>`
+    : '♪';
+  ['pp-art', 'pp-art-big'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.innerHTML = html;
+  });
+  const prev = document.getElementById('pp-prev');
+  const next = document.getElementById('pp-next');
+  if (prev) prev.disabled = (idx <= 0);
+  if (next) next.disabled = (idx >= Preview.queue.length - 1);
+  if (typeof _updateMediaSession === 'function') _updateMediaSession(item, sub);
+}
+
 // The scheduled source is already audible by the time this runs — this only
 // moves the bookkeeping and UI onto it.
 function _waPromoteScheduled() {
@@ -1210,6 +1239,9 @@ function _waPromoteScheduled() {
     const el = document.getElementById(id); if (el) el.textContent = durStr;
   });
   _waAttachEnded(src, idx);
+  // Нижняя панель. Без этой строки она показывала предыдущий трек до тех пор,
+  // пока человек не нажмёт что-нибудь руками.
+  _ppSyncNowPlaying(item, idx);
   if (typeof fpSyncMeta === 'function') fpSyncMeta(item);
   try { _syncAlbumPlayBtns?.(); } catch {}
 
@@ -1939,28 +1971,9 @@ async function _playPreviewAt(idx) {
       main.removeAttribute('data-preview-expanded');
       main.setAttribute(isExpanded ? 'data-preview-expanded' : 'data-preview-open', '1');
     }
-    // Sync mini player title/artist/cover (WA path skips the normal assignment below)
-    const _waArtistSub = _ppArtistSub(item);
-    const _waPpTitle   = document.getElementById('pp-title');
-    const _waPpArtist  = document.getElementById('pp-artist');
-    const _waPpTitleB  = document.getElementById('pp-title-big');
-    const _waPpArtistB = document.getElementById('pp-artist-big');
-    if (_waPpTitle)   _waPpTitle.textContent   = item.title || '—';
-    if (_waPpArtist)  _waPpArtist.textContent  = _waArtistSub;
-    if (_waPpTitleB)  _waPpTitleB.textContent  = item.title || '—';
-    if (_waPpArtistB) _waPpArtistB.textContent = _waArtistSub;
-    const _waCoverHtml = item.cover
-      ? `<img src="${esc(item.cover)}" data-cover onload="this.classList.add('loaded')" style="width:100%;height:100%;object-fit:cover"/>`
-      : '♪';
-    const _waPpArt    = document.getElementById('pp-art');
-    const _waPpArtBig = document.getElementById('pp-art-big');
-    if (_waPpArt)    _waPpArt.innerHTML    = _waCoverHtml;
-    if (_waPpArtBig) _waPpArtBig.innerHTML = _waCoverHtml;
-    const _waPrev = document.getElementById('pp-prev');
-    const _waNext = document.getElementById('pp-next');
-    if (_waPrev) _waPrev.disabled = (idx === 0);
-    if (_waNext) _waNext.disabled = (idx >= Preview.queue.length - 1);
-    if (typeof _updateMediaSession === 'function') _updateMediaSession(item, _waArtistSub);
+    // Тот же помощник, что и у бесшовного стыка: два входа в переход должны
+    // обновлять панель ОДНИМ кодом, иначе они снова разойдутся.
+    _ppSyncNowPlaying(item, idx);
     await _waPlay(idx, 0);
     return;
   }
