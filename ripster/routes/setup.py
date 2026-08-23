@@ -780,6 +780,84 @@ async def soundcloud_accounts_remove(slot: int):
 #   POST /api/yandex/accounts/add    — add a token
 #   POST /api/yandex/accounts/{slot}/remove — remove an added account (not slot 0)
 
+# ── Приоритет и включение учёток — ОБЩЕЕ для всех пулов ───────────────────────
+# Отдельной вкладки «учётные записи» нет намеренно: приоритет живёт там же, где
+# сама учётка, то есть внутри вкладки своего сервиса. Иначе человеку пришлось бы
+# держать в голове соответствие между двумя списками.
+#
+# У Apple своя ручка (`/api/wrapper/accounts/prefs`): там слот это контейнер, и
+# приоритет действует ВНУТРИ витрины, потому что страна решает, существует ли
+# релиз вообще. Здесь всё проще — приоритет это просто очередь.
+_PREFS_POOLS = ("deezer", "qobuz", "soundcloud", "yandex")
+
+
+@router.post("/api/{service}/accounts/prefs")
+async def pool_accounts_prefs(service: str, body: dict):
+    """Тело: {"slots": [{"slot": 0, "priority": 2, "enabled": true}, …]}.
+
+    Слот 0 — ОСНОВНАЯ учётка: у неё нет своего словаря, она размазана по плоским
+    ключам конфига, поэтому её настройки лежат в `<svc>-primary-priority` и
+    `<svc>-primary-enabled`. Имена собирает `account_fallback.primary_src` — не
+    повторять их здесь по памяти: общий ключ `priority` был бы один на все
+    сервисы сразу.
+
+    Возвращает число ИЗМЕНЁННЫХ полей: действие над списком без счётчика
+    неотличимо от действия вхолостую (урок вишлиста, 22.08.2026).
+    """
+    svc = (service or "").strip().lower()
+    if svc not in _PREFS_POOLS:
+        raise HTTPException(404, imsg("err.prefs_no_pool",
+                                      "у сервиса {svc} нет пула учёток", svc=svc))
+    slots = body.get("slots")
+    if not isinstance(slots, list) or not slots:
+        raise HTTPException(400, imsg("err.slots_required", "нужен непустой список slots"))
+
+    extras = list(_cfg.get(f"{svc}-accounts") or [])
+    changed = 0
+    for item in slots:
+        if not isinstance(item, dict):
+            continue
+        try:
+            idx = int(item.get("slot"))
+        except (TypeError, ValueError):
+            continue
+        if not (0 <= idx <= len(extras)):
+            raise HTTPException(400, imsg("err.slot_range",
+                                          "слот {i} вне диапазона 0..{max}",
+                                          i=idx, max=len(extras)))
+        if "priority" in item:
+            try:
+                val = float(item["priority"])
+            except (TypeError, ValueError):
+                raise HTTPException(400, imsg("err.priority_number",
+                                              "приоритет должен быть числом"))
+            if idx == 0:
+                if _cfg.get(f"{svc}-primary-priority") != val:
+                    _cfg[f"{svc}-primary-priority"] = val
+                    changed += 1
+            elif extras[idx - 1].get("priority") != val:
+                extras[idx - 1]["priority"] = val
+                changed += 1
+        if "enabled" in item:
+            val = bool(item["enabled"])
+            if idx == 0:
+                if bool(_cfg.get(f"{svc}-primary-enabled", True)) != val:
+                    _cfg[f"{svc}-primary-enabled"] = val
+                    changed += 1
+            elif bool(extras[idx - 1].get("enabled", True)) != val:
+                extras[idx - 1]["enabled"] = val
+                changed += 1
+
+    if changed:
+        _cfg[f"{svc}-accounts"] = extras
+        if _save_config:
+            try:
+                _save_config(_cfg)
+            except Exception as e:
+                return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "changed": changed, "slots": len(extras) + 1}
+
+
 @router.get("/api/yandex/accounts")
 async def yandex_accounts_list():
     from ripster import yandex_pool as _yxp

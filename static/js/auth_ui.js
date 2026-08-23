@@ -557,6 +557,7 @@ async function loadDeezerAccounts() {
       <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
         <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        ${acctPrefCtl('deezer', a)}
         ${a.primary ? '' : `<button onclick="removeDeezerAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
   } catch(e) { list.innerHTML = ''; }
@@ -591,6 +592,43 @@ async function removeDeezerAccount(slot) {
 }
 
 // ── Qobuz multi-account pool (load-balanced) ────────────────────────────────
+// ── Приоритет и включение учётки — общий кусок для ВСЕХ сервисов ─────────────
+// Живёт внутри вкладки своего сервиса, отдельной вкладки «учётные записи» нет
+// намеренно: иначе человеку пришлось бы держать в голове соответствие между
+// двумя списками. Разметка одна на всех, чтобы у Deezer и Qobuz правило
+// «меньше число — раньше очередь» не разошлось через месяц.
+function acctPrefCtl(svc, a) {
+  const pr = (a.priority === undefined || a.priority === null) ? a.slot : a.priority;
+  const on = a.enabled !== false;
+  return `
+    <input type="number" step="1" value="${pr}" title="${t('acc.priority_hint')}"
+           onchange="setAcctPref('${svc}',${a.slot},'priority',this.value)"
+           style="width:46px;padding:2px 4px;background:var(--bg);border:1px solid var(--border);
+                  border-radius:5px;font-size:10px;color:var(--text);font-family:var(--mono);text-align:center"/>
+    <button onclick="setAcctPref('${svc}',${a.slot},'enabled',${!on})"
+            title="${on ? t('acc.click_disable') : t('acc.click_enable')}"
+            style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;
+                   font-size:10px;cursor:pointer;font-family:var(--font);
+                   color:${on ? 'var(--green)' : 'var(--muted2)'}">${on ? t('acc.on') : t('acc.off')}</button>`;
+}
+
+async function setAcctPref(svc, slot, field, value) {
+  const item = {slot};
+  item[field] = (field === 'priority') ? Number(value) : value;
+  // У Apple свой маршрут: там слот это контейнер, и приоритет действует внутри
+  // витрины, а не поверх неё.
+  const path = (svc === 'apple') ? '/api/wrapper/accounts/prefs'
+                                 : `/api/${svc}/accounts/prefs`;
+  try {
+    const r = await api('POST', path, {slots: [item]});
+    if (!r || r.ok === false) { toast(t('t.error'), 'var(--red)'); return; }
+    toast(ti('acc.pref_saved', {n: r.changed}), 'var(--green)');
+  } catch (e) { toast(t('t.error'), 'var(--red)'); return; }
+  const reload = {qobuz: 'loadQobuzAccounts', deezer: 'loadDeezerAccounts',
+                  soundcloud: 'loadSoundcloudAccounts'}[svc];
+  if (reload && typeof window[reload] === 'function') window[reload]();
+}
+
 async function loadQobuzAccounts() {
   const list = document.getElementById('qobuz-accounts-list');
   if(!list) return;
@@ -602,6 +640,7 @@ async function loadQobuzAccounts() {
       <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
         <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        ${acctPrefCtl('qobuz', a)}
         ${a.primary ? '' : `<button onclick="removeQobuzAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
   } catch(e) { list.innerHTML = ''; }
@@ -703,6 +742,7 @@ async function loadSoundcloudAccounts() {
       <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
         <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        ${acctPrefCtl('soundcloud', a)}
         ${a.primary ? '' : `<button onclick="removeSoundcloudAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
   } catch(e) { list.innerHTML = ''; }
