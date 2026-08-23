@@ -65,3 +65,6 @@ python/
 Thumbs.db
 .idea/
 .vscode/
+
+# Claude Code: внутренние скиллы и настройки — не для публичного репозитория
+.claude/
