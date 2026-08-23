@@ -413,7 +413,7 @@ function _qualityBadges(item) {
 function _renderSearchCard(item, svc) {
     const artUrl = item.artworkUrl || item.cover || '';
     const cover = artUrl
-      ? `<img src="${esc(artUrl)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" onerror="this.style.display='none'"/>`
+      ? `<img src="${esc(artUrl)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" onerror="coverFail(this)"/>`
       : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:28px">♪</div>`;
 
     const dateStr = item.date || '';
@@ -527,8 +527,7 @@ function _renderSearchCard(item, svc) {
           : '';
         return `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s;position:relative" onmouseover="this.style.borderColor='var(--red)'" onmouseout="this.style.borderColor='var(--border)'">
-            <div style="position:relative">${cover}${playOverlay}${_qualityBadges(item)}</div>
-            <div style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,.65);color:rgba(255,255,255,.65);font-size:8px;font-weight:700;padding:2px 5px;border-radius:3px;letter-spacing:.4px">${typeTag}</div>
+            <div style="position:relative">${cover}${playOverlay}${_qualityBadges(item)}<div style="position:absolute;top:6px;left:6px;background:rgba(0,0,0,.65);color:rgba(255,255,255,.65);font-size:8px;font-weight:700;padding:2px 5px;border-radius:3px;letter-spacing:.4px;z-index:2">${typeTag}</div></div>
             <div style="padding:8px 9px">
               <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${escJ(item.title)}">${escapeHtml(item.title)||'—'}${hiresBadge}</div>
               <div style="font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px${item.artist_id ? ';cursor:pointer' : ''}"
@@ -712,7 +711,7 @@ function renderArtistPage(){
 
   const header = `
     <div style="display:flex;gap:20px;margin-bottom:24px;align-items:flex-start;flex-wrap:wrap">
-      ${artist.picture ? `<img src="${escapeHtml(artist.picture)}" data-lightbox style="width:140px;height:140px;border-radius:50%;object-fit:cover;flex-shrink:0;cursor:zoom-in" onerror="this.style.display='none'"/>` : ''}
+      ${artist.picture ? `<img src="${escapeHtml(artist.picture)}" data-lightbox style="width:140px;height:140px;border-radius:50%;object-fit:cover;flex-shrink:0;cursor:zoom-in" onerror="coverFail(this)"/>` : ''}
       <div style="flex:1;min-width:260px">
         <div style="font-size:11px;color:var(--muted);letter-spacing:.8px;text-transform:uppercase;font-family:var(--display)">${t('card.artist')} · ${escapeHtml(artist.service)}</div>
         <div style="font-family:var(--display);font-size:32px;font-weight:800;color:var(--text);margin-top:4px;line-height:1.1">${esc(artist.name||'—')}</div>
@@ -758,7 +757,7 @@ function _discoGridHTML(list, ownerName){
     : `<div class="card-grid">
         ${list.map(r => `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s" onmouseover="this.style.borderColor='var(--red)'" onmouseout="this.style.borderColor='var(--border)'">
-            ${r.cover ? `<img src="${escapeHtml(r.cover)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" onerror="this.style.display='none'"/>` : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:26px">♪</div>`}
+            ${r.cover ? `<img src="${escapeHtml(r.cover)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" onerror="coverFail(this)"/>` : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:26px">♪</div>`}
             <div style="padding:8px 10px">
               <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.title)}">${esc(r.title)}</div>
               <div style="font-size:10px;color:var(--muted);margin-top:3px;display:flex;justify-content:space-between;gap:4px;margin-bottom:${r.label?'2px':'7px'}">
@@ -916,7 +915,7 @@ function renderAlbumPage(){
   const bc = document.getElementById('detail-breadcrumb');
   if(bc) bc.textContent = `${album.artist||''} — ${album.title||''}`.replace(/^— /, '');
   const coverHtml = album.cover
-    ? `<img src="${escapeHtml(album.cover)}" data-lightbox style="width:220px;height:220px;border-radius:8px;object-fit:cover;flex-shrink:0;cursor:zoom-in" onerror="this.style.display='none'"/>`
+    ? `<img src="${escapeHtml(album.cover)}" data-lightbox style="width:220px;height:220px;border-radius:8px;object-fit:cover;flex-shrink:0;cursor:zoom-in" onerror="coverFail(this)"/>`
     : `<div style="width:220px;height:220px;border-radius:8px;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:48px;flex-shrink:0">♪</div>`;
 
   const meta = [

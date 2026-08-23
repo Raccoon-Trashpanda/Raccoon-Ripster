@@ -60,3 +60,48 @@
 
   window.imgBoost = boost;   // для ручной проверки и разовых прогонов
 })();
+
+// ======================================================================
+// Обложка не доехала — карточка НЕ должна схлопываться.
+//
+// Раньше в сетках стоял `onerror="this.style.display='none'"`. У одной битой
+// ссылки это выглядит терпимо, но обрыв связи (переключение VPN, засыпание
+// машины, троттл витрины) гасит ВСЕ картинки сетки разом — и тогда у каждой
+// карточки исчезает не только обложка, но и её место: бейдж «Альбом», который
+// стоит поверх обложки, падает на название и печатается прямо по нему. Именно
+// это и было на экране 23.08: читалось «Albumодняя» вместо «Новогодняя».
+//
+// Два правила. ПЕРВОЕ: одна повторная попытка через секунду — сетевой обрыв
+// разовый, а без ретрая обложки не вернутся до перезагрузки страницы. Второе
+// обращение идёт с меткой, иначе браузер отдаёт свой же отрицательный кэш.
+// ВТОРОЕ: если и она не доехала — на место картинки встаёт заглушка ТОГО ЖЕ
+// размера. Карточка остаётся карточкой, текст остаётся читаемым.
+// ======================================================================
+window.coverFail = function (img) {
+  if (!img || img.dataset.covDead) return;
+  if (!img.dataset.covRetry) {
+    img.dataset.covRetry = '1';
+    const src = img.currentSrc || img.src;
+    if (src) {
+      setTimeout(() => {
+        img.src = src + (src.indexOf('?') < 0 ? '?' : '&') + '_r=1';
+      }, 1000);
+      return;
+    }
+  }
+  img.dataset.covDead = '1';
+  const cs  = getComputedStyle(img);
+  const ph  = document.createElement('div');
+  ph.textContent = '♪';
+  ph.style.cssText = 'display:flex;align-items:center;justify-content:center;'
+    + 'background:rgba(255,255,255,.05);color:var(--muted2)';
+  // Размер берём из ИНЛАЙНОВОГО стиля картинки, а не из вычисленного: у сеток
+  // там `width:100%`, и подстановка пикселей сломала бы резину при ресайзе.
+  ph.style.width  = img.style.width  || cs.width;
+  if (img.style.height && img.style.height !== 'auto') ph.style.height = img.style.height;
+  else ph.style.aspectRatio = '1';
+  ph.style.fontSize     = (parseFloat(cs.width) > 160) ? '48px' : '28px';
+  ph.style.borderRadius = cs.borderRadius;
+  ph.style.flexShrink   = cs.flexShrink;
+  img.replaceWith(ph);
+};
