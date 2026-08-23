@@ -1479,6 +1479,46 @@ async def fix_gamdl_deps():
             await _setup.ilog("   ✓ pywidevine upgraded", "success")
         else:
             await _setup.ilog(f"   ✗ pywidevine failed: {o2[:100]}", "error")
+
+        # ── construct: пин, без которого Apple перестаёт качать целиком ──────
+        #
+        # `pywidevine/device.py` пишет `Const(Int8ub, 2)`. Этот порядок аргументов
+        # принимает ТОЛЬКО construct 2.8.8 — замерено перебором версий 22.08.2026:
+        # 2.8.22, 2.9.45 и вся ветка 2.10.x поднимают
+        # `TypeError: subcon should be a Construct field`. Правильный для них
+        # порядок — `Const(2, Int8ub)`, но чинить чужой пакет мы не будем.
+        # Сам pywidevine пин не объявляет: 2.8.8 приезжает транзитивно от pymp4.
+        #
+        # Цена промаха несоразмерна: AMD импортирует pywidevine в
+        # `src/legacy/decrypt.py` на уровне модуля, поэтому кривой construct
+        # убивает ВСЕ загрузки Apple на этапе BOOT — до единого сетевого запроса.
+        # Именно так 22.08 человек получил три одинаковых трейсбека подряд.
+        #
+        # `--no-deps` обязателен: без него pip тянет за construct зависимости и
+        # может снова сдвинуть версию, ради которой всё и делается.
+        #
+        # ВОССТАНОВЛЕНО 23.08.2026. Этот блок уже был здесь в 3.6.3 (89487d7) и
+        # исчез в 30bfb0b: правка писалась поверх устаревшей копии файла и снесла
+        # главную правку релиза заодно со своей целью. На этот раз покрыто
+        # tests/test_fix_deps.py — тест читает ИСХОДНИК этой функции, поэтому
+        # следующая такая запись упадёт, а не уедет в релиз молча.
+        rc3, o3 = await _setup.irun([sys.executable, "-m", "pip", "install",
+                                      "construct==2.8.8", "--no-deps",
+                                      "--force-reinstall",
+                                      "--break-system-packages", "-q"])
+        if rc3 == 0:
+            await _setup.ilog("   ✓ construct закреплён на 2.8.8 (нужен pywidevine)", "success")
+        else:
+            await _setup.ilog(f"   ✗ construct pin failed: {o3[:100]}", "error")
+
+        # Проверка, которая МОЖЕТ провалиться: импорт, а не наличие файла.
+        rc4, o4 = await _setup.irun([sys.executable, "-c",
+            "from pywidevine.device import Device; print('WVD_IMPORT_OK')"])
+        if rc4 == 0 and "WVD_IMPORT_OK" in (o4 or ""):
+            await _setup.ilog("   ✓ pywidevine импортируется — Apple сможет качать", "success")
+        else:
+            await _setup.ilog("   ✗ pywidevine НЕ импортируется — загрузки Apple упадут "
+                              f"на старте: {(o4 or '')[-160:]}", "error")
         rc_v, verify_out = await _setup.irun([sys.executable, "-c",
             "from gamdl.downloader import Downloader; print('gamdl OK')"])
         if rc_v == 0:
