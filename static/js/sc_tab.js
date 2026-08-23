@@ -860,7 +860,12 @@ async function playRelease(service, url, title, artist, cover) {
   }
   toast('⏳ ' + title, 'var(--muted)', '', 1800);
   try {
-    const r = await fetch(`/api/release/expand?service=${encodeURIComponent(service)}&url=${encodeURIComponent(url)}`);
+    // title/artist — не для показа, а чтобы бэкенд мог найти тот же релиз в
+    // Deezer, когда Spotify под лимитом запросов. Без них запасной путь
+    // искать нечем, и ▶ просто отказывает.
+    const r = await fetch(`/api/release/expand?service=${encodeURIComponent(service)}`
+      + `&url=${encodeURIComponent(url)}`
+      + `&title=${encodeURIComponent(title || '')}&artist=${encodeURIComponent(artist || '')}`);
     if (!r.ok) {
       const detail = await r.text().catch(() => '');
       toast(t('t.error_c') + (detail.slice(0, 120) || r.status), 'var(--red)');

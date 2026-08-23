@@ -706,6 +706,19 @@ async function api(method, path, body, timeoutMs) {
       const s = errKeyText(data.error_key, data.error_args);
       if (s) data.error = s;
     }
+    // И для «мягких» полей того же контракта. `warning` показывается тостом
+    // ПРЯМО как есть (подписка на лейбл, вишлист), `note` — под пустой выдачей.
+    // Без этой развёртки сервер обязан слать готовый текст, а он один — и
+    // английский интерфейс получает русскую фразу. Русские `warning`/`note`
+    // сервер слать не перестаёт: их читают бот и healthcheck.
+    if (data && data.warning_key) {
+      const s = errKeyText(data.warning_key, data.warning_args);
+      if (s) data.warning = s;
+    }
+    if (data && data.note_key) {
+      const s = errKeyText(data.note_key, data.note_args);
+      if (s) data.note = s;
+    }
     return data;
   } catch (_) {
     throw new Error(!r.ok ? `${t('t.server_down')} (HTTP ${r.status})` : t('t.bad_server_resp'));

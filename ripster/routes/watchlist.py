@@ -201,7 +201,7 @@ async def api_watchlist_add(body: dict):
     if kind == "label":
         if not name:
             raise HTTPException(400, imsg("err.label_name_required", "название лейбла обязательно"))
-        rels = await _label_releases(name, 10)
+        rels, lbl_info = await _label_releases_ex(name, 10)
         entry = {
             "id":           f"wl_{int(datetime.now().timestamp()*1000)}",
             "name":         name,
@@ -221,11 +221,31 @@ async def api_watchlist_add(body: dict):
         }
         _s["items"].append(entry)
         _s["save"](_s["items"])
+        # Предупреждение говорит то, что ИЗМЕРЕНО, и на языке интерфейса.
+        #
+        # Было: «Лейбл «X» не найден в каталогах Spotify/Deezer — проверь
+        # написание». Три неправды в одной строке. Deezer не спрашивали вовсе
+        # (`_LABEL_NATIVE` — только Spotify). Лейбл, случалось, был НАЙДЕН, и
+        # выдача пустела на шаге сверки. А совет указывал на опечатку человека,
+        # хотя отказывала наша проверка. Плюс строка была русской в коде, то есть
+        # английский интерфейс всё равно получал русский текст.
+        warn_key, warn_args, warn_ru = "", {}, ""
+        if not rels:
+            if lbl_info.get("verify_failed"):
+                n = int(lbl_info.get("candidates") or 0)
+                warn_key, warn_args = "wl.label_unverified", {"name": name, "n": n}
+                warn_ru = (f"Лейбл «{name}» найден ({n} релизов), но Spotify сейчас "
+                           f"не даёт подтвердить лейбл — подписка заведена, проверка "
+                           f"повторится при следующем обходе")
+            else:
+                warn_key, warn_args = "wl.label_not_found", {"name": name}
+                warn_ru = (f"Лейбл «{name}» не найден в каталоге Spotify — "
+                           f"проверь написание, иначе отслеживать нечего")
         return {"ok": True, "item": entry, "resolved": bool(rels),
                 "found": len(rels),
-                "warning": ("" if rels else
-                            f"Лейбл «{name}» не найден в каталогах Spotify/Deezer — "
-                            f"проверь написание, иначе отслеживать нечего")}
+                "verify_failed": bool(lbl_info.get("verify_failed")),
+                "warning_key": warn_key, "warning_args": warn_args,
+                "warning": warn_ru}
 
     resolved = await _resolve_target(name, url, service, artist_id)
 
@@ -569,7 +589,7 @@ async def api_label_detail(name: str, limit: int = Query(60, ge=1, le=200)):
     name = (name or "").strip()
     if not name:
         raise HTTPException(400, imsg("err.label_name_required", "название лейбла обязательно"))
-    rels = await _label_releases(name, limit)
+    rels, lbl_info = await _label_releases_ex(name, limit)
     releases = [{
         "id":      str(r.get("id") or r.get("url") or ""),
         "title":   r.get("title", ""),
@@ -586,9 +606,13 @@ async def api_label_detail(name: str, limit: int = Query(60, ge=1, le=200)):
     watched = any(e.get("kind") == "label"
                   and (e.get("name") or "").strip().lower() == name.lower()
                   for e in (_s.get("items") or []))
+    # Пустая страница лейбла обязана сказать, ПОЧЕМУ она пустая: «такого лейбла
+    # нет» и «сверка сейчас не работает» выглядят одинаково, а значат разное.
     return {"ok": True,
             "label": {"name": name, "watched": watched,
                       "releases_total": len(releases),
+                      "verify_failed": bool(lbl_info.get("verify_failed")),
+                      "candidates": int(lbl_info.get("candidates") or 0),
                       "service": (releases[0]["service"] if releases else "spotify")},
             "releases": releases}
 
@@ -877,15 +901,29 @@ async def _label_releases(label: str, limit: int = 20) -> list[dict]:
     monitoring source regardless of where the user wants the files from.
     Sorted by release date because those APIs return by relevance, and a
     relevance-ordered list would make an old album look like a new release."""
+    rels, _ = await _label_releases_ex(label, limit)
+    return rels
+
+
+async def _label_releases_ex(label: str, limit: int = 20) -> tuple[list[dict], dict]:
+    """`_label_releases` + ПРИЧИНА, по которой список получился таким.
+
+    Пустой список раньше означал ровно одно сообщение человеку: «лейбл не найден,
+    проверь написание». Но пустота бывает двух совершенно разных сортов, и
+    23.08.2026 сработала вторая: у «Balance Music» поиск Spotify отдал десять
+    релизов лейбла, а подтвердить их не вышло — `/v1/albums?ids=` отвечает 403,
+    `/v1/albums/{id}` отвечает 429. Существующий лейбл был объявлен опечаткой, и
+    совет «проверь написание» указывал на человека, тогда как сломана была наша
+    проверка. `info` даёт вызывающему различить эти случаи."""
     from ripster.routes import discovery as _disc
     try:
-        seeds = await _disc._label_seeds(label, limit)
+        seeds, info = await _disc._label_seeds_ex(label, limit)
     except Exception as e:
         print(f"[watchlist] label «{label}» lookup failed: {e}", flush=True)
-        return []
+        return [], {"candidates": 0, "verify_failed": False, "error": str(e)}
     seeds = [s for s in seeds if (s.get("date") or s.get("year"))]
     seeds.sort(key=lambda s: str(s.get("date") or s.get("year") or ""), reverse=True)
-    return seeds
+    return seeds, info
 
 
 async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> int:

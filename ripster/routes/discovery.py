@@ -59,6 +59,26 @@ def _sp_rate_limit_msg() -> str:
     return f"лимит запросов Spotify — блокировка на {hrs} ч{tail} (слишком много запросов к API)"
 
 
+def _sp_rate_limit_i18n() -> tuple[str, dict]:
+    """Тот же текст, но ключом и числами — чтобы английский интерфейс не получал
+    русскую фразу. Русский `error` рядом остаётся: его читают бот и healthcheck,
+    живущие в русской среде."""
+    remaining = int(_sp_rate_limit_until - _time.time())
+    if remaining <= 0:
+        return "err.sp_rl_now", {}
+    if remaining < 120:
+        return "err.sp_rl_sec", {"s": remaining}
+    if remaining < 3600:
+        return "err.sp_rl_min", {"m": (remaining + 59) // 60}
+    return "err.sp_rl_hr", {"h": remaining // 3600, "m": (remaining % 3600) // 60}
+
+
+def _sp_rate_limit_payload() -> dict:
+    """Готовые поля отказа по лимиту: русский текст + ключ + подстановки."""
+    key, args = _sp_rate_limit_i18n()
+    return {"error": _sp_rate_limit_msg(), "error_key": key, "error_args": args}
+
+
 def _sp_is_rate_limited() -> bool:
     return _time.time() < _sp_rate_limit_until
 
@@ -464,6 +484,19 @@ def _label_matches(value: str, wanted: str) -> bool:
 # и дальше не перепроверяется в пределах запуска.
 _SP_ALBUMS_BATCH_OK = True
 
+# Сколько релизов сверяем ПОШТУЧНО за один вызов, когда пакетный запрос запрещён.
+#
+# Поштучный обход задумывался как фоллбэк на 403, но фоллбэк без потолка — это не
+# фоллбэк, а два порядка запросов: радар зовёт сверку на каждый лейбл с limit=40,
+# двадцать два лейбла дают до 880 одиночных запросов за обход. Токен на этом
+# сгорел (12-часовой Retry-After, 23.08.2026).
+#
+# Потолок не теряет данные: `_sp_label_cache` живёт всё время работы процесса,
+# поэтому следующий обход досверяет следующую порцию, и через несколько проходов
+# подтверждено всё. Лучше подтверждать постепенно, чем один раз и потом сутки
+# вообще ничего.
+_SP_SINGLE_VERIFY_CAP = 10
+
 
 def _label_from_album(alb: dict) -> str:
     """Имя лейбла из ответа `/v1/albums/{id}`.
@@ -491,7 +524,7 @@ def _label_from_album(alb: dict) -> str:
     return ""
 
 
-async def _sp_real_labels(ids: list[str]) -> dict:
+async def _sp_real_labels(ids: list[str]) -> tuple[dict, bool]:
     """Настоящий label релизов Spotify. `/v1/search` его НЕ отдаёт, `/v1/albums`
     отдаёт.
 
@@ -508,15 +541,29 @@ async def _sp_real_labels(ids: list[str]) -> dict:
     от «проверка не работала», поэтому код ответа теперь пишется в лог.
 
     Кэш вечный: лейбл выпущенного релиза не меняется, а один и тот же лейбл
-    опрашивается и радаром, и вотчлистом, и страницей лейбла."""
+    опрашивается и радаром, и вотчлистом, и страницей лейбла.
+
+    ВОЗВРАЩАЕТ ПАРУ `(labels, verified)`. Второе — «сверка вообще смогла
+    отработать». Без него отказ ПРОВЕРКИ неотличим от вердикта «лейбл не тот», и
+    вызывающий выбрасывает найденное, а человеку говорит «не найдено, проверь
+    написание». Замерено 23.08.2026 на «Balance Music»: `/v1/search` тем же
+    токеном отвечает 200 и отдаёт 10 релизов лейбла, `/v1/albums?ids=` — 403,
+    `/v1/albums/{id}` — 429 без `Retry-After`. То есть подтвердить нельзя НИ
+    ОДИН, и лейбл, существующий во всех каталогах, объявлялся опечаткой."""
     want = [i for i in ids if i and i not in _sp_label_cache]
+    verified = True
     if want:
         token = await _get_spotify_app_token()
         if not token:
             print("[label] verify skipped: нет app-токена Spotify "
                   "(spotify-client-id/secret не заданы)", flush=True)
-            return {i: _sp_label_cache.get(i, "") for i in ids}
+            return {i: _sp_label_cache.get(i, "") for i in ids}, False
         h = {"Authorization": f"Bearer {token}"}
+        # Уже под баном — не долбимся. Каждый запрос в стену 429 ПРОДЛЕВАЕТ бан,
+        # а ответа всё равно не будет.
+        if _sp_is_rate_limited():
+            print(f"[label] verify skipped: {_sp_rate_limit_msg()}", flush=True)
+            return {i: _sp_label_cache.get(i, "") for i in ids}, False
         try:
             async with _HTTP.ashared() as c:
                 # Флаг ЗАПОМИНАЕТСЯ на процесс: обход лейблов делает по запросу
@@ -537,19 +584,42 @@ async def _sp_real_labels(ids: list[str]) -> dict:
                         batch_ok = _SP_ALBUMS_BATCH_OK = False
                         print(f"[label] batch /v1/albums -> HTTP {r.status_code}, "
                               f"перехожу на поштучный запрос", flush=True)
+                    if len(chunk) > _SP_SINGLE_VERIFY_CAP:
+                        # Остаток не «не сошёлся», а «не проверен» — поэтому
+                        # verified=False, и вызывающий не выдаст пустоту за вердикт.
+                        verified = False
+                        chunk = chunk[:_SP_SINGLE_VERIFY_CAP]
                     for one in chunk:
                         r1 = await c.get(f"https://api.spotify.com/v1/albums/{one}",
                                          headers=h)
+                        if r1.status_code == 429:
+                            # ЗДЕСЬ и сгорал токен. Поштучный обход — фоллбэк на
+                            # 403 пакетного запроса (3.6.3), и он получился без
+                            # тормоза: радар зовёт `_label_releases(name, 40)` на
+                            # КАЖДЫЙ лейбл, 22 лейбла = до 880 одиночных запросов
+                            # за обход. Первый же 429 не останавливал цикл, и
+                            # оставшиеся сотни запросов летели в стену, продлевая
+                            # бан. 23.08.2026 Spotify выдал Retry-After на 12 часов.
+                            # Теперь: записываем бан и ВЫХОДИМ, а не продолжаем.
+                            _record_sp_rate_limit(int(r1.headers.get("Retry-After", 3600)))
+                            print(f"[label] 429 на /v1/albums/{one} — {_sp_rate_limit_msg()}; "
+                                  f"сверка лейблов остановлена", flush=True)
+                            return ({i: _sp_label_cache.get(i, "") for i in ids}, False)
                         if r1.status_code != 200:
                             print(f"[label] /v1/albums/{one} -> HTTP {r1.status_code}",
                                   flush=True)
+                            # Отказ НАШЕЙ проверки, а не факт о релизе. 429/403
+                            # здесь массовые: если их считать «лейбл не сошёлся»,
+                            # пустеет вся выдача лейбла разом.
+                            verified = False
                             continue
                         alb = r1.json()
                         if alb.get("id"):
                             _sp_label_cache[alb["id"]] = _label_from_album(alb)
         except Exception as e:
             print(f"[label] verify failed: {e}", flush=True)
-    return {i: _sp_label_cache.get(i, "") for i in ids}
+            verified = False
+    return {i: _sp_label_cache.get(i, "") for i in ids}, verified
 
 
 async def _search_spotify_label(label: str, limit: int) -> dict:
@@ -566,9 +636,12 @@ async def _search_spotify_label(label: str, limit: int) -> dict:
     данные, и это хуже её отсутствия."""
     out = await _search_spotify(f'label:"{label}"', "album", limit)
     res = out.get("results") or []
+    out["candidates"] = len(res)
+    out["verify_failed"] = False
+    out["unverified"] = []
     if not res:
         return out
-    real = await _sp_real_labels([str(r.get("id") or "") for r in res])
+    real, verified = await _sp_real_labels([str(r.get("id") or "") for r in res])
     keep = []
     for r in res:
         got = real.get(str(r.get("id") or ""), "")
@@ -576,9 +649,18 @@ async def _search_spotify_label(label: str, limit: int) -> dict:
             r["label"] = got
             keep.append(r)
     if len(keep) != len(res):
-        print(f"[label] «{label}»: spotify отдал {len(res)}, лейбл подтверждён у {len(keep)}",
+        print(f"[label] «{label}»: spotify отдал {len(res)}, лейбл подтверждён у {len(keep)}"
+              + ("" if verified else " (сверка НЕ отработала — отказ /v1/albums)"),
               flush=True)
     out["results"] = keep
+    # Отказ сверки — не вердикт о лейбле. Отдаём его отдельно, вместе с тем, что
+    # НАШЛОСЬ, но подтвердить не удалось: без этого вызывающий видит пустой
+    # список и не может отличить «такого лейбла нет» от «Spotify не дал
+    # проверить». Именно на этой неразличимости 23.08 «Balance Music» —
+    # существующий лейбл с десятью релизами в выдаче — объявлялся опечаткой.
+    if not keep and not verified:
+        out["verify_failed"] = True
+        out["unverified"] = res
     return out
 
 
@@ -617,22 +699,45 @@ async def _search_label(q: str, service: str, limit: int, country: str = "") -> 
     #    label put out"; the target service only has to be asked "do you have
     #    this album". That gives real label results everywhere instead of
     #    name-matching, which returned almost nothing.
-    seeds = await _label_seeds(label, limit)
+    seeds, info = await _label_seeds_ex(label, limit)
     if not seeds:
+        # Две разные причины пустоты — два разных ответа. Раньше обе сводились к
+        # «проверь написание», и правильно набранный лейбл выглядел опечаткой.
+        if info.get("verify_failed"):
+            return {"results": [], "label": label, "native": False,
+                    "verify_failed": True,
+                    "candidates": info.get("candidates", 0),
+                    "note_key": "lbl.note_unverified",
+                    "note_args": {"label": label, "n": info.get("candidates", 0)},
+                    "note": (f"Релизы лейбла «{label}» нашлись ({info.get('candidates', 0)}), "
+                             f"но Spotify сейчас не даёт проверить лейбл — показать их "
+                             f"как подтверждённые нельзя")}
         return {"results": [], "label": label, "native": False,
+                "note_key": "lbl.note_not_found",
+                "note_args": {"label": label},
                 "note": f"Не нашёл релизов лейбла «{label}» — проверь написание"}
 
     found = await _match_seeds_in_service(seeds, service, label, limit, country)
     return {"results": found, "label": label, "native": False,
-            "matched_from": "spotify/deezer",
+            "matched_from": "spotify",
+            "note_key": ("" if found else "lbl.note_no_match_in_svc"),
+            "note_args": {"service": service},
             "note": ("" if found else
                      f"Релизы лейбла найдены, но в {service} их сопоставить не удалось")}
 
 
-async def _label_seeds(label: str, limit: int) -> list[dict]:
-    """What the label released, from whoever can actually answer that.
-    Spotify first (best coverage), Deezer as backup and to fill gaps."""
+async def _label_seeds_ex(label: str, limit: int) -> tuple[list[dict], dict]:
+    """То же, что `_label_seeds`, но вторым значением — ПОЧЕМУ список такой.
+
+    Пустой список имеет две несовместимые причины: лейбла нет в каталоге, или
+    наша сверка не смогла отработать. Пока функция отдавала только список, обе
+    сводились к одному ответу — «не найдено, проверь написание», — и человека
+    отправляли исправлять правильно набранное имя.
+
+    `info` — {candidates, verify_failed, unverified}: сколько релизов вернул
+    поиск, сломалась ли сверка и что именно она не смогла подтвердить."""
     seeds, seen = [], set()
+    info = {"candidates": 0, "verify_failed": False, "unverified": []}
     for svc in _LABEL_NATIVE:
         try:
             out = await (_search_spotify_label(label, limit)
@@ -640,6 +745,10 @@ async def _label_seeds(label: str, limit: int) -> list[dict]:
                          _search_deezer(f'label:"{label}"', "album", limit))
         except Exception:
             continue
+        info["candidates"] += int(out.get("candidates") or len(out.get("results") or []))
+        if out.get("verify_failed"):
+            info["verify_failed"] = True
+            info["unverified"].extend(out.get("unverified") or [])
         for r in (out.get("results") or []):
             key = (_wl_norm(r.get("artist", "")), _wl_norm(r.get("title", "")))
             if key in seen or not key[1]:
@@ -648,6 +757,19 @@ async def _label_seeds(label: str, limit: int) -> list[dict]:
             seeds.append(r)
         if len(seeds) >= limit * 2:
             break
+    return seeds, info
+
+
+async def _label_seeds(label: str, limit: int) -> list[dict]:
+    """What the label released, from whoever can actually answer that.
+
+    Тонкая обёртка над `_label_seeds_ex` для мест, которым причина не нужна.
+    ВНИМАНИЕ: `_LABEL_NATIVE` сейчас — только Spotify. Deezer сюда не включён:
+    его `label:"..."` не фильтр, а подсказка ранжирования, и на «Balance Music»
+    он отдаёт 300 записей артиста «Balance Autonomic Nerves with Music Therapy».
+    Пока у нас нет строгой сверки лейбла на стороне Deezer, называть его вторым
+    каталогом в сообщениях человеку нельзя."""
+    seeds, _ = await _label_seeds_ex(label, limit)
     return seeds
 
 
@@ -1347,7 +1469,7 @@ _RE_AP_ALBUM = _re_mod.compile(r'music\.apple\.com/(?:[a-z]+/)?album/[^/]+/(\d+)
 
 
 @router.get("/api/release/expand")
-async def api_release_expand(service: str, url: str):
+async def api_release_expand(service: str, url: str, title: str = "", artist: str = ""):
     """Expand a release URL → {album, tracks} via the appropriate engine.
 
     Used by the Releases tab's ▶ play button. Returns the same shape as
@@ -1409,6 +1531,22 @@ async def api_release_expand(service: str, url: str):
     if not isinstance(d, dict):
         raise HTTPException(502, "Bad engine response")
     if d.get("error"):
+        # Spotify под лимитом — это НЕ приговор воспроизведению.
+        #
+        # Звук у Spotify-карточки и так берётся не из Spotify: треки
+        # разрешаются в ту же физическую запись на Deezer (см.
+        # `_attach_playable_sources`). То есть Spotify нужен здесь ровно за одним
+        # — за списком треков. Когда его API отказывает, спросить тот же список
+        # у Deezer напрямую дешевле, чем сказать человеку «не играет».
+        # 23.08.2026 нажатие ▶ в радаре отвечало «блокировка на 12 ч», хотя
+        # играть было откуда.
+        if service == "spotify" and _sp_is_rate_limited() and (title or artist):
+            alt = await _deezer_album_by_name(title, artist)
+            if alt:
+                return {"ok": True, "via": "deezer", **alt}
+        if d.get("error_key"):
+            raise HTTPException(502, imsg(d["error_key"], d["error"],
+                                          **(d.get("error_args") or {})))
         raise HTTPException(502, d["error"])
     # Играбельная копия по UPC нужна не только Spotify.
     #
@@ -1426,6 +1564,85 @@ async def api_release_expand(service: str, url: str):
     if service in ("spotify", "apple"):
         await _attach_playable_sources(d.get("tracks") or [], (d.get("album") or {}).get("upc", ""))
     return {"ok": True, **d}
+
+
+async def _deezer_album_by_name(title: str, artist: str) -> dict | None:
+    """Тот же релиз в Deezer по названию и артисту — запасной путь для ▶.
+
+    Точный ключ (штрихкод) здесь недоступен: он лежит в ответе Spotify, а
+    спросить Spotify мы как раз и не можем. Поэтому ищем по имени и берём
+    совпадение, у которого сошлись И артист, И название — на кнопке «слушать»
+    цена ошибки невелика, а альтернатива — тишина.
+
+    Возвращает форму `/api/album/...`, чтобы фронт не различал источники: треки
+    сразу помечены играбельными на Deezer, и фильтр в `playRelease` их не
+    вычищает."""
+    # Скобочный хвост («(Mixed Version)», «[Deluxe Edition]») ломает поиск
+    # Deezer: по полному названию он отдаёт НОЛЬ, по обрезанному — три точных
+    # попадания. Замерено 23.08.2026 на «Balance presents Sunsetstrip (Mixed
+    # Version)»: 0 против 3. Поэтому пробуем от точного к обрезанному, а не
+    # одним запросом.
+    bare = _re_mod.sub(r"\s*[\(\[][^)\]]*[\)\]]\s*$", "", title or "").strip()
+    queries = []
+    for t in (title, bare):
+        if not t:
+            continue
+        for q_ in (" ".join(x for x in (artist, t) if x).strip(), t.strip()):
+            if q_ and q_ not in queries:
+                queries.append(q_)
+    if not queries:
+        return None
+    want_t, want_a = _wl_norm(title), _wl_norm(artist)
+    want_bare = _wl_norm(bare)
+    try:
+        async with _HTTP.ashared() as c:
+            alb = None
+            for q in queries:
+                r = await c.get("https://api.deezer.com/search/album",
+                                params={"q": q, "limit": 5})
+                if r.status_code != 200:
+                    continue
+                hits = (r.json() or {}).get("data") or []
+                for h in hits:
+                    ht = _wl_norm(h.get("title", ""))
+                    ha = _wl_norm((h.get("artist") or {}).get("name", ""))
+                    if not ht or not ha:
+                        continue
+                    t_ok = any(ht == w or (w and (ht.startswith(w) or w.startswith(ht)))
+                               for w in (want_t, want_bare) if w)
+                    a_ok = (not want_a) or ha == want_a                         or ha.startswith(want_a) or want_a.startswith(ha)
+                    if t_ok and a_ok:
+                        alb = h
+                        break
+                if alb:
+                    break
+            if not alb:
+                return None
+            tr = await c.get(f"https://api.deezer.com/album/{alb['id']}/tracks",
+                             params={"limit": 200})
+            if tr.status_code != 200:
+                return None
+            dz = (tr.json() or {}).get("data") or []
+    except Exception:
+        return None
+    if not dz:
+        return None
+    cover = alb.get("cover_medium") or alb.get("cover") or ""
+    return {
+        "album": {"id": str(alb.get("id")), "title": alb.get("title", ""),
+                  "artist": (alb.get("artist") or {}).get("name", ""),
+                  "cover": cover, "service": "deezer"},
+        "tracks": [{
+            "id": str(t.get("id")), "title": t.get("title", ""),
+            "artist": (t.get("artist") or {}).get("name", ""),
+            "disc": t.get("disk_number") or 1,
+            "track_no": t.get("track_position"),
+            "duration": t.get("duration") or 0,
+            "artwork": cover,
+            "url": t.get("link", ""),
+            "playable_service": "deezer", "playable_id": str(t.get("id")),
+        } for t in dz if t.get("id")],
+    }
 
 
 async def _attach_playable_sources(tracks: list, upc: str) -> None:
@@ -1604,7 +1821,7 @@ def _sp_cover(images: list) -> str:
 
 async def _search_spotify(q: str, ent: str, limit: int) -> dict:
     if _sp_is_rate_limited():
-        return {"results": [], "error": _sp_rate_limit_msg()}
+        return {"results": [], **_sp_rate_limit_payload()}
     token = await _get_spotify_app_token()
     if not token:
         return {"results": [], "error_key": "err.sp_not_configured", "error": "Spotify API не настроен — добавь Client ID/Secret в Settings → Spotify"}
@@ -1628,7 +1845,7 @@ async def _search_spotify(q: str, ent: str, limit: int) -> dict:
                 return {"results": [], "error_key": "err.sp_token_expired", "error": "Spotify: токен истёк, попробуй снова"}
             if r.status_code == 429:
                 _record_sp_rate_limit(int(r.headers.get("Retry-After", 30)))
-                return {"results": [], "error": _sp_rate_limit_msg()}
+                return {"results": [], **_sp_rate_limit_payload()}
             if not r.content:
                 return {"results": [], "error": f"Spotify API: HTTP {r.status_code}"}
             data = r.json()
@@ -1698,7 +1915,7 @@ async def _artist_spotify(artist_id: str, types: str) -> dict:
         return cached
     if _sp_is_rate_limited():
         if cached: return cached
-        return {"error": _sp_rate_limit_msg(), "releases": []}
+        return {"releases": [], **_sp_rate_limit_payload()}
 
     token = await _get_spotify_app_token()
     if not token:
@@ -1714,7 +1931,7 @@ async def _artist_spotify(artist_id: str, types: str) -> dict:
             if info_r.status_code == 429:
                 _record_sp_rate_limit(int(info_r.headers.get("Retry-After", 30)))
                 if cached: return cached
-                return {"error": _sp_rate_limit_msg(), "releases": []}
+                return {"releases": [], **_sp_rate_limit_payload()}
             if not info_r.content:
                 return {"error_key": "err.sp_empty_resp", "error": "Spotify API: пустой ответ", "releases": []}
             info = info_r.json()
@@ -1725,7 +1942,7 @@ async def _artist_spotify(artist_id: str, types: str) -> dict:
             if alb_r.status_code == 429:
                 _record_sp_rate_limit(int(alb_r.headers.get("Retry-After", 30)))
                 if cached: return cached
-                return {"error": _sp_rate_limit_msg(), "releases": []}
+                return {"releases": [], **_sp_rate_limit_payload()}
             if not alb_r.content:
                 return {"error_key": "err.sp_empty_resp", "error": "Spotify API: пустой ответ", "releases": []}
             alb_data = alb_r.json()
@@ -1773,7 +1990,7 @@ async def _album_spotify(album_id: str) -> dict:
         return cached
     if _sp_is_rate_limited():
         if cached: return cached
-        return {"error": _sp_rate_limit_msg()}
+        return _sp_rate_limit_payload()
 
     token = await _get_spotify_app_token()
     if not token:
@@ -1789,7 +2006,7 @@ async def _album_spotify(album_id: str) -> dict:
                 _record_sp_rate_limit(int(r.headers.get("Retry-After", 10)))
                 if cached:
                     return cached
-                return {"error": _sp_rate_limit_msg()}
+                return _sp_rate_limit_payload()
             if not r.content:
                 return {"error_key": "err.sp_empty_resp_http", "error_args": {"code": r.status_code}, "error": f"Spotify API: пустой ответ (HTTP {r.status_code})"}
             a = r.json()
