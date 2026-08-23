@@ -1045,6 +1045,36 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
         return {"ok": False, "error_key": "pr.net", "error_args": {"e": str(e)}, "error": f"Сеть: {e}"}
 
     if r.status_code == 401:
+        # 401 НЕ значит «твои токены протухли». Веб-API Apple умеет отказывать
+        # целому адресу: 22.08.2026 он отвечал 401 на ЛЮБОЙ запрос с этой
+        # машины — включая запрос вовсе БЕЗ токенов и включая запрос изнутри
+        # живой страницы music.apple.com в настоящем Chrome. Загрузки при этом
+        # работали: у Go-загрузчика свой путь получения токена, и альбом в тот
+        # же час скачался целиком, 1 из 1, без единой ошибки.
+        #
+        # Разница в цене диагноза огромная: «обнови токены» посылает человека
+        # заново их добывать — и это ничего не меняет, потому что менять нечего.
+        # Поэтому прежде чем обвинять токены, спрашиваем то же самое БЕЗ них.
+        # Если и голый запрос получает отказ — виноваты не токены, а адрес.
+        blind = None
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                br = await c.get(
+                    "https://api.music.apple.com/v1/catalog/us/albums/1440857781",
+                    headers={"Origin": "https://music.apple.com",
+                             "Referer": "https://music.apple.com/"},
+                )
+            blind = br.status_code
+        except Exception as e:
+            print(f"[apple] control request failed: {e}", flush=True)
+        if blind in (401, 403):
+            return {"ok": False,
+                    "error_key": "pr.ap_api_blocked",
+                    "error_args": {"code": blind},
+                    "error": (f"Веб-API Apple отказывает этому адресу (контрольный запрос "
+                              f"БЕЗ токенов тоже получил {blind}). Токены обновлять "
+                              f"бесполезно — менять нечего. На загрузку это не влияет: "
+                              f"у неё свой путь получения токена.")}
         return {"ok": False,
                 "error_key": "pr.ap_bad_tokens", "error": "Токены недействительны. Обнови MUT и Bearer в Settings → Apple Music."}
     if r.status_code == 403:

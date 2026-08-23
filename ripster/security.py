@@ -21,6 +21,9 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "nudges-",              # подсказки в простое
     "webview-hw-accel", "webview-browser-args",   # ускорение окна
     "apple-local-only-strict",                     # запрет AMD-подхвата при local-only
+    "upcoming-",            # лента грядущих релизов: включение и её настройки.
+                            # Без этой строки переключатель молча ничего не делает —
+                            # ровно тот класс, что уже ловили самопроверкой 02.08.
     "quality", "engine", "language", "font", "theme",
     "embed-", "save-path", "cover-", "lrc-", "lyric",
     "truncate",

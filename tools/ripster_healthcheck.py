@@ -669,7 +669,15 @@ def check_engine_probe():
             warn("Не смог опросить сервисы")
         return
 
-    down = []
+    # Отказы, при которых ЗАГРУЗКА продолжает работать: у неё свой путь, а
+    # упала лишь метадата-часть. Валить их в «НЕ РАБОТАЮТ» — враньё прибора:
+    # 23.08.2026 проба писала «apple: сервис не работает», пока ночью Apple
+    # выкачал 29/29 треков без единой ошибки. Веб-API Apple отказывает адресу
+    # (401 даже на запрос БЕЗ токенов), и сама проба это честно объясняет —
+    # объяснение просто не доживало до отчёта.
+    _DEGRADED_KEYS = {"pr.ap_api_blocked"}
+
+    down, degraded = [], []
     for s in services:
         if not isinstance(s, dict) or s.get("ok"):
             continue
@@ -680,10 +688,19 @@ def check_engine_probe():
         # постоянно красной, и на неё перестанут смотреть).
         if name == "amazon" and ("amz.dezalty.com" in err or "503" in err):
             continue
-        down.append(f"{name}: {err[:70]}")
+        # 70 символов обрезали объяснение ровно на полуслове — владелец читал
+        # «контрольный запрос БЕЗ токенов » и терял вторую половину фразы,
+        # ту самую, которая меняет вердикт. Хвост дороже краткости.
+        line = f"{name}: {err[:200]}"
+        if str(s.get("error_key") or "") in _DEGRADED_KEYS:
+            degraded.append(line)
+        else:
+            down.append(line)
     if down:
         warn("Сервисы НЕ РАБОТАЮТ (живая проба): " + " · ".join(down))
-    else:
+    if degraded:
+        warn("Метаданные недоступны, ЗАГРУЗКА работает: " + " · ".join(degraded))
+    if not down and not degraded:
         ok(f"Сервисы отвечают по-настоящему ({len(services)} проверено)")
 
 
@@ -1145,7 +1162,19 @@ _ERR_BUCKETS = [
     # полностью здоровой авторизации (29.07.2026: 2 строки лирики + 1 попытка
     # blob'а 1/4, которая сама же и пересоздалась). Держать ПЕРЕД spotify-auth.
     ("spotify-lyrics",      ("color-lyrics", "error fetching spotify lyrics")),
-    ("spotify-auth",        ("orpheus_not_authed", "gettrack", "401", "spotify", "attribute 'download_type'")),
+    # Трек недоступен учётке (лицензия/регион) — НЕ отказ авторизации. Цепочка из
+    # одного такого трека печатает ЧЕТЫРЕ строки: SpotifyTrackUnavailableError,
+    # «Track/Episode is unavailable», попытку добрать его как эпизод (404
+    # Extended Metadata) и падение `'NoneType' has no attribute 'download_type'`.
+    # Все четыре содержали "spotify"/"401"/"download_type" и падали в spotify-auth:
+    # 16.08.2026 бакет показал spotify-auth×137 при полностью живой авторизации
+    # (Bearer свежий, sp-keeper минтит каждые 45 мин) — из них 120+ строк были
+    # этой недоступностью, и настоящий отказ входа в такой куче не разглядеть.
+    # Держать ПЕРЕД spotify-auth — как spotify-lyrics выше и по той же причине.
+    ("spotify-unavailable", ("cannot get alternative track", "is unavailable on spotify",
+                             "spotifytrackunavailableerror", "attribute 'download_type'",
+                             "extended metadata request failed")),
+    ("spotify-auth",        ("orpheus_not_authed", "gettrack", "401", "spotify")),
     ("qobuz-sub",           ("нет активной подписки", "ineligible")),
     # Beatport отвечает 403 «You do not have permission to perform this action» на
     # запросе ПОТОКА (логин при этом проходит, подписка активна) — это права на
@@ -1225,6 +1254,35 @@ def check_retry_storms():
         # (ровно так и вышло 10.08: все 5 инцидентов были от 09.08 17:10–17:45,
         # правка легла в 22:48, приложение перезапущено в 23:49).
         app_ts = _app_started_ts()
+
+        def _ts(ln):
+            m = _re.match(r"(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)", ln)
+            if not m:
+                return 0.0
+            try:
+                return datetime.strptime(m.group(1), "%Y-%m-%d %H:%M:%S").timestamp()
+            except Exception:
+                return 0.0
+
+        # ВТОРОЙ счётчик, не зависящий от формулировки движка. Первый (ниже)
+        # заякорен на «Прогон прерван», то есть ловит только случай «движок вынес
+        # вердикт, а раннер его выбросил». Но докстрока этой проверки обещает
+        # ловить СИМПТОМ — «раннер объявил повтор, уже имея ноль файлов», — а он
+        # бывает и без всякого вердикта: 15.08.2026 gamdl упал детерминированным
+        # `KeyError: AUDIO-SESSION-KEY-IDS` (экспериментальный кодек без wrapper'а),
+        # никакого «прогон прерван» не печатал, раннер увидел обычную частичную
+        # загрузку и пошёл на повтор — 0 файлов, повторы по кругу, а сводка
+        # написала «Повторов вхолостую нет». Проверка, которая обещает симптом, а
+        # проверяет формулировку, — ровно тот мёртвый детектор, ради которого её и
+        # заводили. Якорь по РУССКОЙ строке намеренно: консоль одноязычная
+        # (`console.partial_retry` в ripster/i18n.py), английской формы в логе нет.
+        _zero_all = [ln for ln in fresh if _re.search(r"Частично:\s*0\s+скачано", ln)]
+        zero_retry = sum(
+            1 for ln in _zero_all
+            if not app_ts or not _ts(ln) or _ts(ln) >= app_ts
+        )
+        zero_old = len(_zero_all) - zero_retry
+
         storms = live = 0
         for i, ln in enumerate(fresh):
             if "Прогон прерван" not in ln:
@@ -1253,11 +1311,19 @@ def check_retry_storms():
                  f"не узнала отказ. С 10.08 раннер читает сам вердикт движка (`abort_reason`) "
                  f"помимо `_RE_NO_RETRY` — если счёт живой, вердикт до раннера не доходит: "
                  f"grep «Прогон прерван» в logs/console.log")
-        elif live:
-            ok(f"Повторы вхолостую: {live} — единичные, отсечка в целом держит")
-        elif storms:
-            ok(f"Повторы вхолостую: {storms} за сутки, но все ДО перезапуска app.py — "
-               f"под текущим кодом ни одного, окно дочистится само")
+        elif zero_retry >= 3:
+            warn(f"Повторы вхолостую: {zero_retry} раз за сутки раннер пошёл на повтор, "
+                 f"имея НОЛЬ скачанных треков. Вердикта «прогон прерван» при этом не было — "
+                 f"значит, движок упал так, что отсечка его не распознала (15.08 это был "
+                 f"детерминированный KeyError gamdl на экспериментальном кодеке). Повтор "
+                 f"осмыслен, только если второй проход что-то добирает: grep «Частично: 0 "
+                 f"скачано» в logs/console.log и посмотри причину выше по логу")
+        elif live or zero_retry:
+            _z = f", из них без вердикта движка: {zero_retry}" if zero_retry else ""
+            ok(f"Повторы вхолостую: {live + zero_retry} — единичные, отсечка в целом держит{_z}")
+        elif storms or zero_old:
+            ok(f"Повторы вхолостую: {storms + zero_old} за сутки, но все ДО перезапуска "
+               f"app.py — под текущим кодом ни одного, окно дочистится само")
         else:
             ok("Повторов вхолостую нет — отсечка безнадёжных прогонов работает")
     except Exception as e:

@@ -55,6 +55,9 @@ def install(app, ctx) -> None:
         "cache_file": ctx.base_dir / "radar_cache.json",
         "favs_file":  ctx.base_dir / "rel_favorites.json",
         "store_file": ctx.base_dir / "radar_store.json",
+        # Отдельный файл: у грядущего релиза другой жизненный цикл —
+        # он не «выпал из окна источника», он однажды ВЫХОДИТ.
+        "upcoming_file": ctx.base_dir / "upcoming_store.json",
     })
     _load_cache()
     app.include_router(router)
@@ -337,6 +340,169 @@ async def releases_bbc(days: int = Query(90, ge=1, le=365),
     releases = _durable_merge("bbc", releases, days)
     return _store(key, {"ok": True, "releases": releases,
                         "sources": len(BRANDS)})
+
+
+# ── Грядущие релизы ───────────────────────────────────────────────────────────
+# Радар показывает ВЫШЕДШЕЕ и отсекает будущее строкой `date > today` (см.
+# releases_apple). При этом предзаказы в каталоге УЖЕ ЕСТЬ — Apple отдаёт их
+# вместе с остальным, и Ripster их выбрасывал. Здесь тот же самый обход, только
+# берётся ровно то, что там отбрасывалось.
+#
+# Ни одного нового парсера: источники — те, чей разбор в проекте уже работает на
+# живых данных. Контракт записи и запрет изданиям заводить записи — в
+# ripster/upcoming.py.
+
+@router.get("/api/releases/upcoming")
+async def releases_upcoming(days: int = Query(120, ge=1, le=400),
+                            force: int = Query(0)):
+    """Что ещё НЕ вышло — по артистам и лейблам вотчлиста.
+
+    `days` здесь смотрит ВПЕРЁД, в отличие от остальных ручек радара, где он
+    смотрит назад. Имя то же намеренно: для человека это «окно», и разворот
+    смысла у одного и того же параметра запутал бы сильнее, чем помог.
+    """
+    from ripster import upcoming as _up
+
+    cfg = _s.get("config") or {}
+    if cfg.get("show-upcoming") is not True:
+        return {"ok": True, "releases": [], "sources": 0, "hint": "upcoming_off",
+                "registry": _up.source_report()}
+
+    key = f"upcoming|{days}"
+    if not force:
+        hit = _serve_or_refresh(key, lambda: releases_upcoming(days=days, force=1))
+        if hit is not None:
+            return hit
+
+    import httpx
+    from ripster.routes.watchlist import _apple_artist_collections, _label_releases
+
+    today = datetime.now().strftime("%Y-%m-%d")
+    horizon = (datetime.now() + timedelta(days=days)).strftime("%Y-%m-%d")
+    fresh: list = []
+    used: set = set()
+
+    # ── Apple: предзаказы по артистам вотчлиста ───────────────────────────────
+    entries = [e for e in _watch_entries("apple") if e.get("artist_id")]
+    storefront = cfg.get("storefront", "us") or "us"
+    with_comps = cfg.get("watchlist-compilations", True) is not False
+    if entries:
+        sem = asyncio.Semaphore(4)
+
+        async def _one_apple(client, entry: dict) -> list:
+            async with sem:
+                try:
+                    rels = await _apple_artist_collections(
+                        client, entry["artist_id"], storefront, with_comps)
+                except Exception as e:
+                    print(f"[upcoming] apple {entry.get('name')}: {e}", flush=True)
+                    return []
+            out = []
+            for x in rels:
+                raw = str(x.get("date") or "")
+                url = x.get("url", "")
+                if not url:
+                    continue          # без ссылки запись не предъявить
+                r = _up.make_record(
+                    src="apple", src_url=url, date_raw=raw,
+                    ident=url, title=x.get("name", ""),
+                    artist=x.get("artist") or entry.get("name", ""),
+                    artist_id=entry.get("artist_id", ""),
+                    cover=x.get("cover", ""), url=url, service="apple",
+                    type="compilation" if x.get("compilation") else "album")
+                if r and today < (r.get("date") or "") <= horizon:
+                    out.append(r)
+            return out
+
+        async with httpx.AsyncClient(timeout=20) as client:
+            got = await asyncio.gather(*(_one_apple(client, e) for e in entries))
+        for lst in got:
+            fresh.extend(lst)
+        used.add("apple")
+
+    # ── Лейблы: тот же источник, что и у блока лейблов радара ────────────────
+    labels = [e for e in (_s.get("watchlist") or [])
+              if e.get("kind") == "label" and str(e.get("name") or "").strip()]
+    for entry in labels[:20]:
+        name = str(entry["name"]).strip()
+        try:
+            rels = await _label_releases(name, 40)
+        except Exception as e:
+            print(f"[upcoming] label {name}: {e}", flush=True)
+            continue
+        for x in rels:
+            raw = str(x.get("date") or x.get("year") or "")
+            url = x.get("url", "")
+            sid = str(x.get("id") or "")
+            if not (url or sid):
+                continue
+            r = _up.make_record(
+                src="label", src_url=url or f"spotify:album:{sid}",
+                date_raw=raw, ident=sid or url,
+                title=x.get("title", ""), artist=x.get("artist", ""),
+                cover=x.get("cover", ""), url=url, label=name,
+                service=x.get("service") or "spotify", via_label=True)
+            if r and today < (r.get("date") or "") <= horizon:
+                fresh.append(r)
+        used.add("label")
+
+    # ── Слияние, склад, «наступило» ──────────────────────────────────────────
+    merged = _up.merge(fresh)
+    path = _s.get("upcoming_file")
+    store = _up.load(path)
+    added = _up.put(store, merged)
+    released = _up.promote_released(store, today)
+    _up.save(path, store)
+
+    out = [r for r in store.values()
+           if not r.get("released") and today < (r.get("date") or "") <= horizon]
+    out.sort(key=lambda r: r.get("date", ""))
+
+    if added or released:
+        print(f"[upcoming] источников {len(used)}, новых {added}, "
+              f"наступило {len(released)}, в окне {len(out)}", flush=True)
+
+    return _store(key, {
+        "ok": True, "releases": out, "sources": len(used),
+        # Числа, а не «готово»: обход без счётчика неотличим от обхода вхолостую.
+        "added": added, "released_today": released,
+        "registry": _up.source_report(),
+    })
+
+
+@router.get("/api/releases/upcoming/suggest")
+async def releases_upcoming_suggest(days: int = Query(120, ge=1, le=400)):
+    """Кого стоило бы добавить в вотчлист: грядущее у НЕотслеживаемых артистов,
+    чей жанр совпал с профилем вкуса.
+
+    Отдаёт предложения, а не подписывает. Автоподписка по совпадению жанра —
+    действие по догадке: разметка жанров в каталогах грубая, а цена ошибки
+    несимметрична (лишний лейбл — это десятки автозагрузок в месяц). У каждого
+    предложения написано, ПОЧЕМУ оно предложено.
+    """
+    from ripster import upcoming as _up
+    base = await releases_upcoming(days=days)
+    if not base.get("ok") or base.get("hint"):
+        return {"ok": True, "suggest": [], "hint": base.get("hint")}
+    wl = _s.get("watchlist") or []
+    watched_ids = {str(e.get("artist_id")) for e in wl if e.get("artist_id")}
+    watched_names = {_up._norm(e.get("name")) for e in wl if e.get("name")}
+    genres: list = []
+    try:
+        # Именно build_profile и именно await: функция асинхронная, и мой первый
+        # заход звал несуществующую `profile()` — вернулось бы пусто, а выглядело
+        # бы как «у человека нет вкусового профиля». Проверено по коду digs.py.
+        from ripster import digs as _digs
+        prof = await _digs.build_profile(limit=40, with_genres=True)
+        genres = [g.get("genre") for g in (prof.get("genres") or []) if g.get("genre")]
+    except Exception as e:
+        print(f"[upcoming] профиль вкуса недоступен: {e}", flush=True)
+    if not genres:
+        # Честный отказ вместо предложений наугад: без профиля «совпало по
+        # жанру» означало бы «совпало ни с чем».
+        return {"ok": True, "suggest": [], "hint": "no_profile"}
+    sug = _up.suggest(base.get("releases") or [], watched_ids, watched_names, genres)
+    return {"ok": True, "suggest": sug, "genres": genres}
 
 
 # ── SoundCloud ────────────────────────────────────────────────────────────────
