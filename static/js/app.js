@@ -224,8 +224,11 @@ async function pullQueue() {
 function handleMessage(msg) {
   // Resolve any Setup-checklist waiter keyed on this message type (e.g. a
   // 'soundcloud_installed' that unblocks the next component in installSelected).
+  // Ждущему отдаём СООБЩЕНИЕ, а не голый сигнал: установка компонента
+  // сообщает исход (`state`: already | installed | failed) и причину отказа,
+  // и без payload их было бы негде прочитать.
   if(typeof _wsWaiters !== 'undefined' && _wsWaiters.has(msg.type)) {
-    try { _wsWaiters.get(msg.type)(); } catch {}
+    try { _wsWaiters.get(msg.type)(msg); } catch {}
   }
   switch(msg.type) {
     case 'init':

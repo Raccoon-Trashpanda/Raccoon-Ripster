@@ -115,10 +115,16 @@ function setOverall(label, pct){
 }
 
 // Resolve when a given WS message type arrives (consumed in the WS switch), or time out.
-function waitForWs(type, timeoutMs){
+function waitForWs(type, timeoutMs, match){
   return new Promise((resolve,reject)=>{
     const to = setTimeout(()=>{ _wsWaiters.delete(type); reject(new Error('timeout')); }, timeoutMs||60000);
-    _wsWaiters.set(type, ()=>{ clearTimeout(to); _wsWaiters.delete(type); resolve(); });
+    // `match` отсеивает чужие события того же типа: компоненты ставятся по
+    // одному, но событие несёт ключ, и ждать «любое» значило бы засчитать
+    // соседний компонент за свой.
+    _wsWaiters.set(type, (msg)=>{
+      if (match && !match(msg||{})) return;
+      clearTimeout(to); _wsWaiters.delete(type); resolve(msg||{});
+    });
   });
 }
 
@@ -139,9 +145,36 @@ async function _runComponentInstall(c) {
       await waitForWs(c.wsdone, 900000).catch(()=>{});
       s.running=false; s.pct=100; s.installed=true;
     } else {
-      const r = await api('POST', c.endpoint);  // await-style component endpoint
-      s.running=false; s.pct=100; s.installed = !!(r&&r.ok);
-      if(r && !r.ok){ s.error = true; if(window.toast) toast(c.label+': '+(r.error||t('t.error')),'var(--red)'); }
+      const r = await api('POST', c.endpoint);
+      // Новый контракт: эндпоинт ВОЗВРАЩАЕТСЯ СРАЗУ, а итог приезжает событием.
+      // Так сделано потому, что ffmpeg качается больше пятнадцати минут, и
+      // ожидание ответа выглядело зависанием: соединение рвалось раньше, чем
+      // приходил результат, и человек не видел ни успеха, ни ошибки.
+      // Старый ответ (`ok` без `started`) поддерживаем — на случай отката.
+      if (r && r.started) {
+        const done = await waitForWs('setup_component_done', 3600000,
+                                     m => m && m.key === c.key).catch(()=>null);
+        s.running = false; s.pct = 100;
+        if (!done) {                      // час прошёл, события нет
+          s.error = true;
+          if(window.toast) toast(c.label+': '+t('setup.no_answer'),'var(--red)', '', 8000);
+        } else {
+          s.installed = !!done.ok;
+          if (done.state === 'already') {
+            if(window.toast) toast(c.label+': '+t('setup.st_already'), 'var(--muted)', '', 3000);
+          } else if (done.state === 'installed') {
+            if(window.toast) toast(c.label+': '+t('setup.st_installed'), c.color, '', 3000);
+          } else {
+            s.error = true;
+            // Причину показываем ДОЛГО: раньше отказ уезжал вместе с тостом,
+            // и до владельца доходило только «падает», без единой строки.
+            if(window.toast) toast(c.label+': '+(done.error||t('t.error')),'var(--red)', '', 15000);
+          }
+        }
+      } else {
+        s.running=false; s.pct=100; s.installed = !!(r&&r.ok);
+        if(r && !r.ok){ s.error = true; if(window.toast) toast(c.label+': '+(r.error||t('t.error')),'var(--red)', '', 15000); }
+      }
     }
   } catch(e){ s.running=false; s.error=true; if(window.toast) toast(c.label+': '+((e&&e.message)||e),'var(--red)'); }
   renderChecklist();

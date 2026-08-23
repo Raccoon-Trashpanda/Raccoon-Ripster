@@ -206,13 +206,35 @@ async def widevine_mint_auto():
 # install_* helpers yield to the loop, so WS broadcasts keep flowing meanwhile.
 # SoundCloud + WVD keep their own dedicated endpoints (npm build / console wizard).
 
-@router.post("/api/setup/component/{key}")
-async def setup_component(key: str):
-    # NOTE: each component installs ONLY its own thing and reports its own status,
-    # so the user can see exactly what landed and what didn't. Shared tools
-    # (ffmpeg / Bento4 / Node) are their own rows — NOT bundled into an engine.
-    # The install log is NOT cleared here (the frontend clears the console once at
-    # the start of a run) so a multi-component install keeps the full history.
+# Инструмент, по наличию которого судим об исходе компонента. Нужен, чтобы
+# отличить «уже было» от «поставили»: см. _run_setup_component ниже.
+_SETUP_PROBE = {
+    "ffmpeg":     "ffmpeg",
+    "mp4decrypt": "mp4decrypt",
+    "node":       "node",
+    "zhaarey":    "go",
+}
+
+
+async def _run_setup_component(key: str) -> dict:
+    """Поставить один компонент и вернуть ЧЕСТНЫЙ исход.
+
+    Раньше ответ был `{"ok": bool(tool_path(name))}`, и это давало ложный
+    зелёный: `tool_path()` первым делом смотрит в СИСТЕМНЫЙ PATH, поэтому на
+    машине разработчика, где ffmpeg/git/go уже стоят, проверка не могла
+    провалиться в принципе. 23.08.2026 замерено на чистой установке: с обычным
+    PATH все три компонента вернули `ok:true`, не скачав НИЧЕГО, — реально
+    установился один mp4decrypt. Ровно поэтому жалобу «установка зависимостей
+    падает» полтора месяца не удавалось воспроизвести.
+
+    Теперь исход трёхзначный: `already` — было и без нас, `installed` — мы
+    поставили, `failed` — не смогли, и тогда рядом лежит причина.
+    """
+    probe  = _SETUP_PROBE.get(key)
+    before = bool(_setup.tool_path(probe)) if probe else None
+    # Отметка, с которой начинается ЭТОТ компонент: причину отказа берём только
+    # из его собственных строк, а не из чужих, оставшихся выше по прогону.
+    log_mark = len(_setup.install_log)
     try:
         if key == "apple":
             # Apple Music engine (AMD v2): clone AppleMusicDecrypt + its Python deps.
@@ -257,11 +279,77 @@ async def setup_component(key: str):
             asyncio.create_task(_setup.setup_widevine_toolchain())
             done = True
         else:
-            return {"ok": False, "error": f"неизвестный компонент: {key}"}
+            return {"ok": False, "state": "failed",
+                    "error": f"неизвестный компонент: {key}"}
     except Exception as e:                                # noqa: BLE001
         await _setup.ilog(f"✗ {key}: {e}", "error")
-        return {"ok": False, "error": str(e)}
-    return {"ok": done}
+        return {"ok": False, "state": "failed", "error": str(e)}
+
+    after = bool(_setup.tool_path(probe)) if probe else bool(done)
+    if probe and before:
+        return {"ok": True, "state": "already"}
+    if after:
+        return {"ok": True, "state": "installed"}
+    # Отказ обязан назвать себя. Установщики компонентов возвращают голый bool, а
+    # настоящая причина уходит строкой в консоль Setup — и там и оставалась:
+    # человеку доставался общий «✗ ошибка», из-за чего единственной обратной
+    # связью от гостей было слово «падает» без единой строки текста. Достаём
+    # последнюю содержательную строку этого компонента и кладём её в ответ.
+    return {"ok": False, "state": "failed", "error": _last_failure_reason(log_mark)}
+
+
+def _last_failure_reason(mark: int) -> str:
+    """Последняя осмысленная строка отказа из консоли Setup, начиная с `mark`."""
+    tail = _setup.install_log[mark:]
+    for e in reversed(tail):
+        text = (e.get("text") or "").strip()
+        if not text:
+            continue
+        low = text.lower()
+        if e.get("level") == "error" or "error:" in low or text.startswith("✗"):
+            # Префикс раннера не несёт смысла для человека — срезаем.
+            for pref in ("[irun] ", "✗ "):
+                if text.startswith(pref):
+                    text = text[len(pref):]
+            return text[:300]
+    return "причина не определена — смотри консоль Setup ниже"
+
+
+@router.post("/api/setup/component/{key}")
+async def setup_component(key: str):
+    """Запустить установку компонента и вернуться СРАЗУ.
+
+    Раньше запрос ждал всю работу. Для ffmpeg это больше пятнадцати минут:
+    замер 23.08.2026 — zip 106 МБ на скорости ~120 КБ/с, клиент отвалился по
+    таймауту через 880 с, а загрузка спокойно доехала уже без него. Человек в
+    это время видит крутящуюся кнопку, потом обрыв соединения и НИЧЕГО: ни
+    успеха, ни ошибки. Это и есть «установка падает» в жалобах — она не падает,
+    она не отвечает.
+
+    Теперь так же, как давно сделано у Widevine: работа уходит в фон, итог
+    приезжает событием `setup_component_done`, а прогресс — в консоль Setup.
+    """
+    known = {"apple", "ffmpeg", "mp4decrypt", "node", "soundcloud",
+             "orpheus", "beatport", "zhaarey", "widevine"}
+    if key not in known:
+        return {"ok": False, "state": "failed",
+                "error": f"неизвестный компонент: {key}"}
+
+    async def _bg():
+        res = await _run_setup_component(key)
+        st = res.get("state")
+        if st == "already":
+            await _setup.ilog(f"= {key}: уже установлено, ничего не делал", "success")
+        elif st == "installed":
+            await _setup.ilog(f"✓ {key}: установлено", "success")
+        else:
+            await _setup.ilog(f"✗ {key}: не установлено — {res.get('error') or 'причина не определена'}",
+                              "error")
+        if _broadcast:
+            await _broadcast({"type": "setup_component_done", "key": key, **res})
+
+    asyncio.create_task(_bg())
+    return {"ok": True, "started": True, "key": key}
 
 
 # ── Tools / Setup ─────────────────────────────────────────────────────────────
