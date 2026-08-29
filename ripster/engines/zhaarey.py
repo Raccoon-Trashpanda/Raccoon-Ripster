@@ -493,6 +493,19 @@ class ZhaereyEngine(EngineBase):
                 return EngineResult(False, tracks_ok=0, tracks_err=total, error=(
                     "Apple: трек недоступен в этом регионе/качестве (Unavailable) — "
                     "смени storefront (регион) или качай через AMD (публичный wrapper)."))
+            if ok == 0:
+                # Ноль из N БЕЗ распознанной причины. Раньше сюда попадал
+                # `EngineResult` с пустым `error`, и runner рендерил его как
+                # `Exit code {rc}` — а rc был НУЛЁМ. Гость 23.08.2026 получил
+                # ровно «✗ Exit code 0» на сингле, у которого в логе строкой выше
+                # стояло «Failed to extract info from manifest: no codec found».
+                # Код знал причину, человек — нет.
+                #
+                # Перечислять все формулировки загрузчика бессмысленно: их пишет
+                # чужая программа и меняет от версии к версии. Поэтому берём
+                # последнюю содержательную строку его собственного лога.
+                return EngineResult(False, tracks_ok=0, tracks_err=total,
+                                    error=_last_reason(log_text, total))
             return EngineResult(success=ok > 0, tracks_ok=ok, tracks_err=total-ok)
         # Local docker wrapper couldn't mint a content key — the wrapper's saved
         # Apple SESSION is expired/unsubscribed (logs "Invalid CKC"). This is the
@@ -529,3 +542,29 @@ class ZhaereyEngine(EngineBase):
                     "смени storefront (регион) или качай через AMD (публичный wrapper)."))
             return EngineResult(success=True)
         return EngineResult(False, error="unknown finish state")
+
+
+def _last_reason(log_text: str, total: int) -> str:
+    """Последняя осмысленная строка загрузчика — вместо пустого отказа.
+
+    Ищем снизу вверх: предупреждения и ошибки несут причину, строки прогресса и
+    итоговая сводка — нет. Если не нашлось ничего, говорим об этом прямо, а не
+    подставляем код возврата: `Exit code 0` не сообщает ВООБЩЕ ничего и читается
+    как «программа отработала успешно», хотя не скачано ни одного трека.
+    """
+    _skip = ("completed:", "warnings:", "errors:", "[step]", "[ok]", "downloading",
+             "progress", "=======")
+    for raw in reversed((log_text or "").splitlines()):
+        line = raw.strip()
+        if not line or len(line) < 12:
+            continue
+        low = line.lower()
+        if any(k in low for k in _skip):
+            continue
+        if any(k in low for k in ("fail", "error", "unavailable", "warning",
+                                  "not found", "no codec", "invalid", "denied",
+                                  "unable", "cannot", "не удалось")):
+            return f"Apple: {line[:220]}"
+    return (f"Apple: загрузчик завершился, не скачав ни одного трека из {total}, "
+            f"и не назвал причину — смотри консоль задачи")
+

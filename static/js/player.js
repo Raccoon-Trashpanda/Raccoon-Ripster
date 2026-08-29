@@ -2129,10 +2129,16 @@ async function _playPreviewAt(idx) {
     });
   }
 
-  const artistSub = _ppArtistSub(item);
-
-  document.getElementById('pp-title').textContent  = item.title   || '—';
-  document.getElementById('pp-artist').textContent = artistSub;
+  // Название, артист и обложка — ОДНОЙ функцией, не вторым набором присваиваний.
+  //
+  // Здесь стояли те же шесть присваиваний, что и в `_ppSyncNowPlaying`, хотя эта
+  // же функция её уже вызывала выше (после разрешения источника). Дубль ничего
+  // не давал: между двумя точками название, артист и обложка не меняются —
+  // меняется только `item.format`. Зато он гарантировал возвращение бага: седьмое
+  // поле добавили бы в одно место из двух, и нижняя панель снова показывала бы
+  // не то. Ровно так 23.08 она и застревала на первом треке при бесшовном стыке —
+  // у перехода было два входа, а обновление стояло на одном.
+  _ppSyncNowPlaying(item, idx);
   bar.classList.add('visible');
   if (main) {
     const isExpanded = document.getElementById('pp-expanded')?.style.display !== 'none';
@@ -2141,23 +2147,8 @@ async function _playPreviewAt(idx) {
     main.setAttribute(isExpanded ? 'data-preview-expanded' : 'data-preview-open', '1');
   }
 
-  // Cover art — sync compact and expanded (fade-in via data-cover + CSS)
-  const coverHtml = item.cover
-    ? `<img src="${esc(item.cover)}" data-cover onload="this.classList.add('loaded')" style="width:100%;height:100%;object-fit:cover"/>`
-    : '♪';
-  const ppArt    = document.getElementById('pp-art');
-  const ppArtBig = document.getElementById('pp-art-big');
-  if (ppArt)    ppArt.innerHTML    = coverHtml;
-  if (ppArtBig) ppArtBig.innerHTML = coverHtml;
-
-  // Sync expanded panel text
-  const titleBig  = document.getElementById('pp-title-big');
-  const artistBig = document.getElementById('pp-artist-big');
-  if (titleBig)  titleBig.textContent  = item.title   || '—';
-  if (artistBig) artistBig.textContent = artistSub;
-
-  // Update lockscreen / system media controls
-  _updateMediaSession(item, artistSub);
+  // Обложка, развёрнутая панель и системные органы управления — всё это уже сделал
+  // `_ppSyncNowPlaying` выше. Второго набора здесь нет намеренно.
   // Update fullscreen player meta (sync UI even if not currently open)
   if (typeof fpSyncMeta === 'function') fpSyncMeta(item);
   // If the lyrics panel is open, fetch fresh lines for the new track.
@@ -2165,11 +2156,10 @@ async function _playPreviewAt(idx) {
   // Restore saved playback speed for the new audio element src
   if (_FP && _FP.speed && audio) audio.playbackRate = _FP.speed;
 
-  // prev/next disabled state
-  const prevBtn = document.getElementById('pp-prev');
-  const nextBtn = document.getElementById('pp-next');
-  if (prevBtn) prevBtn.disabled = (idx === 0);
-  if (nextBtn) nextBtn.disabled = (idx >= Preview.queue.length - 1);
+  // prev/next тоже выставляет `_ppSyncNowPlaying` — второй набор убран.
+  // Он вдобавок расходился с первым: здесь было `idx === 0`, там `idx <= 0`.
+  // Расхождение безобидное ровно до первого отрицательного индекса, и такие
+  // «почти одинаковые» копии и есть способ, которым баг возвращается.
   Preview.idx = idx;
 }
 

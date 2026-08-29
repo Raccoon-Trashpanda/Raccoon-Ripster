@@ -319,6 +319,48 @@ def check_apple_wrapper():
             "ручной разбор (skill ripster-apple-wrapper)")
 
 
+def check_apple_pool_slots():
+    """Мёртвые слоты мульти-аккаунт пула (rip-wrapper-N): архивировать после
+    нескольких подряд неудачных проходов, освободить порт. См. ripster/credential_health.py —
+    заведено 29.08.2026 из-за rip-wrapper-3, месяцами зациклённого на 'account disabled'."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from ripster import credential_health as ch
+    except Exception as e:
+        warn(f"credential_health недоступен: {e}")
+        return
+    lines = ch.check_all_apple_slots()
+    if not lines:
+        ok("Слоты пула Apple живы (или ещё не набрали порог)")
+        return
+    for line in lines:
+        if line.startswith("💀"):
+            fixed(line)
+        else:
+            warn(line)
+
+
+def check_deezer_arls():
+    """Мёртвые Deezer ARL (основной + пул): та же логика, что check_apple_pool_slots,
+    но для Deezer. Проверка — приватный gw-light.php (ripster/deezer_accounts.py),
+    архивация/снятие с маршрутизации — ripster/credential_health.py."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from ripster import credential_health as ch
+    except Exception as e:
+        warn(f"credential_health недоступен: {e}")
+        return
+    lines = ch.check_all_deezer_arls()
+    if not lines:
+        ok("Deezer ARL живы (или ещё не набрали порог)")
+        return
+    for line in lines:
+        if line.startswith("💀"):
+            fixed(line)
+        else:
+            warn(line)
+
+
 def check_gamdl_cookies():
     """Отличить ДВА состояния cookies.txt, которые до 01.08.2026 выглядели одинаково.
 
@@ -949,9 +991,16 @@ def check_watchlist():
               if x.get("kind") != "label"
               and x.get("service", "apple") != "soundcloud"
               and not x.get("artist_id")]
+    # Ключ обязан совпадать с тем, по которому дедуплицирует /api/watchlist/repair,
+    # а там в подпись входит `kind`: подписка на ЛЕЙБЛ «Balance Music» и подписка
+    # на АРТИСТА «Balance Music» — разные вещи, опрашиваются разными путями, и
+    # склеивать их нельзя. 23.08.2026 без `kind` проверка считала эту законную
+    # пару дублем, звала репейр, тот справедливо не удалял ничего — и жалоба
+    # «1 дублей» висела бы вечно, при том что обе записи опрашивались в тот же день.
     seen, dups = set(), 0
     for x in items:
-        sig = ((x.get("name") or "").strip().lower(), x.get("service", ""))
+        sig = (x.get("kind", "artist"), (x.get("name") or "").strip().lower(),
+               x.get("service", ""))
         if sig in seen:
             dups += 1
         seen.add(sig)
@@ -1151,7 +1200,10 @@ _ERR_BUCKETS = [
     # большую часть `other` и прятали за собой настоящую находку. Диагноз в них
     # верный — им не хватало только имени.
     ("apple-region",        ("resource not found", "40400", "territory",
-                             "прав в регионе аккаунта нет")),
+                             "прав в регионе аккаунта нет",
+                             # Третья форма того же диагноза (24.08.2026, 2 строки
+                             # в `other`): движок говорит про трек, а не про права.
+                             "недоступен в этом регионе")),
     # Протухшие cookies.txt: gamdl рапортует «нет подписки», хотя подписка есть.
     # Постоянное состояние, чинится только руками владельца (см. gamdl.py).
     ("gamdl-cookies",       ("no active apple music subscription",
@@ -1200,6 +1252,20 @@ _ERR_BUCKETS = [
     # audio-stereo-256 и «Decrypted.» Загрузка не падает — это шум пробы
     # варианта, а не сбой. Значение ключа в лог не попадает (уже редактится).
     ("apple-mv-key",        ("invalid argument for --key",)),
+    # Сторож тишины: 300 секунд без вывода → процесс убит. Это НАСТОЯЩИЙ отказ,
+    # и до 24.08.2026 у него не было имени — обе строки падали в `other`. Свой
+    # бакет нужен, чтобы отличать «завис и убит» от «отказано в правах»: 24.08
+    # это была нога лестницы витрин (локальная 'ca' не дала прав, повтор по 'ca'
+    # завис), и по безымянной строке этого было не понять. Держать ПЕРЕД
+    # `network`: там ключ "timeout", но наша строка русская — совпадения нет, а
+    # порядок страхует от будущей английской формулировки.
+    ("stall-timeout",       ("процесс завис", "нет вывода")),
+    # Tidal на гео-блоке отвечает «Album [id] not found. This might be
+    # region-locked.» — и повторяет попытку ЧЕТЫРЕ раза на детерминированном
+    # отказе, так что один релиз даёт 5 строк. Ключ `region locked` бакета
+    # beatport-region не совпадает: у Tidal дефис (`region-locked`).
+    ("tidal-region",        ("this might be region-locked",
+                             "недоступно в регионе твоего аккаунта")),
     ("network",             ("getaddrinfo", "deadline exceeded", "connection", "timeout", "429")),
     # Хвосты уже посчитанных провалов: «Exit code 0» печатается ПОСЛЕ причины
     # (apple-album-unavailable), «=== Track N failed ===» — после 403 Beatport.
@@ -1352,6 +1418,14 @@ def check_errors_24h():
             low = ln.lower()
             if any(x in low for x in ("=======", "traceback", 'file "')):
                 continue
+            # УСПЕХ, записанный на уровне ERROR. streamrip/SoundCloud печатает
+            # итог прогона («Summary: 1 Success, 0 Failed») в stderr, и наш
+            # захват метит stderr как ERROR — 24.08.2026 такая строка лежала в
+            # `other` и означала ровно противоположное тому, что бакет считает.
+            # Настоящий провал внутри такого прогона печатает СВОЮ строку и
+            # считается по ней, так что сводку можно не считать вовсе.
+            if "summary:" in low and "success" in low:
+                continue
             total += 1
             tag = next((name for name, keys in _ERR_BUCKETS if any(k in low for k in keys)), "other")
             buckets[tag] = buckets.get(tag, 0) + 1
@@ -1475,6 +1549,8 @@ def main():
     app_ok = check_app()
     if app_ok:
         check_apple_wrapper()
+        check_apple_pool_slots()
+        check_deezer_arls()
         check_gamdl_cookies()
         check_tokens()
         check_token_files()

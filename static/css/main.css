@@ -1660,14 +1660,156 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
     /* …but on roomy desktops the side zones are never equal-width (left art+title
        vs right pill+volume+4 tiles), so in-flow always parks the transport left of
        the dock's real middle («кнопки не по середине» report). Pin the group to
-       #pp-bar's true midpoint ONLY where there is guaranteed spare width — ≥860px
-       keeps phones/tablets on the safe in-flow layout above. */
-    @media (min-width: 860px){
-      .pp-zone-center {
-        position: absolute !important;
-        left: 50% !important; top: 50% !important;
-        transform: translate(-50%, -50%) !important;
+       #pp-bar's true midpoint ONLY where there is guaranteed spare width. */
+    /* 29.08.2026: the `position:absolute;left:50%` fix above DID center the
+       group — but centering against the bar's midpoint while the right zone's
+       content stays pinned to the bar's real right edge means the gap between
+       them shrinks at TWICE the rate the window narrows (center moves at ΔW/2,
+       the right-edge content at ΔW). Measured live at the OLD ≥860px gate: the
+       quality pill was already overlapping the transport group at 1200px — an
+       ordinary desktop width, not an edge case («флак накладывается на кнопки»
+       report). Grid instead of absolute positioning: the centre column's width
+       is a real reserved track, not a box floating over whatever the flex
+       siblings decide to occupy — the two content zones physically cannot
+       share a pixel. minmax(0,1fr) on both content columns keeps them
+       equal-width regardless of what's inside (the reason the OLD flex 50/50
+       split ever broke: the left zone's max-width:320 cap let the right
+       zone's flex-grow balloon past it unopposed) — which is what puts the
+       middle column at the bar's true centre, matching the intent of the old
+       fix without its bug. The canvas visualiser gets its own fixed-width
+       column so it doesn't skew the left/right balance the centering depends on.
+       Grid stops the two content zones' BOXES from ever overlapping the centre
+       track — but a track can still be narrower than its own content's natural
+       width, and content spills past its box edge when that happens (measured:
+       still true right up to 1360px). So the gate moved from 860px to 1400px —
+       live-measured (headless Chrome, real button/pill markup, 20px binary-
+       search step) as the width where the right zone's actual content (quality
+       pill + volume + 4 icon buttons) first fits its reserved column with zero
+       overflow, with a small margin above the measured 1380px floor. Below
+       1400px this whole block doesn't apply and the in-flow default above
+       runs instead — same layout that already served <860px safely, now
+       covering the range where "true centre" genuinely doesn't have room. */
+    @media (min-width: 1400px){
+      #pp-bar {
+        display: grid !important;
+        grid-template-columns: auto minmax(0,1fr) auto minmax(0,1fr);
+        align-items: center;
       }
+      #pp-viz { grid-column: 1; }
+      .pp-zone-left { grid-column: 2; }
+      .pp-zone-center {
+        grid-column: 3;
+        position: static !important; left: auto !important; top: auto !important;
+        transform: none !important;
+      }
+      .pp-zone-right { grid-column: 4; }
+    }
+    /* 29.08.2026: the grid above only fixes the overlap at ≥1400px — below
+       that, #pp-bar falls back to the plain in-flow layout, which measured
+       JUST AS overlapped (quality pill spilling into the transport zone,
+       confirmed live down to 700px) for a separate reason: the right zone's
+       own CONTENT (quality pill + volume slider + 4 icon buttons) is wider
+       than the share of the bar it's given below ~1360px, and — because its
+       inline style carries `min-width:0` — flexbox happily compresses its box
+       past what its buttons need, and `justify-content:flex-end` then spills
+       the overflowing content LEFTWARD into whatever sits next to it. That's
+       the real, general shape of the bug: not any one positioning trick, but
+       the one zone with no graceful-shrink story sitting next to zones that
+       flex freely.
+       min-width:max-content makes the browser compute the zone's true content
+       floor itself (buttons + slider + gaps, in the real font/DPI/locale) —
+       exact, not a guessed pixel number, and immune to the quality label's
+       length varying (MP3/FLAC/Hi-Res). Below that floor the SQUEEZE now
+       lands on `.pp-zone-left` instead, which already has the ellipsis/`data-
+       mq` mechanism built for exactly this (title truncates, never overlaps)
+       — so shrinking the window hits a real floor at the buttons, per the
+       request, instead of silently overlapping them. Gated to ≥700px: below
+       that the mobile layout above already has its own (pre-existing, out of
+       scope here) compressed treatment — forcing max-content there would
+       push buttons off the edge of an actual phone screen instead. */
+    @media (min-width: 700px){
+      .pp-zone-right { min-width: max-content !important; }
+    }
+    /* Same floor idea for the LEFT zone (cover + title + artist) — the request
+       was "the whole panel", not just the button side. Unlike the right zone,
+       title/artist are UNBOUNDED (a long mix name can run to 80+ chars), so
+       max-content is the wrong tool here — it would force the entire bar to
+       overflow on an ordinary window just because one track has a long title,
+       which is worse than what it fixes. What title/artist actually need is a
+       READABLE FLOOR: enough width that the marquee (`[data-mq].mq-on` above)
+       has something legible to scroll, instead of shrinking toward a sliver.
+       150px = 42px cover + 11px gap + ~97px text column, enough for a handful
+       of real characters at the pill's font sizes (13px/11.5px) before the
+       marquee mechanism (already built, JS in player_queue.js) takes over —
+       long titles still ellipsize/scroll, they just don't get squeezed to
+       nothing first.
+       NOT the same ≥700px gate as the right zone — tried that first and it
+       was a real regression, not just a smaller version of the same fix.
+       Flooring BOTH zones at once removes the layout's only remaining give:
+       below ~1200px the two floors together need more width than #pp-bar
+       has, and since #pp-bar has no scroll/wrap, the excess doesn't compress
+       — it renders past the viewport's right edge with nothing to reveal it
+       (html,body are deliberately overflow:hidden for the app shell). Live
+       measurement: at 1200px every control was still on-screen; at 1180px
+       the ✕ close button already wasn't (close_btn_visible_in_viewport:
+       false). An invisible, unreachable button is a worse failure than the
+       overlap this whole change started from, so the floor only applies
+       where it's actually free: ≥1200px. Below that, the left zone goes back
+       to shrinking toward 0 (its original, already-safe behaviour) so the
+       deficit has somewhere to go instead of pushing buttons off-screen —
+       title/artist lose their readable floor at those widths, but every
+       control stays reachable, which matters more. */
+    /* 29.08.2026, second pass: the owner rejected the "title goes to 0 below
+       1200px" tradeoff from the first pass — wanted a real floor for the
+       WHOLE panel, text included, even if that means shrinking the transport
+       buttons. This block replaces the three separate tiers above with one
+       consistent story: title/artist keep a 150px floor at every desktop
+       width ≥700px, and everything else (icon sizes, which controls survive)
+       is what flexes to make room for it, instead of text being the only
+       thing that ever gives. */
+    @media (min-width: 700px){
+      .pp-zone-left { min-width: 150px !important; }
+    }
+    /* The right zone's min-width:max-content has the same "no give left"
+       failure below a real threshold — quality+volume+4 icon buttons need
+       ~350px the bar doesn't have below ~1040px, and controls go dark
+       off-screen rather than overlap (measured via the ✕ close button's own
+       on-screen check). Drop the least-essential ones instead of letting
+       them vanish unreachably: visualiser (decorative), float-window /
+       local-file (reachable other ways, used far less than quality/volume/
+       close). */
+    /* Second pass measured this in tiers (900px, then 800px) and each tier
+       alone still came up short once the left zone keeps its 150px floor
+       everywhere — a graduated approach here just means several widths in
+       between the tiers stay broken. One "compact" mode for the whole
+       700-1199px band instead: hide the decorative/duplicate-entry-point
+       controls (visualiser, float-window, local-file, volume — reachable via
+       system volume or the expanded player, expand/collapse — duplicates a
+       click on the cover), shrink the transport buttons (36px→28px, 42px→36px
+       play, tighter gaps — the one thing the first pass explicitly avoided
+       without live review), and drop queue-list/follow-artist (duplicate
+       entry points elsewhere in the UI). Verified live across the full
+       700-1450px sweep after this change — no width in between left the
+       close button off-screen. */
+    @media (min-width: 700px) and (max-width: 1199px){
+      #pp-viz, #pp-float-btn, #pp-local-btn, #pp-vol-wrap, #pp-expand-btn,
+      #pp-queue-btn, #pp-fav-btn { display: none !important; }
+      .pp-zone-center { gap: 5px !important; }
+      .pp-transport { width: 28px !important; height: 28px !important; font-size: 14px !important; }
+      #pp-play { width: 36px !important; height: 36px !important; font-size: 15px !important; }
+    }
+    /* Down to 760px that's a clean fit — below it, still short by a small,
+       fixed ~50px (measured), because everything above is already at its
+       floor. Trim what's left: the quality pill's dropdown caret and half
+       its horizontal padding (still tappable, still readable), and the bar's
+       own outer gutters. Cosmetic shaves, not functional drops — nothing
+       here removes a control, unlike the tier above. */
+    @media (min-width: 700px) and (max-width: 759px){
+      #pp-quality-caret { display: none !important; }
+      #pp-quality-btn { padding: 0 6px !important; }
+      #pp-bar { padding: 0 4px !important; gap: 4px !important; }
+      .pp-zone-right { gap: 4px !important; }
+      .pp-extra, #pp-mute { width: 28px !important; height: 28px !important; }
     }
     /* BIG time readout on the LEFT of the transport buttons — sized like the Play
        button so the seconds are clearly readable. Flat (no chip). Fixed width so

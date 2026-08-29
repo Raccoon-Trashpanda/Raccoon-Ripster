@@ -868,7 +868,7 @@ var LANG = {
     'console.sf_rung_failed':"─── витрина '{cc}' тоже не дала релиз → иду дальше по своим слотам ───",
     'console.slot_rung_failed':'─── слот {slot} ({cc}) не дал релиз ───',
     'console.rung_revived':'─── попытка не вышла ({why}) → следующая ступень ───',
-    'console.no_own_slot':'─── ни одна своя витрина не подходит: релиз издан в {have}, мои аккаунты в {mine} → иду в публичный wrapper ───',
+    'console.no_own_slot':'─── ни одна своя витрина не подходит: релиз издан в {have}, мои аккаунты в {mine}, уже отказали {tried} → иду в публичный wrapper ───',
     // ── Wrapper dynamic statuses (app.js) ──
     's.wrapper_connected':'подключён','s.wrapper_not_running':'не запущен',
     's.docker_not_found':'не найден','s.docker_status':'(Docker: {msg})',
@@ -2454,7 +2454,7 @@ var LANG = {
     'console.sf_rung_failed':"─── storefront '{cc}' has no release either → moving on through my own slots ───",
     'console.slot_rung_failed':'─── slot {slot} ({cc}) has no release ───',
     'console.rung_revived':'─── attempt failed ({why}) → next rung ───',
-    'console.no_own_slot':'─── none of my own storefronts fits: the release is out in {have}, my accounts are in {mine} → going to the public wrapper ───',
+    'console.no_own_slot':'─── none of my own storefronts fits: the release is out in {have}, my accounts are in {mine}, already refused by {tried} → going to the public wrapper ───',
     // ── Wrapper dynamic statuses (app.js) ──
     's.wrapper_connected':'connected','s.wrapper_not_running':'not running',
     's.docker_not_found':'not found','s.docker_status':'(Docker: {msg})',
@@ -3396,7 +3396,7 @@ var LANG = {
     'console.sf_rung_failed':"─── storefront '{cc}': release not there either → trying my other slots ───",
     'console.slot_rung_failed':'─── slot {slot} ({cc}): release not there ───',
     'console.rung_revived':'─── attempt failed ({why}) → next rung ───',
-    'console.no_own_slot':'─── none of my own storefronts fits: the release is out in {have}, my accounts are in {mine} → going to the public wrapper ───',
+    'console.no_own_slot':'─── none of my own storefronts fits: the release is out in {have}, my accounts are in {mine}, already refused by {tried} → going to the public wrapper ───',
   },
   ja: {
     'nav.s_main':'メイン','nav.queue':'キュー','nav.search':'検索',
@@ -3621,7 +3621,7 @@ var LANG = {
     'console.sf_rung_failed':"─── storefront '{cc}': release not there either → trying my other slots ───",
     'console.slot_rung_failed':'─── slot {slot} ({cc}): release not there ───',
     'console.rung_revived':'─── attempt failed ({why}) → next rung ───',
-    'console.no_own_slot':'─── none of my own storefronts fits: the release is out in {have}, my accounts are in {mine} → going to the public wrapper ───',
+    'console.no_own_slot':'─── none of my own storefronts fits: the release is out in {have}, my accounts are in {mine}, already refused by {tried} → going to the public wrapper ───',
   },
   zh: {
     'nav.s_main':'主界面','nav.queue':'队列','nav.search':'搜索',
@@ -3846,6 +3846,6 @@ var LANG = {
     'console.sf_rung_failed':"─── storefront '{cc}': release not there either → trying my other slots ───",
     'console.slot_rung_failed':'─── slot {slot} ({cc}): release not there ───',
     'console.rung_revived':'─── attempt failed ({why}) → next rung ───',
-    'console.no_own_slot':'─── none of my own storefronts fits: the release is out in {have}, my accounts are in {mine} → going to the public wrapper ───',
+    'console.no_own_slot':'─── none of my own storefronts fits: the release is out in {have}, my accounts are in {mine}, already refused by {tried} → going to the public wrapper ───',
   }
 };

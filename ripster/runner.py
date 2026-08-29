@@ -241,6 +241,36 @@ _FAILED_TRACK_RE = [
 _MAX_FAILED_TRACKS = 25
 
 
+# ── Последняя миля честности: отказ БЕЗ причины ──────────────────────────────
+# `msg = result.error or f"Exit code {rc}"` — единственное место, где пустой
+# отказ ЛЮБОГО движка превращался в строку, из которой причину узнать
+# невозможно. Хуже того, при rc == 0 человек читал «Exit code 0» и понимал это
+# как «программа отработала успешно», хотя не сохранено ни одного файла (гость
+# 23.08.2026, Atmos-сингл). Точечные заплатки уже стоят в zhaarey.is_finished и
+# в центральном апгрейде выше — здесь ловим ВСЁ, что просочилось мимо них:
+# берём последнюю содержательную строку чужого лога, а если и её нет — говорим
+# прямо, что причина не названа, вместо кода возврата.
+_NOREASON_SKIP = ("completed:", "warnings:", "errors:", "[step]", "[ok]",
+                  "downloading", "progress", "=======", "[salvage]")
+_NOREASON_HIT = ("fail", "error", "unavailable", "warning", "not found",
+                 "no codec", "invalid", "denied", "unable", "cannot",
+                 "не удалось", "недоступ")
+
+
+def _no_reason_msg(engine_name: str, rc: int, log_text: str) -> str:
+    """Осмысленный отказ, когда движок не назвал причину вообще."""
+    for raw in reversed((log_text or "").splitlines()):
+        line = raw.strip()
+        if len(line) < 12:
+            continue
+        low = line.lower()
+        if any(k in low for k in _NOREASON_SKIP):
+            continue
+        if any(k in low for k in _NOREASON_HIT):
+            return f"{engine_name}: {line[:220]}"
+    return (f"{engine_name}: загрузка не удалась, файлы не сохранены, а движок не "
+            f"назвал причину (код возврата {rc}) — смотри консоль задачи")
+
 def _extract_failed_tracks(log_text: str) -> list:
     """Best-effort [{track, reason}] for the tracks that failed, parsed from the
     engine log. `reason` is a canonical token (via _classify_partial_reason) so
@@ -2578,7 +2608,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
             await _broadcast(_i18n.log_event("console.autoretry_partial", level="info"))
         else:
-            msg = result.error or f"Exit code {rc}"
+            msg = result.error or _no_reason_msg(engine_name, rc, log_text)
             if msg.startswith("ORPHEUS_NOT_AUTHED"):
                 await _broadcast({"type": "orpheus_not_authed"})
             elif "-1002" in msg and engine_name in ("gamdl", "zhaarey"):
@@ -3178,11 +3208,19 @@ async def run_task(task: dict) -> None:
                                 _have = ", ".join(sorted(_avail)) or "—"
                                 _mine = ", ".join(sorted({s["country"] for s in _all
                                                           if s.get("country")})) or "—"
+                                # Витрины, которые УЖЕ пробовали и которые отказали.
+                                # Без них строка читается как противоречие — своя
+                                # витрина стоит и в «издан в», и в «мои аккаунты», а
+                                # вывод «ни одна не подходит».
+                                _tried = ", ".join(sorted(
+                                    _failed_cc if isinstance(_failed_cc, (set, list, tuple))
+                                    else ([_failed_cc] if _failed_cc else []))) or "—"
                                 task["log"].append(_i18n.tr("console.no_own_slot",
-                                                            have=_have, mine=_mine))
+                                                            have=_have, mine=_mine,
+                                                            tried=_tried))
                                 await _broadcast(_i18n.log_event(
                                     "console.no_own_slot", level="warn",
-                                    have=_have, mine=_mine,
+                                    have=_have, mine=_mine, tried=_tried,
                                     task_id=task.get("id", "")))
                         except _NeedAMDFallback:
                             _retried_sf = False          # и чужой слот не дал ключа
