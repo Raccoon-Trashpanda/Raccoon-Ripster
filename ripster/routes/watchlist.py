@@ -201,6 +201,11 @@ async def api_watchlist_add(body: dict):
     if kind == "label":
         if not name:
             raise HTTPException(400, imsg("err.label_name_required", "название лейбла обязательно"))
+        # Со страницы релиза в поле label часто приходит строка копирайта
+        # («℗ 2024 Erased Tapes Records Ltd.»), а не имя. Приводим к имени до
+        # проверки И перед сохранением — иначе каждый обход снова ищет мусор.
+        from ripster.routes import discovery as _disc
+        name = _disc._clean_label(name) or name
         rels, lbl_info = await _label_releases_ex(name, 10)
         entry = {
             "id":           f"wl_{int(datetime.now().timestamp()*1000)}",
@@ -916,6 +921,10 @@ async def _label_releases_ex(label: str, limit: int = 20) -> tuple[list[dict], d
     совет «проверь написание» указывал на человека, тогда как сломана была наша
     проверка. `info` даёт вызывающему различить эти случаи."""
     from ripster.routes import discovery as _disc
+    # «℗ 2024 Erased Tapes Records Ltd.» и подобные строки копирайта прилетают
+    # сюда как имя лейбла (со страницы релиза, из радара, из вотчлиста) — чистим,
+    # иначе поиск `label:"…"` не находит ничего и лейбл выглядит опечаткой.
+    label = _disc._clean_label(label) or label
     try:
         seeds, info = await _disc._label_seeds_ex(label, limit)
     except Exception as e:

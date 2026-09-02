@@ -465,12 +465,57 @@ async def api_search(q: str, service: str = "apple", type: str = "album", limit:
 # как данные. 16.08.2026.
 _LABEL_NATIVE = ("spotify",)
 
+# Строка копирайта/фонограммы вместо имени лейбла. Spotify и Apple сплошь и
+# рядом отдают в поле label именно её — «℗ 2024 Erased Tapes Records Ltd.»,
+# «(P) 2019 XL Recordings Ltd under exclusive licence to …». Такое «имя» не
+# находит ни `label:"…"`, ни сверка по границам слов, и правильно подписанный
+# лейбл выглядит опечаткой.
+_PLINE_START = _re_mod.compile(r"^\s*(?:[℗©]|[\(\[]\s*[cCpP]\s*[\)\]])")
+_PLINE_HEAD = _re_mod.compile(r"^\s*(?:[℗©]|[\(\[]\s*[cCpP]\s*[\)\]]|\s)+")
+_PLINE_YEAR = _re_mod.compile(r"^\s*(?:19|20)\d{2}\b[\s.,\-–—]*")
+_LABEL_TAIL = _re_mod.compile(
+    r"\s*(?:,?\s*(?:under\s+exclusive\s+licen[cs]e|under\s+licen[cs]e|"
+    r"exclusively\s+licen[cs]ed|distributed\s+by|marketed\s+by|"
+    r"a\s+division\s+of|a\s+\w[\w\s]*?\s+company)\b.*)$",
+    _re_mod.IGNORECASE)
+_LABEL_SUFFIX = _re_mod.compile(
+    r"[\s,]+(?:ltd|limited|llc|l\.l\.c|inc|incorporated|corp|corporation|"
+    r"co|company|gmbh|mbh|ug|kg|ag|s\.?a|s\.?a\.?s|s\.?l|s\.?r\.?l|s\.?p\.?a|"
+    r"b\.?v|n\.?v|pty|pvt|oy|ab|a/s|aps|kft|d\.?o\.?o)\.?\s*$",
+    _re_mod.IGNORECASE)
+
+
+def _clean_label(name: str) -> str:
+    """Имя лейбла, выдернутое из возможной строки копирайта.
+
+    «℗ 2024 Erased Tapes Records Ltd.» → «Erased Tapes Records». Срезаем метки
+    ℗/©/(P)/(C) и — только если они были — ведущий год, хвост «under exclusive
+    licence to …» и юр-суффикс (Ltd/LLC/GmbH/…). «Records/Recordings/Music» не
+    трогаем: это часть имени, а `_label_matches` и так терпит лишнее слово.
+    Идемпотентна — чистое имя не меняется. На вход-мусор возвращает исходную
+    строку, а не пустоту."""
+    s = (name or "").strip().strip('"').strip()
+    if not s:
+        return ""
+    orig = s
+    if _PLINE_START.match(s):
+        s = _PLINE_HEAD.sub("", s, count=1)
+        s = _PLINE_YEAR.sub("", s, count=1)
+    s = _LABEL_TAIL.sub("", s).strip()
+    for _ in range(3):
+        s2 = _LABEL_SUFFIX.sub("", s).strip(" .,-–—")
+        if s2 == s:
+            break
+        s = s2
+    s = _re_mod.sub(r"\s{2,}", " ", s).strip(" .,-–—")
+    return s or orig
+
 
 def _label_matches(value: str, wanted: str) -> bool:
     """Loose label comparison: catalogue spellings differ wildly
     ('Hospital', 'Hospital Records', 'Hospital Records Ltd')."""
-    a = (value or "").strip().lower()
-    b = (wanted or "").strip().lower()
+    a = _clean_label(value).lower()
+    b = _clean_label(wanted).lower()
     if not a or not b:
         return False
     if a == b or a.startswith(b) or b.startswith(a):
@@ -634,8 +679,22 @@ async def _search_spotify_label(label: str, limit: int) -> dict:
     лейбл не сошёлся, выбрасывается; релиз, у которого лейбл узнать не удалось
     (сеть, токен), выбрасывается ТОЖЕ — непроверенная запись выглядит как
     данные, и это хуже её отсутствия."""
+    label = _clean_label(label) or label
     out = await _search_spotify(f'label:"{label}"', "album", limit)
     res = out.get("results") or []
+    # Полное имя лейбла нередко чуть длиннее того, что Spotify индексирует в
+    # `label:` («Erased Tapes Records» vs «Erased Tapes»). Пусто по полному —
+    # пробуем более короткие префиксы из первых слов; сверка ниже всё равно
+    # подтверждает по настоящему полю label релиза, так что мусор не пройдёт.
+    if not res:
+        words = label.split()
+        for n in (3, 2):
+            if len(words) > n:
+                alt = " ".join(words[:n])
+                out = await _search_spotify(f'label:"{alt}"', "album", limit)
+                res = out.get("results") or []
+                if res:
+                    break
     out["candidates"] = len(res)
     out["verify_failed"] = False
     out["unverified"] = []
@@ -672,7 +731,7 @@ async def _search_label(q: str, service: str, limit: int, country: str = "") -> 
     the service filtered server-side (trustworthy) or we filtered locally
     (best-effort — a service that doesn't expose the label field at all can only
     return name matches)."""
-    label = q.strip().strip('"')
+    label = _clean_label(q.strip().strip('"'))
     if not label:
         return {"results": []}
 
