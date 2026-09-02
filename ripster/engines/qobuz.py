@@ -487,6 +487,7 @@ class QobuzEngine(StreamripMixin, EngineBase):
 
     async def get_artist(self, artist_id: str, types: str, config: dict) -> dict:
         import httpx as _httpx
+        import asyncio as _aio
         app_id = (config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
         token  = (config.get("qobuz-auth-token") or "").strip()
         wanted = {t.strip() for t in types.split(",") if t.strip()}
@@ -497,20 +498,59 @@ class QobuzEngine(StreamripMixin, EngineBase):
                     "artist_id": artist_id, "extra": "albums", "limit": 200, "app_id": app_id,
                 }, headers=headers)
                 data = ar.json()
-            if data.get("status") == "error":
-                return {"error": data.get("message", "Qobuz error"), "releases": []}
-            artist = {
-                "id":      str(data.get("id", artist_id)),
-                "name":    data.get("name", ""),
-                "picture": (data.get("image") or {}).get("large", "") if isinstance(data.get("image"), dict) else "",
-                "albums_total": data.get("albums_count"),
-                "url":     f"https://www.qobuz.com/artist/{artist_id}",
-                "service": "qobuz",
-            }
+                if data.get("status") == "error":
+                    return {"error": data.get("message", "Qobuz error"), "releases": []}
+                aname = (data.get("name") or "").strip().lower()
+                artist = {
+                    "id":      str(data.get("id", artist_id)),
+                    "name":    data.get("name", ""),
+                    "picture": (data.get("image") or {}).get("large", "") if isinstance(data.get("image"), dict) else "",
+                    "albums_total": data.get("albums_count"),
+                    "url":     f"https://www.qobuz.com/artist/{artist_id}",
+                    "service": "qobuz",
+                }
+                items = (data.get("albums") or {}).get("items", [])
+
+                def _alb_artist(a: dict) -> str:
+                    v = a.get("artist")
+                    if isinstance(v, dict):
+                        return (v.get("name") or "").strip()
+                    return ""
+
+                # компиляция = release_type compilation ИЛИ альбом кредитован не
+                # на этого артиста → «с этим артистом». Для первых ~20 дотягиваем
+                # какой именно трек артиста в сборнике.
+                def _is_comp(a: dict) -> bool:
+                    if (a.get("release_type") or "").lower() == "compilation":
+                        return True
+                    aa = _alb_artist(a).lower()
+                    return bool(aa) and aa != aname and aa != "various artists" and \
+                        str((a.get("artist") or {}).get("id", "")) != str(artist_id)
+
+                comp_ids = [str(a.get("id", "")) for a in items if a.get("id") and _is_comp(a)][:20]
+
+                async def _who(cid: str):
+                    try:
+                        r = await c.get("https://www.qobuz.com/api.json/0.2/album/get",
+                                        params={"album_id": cid, "app_id": app_id}, headers=headers)
+                        j = r.json()
+                        mine = [t.get("title", "")
+                                for t in (j.get("tracks") or {}).get("items", [])
+                                if aname and aname in (t.get("performer") or {}).get("name", "").lower()
+                                or str((t.get("performer") or {}).get("id", "")) == str(artist_id)
+                                or (aname and aname in (t.get("title", "") or "").lower())]
+                        return cid, "; ".join(dict.fromkeys(x for x in mine if x))
+                    except Exception:
+                        return cid, ""
+                comp_tracks = dict(await _aio.gather(*[_who(i) for i in comp_ids])) if comp_ids else {}
+
             releases = []
-            for a in (data.get("albums") or {}).get("items", []):
+            for a in items:
                 rtype = (a.get("release_type") or "album").lower()
-                releases.append({
+                is_comp = _is_comp(a)
+                if is_comp:
+                    rtype = "compilation"
+                row = {
                     "id":      str(a.get("id", "")),
                     "title":   a.get("title", ""),
                     "cover":   (a.get("image") or {}).get("large", "") if isinstance(a.get("image"), dict) else "",
@@ -523,7 +563,14 @@ class QobuzEngine(StreamripMixin, EngineBase):
                     "explicit":a.get("parental_warning", False),
                     "hires":   a.get("hires", False),
                     "service": "qobuz",
-                })
+                }
+                if is_comp:
+                    if _alb_artist(a):
+                        row["album_artist"] = _alb_artist(a)
+                    ap = comp_tracks.get(str(a.get("id", "")), "")
+                    if ap:
+                        row["appears_as"] = ap
+                releases.append(row)
             if wanted and wanted != {"all"}:
                 releases = [r for r in releases if r["type"] in wanted]
             releases.sort(key=lambda r: r.get("date", ""), reverse=True)

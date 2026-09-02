@@ -649,6 +649,7 @@ class TidalEngine(EngineBase):
                     "error": "Tidal access_token не настроен", "releases": []}
         headers = {"Authorization": f"Bearer {token}"}
         wanted  = {t.strip() for t in types.split(",") if t.strip()} if types else set()
+        import asyncio as _aio
         try:
             async with _HTTP.ashared() as c:
                 info_r = await c.get(f"https://api.tidal.com/v1/artists/{artist_id}",
@@ -658,19 +659,61 @@ class TidalEngine(EngineBase):
                             "error": "Tidal: токен истёк. Обнови access_token в Settings → Tidal.",
                             "releases": []}
                 info = info_r.json()
-                albums_r = await c.get(f"https://api.tidal.com/v1/artists/{artist_id}/albums",
-                                       headers=headers,
-                                       params={"countryCode": country, "limit": 100, "offset": 0})
-                albums_data = albums_r.json()
+                aname = (info.get("name") or "").strip().lower()
+
+                async def _albs(filt: str | None):
+                    p = {"countryCode": country, "limit": 100, "offset": 0}
+                    if filt:
+                        p["filter"] = filt
+                    rr = await c.get(f"https://api.tidal.com/v1/artists/{artist_id}/albums",
+                                     headers=headers, params=p)
+                    return (rr.json().get("items") or []) if rr.status_code == 200 else []
+
+                # default = свои альбомы; EPSANDSINGLES = свои EP/синглы;
+                # COMPILATIONS = «с этим артистом» (микс/сборник/радио — раньше
+                # они вообще не приходили, дискография Tidal была неполной).
+                own, eps, comps = await _aio.gather(
+                    _albs(None), _albs("EPSANDSINGLES"), _albs("COMPILATIONS"))
+
+                # для компиляций — чей это релиз и какой трек артиста в нём
+                comp_slice = comps[:24]
+
+                async def _who(alb):
+                    cid = str(alb.get("id", ""))
+                    try:
+                        tr = await c.get(f"https://api.tidal.com/v1/albums/{cid}/tracks",
+                                         headers=headers, params={"countryCode": country, "limit": 100})
+                        items = (tr.json().get("items") or []) if tr.status_code == 200 else []
+                        mine = [t.get("title", "") for t in items
+                                if str((t.get("artist") or {}).get("id", "")) == str(artist_id)
+                                or any(str(a.get("id", "")) == str(artist_id) for a in (t.get("artists") or []))
+                                or (aname and aname in (t.get("title", "") or "").lower())]
+                        return cid, "; ".join(dict.fromkeys(x for x in mine if x))
+                    except Exception:
+                        return cid, ""
+                comp_tracks = dict(await _aio.gather(*[_who(a) for a in comp_slice])) if comp_slice else {}
+
             releases = []
-            for alb in albums_data.get("items") or []:
-                alb_id   = str(alb.get("id", ""))
+            seen_ids: set[str] = set()
+
+            def _add(alb, forced_type: str | None):
+                alb_id = str(alb.get("id", ""))
+                if not alb_id or alb_id in seen_ids:
+                    return
                 alb_type = alb.get("type", "ALBUM").lower()
-                type_norm = {"album": "album", "ep": "single", "single": "single",
-                             "compilation": "compilation"}.get(alb_type, "album")
+                type_norm = forced_type or {"album": "album", "ep": "single", "single": "single",
+                                            "compilation": "compilation"}.get(alb_type, "album")
+                alb_artist = (alb.get("artist") or {}).get("name", "") or ""
+                is_appears = type_norm == "compilation" or (
+                    alb_artist and alb_artist.strip().lower() != aname
+                    and alb_artist.strip().lower() != "" and forced_type is None
+                    and not any(str(a.get("id", "")) == str(artist_id) for a in (alb.get("artists") or [])))
+                if is_appears:
+                    type_norm = "compilation"
                 if wanted and type_norm not in wanted:
-                    continue
-                releases.append({
+                    return
+                seen_ids.add(alb_id)
+                row = {
                     "id":      alb_id,
                     "title":   alb.get("title", ""),
                     "artist":  info.get("name", ""),
@@ -681,7 +724,21 @@ class TidalEngine(EngineBase):
                     "date":    alb.get("releaseDate", ""),
                     "tracks":  alb.get("numberOfTracks"),
                     "service": "tidal",
-                })
+                }
+                if type_norm == "compilation":
+                    if alb_artist:
+                        row["album_artist"] = alb_artist
+                    ap = comp_tracks.get(alb_id, "")
+                    if ap:
+                        row["appears_as"] = ap
+                releases.append(row)
+
+            for alb in own:
+                _add(alb, None)
+            for alb in eps:
+                _add(alb, None)
+            for alb in comps:
+                _add(alb, "compilation")
             return {
                 "artist": {
                     "id":      str(info.get("id", artist_id)),
