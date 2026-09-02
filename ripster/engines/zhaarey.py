@@ -26,7 +26,11 @@ _RE_DONE    = re.compile(r"Completed:\s*(\d+)/(\d+)")
 # отличать «ошибок ноль» от настоящей ошибки — по слову их не различить.
 _RE_SUMMARY = re.compile(r"Completed:\s*\d+/\d+.*?Errors:\s*(\d+)", re.I)
 _RE_TRACK   = re.compile(r"Track\s+(\d+)\s+of\s+(\d+)")
-_RE_CODEC   = re.compile(r"no codec found", re.I)
+# «нет lossless-потока» — у релиза в манифесте нет ALAC-стерео (частый случай:
+# spatial-переиздания «… Edition» приходят ТОЛЬКО в Dolby Atmos). Раньше
+# загрузчик писал глухое "no codec found", и движок объявлял это «wrapper не
+# отвечает» — неверный диагноз. Новый main.go пишет "no lossless (ALAC) stream…".
+_RE_NO_LOSSLESS = re.compile(r"no (?:lossless \(ALAC\)|ALAC) stream|no codec found", re.I)
 _RE_TOKEN   = re.compile(r"Failed to get token", re.I)
 _RE_RETRY   = re.compile(r"Error detected, press Enter to try again", re.I)
 # Local docker wrapper couldn't mint a content key (expired/unsubscribed Apple
@@ -211,7 +215,7 @@ class ZhaereyEngine(EngineBase):
         if m:
             return "error" if int(m.group(1)) > 0 else "success"
         if any(k in l for k in ("error","panic","fatal","exception")): return "error"
-        if "warning" in l or "no codec found" in l:                    return "warn"
+        if "warning" in l or "no codec found" in l or "no lossless (alac)" in l: return "warn"
         if any(k in l for k in ("completed","saved","done")):          return "success"
         return "stdout"
 
@@ -527,8 +531,13 @@ class ZhaereyEngine(EngineBase):
                 "расшифровать (локальная Apple-сессия wrapper'а протухла/без подписки, "
                 "либо публичный wm.wol.moe перегружен). Файлы НЕ сохранены. "
                 "Перелогинь wrapper (Setup → Apple → Wrapper) или повтори позже."))
-        if _RE_CODEC.search(log_text):
-            return EngineResult(False, error="no codec found — wrapper not responding")
+        if _RE_NO_LOSSLESS.search(log_text):
+            m = re.search(r"no (?:lossless \(ALAC\)|ALAC) stream[^\n]*", log_text, re.I)
+            detail = (m.group(0).strip() if m else "нет ALAC-потока")
+            return EngineResult(False, error=(
+                f"Apple: у релиза нет lossless — {detail}. "
+                "Часто так у переизданий «… Edition» (только Dolby Atmos). "
+                "Перекачай в AAC (Настройки → качество) или качай оригинальный релиз, а не spatial-версию."))
         if _RE_TOKEN.search(log_text):
             return EngineResult(False, error="failed to get token — wrapper not authenticated")
         if rc == 0:
