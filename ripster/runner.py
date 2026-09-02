@@ -345,6 +345,8 @@ from ripster.task_state import (
     TaskStatus,
     advance     as _advance_task,
     try_advance as _try_advance_task,
+    current     as _task_state,
+    is_terminal as _task_is_terminal,
     # Лестница витрин Apple: провал ступени `_run_engine_task` записывает как
     # ERROR всей задачи, а ERROR терминален. Без возврата в очередь успех
     # следующей ступени не смог бы вывести задачу из ошибки.
@@ -2846,7 +2848,27 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 pass
         # Skip history when the task was reset in-place for auto-retry —
         # it's still queued and will be re-run by process_queue().
-        if not task.pop("_in_retry", False):
+        if task.pop("_in_retry", False):
+            pass
+        else:
+            # SAFETY NET (TASKS_NEXT #4): every task MUST leave run_task in a
+            # terminal state. A run that ends still 'queued'/'running' — e.g. an
+            # early failure whose `_try_advance_task(ERROR)` was rejected as an
+            # illegal QUEUED→ERROR move — used to slip past `_add_to_history`
+            # (it drops non-terminal status) AND past process_queue's "no active,
+            # no queued → finished" break, so the task vanished with no history
+            # row and no error status. Force it terminal here so it's always
+            # visible as a failure instead of "потерялась".
+            if not _task_is_terminal(task):
+                _cur = _task_state(task).value
+                if not task.get("error"):
+                    task["error"] = (
+                        f"Задача завершилась без результата (внутреннее состояние "
+                        f"«{_cur}»). Так быть не должно — повтори загрузку; если "
+                        f"повторяется, пришли ссылку владельцу.")
+                task["status"] = TaskStatus.ERROR.value
+                print(f"[runner] SAFETY NET: task {str(tid)[:8]} left run_task "
+                      f"as '{_cur}' — forced to error", flush=True)
             _add_to_history(task)
         _qs.unregister_runner(tid)
         _qs.proc = None
