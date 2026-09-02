@@ -290,11 +290,81 @@ class DeezerEngine(EngineBase):
                   + _rc_s + _tail_s,
         )
 
+    # ── приватный поиск по КАТАЛОГУ АККАУНТА (gw-light) ────────────────────
+    # `api.deezer.com/search` геолоцирует по IP СЕРВЕРА, а не по стране ARL —
+    # поэтому «через рипстер с турецким ARL не находит релиз, а Мурглар с
+    # британским находит». `deezer.pageSearch` (gw-light, под ARL) отдаёт
+    # выдачу в витрине аккаунта. Порт логики мобильного `DeezerGw.kt`.
+    _GW_URL = "https://www.deezer.com/ajax/gw-light.php"
+
+    async def _gw_search(self, query: str, ep: str, limit: int, arl: str) -> list[dict]:
+        import httpx as _httpx
+        base = {"api_version": "1.0", "input": "3", "api_token": ""}
+        try:
+            async with _httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+                ud = await c.post(self._GW_URL, params={**base, "method": "deezer.getUserData"},
+                                  cookies={"arl": arl}, json={})
+                if ud.status_code != 200:
+                    return []
+                res = (ud.json() or {}).get("results") or {}
+                tok = res.get("checkForm") or ""
+                if not tok or str((res.get("USER") or {}).get("USER_ID") or "0") == "0":
+                    return []           # ARL мёртв / гостевая сессия — молча в фолбэк
+                sid = ud.cookies.get("sid") or c.cookies.get("sid") or ""
+                key = {"track": "TRACK", "album": "ALBUM", "artist": "ARTIST"}.get(ep, "ALBUM")
+                body = {"query": query, "start": 0, "nb": max(limit, 20),
+                        "filter": "ALL", "output": "ALL", "top_tracks": True}
+                sr = await c.post(self._GW_URL,
+                                  params={**base, "api_token": tok, "method": "deezer.pageSearch"},
+                                  cookies={"arl": arl, **({"sid": sid} if sid else {})}, json=body)
+                if sr.status_code != 200:
+                    return []
+                block = ((sr.json() or {}).get("results") or {}).get(key) or {}
+                rows = block.get("data") or []
+        except Exception:
+            return []
+
+        def _cover(md5: str, kind: str) -> str:
+            return (f"https://e-cdns-images.dzcdn.net/images/{kind}/{md5}/500x500-000000-80-0-0.jpg"
+                    if md5 else "")
+
+        out = []
+        for it in rows[:max(limit, 20)]:
+            if key == "TRACK":
+                d = str(it.get("DIGITAL_RELEASE_DATE") or it.get("PHYSICAL_RELEASE_DATE") or "")
+                out.append({
+                    "id": str(it.get("SNG_ID", "")), "title": it.get("SNG_TITLE", ""),
+                    "artist": it.get("ART_NAME", ""), "artist_id": str(it.get("ART_ID", "")),
+                    "type": "track", "url": f"https://www.deezer.com/track/{it.get('SNG_ID','')}",
+                    "cover": _cover(it.get("ALB_PICTURE", ""), "cover"),
+                    "year": d[:4], "date": d, "service": "deezer",
+                })
+            elif key == "ALBUM":
+                d = str(it.get("ORIGINAL_RELEASE_DATE") or it.get("PHYSICAL_RELEASE_DATE") or "")
+                out.append({
+                    "id": str(it.get("ALB_ID", "")), "title": it.get("ALB_TITLE", ""),
+                    "artist": it.get("ART_NAME", ""), "artist_id": str(it.get("ART_ID", "")),
+                    "type": "album", "url": f"https://www.deezer.com/album/{it.get('ALB_ID','')}",
+                    "cover": _cover(it.get("ALB_PICTURE", ""), "cover"),
+                    "year": d[:4], "date": d, "label": it.get("LABEL_NAME", ""),
+                    "tracks": it.get("NUMBER_TRACK"), "service": "deezer",
+                })
+            else:  # ARTIST
+                out.append({
+                    "id": str(it.get("ART_ID", "")), "title": it.get("ART_NAME", ""),
+                    "artist": it.get("ART_NAME", ""), "type": "artist",
+                    "url": f"https://www.deezer.com/artist/{it.get('ART_ID','')}",
+                    "cover": _cover(it.get("ART_PICTURE", ""), "artist"), "service": "deezer",
+                })
+        return out
+
     async def search(self, query: str, search_type: str, limit: int, config: dict) -> list[dict]:
         import httpx as _httpx
         import asyncio as _aio
         ent_map = {"album": "album", "track": "track", "artist": "artist", "playlist": "playlist"}
         ep = ent_map.get(search_type, "album")
+        arl = (config.get("deezer-arl") or "").strip()
+        gw_rows: list[dict] = await self._gw_search(query, ep, limit, arl) if arl else []
         try:
             async with _HTTP.ashared() as c:
                 r = await c.get(f"https://api.deezer.com/search/{ep}",
@@ -380,12 +450,22 @@ class DeezerEngine(EngineBase):
                         "cover":   item.get("picture_medium", ""),
                         "service": "deezer",
                     })
+            # Каталог аккаунта (gw) — ВПЕРЁД, публичная выдача добивает хвост
+            # тем, чего в аккаунтной не было. Дедуп по id.
+            if gw_rows:
+                seen = {r["id"] for r in gw_rows if r.get("id")}
+                merged = list(gw_rows)
+                for r in results:
+                    if r.get("id") and r["id"] not in seen:
+                        merged.append(r); seen.add(r["id"])
+                return merged[:max(limit, 20)]
             return results
         except Exception:
-            return []
+            return gw_rows or []
 
     async def get_artist(self, artist_id: str, types: str, config: dict) -> dict:
         import httpx as _httpx
+        import asyncio as _aio
         wanted = {t.strip() for t in types.split(",") if t.strip()}
         try:
             async with _HTTP.ashared() as c:
@@ -415,6 +495,43 @@ class DeezerEngine(EngineBase):
                             "service": "deezer",
                         })
                     next_url = data.get("next")
+
+                # «Сборник» в дискографии = чужой релиз, куда попал трек артиста.
+                # `/artist/{id}/albums` не говорит НИ чей это релиз, НИ какой
+                # именно трек — дотягиваем это одним `/album/{id}` на сборник
+                # (их обычно единицы), чтобы показать честно: «разные артисты ·
+                # трек: …», а не «Артист — Сборник» как будто это его альбом.
+                comp_ids = [r["id"] for r in releases if r["type"] == "compilation" and r["id"]]
+                if comp_ids:
+                    aname = (info.get("name") or "").strip().lower()
+
+                    async def _comp(aid: str):
+                        try:
+                            rr = await c.get(f"https://api.deezer.com/album/{aid}")
+                            if rr.status_code != 200:
+                                return aid, "", ""
+                            j = rr.json() or {}
+                            va = (j.get("artist") or {}).get("name", "") or ""
+                            mine = [
+                                t.get("title", "")
+                                for t in ((j.get("tracks") or {}).get("data") or [])
+                                if (t.get("artist") or {}).get("name", "").strip().lower() == aname
+                                or str((t.get("artist") or {}).get("id", "")) == str(artist_id)
+                            ]
+                            return aid, va, "; ".join(dict.fromkeys(t for t in mine if t))
+                        except Exception:
+                            return aid, "", ""
+
+                    got = {aid: (va, ap) for aid, va, ap in
+                           await _aio.gather(*[_comp(i) for i in comp_ids])}
+                    for r in releases:
+                        if r["id"] in got:
+                            va, ap = got[r["id"]]
+                            if va:
+                                r["album_artist"] = va
+                            if ap:
+                                r["appears_as"] = ap
+
             if wanted and wanted != {"all"}:
                 releases = [r for r in releases if r["type"] in wanted]
             releases.sort(key=lambda r: r.get("date", ""), reverse=True)
