@@ -156,7 +156,48 @@ def apple_slot_alive(container: str) -> tuple[bool, str]:
         if "login failed" in logs.lower():
             return False, "не может залогиниться (login failed)"
         return False, "порт 30020 не отвечает"
+    # Контейнер жив и отдаёт токены — но это ещё не значит, что по ним что-то
+    # скачается. Аккаунт с истёкшей подпиской Apple Music точно так же публикует
+    # media-user-token, а на загрузке отдаёт 401 «Failed to rip song» / Invalid
+    # CKC. Раньше такой слот проходил как «жив» и месяцами занимал место в пуле
+    # (жалоба владельца 03.09.2026: «в эпле вставлено хуева гора токенов, а
+    # ошибки сыплются всё равно»). Спрашиваем amp-api про подписку — тем же
+    # запросом, что apple_router.local_wrapper_storefront.
+    active, why = _apple_subscription_active(raw)
+    if active is False:                 # именно явное False, не «не смог проверить»
+        return False, why
     return True, ""
+
+
+def _apple_subscription_active(raw: dict) -> "tuple[bool | None, str]":
+    """(True | False | None, причина).
+
+    None — не смогли проверить (нет токенов, сеть, любой не-200): трактуем как
+    «жив», чтобы транзиентная ошибка amp-api не отправила в архив живой аккаунт.
+    Хоронит только явный ответ ``subscription.active == false`` на 200 — и то не
+    сразу, а после DEFAULT_THRESHOLD проходов подряд (см. record_check).
+    """
+    mut = str((raw or {}).get("music_token") or "")
+    dev = str((raw or {}).get("dev_token") or "")
+    if len(mut) < 50 or len(dev) < 50:
+        return None, ""
+    try:
+        import httpx
+        r = httpx.get("https://amp-api.music.apple.com/v1/me/account",
+                      params={"meta": "subscription"},
+                      headers={"Authorization": f"Bearer {dev}",
+                               "Media-User-Token": mut,
+                               "Origin": "https://music.apple.com"},
+                      timeout=8.0)
+        if r.status_code != 200:
+            return None, ""
+        sub = ((r.json() or {}).get("meta") or {}).get("subscription") or {}
+    except Exception:
+        return None, ""
+    if not sub:
+        return None, ""
+    return (bool(sub.get("active")),
+            "" if sub.get("active") else "подписка Apple Music неактивна")
 
 
 def disable_apple_slot(kind: str, container: str) -> None:
