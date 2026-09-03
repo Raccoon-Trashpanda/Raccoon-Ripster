@@ -1447,6 +1447,7 @@ def check_errors_24h():
         cutoff = datetime.now().timestamp() - 24 * 3600
         buckets: dict = {}
         total = 0
+        amz_ext = 0
         for ln in log.read_text(encoding="utf-8", errors="ignore").splitlines()[-8000:]:
             if " ERROR " not in ln:
                 continue
@@ -1468,11 +1469,23 @@ def check_errors_24h():
             # считается по ней, так что сводку можно не считать вовсе.
             if "summary:" in low and "success" in low:
                 continue
+            # Сторонний Amazon-враппер (amz.dezalty.com) лежит сутками — каждый
+            # прогон probe-all пишет одну и ту же ERROR-строку, и за сутки их
+            # набирается 50+. Это НЕ наша поломка (check_engine_probe её уже
+            # игнорирует), но в сводке ошибок она забивала топ и создавала
+            # впечатление шумного прохода. Считаем отдельно, одной строкой.
+            if "[amazon] probe failed" in low and "amz.dezalty.com" in low:
+                amz_ext += 1
+                continue
             total += 1
             tag = next((name for name, keys in _ERR_BUCKETS if any(k in low for k in keys)), "other")
             buckets[tag] = buckets.get(tag, 0) + 1
+        if amz_ext:
+            _report.append(f"ℹ️ Amazon: сторонний {amz_ext}× за сутки «amz.dezalty.com недоступен» "
+                           f"— внешний сервис лежит, не наша поломка (загрузки Amazon стоят, "
+                           f"остальное не затронуто)")
         if not buckets:
-            ok("Ошибок за сутки: 0 — чисто")
+            ok("Ошибок за сутки: 0 — чисто" + (f" (не считая {amz_ext}× внешнего Amazon)" if amz_ext else ""))
             return
         top = sorted(buckets.items(), key=lambda x: -x[1])
         summary = ", ".join(f"{k}×{v}" for k, v in top[:6])
