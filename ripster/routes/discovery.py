@@ -802,7 +802,15 @@ async def _label_seeds_ex(label: str, limit: int) -> tuple[list[dict], dict]:
             out = await (_search_spotify_label(label, limit)
                          if svc == "spotify" else
                          _search_deezer(f'label:"{label}"', "album", limit))
-        except Exception:
+        except Exception as e:
+            # A SEARCH that errored (429/ban/network/timeout) is NOT the label
+            # saying "I have no releases" — it's us failing to ask. Swallowing it
+            # as an empty result is exactly what made a valid label read as a
+            # typo (03.09.2026: Spotify under a multi-hour 429 ban → "Label
+            # Furatena is not in the Spotify catalogue — check the spelling").
+            info["verify_failed"] = True
+            info.setdefault("errors", []).append(f"{svc}: {type(e).__name__}: {e}")
+            print(f"[label] search «{label}» via {svc} failed: {e}", flush=True)
             continue
         info["candidates"] += int(out.get("candidates") or len(out.get("results") or []))
         if out.get("verify_failed"):

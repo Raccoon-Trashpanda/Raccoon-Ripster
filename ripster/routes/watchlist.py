@@ -238,10 +238,17 @@ async def api_watchlist_add(body: dict):
         if not rels:
             if lbl_info.get("verify_failed"):
                 n = int(lbl_info.get("candidates") or 0)
-                warn_key, warn_args = "wl.label_unverified", {"name": name, "n": n}
-                warn_ru = (f"Лейбл «{name}» найден ({n} релизов), но Spotify сейчас "
-                           f"не даёт подтвердить лейбл — подписка заведена, проверка "
-                           f"повторится при следующем обходе")
+                if n > 0:
+                    warn_key, warn_args = "wl.label_unverified", {"name": name, "n": n}
+                    warn_ru = (f"Лейбл «{name}» найден ({n} релизов), но Spotify сейчас "
+                               f"не даёт подтвердить лейбл — подписка заведена, проверка "
+                               f"повторится при следующем обходе")
+                else:
+                    # Сам ПОИСК не отработал (429-бан / сеть) — это не «лейбла нет».
+                    warn_key, warn_args = "wl.label_search_down", {"name": name}
+                    warn_ru = (f"Не удалось проверить лейбл «{name}» — Spotify сейчас "
+                               f"отвечает отказом (лимит запросов). Подписка заведена, "
+                               f"проверка повторится сама при следующем обходе")
             else:
                 warn_key, warn_args = "wl.label_not_found", {"name": name}
                 warn_ru = (f"Лейбл «{name}» не найден в каталоге Spotify — "
