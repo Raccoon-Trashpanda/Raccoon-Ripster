@@ -420,13 +420,21 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
     if is_apple_music_video(url):
         q = "mv"
     cookies = _cookies_ok(config)
-    acct_sf = (config.get("storefront") or "us").lower()
+    # РЕАЛЬНЫЙ регион локального wrapper-аккаунта (спрашиваем Apple, кэш 15 мин),
+    # а не `config['storefront']` — тот часто расходится с фактом (в конфиге `us`,
+    # а аккаунт враппера `ca`) и тогда роутер отдаёт /us/-ссылку локальному
+    # wrapper'у, который на неё получает 401 «Failed to rip song». Проба не
+    # удалась → падаем на конфиг.
+    acct_sf = (local_wrapper_storefront(config) or config.get("storefront") or "us").lower()
     url_sf  = url_storefront(url)
     foreign = bool(url_sf and url_sf != acct_sf)
 
     # When the owner forces the local wrapper, return it immediately and NEVER
     # probe the public wm.wol.moe (keeps it out of the logs and the path entirely).
-    if q in _LOSSLESS and (config.get("apple-wrapper") or "auto").strip().lower() == "local":
+    # Исключение — ссылка ЧУЖОГО региона: локальный аккаунт другого сторфронта на
+    # неё физически получит 401 «Failed to rip song», так что foreign уходит по
+    # общему пути (ниже он сам выберет public/AMD).
+    if q in _LOSSLESS and not foreign and (config.get("apple-wrapper") or "auto").strip().lower() == "local":
         return {"engine": "zhaarey", "quality": q, "degraded": False,
                 "note": f"{q.upper()} · локальный wrapper (премиум)"}
 
@@ -463,16 +471,19 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
             return {"engine": "amd", "quality": q, "degraded": False,
                     "note": f"{q.upper()} · публичный wrapper в очереди"}
 
-        if pref == "local":
+        if pref == "local" and not foreign:
             # Explicit user choice: ALWAYS the local wrapper, NEVER public — even
             # if the local wrapper looks down (it'll queue/retry on its own). The
             # owner does not want the public pool used under any circumstances.
+            # НО чужой регион локальный аккаунт физически не расшифрует (401), так
+            # что foreign-ссылки всё равно уходят в public (см. коммент выше).
             return {"engine": "zhaarey", "quality": q, "degraded": False,
                     "note": f"{q.upper()} · локальный wrapper (премиум)"}
 
         # auto: prefer the local premium wrapper whenever it's up (reliable),
-        # public pool as fallback.
-        if local_ok:
+        # public pool as fallback. foreign-регион — только public (локальный
+        # аккаунт другого сторфронта, иначе 401 «Failed to rip song»).
+        if local_ok and not foreign:
             return {"engine": "zhaarey", "quality": q, "degraded": False,
                     "note": f"{q.upper()} · локальный wrapper (премиум)"}
         if pub_ok:
