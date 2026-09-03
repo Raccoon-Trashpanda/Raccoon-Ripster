@@ -319,6 +319,48 @@ def check_apple_wrapper():
             "ручной разбор (skill ripster-apple-wrapper)")
 
 
+def check_apple_bearer():
+    """Рабочий ли developer-bearer лежит в config.yaml (`authorization-token`).
+
+    ЗАЧЕМ ОТДЕЛЬНО. 03.09.2026 Apple отозвал АНОНИМНЫЙ публичный MusicKit
+    dev-токен (iss M62YD85FTQ — тот, что exe скрейпит из JS music.apple.com и
+    что харвестит браузерное расширение). `ampapi.GetToken()` всё равно
+    возвращал этот мёртвый токен без ошибки, фолбэк на config.yaml не
+    срабатывал → КАЖДАЯ Apple-загрузка (album + song, гости и владелец) падала
+    с замаскированным «error getting album response». Ни одна проверка не
+    смотрела, работает ли токен ИЗ config.yaml — а именно его читает Go-exe.
+
+    Само-лечится: `app._apple_bearer_keeper` (цикл 30 мин) + `main.go` теперь
+    берёт config-токен ПЕРВЫМ. Плюс `sync_mut_from_wrapper` синкает `dev_token`
+    из враппера (:30020, user-scoped, iss UDK28SN10P — переживает ротацию
+    публичного) в `authorization-token`. Здесь — верификация и подстраховка на
+    случай, если кипер по какой-то причине не крутится."""
+    tok = _cfg_get("authorization-token")
+    if not tok or tok == "your-authorization-token":
+        # config-токен не задан вовсе — exe пойдёт по скрейпу, это отдельный путь
+        ok("Apple dev-bearer в config.yaml не задан — exe использует web-скрейп")
+        return
+    if _dev_token_works(tok):
+        ok("Apple dev-bearer (config.yaml) рабочий — catalog API отвечает 200")
+        return
+    n = _streak("apple_bearer_dead", True)
+    warn(f"Apple dev-bearer в config.yaml отклонён Apple (401 на catalog) — "
+         f"Go-загрузчик даст 401 на КАЖДУЮ Apple-загрузку.{(' %d-я проверка подряд.' % n) if n >= 2 else ''}")
+    if NO_FIX:
+        return
+    # Тот же путь, что делает app._apple_bearer_keeper: тянет свежий dev_token
+    # из враппера в config через sync_mut_from_wrapper (side effect).
+    _api("/api/apple/sync-from-wrapper", "POST")
+    time.sleep(1)
+    tok2 = _cfg_get("authorization-token")
+    if tok2 and tok2 != tok and _dev_token_works(tok2):
+        _streak("apple_bearer_dead", False)
+        fixed("Apple dev-bearer пересинхронизирован из враппера — catalog API снова 200")
+    else:
+        bad("Apple dev-bearer мёртв И враппер не дал рабочей замены "
+            "(враппер лежит / не залогинен) — ручной разбор, skill ripster-apple-wrapper")
+
+
 def check_apple_pool_slots():
     """Мёртвые слоты мульти-аккаунт пула (rip-wrapper-N): архивировать после
     нескольких подряд неудачных проходов, освободить порт. См. ripster/credential_health.py —
@@ -1549,6 +1591,7 @@ def main():
     app_ok = check_app()
     if app_ok:
         check_apple_wrapper()
+        check_apple_bearer()
         check_apple_pool_slots()
         check_deezer_arls()
         check_gamdl_cookies()
