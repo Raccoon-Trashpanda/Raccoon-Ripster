@@ -3290,6 +3290,11 @@ async def run_task(task: dict) -> None:
                                              quality=_fbq.upper()))
             task["log"].append(f"─── zhaarey {_fbq} auto-fallback ───")
             task["_amd_fallback"] = True
+            # The failed attempt inside _run_engine_task may already have marked
+            # the task ERROR before raising — QUEUED→RUNNING is legal, ERROR→
+            # RUNNING is not (task_state.advance raises InvalidTransition, the
+            # retry never starts, and the SAFETY NET has to force it to error).
+            _revive_task(task)
             _advance_task(task, TaskStatus.RUNNING)
             task["progress"] = 0
             await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
@@ -3298,6 +3303,11 @@ async def run_task(task: dict) -> None:
             await _broadcast(_i18n.log_event("console.orpheus_retry", level="warn",
                                              task_id=task.get("id", "")))
             task["log"].append("─── auto-retry (new settings) ───")
+            # Same reason as _NeedZhaareyFallback above: the OrpheusDL run that
+            # raised _NeedRetry ("New settings detected") had already errored the
+            # task, so error→running was rejected — "Illegal transition for task
+            # …: error → running", then the safety net (03.09.2026).
+            _revive_task(task)
             _advance_task(task, TaskStatus.RUNNING)
             task["progress"] = 0
             await _run_engine_task(task, engine, url, qid)
