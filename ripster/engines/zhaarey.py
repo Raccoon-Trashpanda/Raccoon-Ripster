@@ -32,6 +32,10 @@ _RE_TRACK   = re.compile(r"Track\s+(\d+)\s+of\s+(\d+)")
 # отвечает» — неверный диагноз. Новый main.go пишет "no lossless (ALAC) stream…".
 _RE_NO_LOSSLESS = re.compile(r"no (?:lossless \(ALAC\)|ALAC) stream|no codec found", re.I)
 _RE_TOKEN   = re.compile(r"Failed to get token", re.I)
+# Врапперная Apple-сессия потеряла авторизацию посреди рипа: media-user-token
+# протух / устройство отвязано / подписка кончилась. Не «unknown finish state».
+_RE_RIP_401 = re.compile(r"Failed to rip song:\s*401|\b401 Unauthorized\b|"
+                         r"license.*401|unauthorized.*(?:rip|license|widevine)", re.I)
 _RE_RETRY   = re.compile(r"Error detected, press Enter to try again", re.I)
 # Local docker wrapper couldn't mint a content key (expired/unsubscribed Apple
 # session): the wrapper logs "Invalid CKC" and the Go side dies decrypting.
@@ -540,6 +544,11 @@ class ZhaereyEngine(EngineBase):
                 "Перекачай в AAC (Настройки → качество) или качай оригинальный релиз, а не spatial-версию."))
         if _RE_TOKEN.search(log_text):
             return EngineResult(False, error="failed to get token — wrapper not authenticated")
+        if _RE_RIP_401.search(log_text):
+            return EngineResult(False, error=(
+                "Apple: сессия загрузчика потеряла авторизацию (401) — media-user-token "
+                "протух, устройство отвязано или кончилась подписка Apple Music. "
+                "Загрузка Apple временно недоступна, пока владелец не обновит токен."))
         if rc == 0:
             # Exit 0 but no "Completed: N/M" summary above. If the log shows the
             # track(s) were Unavailable / failed to download, zhaarey just gave up
