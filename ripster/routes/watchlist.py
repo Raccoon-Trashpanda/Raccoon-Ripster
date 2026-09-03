@@ -279,9 +279,23 @@ async def api_watchlist_add(body: dict):
     # `resolved` is reported so the UI can warn when an entry went in unpollable
     # (no Apple artist id / unresolvable SC channel) instead of failing silently.
     # SoundCloud резолвится в url, у остальных признак пригодности — artist_id.
-    return {"ok": True, "item": entry,
+    resp = {"ok": True, "item": entry,
             "resolved": bool(entry["url"] if service == "soundcloud"
                              else entry["artist_id"])}
+    # Имя оказалось неоднозначным — несколько РАЗНЫХ артистов с таким же именем
+    # (BOP, Solomon Grey…). Подписка заведена на «лучшую догадку», но человека
+    # надо предупредить и дать выбрать нужного (вставить ссылку на его страницу).
+    if resolved.get("ambiguous") and resolved.get("candidates"):
+        cands = resolved["candidates"]
+        resp["ambiguous"] = True
+        resp["candidates"] = cands
+        _lbl = " · ".join(f"{c['name']} ({c['genre'] or '?'})" for c in cands[:4])
+        resp["warning_key"] = "wl.artist_ambiguous"
+        resp["warning_args"] = {"name": entry["name"], "list": _lbl}
+        resp["warning"] = (f"«{entry['name']}» — не один артист: {_lbl}. Подписка "
+                           f"заведена на первого; если нужен другой — вставь ссылку "
+                           f"на его страницу в Apple Music и добавь заново.")
+    return resp
 
 
 # ── Smart suggestions (mined from the local stats DB) ────────────────────────

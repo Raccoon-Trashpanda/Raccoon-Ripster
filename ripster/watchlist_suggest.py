@@ -423,15 +423,34 @@ async def resolve_apple_artist(name: str, storefront: str = "us") -> dict:
 
     target = _norm(name)
     exact = [x for x in results if _norm(x.get("artistName", "")) == target]
-    pick = (exact or results or [None])[0]
+    pool = exact or results
+    pick = (pool or [None])[0]
     if not pick or not pick.get("artistId"):
         return {}
-    return {
+    out = {
         "artist_id": str(pick["artistId"]),
         "url":       pick.get("artistLinkUrl", ""),
         "name":      pick.get("artistName", name),
         "exact":     bool(exact),
     }
+    # ЖЁСТКИЕ МЕРЫ ПО ИМЕНАМ (03.09.2026). Раньше при нескольких артистах с
+    # одинаковым именем (BOP, Solomon Grey…) молча брался первый из iTunes —
+    # и вотчлист/радар навсегда следили за ЧУЖИМ артистом. Теперь, если точных
+    # совпадений по имени больше одного, отдаём кандидатов с жанром: вызывающий
+    # обязан либо уточнить (вставить ссылку на нужного артиста), либо показать
+    # выбор человеку. artist_id при этом всё равно заполнен — «лучшая догадка»,
+    # чтобы запись не была битой, — но помечен `ambiguous`.
+    _uniq = {str(x.get("artistId")): x for x in pool if x.get("artistId")}
+    if len(_uniq) > 1:
+        out["ambiguous"] = True
+        out["candidates"] = [
+            {"artist_id": aid,
+             "name":  x.get("artistName", ""),
+             "genre": x.get("primaryGenreName", ""),
+             "url":   x.get("artistLinkUrl", "")}
+            for aid, x in list(_uniq.items())[:6]
+        ]
+    return out
 
 
 async def resolve_sc_channel(name: str, permalink_hint: str = "") -> dict:

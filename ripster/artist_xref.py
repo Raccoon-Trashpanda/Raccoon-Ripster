@@ -123,11 +123,41 @@ def _remember(service: str, name: str, rec: Optional[dict]) -> None:
 
 def _pick_exact(name: str, candidates: list, id_key: str = "id",
                 name_key: str = "name") -> Optional[dict]:
-    """Из выдачи поиска взять того самого артиста — или никого."""
+    """Из выдачи поиска взять ТОГО САМОГО артиста — или никого.
+
+    ЖЁСТКИЕ МЕРЫ (03.09.2026). Раньше брался первый по имени, и при коллизии
+    (BOP, Solomon Grey — таких артистов несколько в каждом каталоге) в радар
+    подмешивались релизы ЧУЖОГО. Чужой релиз в ленте вводит в заблуждение
+    сильнее, чем отсутствие сшивки: пропущенный кросс-сервисный релиз просто
+    невидим. Поэтому при неоднозначности: берём заметно популярнейшего
+    (обычно именно его и имеют в виду), а если по популярности не различить —
+    НЕ сшиваем вовсе.
+    """
     want = norm(name)
-    for a in candidates or []:
-        if norm(a.get(name_key, "")) == want and a.get(id_key):
-            return {"id": str(a.get(id_key)), "name": a.get(name_key, "")}
+    hits = [a for a in (candidates or [])
+            if norm(a.get(name_key, "")) == want and a.get(id_key)]
+    if not hits:
+        return None
+    if len(hits) == 1:
+        a = hits[0]
+        return {"id": str(a.get(id_key)), "name": a.get(name_key, "")}
+
+    def _pop(a: dict) -> int:
+        for k in ("nb_fan", "popularity", "nb_album", "albumsCount", "albums_count"):
+            v = a.get(k)
+            if isinstance(v, (int, float)) and v > 0:
+                return int(v)
+        return 0
+
+    ranked = sorted(hits, key=_pop, reverse=True)
+    top, second = _pop(ranked[0]), _pop(ranked[1])
+    # Различаем только если у лидера есть популярность И он заметно впереди
+    # (в 3+ раза или второй вовсе без метрики). Иначе — воздерживаемся.
+    if top > 0 and (second == 0 or top >= second * 3):
+        a = ranked[0]
+        return {"id": str(a.get(id_key)), "name": a.get(name_key, "")}
+    print(f"[xref] «{name}»: {len(hits)} одноимённых артиста, по популярности не "
+          f"различить — сшивку пропускаю (лучше пропуск, чем чужой релиз)", flush=True)
     return None
 
 
