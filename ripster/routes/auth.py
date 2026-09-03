@@ -459,7 +459,13 @@ async def _probe_qobuz(overlay: dict | None = None) -> dict:
     custom_app = str(cfg.get("qobuz-app-id")     or "").strip()
     app_id     = custom_app or "312369995"
 
-    if user_id and auth_token:
+    if auth_token:
+        # user-id не обязателен: из cookies на play.qobuz.com пользователь чаще
+        # снимает ТОЛЬКО user_auth_token (это одна длинная строка), а числовой
+        # id — отдельная кука, которую забывают. Qobuz `user/login` по одному
+        # токену отдаёт весь user-объект, включая id — добираем его сами и
+        # сохраняем, дальше движок работает как обычно. Раньше без id проба
+        # проваливалась в «заполни user-id + токен ИЛИ email + пароль».
         res = await _qobuz_probe_token(user_id, auth_token, app_id)
         # Протухший токен НАВСЕГДА заслонял рабочие email+пароль: до ветки входа
         # ниже дело просто не доходило, и Qobuz лежал с 401, пока владелец не
@@ -482,15 +488,14 @@ async def _probe_qobuz(overlay: dict | None = None) -> dict:
 
 
 async def _qobuz_probe_token(user_id: str, auth_token: str, app_id: str) -> dict:
+    params = {"user_auth_token": auth_token, "app_id": app_id}
+    if user_id:
+        params["user_id"] = user_id
     try:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.post(
                 "https://www.qobuz.com/api.json/0.2/user/login",
-                params={
-                    "user_id":         user_id,
-                    "user_auth_token": auth_token,
-                    "app_id":          app_id,
-                },
+                params=params,
             )
     except Exception as e:
         return {"ok": False, "error_key": "pr.net", "error_args": {"e": str(e)}, "error": f"Сеть: {e}"}
@@ -522,6 +527,17 @@ async def _qobuz_probe_token(user_id: str, auth_token: str, app_id: str) -> dict
     if ineligible:
         ineligible["app_id_used"] = app_id
         return ineligible
+    # Токен дали без user-id — Qobuz вернул его в ответе; сохраняем, чтобы
+    # движок и следующая проба сразу шли по полному токен-пути.
+    if not user_id:
+        got_id = str((data.get("user") or {}).get("id") or "").strip()
+        if got_id:
+            _cfg["qobuz-user-id"] = got_id
+            if _save_config:
+                try:
+                    _save_config(_cfg)
+                except Exception:
+                    pass
     return {
         "ok": True,
         "user": user_block,

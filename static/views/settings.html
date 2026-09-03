@@ -217,6 +217,29 @@
           <div id="sec-msg" style="font-size:11px;margin-top:8px;min-height:14px"></div>
         </div>
 
+        <!-- ── Сопряжение с телефоном ── -->
+        <div class="block mt12 owner-only">
+          <div class="block-title" data-i18n="s.pair_section">📱 Сопряжение с телефоном</div>
+          <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:10px" data-i18n="s.pair_help">
+            На телефоне: Ripster → Настройки → «Сопряжение». Введи адрес этого ПК и разовый код ниже. Телефон подхватит учётки сервисов и Apple Music через ПК.
+          </div>
+          <div id="pair-addr-hint" style="font-size:11px;color:var(--muted);margin-bottom:10px"></div>
+          <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+            <button class="btn-red btn-sm" onclick="pairStart()" data-i18n="s.pair_gen">Показать код</button>
+            <button class="btn-ghost btn-sm" onclick="pairRevokeAll()" data-i18n="s.pair_revoke" style="margin-left:auto">Отвязать все устройства</button>
+            <div id="pair-code" style="font-size:26px;font-weight:800;letter-spacing:.22em;color:var(--text);font-family:var(--mono,monospace)"></div>
+            <span id="pair-code-ttl" style="font-size:11px;color:var(--muted)"></span>
+          </div>
+          <div class="toggle-row" style="margin-top:12px">
+            <div class="toggle-info">
+              <div class="toggle-label" data-i18n="s.pair_share">Делиться учётками сервисов с телефоном</div>
+              <div class="toggle-sub" data-i18n="s.pair_share_sub">Телефон сможет разово скачать токены (Qobuz, Deezer, Tidal, Яндекс, SoundCloud, Spotify sp_dc) и storefront Apple.</div>
+            </div>
+            <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="pair-share" onchange="pairShare(this.checked)"><div class="toggle-slider"></div></label>
+          </div>
+          <div id="pair-msg" style="font-size:11px;margin-top:8px;min-height:14px"></div>
+        </div>
+
         </div><!-- end stab-global-shared -->
         <div class="stab-panel" id="stab-about">
 

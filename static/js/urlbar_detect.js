@@ -196,6 +196,7 @@ function showStab(id, btn) {
   if(id==='bot') loadBotConfig();
   if(id==='global')  {
     loadAuthStatus();
+    pairFillHint();
     setChk('s-queue-autostart', c['queue-autostart']!==false);
     setChk('s-notify-on-done', !!c['notify-on-done']);
     // Release toasts default ON — the point of a watchlist is being told.
@@ -326,6 +327,91 @@ async function saveAppPassword(){
 async function logoutApp(){
   await fetch('/api/logout', {method:'POST'}).catch(()=>{});
   location.href = '/login';
+}
+
+// ── Сопряжение с телефоном ──────────────────────────────────────────────
+async function pairStart(){
+  const codeEl=document.getElementById('pair-code');
+  const ttlEl=document.getElementById('pair-code-ttl');
+  const msgEl=document.getElementById('pair-msg');
+  if(msgEl){ msgEl.textContent=''; }
+  try{
+    const r=await fetch('/api/pair/start',{method:'POST'});
+    const d=await r.json().catch(()=>({}));
+    if(!r.ok){
+      if(msgEl){ msgEl.textContent=(d.detail||d.error||('HTTP '+r.status)); msgEl.style.color='var(--red)'; }
+      return;
+    }
+    if(codeEl) codeEl.textContent=d.code;
+    const shareEl=document.getElementById('pair-share');
+    if(shareEl && typeof d.share_credentials==='boolean') shareEl.checked=d.share_credentials;
+    let left=(d.expires_in||300);
+    if(window._pairTtlTimer) clearInterval(window._pairTtlTimer);
+    const tick=()=>{
+      if(!ttlEl) return;
+      if(left<=0){ ttlEl.textContent=t('s.pair_expired'); if(codeEl) codeEl.textContent='— — —'; clearInterval(window._pairTtlTimer); return; }
+      const m=Math.floor(left/60), s=(''+(left%60)).padStart(2,'0');
+      ttlEl.textContent=t('s.pair_valid')+' '+m+':'+s; left--;
+    };
+    tick(); window._pairTtlTimer=setInterval(tick,1000);
+  }catch(e){ if(msgEl){ msgEl.textContent=t('ui.net_err_pfx')+e.message; msgEl.style.color='var(--red)'; } }
+}
+
+async function pairShare(on){
+  const msgEl=document.getElementById('pair-msg');
+  try{
+    const r=await fetch('/api/pair/share',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!!on})});
+    const d=await r.json().catch(()=>({}));
+    if(msgEl){
+      msgEl.textContent = r.ok ? (on?t('s.pair_share_on'):t('s.pair_share_off')) : (d.detail||d.error||('HTTP '+r.status));
+      msgEl.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+    }
+  }catch(e){ if(msgEl){ msgEl.textContent=t('ui.net_err_pfx')+e.message; msgEl.style.color='var(--red)'; } }
+}
+
+async function pairRevokeAll(){
+  const msgEl=document.getElementById('pair-msg');
+  if(!confirm(t('s.pair_revoke_confirm'))) return;
+  try{
+    const r=await fetch('/api/pair/revoke-all',{method:'POST'});
+    const d=await r.json().catch(()=>({}));
+    if(msgEl){
+      msgEl.textContent = r.ok ? (t('s.pair_revoked')+' ('+(d.revoked||0)+')') : (d.detail||d.error||('HTTP '+r.status));
+      msgEl.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+    }
+    const codeEl=document.getElementById('pair-code'); if(codeEl) codeEl.textContent='';
+    const ttlEl=document.getElementById('pair-code-ttl'); if(ttlEl) ttlEl.textContent='';
+  }catch(e){ if(msgEl){ msgEl.textContent=t('ui.net_err_pfx')+e.message; msgEl.style.color='var(--red)'; } }
+}
+
+function _pairRel(ts){
+  if(!ts) return '';
+  const s=Math.max(0,Math.floor(Date.now()/1000)-ts);
+  if(s<60) return s+' '+t('s.pair_sec');
+  if(s<3600) return Math.floor(s/60)+' '+t('s.pair_min');
+  if(s<86400) return Math.floor(s/3600)+' '+t('s.pair_hr');
+  return Math.floor(s/86400)+' '+t('s.pair_day');
+}
+async function pairFillHint(){
+  const el=document.getElementById('pair-addr-hint');
+  if(!el) return;
+  const host=(location.hostname && location.hostname!=='localhost') ? location.hostname : '127.0.0.1';
+  const addrLine = t('s.pair_addr_hint')+' <code>http://'+host+':7799</code> · '+t('s.pair_emu')+' <code>http://10.0.2.2:7799</code>';
+  try{
+    const r=await fetch('/api/pair/status'); const d=await r.json().catch(()=>({}));
+    const shareEl=document.getElementById('pair-share');
+    if(shareEl && d && typeof d.share_credentials==='boolean') shareEl.checked=d.share_credentials;
+    let statusLine='';
+    const n=(d.devices||[]).length;
+    if(n>0){
+      const online=d.online_devices||0;
+      const last=Math.max(0,...(d.devices||[]).map(x=>x.seen||0));
+      statusLine = '<div style="margin-top:6px;color:'+(online>0?'var(--green)':'var(--muted)')+'">📱 '
+        + ti('s.pair_devices',{n:n}) + (online>0 ? ' · '+ti('s.pair_online',{n:online}) : '')
+        + (last ? ' · '+t('s.pair_lastseen')+' '+_pairRel(last) : '') + '</div>';
+    }
+    el.innerHTML = addrLine + statusLine;
+  }catch(e){ el.innerHTML = addrLine; }
 }
 
 // country code → flag emoji
