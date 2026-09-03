@@ -607,6 +607,70 @@ async def _startup_sync_orpheus() -> None:
         print(f"[startup] OrpheusDL username sync skipped: {_e}", flush=True)
 
 
+async def _apple_bearer_keeper() -> None:
+    """Keep config's Apple developer bearer (authorization-token) a WORKING one.
+
+    Two independent things can leave a dead bearer in config.yaml:
+      · Apple rotates the public music.apple.com dev token — the value the
+        browser extension harvests (iss M62YD85FTQ) gets revoked globally, and
+        the extension keeps pushing that same dead token back via `token_update`;
+      · `_harvest_wrapper_token()` only runs when Ripster itself STARTS the
+        wrapper container, so an already-running wrapper never refreshes it.
+    The Go downloader (apple-music-downloader.exe) reads authorization-token
+    straight from config.yaml, so a dead one there = every Apple download 401s
+    with a silent "Failed to get album response" (03.09.2026 outage).
+
+    This keeper probes the current bearer against the catalog API; if it fails,
+    it pulls the wrapper's user-scoped MusicKit token (iss UDK28SN10P — survives
+    the public rotation) from :30020 into config and persists. Cheap: one probe
+    every 30 min, a sync only when the probe fails."""
+    try:
+        from ripster.routes import apple_auth as _aa
+    except Exception as _e:
+        print(f"[apple-bearer] keeper not started: {_e}", flush=True)
+        return
+    loop = asyncio.get_event_loop()
+    first = True
+    while True:
+        await asyncio.sleep(6 if first else 1800)
+        first = False
+        try:
+            bearer = (config.get("authorization-token") or "").strip()
+            if await loop.run_in_executor(None, _apple_bearer_ok, bearer):
+                continue                       # current token still works
+            await loop.run_in_executor(None, _aa.sync_mut_from_wrapper)
+            new_bearer = (config.get("authorization-token") or "").strip()
+            if new_bearer != bearer and await loop.run_in_executor(None, _apple_bearer_ok, new_bearer):
+                print("[apple-bearer] config token was rejected by Apple — "
+                      "replaced with the wrapper's MusicKit token", flush=True)
+                if 'broadcast' in globals():
+                    try:
+                        await broadcast({"type": "wrapper_log",
+                                         "text": "🍎 Apple bearer обновлён из враппера — загрузки снова работают"})
+                    except Exception:
+                        pass
+            elif not new_bearer or new_bearer == bearer:
+                print("[apple-bearer] config token rejected AND wrapper gave no "
+                      "usable replacement (wrapper down / not logged in)", flush=True)
+        except Exception as _e:
+            print(f"[apple-bearer] keeper tick failed: {type(_e).__name__}: {_e}", flush=True)
+
+
+def _apple_bearer_ok(bearer: str) -> bool:
+    """True if `bearer` is accepted by the Apple catalog API (cheap GET)."""
+    if not bearer or len(bearer) < 100:
+        return False
+    try:
+        import httpx
+        r = httpx.get("https://amp-api.music.apple.com/v1/catalog/us/albums/1440857781",
+                      headers={"Authorization": f"Bearer {bearer}",
+                               "Origin": "https://music.apple.com"},
+                      timeout=8.0)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
 # ── Watchlist periodic check ───────────────────────────────────────────────────
 _watchlist_check_task = None
 
@@ -658,6 +722,7 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(process_queue())
 
     asyncio.create_task(_startup_sync_orpheus())
+    asyncio.create_task(_apple_bearer_keeper())
     asyncio.create_task(_soundcloud_routes._prewarm_client_id())
     # Сторож самоподъёма — см. ripster/watchdog.py.
     try:

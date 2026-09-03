@@ -290,17 +290,27 @@ def _wrapper_account_url() -> str:
 
 
 def sync_mut_from_wrapper(timeout: float = 5.0) -> str:
-    """Harvest the media-user-token from the LOCAL wrapper's account API (30020).
+    """Harvest the media-user-token AND developer bearer from the LOCAL wrapper's
+    account API (30020).
 
     The wrapper, once logged into a SUBSCRIBED Apple account, serves a JSON
-    ``{"storefront_id", "dev_token", "music_token"}`` where ``music_token`` is a
-    fresh media-user-token minted from that account — exactly what music-video
-    (and aac-lc) downloads need. Pulling it from the already-authenticated
-    wrapper means NO programmatic web login / 2FA, so no account-lock risk.
+    ``{"storefront_id", "dev_token", "music_token"}``:
+      · ``music_token`` — a fresh media-user-token minted from that account
+        (music-video and aac-lc downloads need it);
+      · ``dev_token``   — a working Apple developer/MusicKit bearer.
 
-    Syncs ``music_token`` into ``config["media-user-token"]`` (persisted) when it
-    differs. Returns the token if synced, else "". Best-effort: a wrapper that is
-    down / not publishing 30020 just yields "" and never clears a good token."""
+    Both are synced into config (persisted) when they differ:
+    ``config["media-user-token"]`` ← music_token, ``config["authorization-token"]``
+    ← dev_token. The bearer sync matters because the Go downloader
+    (apple-music-downloader.exe) reads ``authorization-token`` straight from
+    config.yaml for every catalog fetch — a stale one there is a silent
+    "Failed to get album response" / 401 on EVERY Apple download even while the
+    wrapper session itself is healthy (03.09.2026: Apple rotated the public
+    dev token, config.yaml kept the revoked one, all Apple downloads 401'd).
+
+    Returns the media-user-token if it was synced, else "" (the bearer sync is a
+    side effect and doesn't affect the return value). Best-effort: a wrapper that
+    is down / not publishing 30020 just yields "" and never clears a good token."""
     try:
         url = _wrapper_account_url()
         req = urllib.request.Request(url, headers={"User-Agent": "Ripster"})
@@ -308,15 +318,27 @@ def sync_mut_from_wrapper(timeout: float = 5.0) -> str:
             data = json.loads(r.read().decode("utf-8", "ignore"))
     except Exception:
         return ""
+
+    dirty = False
+
+    # ── developer bearer → authorization-token (used by the Go exe verbatim) ──
+    dev = (data.get("dev_token") or "").strip()
+    if dev.startswith("eyJ") and len(dev) > 100 and dev != (_cfg.get("authorization-token") or "").strip():
+        _cfg["authorization-token"] = dev
+        dirty = True
+
     mut = (data.get("music_token") or "").strip()
     # A real media-user-token is long; guard against an empty/garbage response so
     # we never overwrite a working token with junk.
+    synced_mut = ""
     if mut and len(mut) > 50 and mut != (_cfg.get("media-user-token") or "").strip():
         _cfg["media-user-token"] = mut
-        if _save_config:
-            _save_config(_cfg)
-        return mut
-    return ""
+        synced_mut = mut
+        dirty = True
+
+    if dirty and _save_config:
+        _save_config(_cfg)
+    return synced_mut
 
 
 @router.post("/api/apple/sync-from-wrapper")
