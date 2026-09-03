@@ -432,6 +432,77 @@ def _not_responding_html() -> str:
         "Частая причина — антивирус блокирует <code>python\\\\python.exe</code>.")
 
 
+# ── WebView2 runtime gate ────────────────────────────────────────────────────
+# Окно Ripster рендерит `static/index.html`, а он использует современный JS.
+# На доисторическом WebView2 скрипт падает ДО первого рендера → пользователь
+# видит пустое белое окно без единого слова (жалоба yueka 02.09.2026: убил два
+# часа, нашёл причину — старый WebView2 — сам). Ниже — явная проверка версии
+# рантайма ДО создания окна; если она заведомо старая, показываем простую
+# HTML-страницу (без модерного JS, отрисуется на любом Chromium) с прямой
+# ссылкой на установщик, вместо белого окна.
+_WEBVIEW2_MIN_MAJOR = 90  # ~Chromium 90 (апрель 2021); evergreen-рантайм давно выше
+
+
+def _webview2_runtime_version() -> str:
+    """Версия установленного Microsoft Edge WebView2 Runtime (`"122.0.2365.66"`)
+    или "" если не найдена. GUID {F3017226-…} — это именно рантайм WebView2."""
+    try:
+        import winreg
+    except Exception:
+        return ""
+    guid = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+    for root, sub in (
+        (winreg.HKEY_LOCAL_MACHINE, rf"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{guid}"),
+        (winreg.HKEY_LOCAL_MACHINE, rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{guid}"),
+        (winreg.HKEY_CURRENT_USER, rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{guid}"),
+    ):
+        try:
+            with winreg.OpenKey(root, sub) as k:
+                val, _ = winreg.QueryValueEx(k, "pv")
+                if val and val != "0.0.0.0":
+                    return str(val)
+        except OSError:
+            continue
+    return ""
+
+
+def _webview2_ok() -> tuple[bool, str]:
+    """(годен ли рантаём, найденная версия). Не смогли прочитать версию —
+    считаем годным (не блокируем рабочую установку из-за нестандартного
+    размещения ключа)."""
+    ver = _webview2_runtime_version()
+    if not ver:
+        return True, ""
+    try:
+        major = int(ver.split(".", 1)[0])
+    except ValueError:
+        return True, ver
+    return major >= _WEBVIEW2_MIN_MAJOR, ver
+
+
+def _webview2_too_old_html(cur: str) -> str:
+    dl = "https://developer.microsoft.com/en-us/microsoft-edge/webview2/"
+    return f"""<!doctype html><html><head><meta charset="utf-8">
+<style>
+  html,body{{height:100%;margin:0;background:#0a0a0c;color:#f0f0f4;
+    font-family:-apple-system,Segoe UI,Arial,sans-serif;display:flex;
+    align-items:center;justify-content:center}}
+  .wrap{{max-width:460px;padding:28px;text-align:center;line-height:1.6}}
+  h2{{font-weight:600;margin:0 0 10px}}
+  p{{color:#b8b8c0;font-size:13px;margin:8px 0}}
+  a.btn{{display:inline-block;margin-top:16px;padding:10px 20px;border-radius:8px;
+    background:#c084a0;color:#0a0a0c;text-decoration:none;font-weight:600;font-size:13px}}
+  code{{background:#1a1a20;padding:1px 5px;border-radius:4px}}
+</style></head><body><div class="wrap">
+  <h2>Нужно обновить Microsoft Edge WebView2</h2>
+  <p>Ripster работает на движке WebView2 версии {_WEBVIEW2_MIN_MAJOR}+, а у вас установлена <code>{cur or "неизвестно / отсутствует"}</code>.
+     Без обновления окно останется пустым.</p>
+  <p><b>Update Microsoft Edge WebView2</b> — Ripster needs WebView2 runtime {_WEBVIEW2_MIN_MAJOR}+, yours is <code>{cur or "missing"}</code>.</p>
+  <a class="btn" href="{dl}">Скачать / Download WebView2</a>
+  <p style="margin-top:18px;font-size:11px">Возьмите «Evergreen Standalone Installer», поставьте, перезапустите Ripster.</p>
+</div></body></html>"""
+
+
 def _poll_until_ready(window, url: str, port: int) -> None:
     """Background thread: keep checking readiness with a plain Python HTTP
     call (ripster_alive — no browser, no CORS/origin issues) and drive the
@@ -486,13 +557,18 @@ def open_window(url: str, port: int, win_open, title: str = "Ripster", ready: bo
         except Exception as _e:
             _log(f"[launcher] webview args skipped: {_e}")
         import webview
-        _log(f"[launcher] opening webview window -> {url} (ready={ready})")
+        _wv_ok, _wv_ver = _webview2_ok()
+        if not _wv_ok:
+            _log(f"[launcher] WebView2 runtime too old ({_wv_ver} < {_WEBVIEW2_MIN_MAJOR}) — showing update page instead of blank window")
+        _log(f"[launcher] opening webview window -> {url} (ready={ready}, wv2={_wv_ver or '?'})")
         geo = _load_win_state()
         window = webview.create_window(
-            title, **({"url": url} if ready else {"html": _starting_html()}),
+            title,
+            **({"html": _webview2_too_old_html(_wv_ver)} if not _wv_ok
+               else {"url": url} if ready else {"html": _starting_html()}),
             width=geo.get("width", 1280), height=geo.get("height", 860),
             x=geo.get("x"), y=geo.get("y"))
-        if not ready:
+        if _wv_ok and not ready:
             threading.Thread(target=_poll_until_ready, args=(window, url, port), daemon=True).start()
         state = {"quit": False, "tray": None, "notified": False}
         use_tray = tray_enabled()
