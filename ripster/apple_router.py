@@ -10,10 +10,15 @@ path depends on a resource that may or may not be available right now:
                     needs NO Docker and NO Apple ID, OR
         • zhaarey → local Docker wrapper (``decrypt-port``, default 10020).
 
-``route_apple()`` probes what is actually reachable (public wrapper HTTP, local
-wrapper TCP port, cookies file) and returns the best engine+quality to satisfy
-the request — degrading to the best lossy result (AAC via cookies) only when no
-wrapper at all is available, so every task yields the maximum possible output.
+``route_apple()`` probes what is actually reachable (local wrapper TCP port,
+cookies file) and returns the best engine+quality to satisfy the request.
+
+The public wm.wol.moe wrapper (``amd``) is **manual-only**: it is chosen *only*
+when the owner has set ``apple-wrapper = "public"`` in Settings. It is never an
+automatic fallback — a foreign-storefront link or a down local wrapper stays on
+the local wrapper, and ``runner.py`` rotates through the owner's other Apple
+accounts (own storefront → other slots → honest error). This is a hard rule
+(03.09.2026): the public pool is treated as gone unless explicitly asked for.
 """
 from __future__ import annotations
 
@@ -409,11 +414,10 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
     requested quality could not be delivered and a lower one was substituted.
 
     REGION RULE: the cookies-based engine (gamdl) can only reach the catalog of
-    the *account's* storefront. When the link points at a DIFFERENT region (e.g.
-    a release that's already out in /nz/ but not yet in our /gb/ account), gamdl
-    would 404 — so we steer such audio to AMD, whose public wrapper-manager
-    carries many regional accounts. (Video stays gamdl-only and can't cross
-    regions; ALAC/Atmos already go to AMD.)
+    the *account's* storefront. A foreign-region link is kept on the local
+    wrapper (zhaarey) for lossless; if its account can't mint the key, runner.py
+    rotates through the owner's other Apple account slots. The public AMD
+    wrapper is reached only when the owner explicitly set apple-wrapper=public.
     """
     q = (quality or "").lower().strip()
     # A /music-video/ link is always video, regardless of the requested codec.
@@ -429,16 +433,24 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
     url_sf  = url_storefront(url)
     foreign = bool(url_sf and url_sf != acct_sf)
 
-    # When the owner forces the local wrapper, return it immediately and NEVER
-    # probe the public wm.wol.moe (keeps it out of the logs and the path entirely).
-    # Исключение — ссылка ЧУЖОГО региона: локальный аккаунт другого сторфронта на
-    # неё физически получит 401 «Failed to rip song», так что foreign уходит по
-    # общему пути (ниже он сам выберет public/AMD).
-    if q in _LOSSLESS and not foreign and (config.get("apple-wrapper") or "auto").strip().lower() == "local":
-        return {"engine": "zhaarey", "quality": q, "degraded": False,
-                "note": f"{q.upper()} · локальный wrapper (премиум)"}
+    pref = (config.get("apple-wrapper") or "auto").strip().lower()
 
-    pub_ok  = _public_wrapper_ok(config)
+    # Публичный wm.wol.moe (engine "amd") подключается ТОЛЬКО когда владелец сам
+    # выбрал его в Настройках (apple-wrapper = public). 03.09.2026 владелец
+    # потребовал прямо: НИКОГДА не переводить задачу на публичный wrapper
+    # автоматически — он ненадёжен, может быть уже мёртв, включается только
+    # вручную. Поэтому чужой регион больше НЕ уводит задачу на публичный пул:
+    # она остаётся на локальном враппере, а несовпадение витрины разруливает
+    # перебор Apple-аккаунтов в runner.py (своя витрина → другие свои слоты →
+    # честная ошибка). local_wrapper_storefront() выше по-прежнему даёт реальный
+    # регион аккаунта (config['storefront'] врёт), просто вывод из этого теперь
+    # другой.
+    if q in _LOSSLESS and pref != "public":
+        note = f"{q.upper()} · локальный wrapper (премиум)"
+        if foreign:
+            note = (f"{q.upper()} · локальный wrapper · ссылка витрины '{url_sf}', "
+                    f"аккаунт '{acct_sf}' — при отказе ключа сработает перебор учёток")
+        return {"engine": "zhaarey", "quality": q, "degraded": False, "note": note}
 
     # ── Video — gamdl only (cookies + bundled CDM, no wrapper) ───────────────
     if q in _VIDEO:
@@ -448,49 +460,19 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
         return {"engine": "gamdl", "quality": "mv", "degraded": False, "note": note}
 
     # ── Lossless / spatial — a wrapper is mandatory ──────────────────────────
-    # Policy: KEEP lossless (never silently fall back to lossy AAC). Prefer the
-    # public wrapper (multi-region, reliably subscribed); use the local docker
-    # wrapper only when it's same-region AND CKC-healthy (see the health gate).
-    # If no wrapper looks ready we still hand it to AMD's public wrapper and let
-    # it queue — quality over speed, by the user's choice.
+    # KEEP lossless (never silently fall back to lossy AAC). Non-public prefs are
+    # already handled above (early `pref != "public"` return → local wrapper +
+    # account rotation downstream). The ONLY way execution reaches here is
+    # pref == "public": the owner explicitly picked the public wm.wol.moe
+    # wrapper-manager in Settings → Apple → Wrapper. It is never chosen
+    # automatically — that's a hard rule (03.09.2026).
     if q in _LOSSLESS:
-        # Which wrapper to use is the OWNER's choice (Settings → Apple → Wrapper):
-        #   "local"  → always the local docker wrapper (owner's premium account);
-        #   "public" → always the public wm.wol.moe wrapper-manager;
-        #   "auto"   → local for same-region (reliable premium), public otherwise.
-        # Nothing is hard-wired: each mode just works when selected. Foreign-region
-        # links can only be served by the multi-region public wrapper, so a "local"
-        # choice still uses public for those (the local account can't see them).
-        pref = (config.get("apple-wrapper") or "auto").strip().lower()
-        local_ok = _local_wrapper_ok(config)
-
-        if pref == "public":
-            if pub_ok:
-                return {"engine": "amd", "quality": q, "degraded": False,
-                        "note": f"{q.upper()} · публичный wrapper" + (f" · регион {url_sf}" if foreign else "")}
-            return {"engine": "amd", "quality": q, "degraded": False,
-                    "note": f"{q.upper()} · публичный wrapper в очереди"}
-
-        if pref == "local" and not foreign:
-            # Explicit user choice: ALWAYS the local wrapper, NEVER public — even
-            # if the local wrapper looks down (it'll queue/retry on its own). The
-            # owner does not want the public pool used under any circumstances.
-            # НО чужой регион локальный аккаунт физически не расшифрует (401), так
-            # что foreign-ссылки всё равно уходят в public (см. коммент выше).
-            return {"engine": "zhaarey", "quality": q, "degraded": False,
-                    "note": f"{q.upper()} · локальный wrapper (премиум)"}
-
-        # auto: prefer the local premium wrapper whenever it's up (reliable),
-        # public pool as fallback. foreign-регион — только public (локальный
-        # аккаунт другого сторфронта, иначе 401 «Failed to rip song»).
-        if local_ok and not foreign:
-            return {"engine": "zhaarey", "quality": q, "degraded": False,
-                    "note": f"{q.upper()} · локальный wrapper (премиум)"}
-        if pub_ok:
-            return {"engine": "amd", "quality": q, "degraded": False,
-                    "note": f"{q.upper()} · публичный wrapper" + (f" · регион {url_sf}" if foreign else "")}
-        return {"engine": "amd", "quality": q, "degraded": False,
-                "note": f"{q.upper()} · wrapper в очереди — ждём lossless"}
+        note = f"{q.upper()} · публичный wrapper (выбран вручную)"
+        if not _public_wrapper_ok(config):
+            note = f"{q.upper()} · публичный wrapper в очереди (выбран вручную)"
+        if foreign:
+            note += f" · регион {url_sf}"
+        return {"engine": "amd", "quality": q, "degraded": False, "note": note}
 
     # ── AAC / lossy ──────────────────────────────────────────────────────────
     # РАНЬШЕ AAC жёстко уходил в gamdl (cookies) — а куки могут быть от аккаунта
@@ -500,8 +482,7 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
     # премиум-аккаунт — его и берём первым. Публичный wrapper из AAC-пути убран
     # осознанно: он ненадёжен и в этой сборке владельцем не используется.
     if q in ("aac", "aac-legacy", ""):
-        pref = (config.get("apple-wrapper") or "auto").strip().lower()
-        local_ok = _local_wrapper_ok(config)
+        local_ok = _local_wrapper_ok(config)   # pref уже вычислен выше по функции
         # Локальный wrapper — первый выбор: подписка на его аккаунте живая, и он
         # не зависит от cookies. Чужой регион он не видит — там нужен gamdl/куки.
         if local_ok and not foreign and pref != "public":

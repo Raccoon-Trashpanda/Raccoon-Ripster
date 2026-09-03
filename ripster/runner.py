@@ -3015,12 +3015,17 @@ async def run_task(task: dict) -> None:
     # Normalize empty engine string to configured default
     engine = engine or _config.get("engine", "zhaarey")
 
-    # Owner forced the LOCAL premium wrapper (Settings → Apple → Wrapper = local):
-    # honour it absolutely — NEVER silently auto-switch an Apple task to the public
-    # wm.wol.moe wrapper, even on a wrapper-down / DRM-CKC failure. The local pool
-    # starts its own container on acquire(), so "wrapper not running" is not a
-    # reason to leave the premium account. (Matches apple_router's local-mode rule.)
-    _apple_local_only = (str(_config.get("apple-wrapper") or "auto").strip().lower() == "local")
+    # The public wm.wol.moe wrapper is MANUAL-ONLY (owner, 03.09.2026): it is
+    # used only when apple-wrapper == "public" is set explicitly. Every other
+    # value ("local", "auto", unset) is treated as local-only here — NEVER
+    # silently auto-switch an Apple task to the public wrapper on a wrapper-down
+    # / DRM-CKC failure. The local pool starts its own container on acquire(),
+    # so "wrapper not running" is not a reason to leave the premium account; a
+    # foreign-region key failure is handled by rotating the owner's own Apple
+    # account slots (below), not by hopping to the public pool.
+    _apple_wrapper_pref = str(_config.get("apple-wrapper") or "auto").strip().lower()
+    _apple_public_ok    = (_apple_wrapper_pref == "public")
+    _apple_local_only   = not _apple_public_ok
 
     try:
         # Sanity gate found no engine able to speak this URL — fail cleanly here,
@@ -3255,15 +3260,19 @@ async def run_task(task: dict) -> None:
                                 f"{type(_e_slot).__name__}: {_e_slot} ───")
                             print(f"[runner] slot-pick failed: {_e_slot!r}", flush=True)
                     if not _retried_sf:
+                        # РАНЬШЕ здесь была последняя ступень — уход на публичный
+                        # wm.wol.moe. 03.09.2026 владелец запретил это категорически:
+                        # публичный wrapper НЕ используется автоматически ни при
+                        # каких обстоятельствах, включается только вручную
+                        # (apple-wrapper = public). Все свои витрины и слоты
+                        # перебраны, ключа нет → честная терминальная ошибка.
                         await _broadcast(_i18n.log_event(
-                            "console.wrapper_local_region_amd", level="warn",
+                            "console.wrapper_local_region_fail", level="error",
                             task_id=task.get("id", "")))
-                        task["log"].append("─── local-only: нет прав в регионе → спасаю через AMD ───")
-                        # Последняя ступень. Если предыдущие уже записали ошибку,
-                        # AMD стартовал бы поверх терминального статуса и его успех
-                        # остался бы незамеченным.
-                        _revive_task(task, "local-wrapper")
-                        await _run_engine_task(task, "amd", url, qid)
+                        task["log"].append(
+                            "─── все свои Apple-аккаунты перебраны, ключ не выдан; "
+                            "публичный wrapper отключён (включается вручную в Настройках) ───")
+                        _try_advance_task(task, TaskStatus.ERROR)
                 else:
                     await _broadcast(_i18n.log_event(
                         "console.wrapper_local_region_fail" if _sess_alive
