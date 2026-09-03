@@ -50,6 +50,29 @@ def install(app, ctx) -> None:
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
+async def _get_retry(c: httpx.AsyncClient, url: str, *, tries: int = 3, **kw) -> httpx.Response:
+    """GET that retries a transient upstream failure (5xx / timeout) before
+    giving up. The radar's per-service scans hard-fail the WHOLE feed on the
+    first non-200, so a single Tidal/Qobuz 500 blip zeroed the entire radar
+    (жалоба 03.09.2026: «⚠ Tidal API 500» в релиз-радаре). 4xx is returned
+    as-is — that's a real answer (401 = token, 404 = gone), not a blip."""
+    last: httpx.Response | None = None
+    for attempt in range(tries):
+        try:
+            r = await c.get(url, **kw)
+        except (httpx.TimeoutException, httpx.TransportError):
+            if attempt == tries - 1:
+                raise
+            await asyncio.sleep(0.6 * (attempt + 1))
+            continue
+        if r.status_code < 500:
+            return r
+        last = r
+        if attempt < tries - 1:
+            await asyncio.sleep(0.6 * (attempt + 1))
+    return last  # type: ignore[return-value]
+
+
 def _cutoff(days: int) -> str:
     return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
@@ -133,10 +156,10 @@ async def _qobuz_fetch_artist(sem: asyncio.Semaphore, c: httpx.AsyncClient,
                                artist: dict, app_id: str, headers: dict, cutoff: str) -> list[dict]:
     async with sem:
         try:
-            r = await c.get(f"{_QOBUZ_API}/artist/get",
+            r = await _get_retry(c, f"{_QOBUZ_API}/artist/get",
                 params={"artist_id": artist["id"], "extra": "albums",
                         "limit": 100, "app_id": app_id},
-                headers=headers)
+                headers=headers, tries=2)
             if r.status_code != 200:
                 return []
             items = (r.json().get("albums") or {}).get("items") or []
@@ -184,12 +207,14 @@ async def qobuz_releases(days: int = 30):
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
             offset = 0
             while True:
-                r = await c.get(f"{_QOBUZ_API}/favorite/getUserFavorites",
+                r = await _get_retry(c, f"{_QOBUZ_API}/favorite/getUserFavorites",
                     params={"type": "artists", "limit": 50, "offset": offset, "app_id": app_id},
                     headers=headers)
                 if r.status_code == 401:
                     return {"ok": False, "error_key": "err.qobuz_token_expired", "error": "Qobuz: токен истёк. Обнови qobuz-auth-token в Settings.", "releases": []}
                 if r.status_code != 200:
+                    if artists:
+                        break   # частичный радар лучше пустого
                     return {"ok": False, "error": f"Qobuz API {r.status_code}", "releases": []}
                 data  = r.json()
                 items = (data.get("artists") or {}).get("items") or []
@@ -262,9 +287,9 @@ async def _tidal_fetch_artist(sem: asyncio.Semaphore, c: httpx.AsyncClient,
             items: list[dict] = []
             offset = 0
             while True:
-                r = await c.get(f"{_TIDAL_API}/artists/{artist['id']}/albums",
+                r = await _get_retry(c, f"{_TIDAL_API}/artists/{artist['id']}/albums",
                     params={"limit": 100, "offset": offset, "countryCode": cc, "filter": "ALL"},
-                    headers=hdr)
+                    headers=hdr, tries=2)
                 if r.status_code != 200:
                     break
                 page = r.json().get("items") or []
@@ -324,12 +349,15 @@ async def tidal_releases(days: int = 30):
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
             offset = 0
             while True:
-                r = await c.get(f"{_TIDAL_API}/users/{user_id}/favorites/artists",
+                r = await _get_retry(c, f"{_TIDAL_API}/users/{user_id}/favorites/artists",
                     params={"limit": 100, "offset": offset, "countryCode": cc},
                     headers=hdr)
                 if r.status_code == 401:
                     return {"ok": False, "error_key": "err.tidal_token_expired_settings", "error": "Tidal: токен истёк. Обнови в Settings → Tidal.", "releases": []}
                 if r.status_code != 200:
+                    # Отдали то, что уже собрали до сбоя — частичный радар лучше пустого.
+                    if artists:
+                        break
                     return {"ok": False, "error": f"Tidal API {r.status_code}", "releases": []}
                 data  = r.json()
                 items = data.get("items") or []
@@ -419,8 +447,8 @@ async def _deezer_fetch_artist(sem: asyncio.Semaphore, c: httpx.AsyncClient,
             aid = str(artist.get("id") or "")
             if not aid:
                 return []
-            r = await c.get(f"https://api.deezer.com/artist/{aid}/albums",
-                            params={"limit": 50})
+            r = await _get_retry(c, f"https://api.deezer.com/artist/{aid}/albums",
+                                 params={"limit": 50}, tries=2)
             out = []
             for alb in (r.json().get("data") or []):
                 date = str(alb.get("release_date") or "")[:10]
@@ -466,8 +494,8 @@ async def deezer_releases(days: int = 30):
         async with httpx.AsyncClient(timeout=_TIMEOUT) as c:
             index = 0
             while True:
-                r = await c.get(f"https://api.deezer.com/user/{uid}/artists",
-                                params={"limit": 100, "index": index})
+                r = await _get_retry(c, f"https://api.deezer.com/user/{uid}/artists",
+                                     params={"limit": 100, "index": index})
                 j = r.json() or {}
                 if j.get("error"):
                     return {"ok": False,
