@@ -277,7 +277,12 @@ def disable_deezer_arl(primary: bool, arl: str) -> None:
     целиком. Ничего не логинит заново, только убирает из маршрутизации."""
     import yaml
     from . import config_service as _cs
+    from . import retired_credentials as _retired
     target = arl.strip()
+    # Сначала реестр, потом файл. Порядок важен: правку файла может отменить
+    # работающее приложение (пишет config.yaml целиком из памяти), реестр —
+    # нет, и он же не даст записи вернуться при следующем сохранении.
+    _retired.retire("deezer_arl", target, "ARL отвергнут Deezer")
     for path in _yaml_files_to_check():
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -330,7 +335,8 @@ def check_all_deezer_arls(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
             try:
                 info = await da.arl_info(entry["arl"], fresh=True)
             except Exception as e:
-                info = {"alive": False, "reason": f"ошибка проверки: {type(e).__name__}"}
+                info = {"alive": False, "unreachable": True,
+                        "reason": f"ошибка проверки: {type(e).__name__}"}
             out.append((entry, info))
         return out
 
@@ -347,6 +353,17 @@ def check_all_deezer_arls(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
         alive = bool(info.get("alive"))
         country = info.get("country", "") if alive else ""
         reason = "" if alive else (info.get("reason") or "не отвечает")
+
+        # Недоступность ≠ приговор. Если до Deezer не достучались (таймаут, 5xx,
+        # оборванная сеть), про ARL мы не узнали НИЧЕГО — и права наказывать за
+        # это streak'ом у нас нет: три сетевых сбоя подряд сняли бы с
+        # маршрутизации совершенно живую учётку, а гость получил бы отказ по
+        # вине нашего канала. Пишем строкой в отчёт и идём дальше.
+        if not alive and info.get("unreachable"):
+            lines.append(f"⚠️ Deezer ARL {masked} ({entry.get('label','?')}): "
+                         f"проверить не удалось ({reason}) — учётка не тронута")
+            continue
+
         streak, archived = record_check(
             "deezer_arl", masked, alive, country=country, reason=reason,
             threshold=threshold,

@@ -91,16 +91,29 @@ async def arl_info(arl: str, fresh: bool = False) -> dict:
             r = await c.post(_GW, params={**_BASE, "method": "deezer.getUserData"},
                              cookies={"arl": arl}, json={})
         if r.status_code != 200:
-            return {"alive": False, "reason": f"gw-light HTTP {r.status_code}"}
+            return {"alive": False, "unreachable": True,
+                    "reason": f"gw-light HTTP {r.status_code}"}
         res = (r.json() or {}).get("results") or {}
     except Exception as e:
         # Сеть/таймаут — это НЕ «ARL протух». Возвращаем причину как есть.
-        return {"alive": False, "reason": f"запрос не прошёл: {type(e).__name__}"}
+        # `unreachable` отличает «мы не смогли спросить» от «Deezer отказал»:
+        # по первому нельзя ни снимать учётку с маршрутизации, ни двигать её
+        # в конец очереди — виноват канал, а не токен.
+        return {"alive": False, "unreachable": True,
+                "reason": f"запрос не прошёл: {type(e).__name__}"}
 
     user = res.get("USER") or {}
     uid = user.get("USER_ID")
     if not uid or str(uid) == "0":
-        return {"alive": False, "reason": "ARL отвергнут (гостевая сессия)"}
+        # Отказ — тоже ответ, и его надо помнить. Раньше кэшировался только
+        # успех: каждый выбор слота заново ходил в сеть за одним и тем же
+        # «нет», а порядок перебора не мог узнать, что учётка мертва.
+        # Сетевые сбои выше по коду возвращаются БЕЗ записи в кэш — они не
+        # приговор учётке.
+        bad = {"alive": False, "reason": "ARL отвергнут (гостевая сессия)"}
+        _MEM[k] = (time.time(), bad)
+        _cache_save(k, bad)
+        return bad
 
     opts = user.get("OPTIONS") or {}
     info = {
@@ -121,6 +134,30 @@ async def arl_info(arl: str, fresh: bool = False) -> dict:
     _MEM[k] = (time.time(), info)
     _cache_save(k, {kk: vv for kk, vv in info.items() if kk != "name"})
     return info
+
+
+def known(arl: str, max_age: float = 24 * 3600.0) -> dict | None:
+    """Что УЖЕ измерено про учётку — ни одного сетевого запроса.
+
+    Нужно там, где спрашивают на горячем пути (выбор слота в пуле): ждать
+    ответа Deezer ради порядка перебора нельзя, а решать вслепую — то самое,
+    из-за чего 04.09.2026 гостю не отдали релиз.
+
+    Читаем память процесса, а при промахе — файл рядом с конфигом. Файл писали
+    и другие процессы (healthcheck ходит своим прогоном), поэтому после
+    рестарта приложения знание не теряется. `None` значит «не спрашивали» и
+    честно отличается от «спрашивали, отвергнут».
+    """
+    k = _key(arl)
+    hit = _MEM.get(k)
+    if hit and time.time() - hit[0] < _TTL:
+        return hit[1]
+    rec = _cache_load().get(k)
+    if not isinstance(rec, dict):
+        return None
+    if time.time() - float(rec.get("cached_at") or 0) > max_age:
+        return None                      # устарело — судить по нему нельзя
+    return rec
 
 
 def configured_arls(config: dict) -> list[dict]:

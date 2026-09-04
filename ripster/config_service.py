@@ -444,12 +444,36 @@ def load_config(config_file: _Path, tokens_dir: _Path) -> dict:
     except Exception:
         pass
 
+    # Учётки, снятые сторожем здоровья, не должны воскресать при старте.
+    # Сторож работает отдельным процессом и правит файл; если бы мы просто
+    # читали файл, всё бы сходилось — но сохранение пишет config.yaml целиком
+    # из памяти, и раз в сутки мёртвый ARL возвращался (см. retired_credentials).
+    try:
+        from . import retired_credentials as _retired
+        for _n in _retired.strip_from_config(merged):
+            print(f"[config] {_n}", flush=True)
+    except Exception as _e:
+        print(f"[config] реестр снятых учёток недоступен: {_e}",
+              file=_sys.stderr, flush=True)
+
     return merged
 
 
 def save_config(cfg: Any, config_file: _Path, tokens_dir: _Path) -> None:
     """Persist config to config.yaml and sync any token files."""
     raw = cfg._data if isinstance(cfg, ConfigService) else cfg
+    # Перед записью сверяемся с реестром снятых: сохранение переписывает файл
+    # ЦЕЛИКОМ, и без этой сверки оно возвращало бы в конфиг учётку, которую
+    # сторож уже снял (ровно так ARL ...947f15 пережил собственное удаление
+    # 03.09.2026). Правим `raw` на месте — это и есть живой словарь приложения,
+    # так что поле освобождается сразу, а не только в файле.
+    try:
+        from . import retired_credentials as _retired
+        for _n in _retired.strip_from_config(raw):
+            print(f"[config] {_n}", flush=True)
+    except Exception as _e:
+        print(f"[config] реестр снятых учёток недоступен: {_e}",
+              file=_sys.stderr, flush=True)
     if not _atomic_write_yaml(config_file, raw):
         return
     if tokens_dir.is_dir():

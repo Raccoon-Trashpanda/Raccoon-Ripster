@@ -93,6 +93,23 @@ def mark_tried(task: dict, engine_name: str, slot) -> None:
         lst.append(slot)
 
 
+def _better_account_untried(task: dict, engine_name: str, config: dict) -> bool:
+    """Есть ли ещё не пробованная учётка с БОЛЬШИМИ правами, чем у пробованных.
+
+    Знание про качество учёток есть только у пула сервиса, поэтому спрашиваем
+    его — по желанию: пул без `better_account_untried` просто отвечает «нет», и
+    поведение остаётся прежним.
+    """
+    mod = pool_module(engine_name)
+    fn = getattr(mod, "better_account_untried", None)
+    if fn is None:
+        return False
+    try:
+        return bool(fn(tried_slots(task, engine_name), config))
+    except Exception:       # noqa: BLE001
+        return False
+
+
 def should_try_next(task: dict, engine_name: str, reason: str, config: dict) -> bool:
     """Брать ли следующую учётку после отказа с причиной `reason`.
 
@@ -103,7 +120,17 @@ def should_try_next(task: dict, engine_name: str, reason: str, config: dict) -> 
     Ловится только тестом на пул из одного элемента, поэтому условие явное.
     """
     if reason not in RETRY_WITH_NEXT_ACCOUNT:
-        return False
+        # `no-flac` — единственная причина, про которую нельзя решить по одному
+        # слову. Deezer на отказ ПО ПРАВАМ учётки отвечает тем же «can't stream
+        # the track at the desired bitrate», что и на честное отсутствие FLAC у
+        # релиза: 04.09.2026 бесплатная учётка отвечала так на ЛЮБОЙ битрейт,
+        # включая 128, а две Family рядом качали тот же трек в FLAC. Задача при
+        # этом останавливалась и советовала «выбери MP3 320» — совет в никуда.
+        # Спрашиваем пул: есть ли непробованная учётка, которая умеет БОЛЬШЕ
+        # текущей. Нет — значит у релиза действительно нет FLAC, и перебор был
+        # бы пустой тратой попыток.
+        if reason != "no-flac" or not _better_account_untried(task, engine_name, config):
+            return False
     tried = tried_slots(task, engine_name)
     if not tried:
         return False

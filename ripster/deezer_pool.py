@@ -23,20 +23,81 @@ from ripster import account_fallback as _afb
 from pathlib import Path
 
 
+def health_rank(arl: str) -> int:
+    """Насколько учётка пригодна: 0 — лучшая, 3 — отвергнутая.
+
+    Читаем ТОЛЬКО то, что уже измерено (`deezer_accounts` кэширует ответ
+    Deezer), сети здесь не касаемся: `acquire()` зовут на горячем пути.
+
+    Зачем: 04.09.2026 гостю не отдали релиз, потому что перебор учёток потратил
+    все попытки на слоты 0–2 (бесплатная и две отвергнутые) и не добрался до
+    двух Deezer Family с lossless, стоявших последними. Порядок «как в конфиге»
+    имеет смысл, только пока про учётки ничего не известно; когда известно —
+    первым должен идти тот, кто действительно может скачать.
+    """
+    try:
+        from ripster import deezer_accounts as _da
+        from ripster import retired_credentials as _retired
+        if _retired.is_retired("deezer_arl", arl):
+            return 3        # уже снята сторожем — в маршрутизацию не возвращаем
+        info = _da.known(arl)
+        if not info:
+            return 2                       # не спрашивали — не судим
+        if not info.get("alive"):
+            if info.get("unreachable"):
+                return 2                   # не достучались — про учётку неизвестно ничего
+            return 3                       # отвергнут: тратить на него попытку незачем
+        return 0 if info.get("lossless") else 1
+    except Exception:                       # noqa: BLE001
+        return 2
+
+
+def better_account_untried(tried: list, config: dict) -> bool:
+    """Осталась ли учётка, которая умеет больше уже пробованных.
+
+    Deezer отвечает «can't stream the track at the desired bitrate» и когда у
+    релиза правда нет FLAC, и когда прав нет у КОНКРЕТНОЙ учётки. Различить
+    можно только по составу пула: если пробовали бесплатную, а рядом лежит
+    непробованная lossless — отказ был про учётку, и перебор осмыслен.
+
+    Спрашивает `ripster.account_fallback` (см. `_better_account_untried`).
+    """
+    accounts = _configured_accounts(config)
+    if not accounts:
+        return False
+    done = set(tried or [])
+    worst_tried = max((health_rank(accounts[i]["arl"])
+                       for i in done if 0 <= i < len(accounts)), default=None)
+    if worst_tried is None:
+        return False
+    return any(health_rank(a["arl"]) < worst_tried
+               for i, a in enumerate(accounts) if i not in done)
+
+
 def _configured_accounts(config: dict) -> list[dict]:
     """Primary account (slot 0) + any extras from `deezer-accounts`."""
     primary_arl = (config.get("deezer-arl") or "").strip()
     accounts: list[dict] = []
+    sources: list[dict] = []
     if primary_arl:
         accounts.append(_afb.stamp(
             {"arl": primary_arl, "label": config.get("deezer-arl-label", "primary")},
             config, 0))
+        sources.append(config)
     for a in (config.get("deezer-accounts") or []):
         arl = (a.get("arl") or "").strip()
         if arl:
             accounts.append(_afb.stamp(
                 {"arl": arl, "label": a.get("label") or f"account{len(accounts)+1}"},
                 a, len(accounts)))
+            sources.append(a)
+    # Приоритет по здоровью — но ТОЛЬКО там, где владелец не задал свой.
+    # Спрашиваем ИСХОДНУЮ запись конфига, а не проштампованную: `_afb.stamp`
+    # уже подставил номер слота вместо отсутствующего priority, и по результату
+    # «владелец задал 0» от «мы подставили 0» не отличить.
+    for i, (acc, src) in enumerate(zip(accounts, sources)):
+        if (src or {}).get("priority") is None:
+            acc["priority"] = float(health_rank(acc["arl"]) * 100 + i)
     return accounts
 
 
@@ -60,7 +121,14 @@ class DeezerPool:
         (ripster/account_fallback.py)."""
         ex = set(exclude or ())
         with self._lock:
-            for i in _afb.order_indices(self.accounts):
+            order = _afb.order_indices(self.accounts)
+            # Заведомо отвергнутые пропускаем ПОЛНОСТЬЮ, пока есть живые: каждая
+            # попытка на мёртвой учётке — это попытка, не доставшаяся рабочей
+            # (предел попыток на задачу конечен). Если живых не осталось вовсе,
+            # берём как есть: пусть отказ придёт от Deezer, а не от нашей
+            # догадки.
+            usable = [i for i in order if health_rank(self.accounts[i]["arl"]) < 3]
+            for i in (usable or order):
                 if not self._busy[i] and i not in ex:
                     self._busy[i] = True
                     arl = self.accounts[i]["arl"]
@@ -92,6 +160,38 @@ _pool_instance: DeezerPool | None = None
 _pool_accounts_fingerprint: tuple = ()
 
 
+def _warm_health(arls: tuple) -> None:
+    """Опросить учётки фоном, чтобы порядок слотов было чем обосновать.
+
+    `health_rank` смотрит только на измеренное; при первом запуске (или после
+    смены списка) измеренного нет, и перебор снова идёт «как в конфиге». Один
+    фоновый проход это чинит.
+
+    Свой поток и свой цикл событий — get_pool зовут и из синхронного кода, и
+    изнутри работающего цикла; ошибки глушим намеренно: это подсказка для
+    сортировки, а не операция, ради которой стоит ронять загрузку.
+    """
+    import threading
+
+    def run() -> None:
+        import asyncio
+        from ripster import deezer_accounts as _da
+        unknown = [a for a in arls if _da.known(a) is None]
+        if not unknown:
+            return
+        loop = asyncio.new_event_loop()
+        try:
+            for a in unknown:
+                try:
+                    loop.run_until_complete(_da.arl_info(a))
+                except Exception:       # noqa: BLE001
+                    pass
+        finally:
+            loop.close()
+
+    threading.Thread(target=run, name="deezer-health-warm", daemon=True).start()
+
+
 def get_pool(config: dict) -> DeezerPool | None:
     """Singleton, rebuilt only when the configured account list actually
     changes (so acquire()'d busy-state survives across calls within a run)."""
@@ -105,6 +205,7 @@ def get_pool(config: dict) -> DeezerPool | None:
         base = _P(__file__).resolve().parent.parent / "dist" / "deezer_pool"
         _pool_instance = DeezerPool(accounts, base)
         _pool_accounts_fingerprint = fp
+        _warm_health(fp)
     return _pool_instance
 
 
