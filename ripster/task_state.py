@@ -43,7 +43,14 @@ _TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     # the user can resume by pressing Start again, not force them to re-add
     # every URL. Done→queued (restart a finished task) is still forbidden —
     # that's what the new-task path is for.
-    TaskStatus.QUEUED:    {TaskStatus.RUNNING, TaskStatus.CANCELLED},
+    # QUEUED→ERROR разрешён намеренно: задача может провалиться ДО старта —
+    # ссылка не разобралась, движка для сервиса нет, учётку получить не удалось.
+    # Без этого ребра такой отказ было нечем записать: `try_advance(ERROR)`
+    # отвергался, задача уходила из run_task нетерминальной, и страховочная сетка
+    # проставляла статус ПРЯМЫМ присваиванием — ровно тем обходом, который этот
+    # модуль и заведён запрещать. За сутки 04.09.2026 так «терялись» две задачи,
+    # и человек получал «Задача завершилась без результата» вместо причины.
+    TaskStatus.QUEUED:    {TaskStatus.RUNNING, TaskStatus.ERROR, TaskStatus.CANCELLED},
     TaskStatus.RUNNING:   {TaskStatus.DONE, TaskStatus.ERROR, TaskStatus.CANCELLED, TaskStatus.QUEUED},
     # Terminal states — no further transitions. A task that finished is
     # finished; requeue means *creating a new task*, not mutating this one.

@@ -2885,6 +2885,10 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # visible as a failure instead of "потерялась".
             if not _task_is_terminal(task):
                 _cur = _task_state(task).value
+                # Переход теперь ЗАКОННЫЙ (task_state: QUEUED→ERROR), поэтому
+                # идём через модель, а не мимо неё: прямое присваивание было
+                # обходом, который сам же модуль и запрещает.
+                _try_advance_task(task, TaskStatus.ERROR)
                 if not task.get("error"):
                     task["error"] = (
                         f"Задача завершилась без результата (внутреннее состояние "
