@@ -72,7 +72,22 @@ async def arl_info(arl: str, fresh: bool = False) -> dict:
         return hit[1]
 
     try:
-        async with _HTTP.ashared() as c:
+        # ОТДЕЛЬНЫЙ клиент на каждый ARL, а не общий процесс-клиент.
+        #
+        # Общий клиент держит свою банку кук: первый же запрос кладёт в неё
+        # `arl=<первый токен>`, и все последующие проверки отвечают про ПЕРВУЮ
+        # учётку. 04.09.2026 из-за этого шесть разных ARL показывали одно и то
+        # же — «жив, Deezer Free», — хотя на деле два из них Deezer Family с
+        # lossless, а три вообще отвергнуты (гостевая сессия). Проверка учёток
+        # врала всем: и healthcheck'у, и пулу, и владельцу. В самом http_client
+        # об этом прямо написано: «не использовать там, где нужны куки уровня
+        # клиента».
+        import httpx as _httpx
+        async with _httpx.AsyncClient(
+            follow_redirects=True,
+            timeout=25,
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as c:
             r = await c.post(_GW, params={**_BASE, "method": "deezer.getUserData"},
                              cookies={"arl": arl}, json={})
         if r.status_code != 200:

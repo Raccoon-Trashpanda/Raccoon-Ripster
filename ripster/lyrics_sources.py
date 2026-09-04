@@ -201,7 +201,13 @@ async def from_deezer(artist: str, track: str, duration: int, config: dict,
         return {}
 
     try:
-        async with _HTTP.ashared() as c:
+        # Свой клиент: ниже запрос уходит с кукой `arl`, а общий процесс-клиент
+        # копит куки между вызовами — под чужой учёткой текст не находится, и это
+        # выглядит как «у трека нет слов». Та же ловушка, что сломала проверку
+        # живости ARL (04.09.2026).
+        import httpx as _httpx
+        async with _httpx.AsyncClient(follow_redirects=True, timeout=25,
+                                      headers={"User-Agent": "Mozilla/5.0"}) as c:
             if not track_id:
                 r = await c.get("https://api.deezer.com/search",
                                 params={"q": f'artist:"{artist}" track:"{track}"', "limit": 5})
