@@ -52,6 +52,25 @@ def health_rank(arl: str) -> int:
         return 2
 
 
+def health_note(arl: str) -> dict:
+    """Почему слот пропускается — словами, для панели настроек. Секрет наружу
+    не отдаём: только состояние и причина."""
+    rank = health_rank(arl)
+    try:
+        from ripster import deezer_accounts as _da
+        info = _da.known(arl) or {}
+    except Exception:               # noqa: BLE001
+        info = {}
+    state = {0: "ok", 1: "lossy", 2: "unknown", 3: "unusable"}[rank]
+    if rank == 3:
+        why = info.get("reason") or "снят автоматикой"
+    elif rank == 2:
+        why = info.get("reason") or "ещё не проверялся"
+    else:
+        why = info.get("plan") or ""
+    return {"health": state, "health_why": why, "usable": rank < 3}
+
+
 def better_account_untried(tried: list, config: dict) -> bool:
     """Осталась ли учётка, которая умеет больше уже пробованных.
 
@@ -150,7 +169,8 @@ class DeezerPool:
                 "accounts": [
                     {"slot": i, "label": a["label"], "primary": i == 0, "busy": self._busy[i],
                      "enabled": a.get("enabled", True), "priority": a.get("priority", i),
-                     "order": _afb.order_indices(self.accounts).index(i)}
+                     "order": _afb.order_indices(self.accounts).index(i),
+                     **health_note(a["arl"])}
                     for i, a in enumerate(self.accounts)
                 ],
             }
@@ -216,7 +236,8 @@ def live_status(config: dict) -> dict:
         return {"pool_enabled": False, "accounts": [
             {"slot": i, "label": a["label"], "primary": i == 0, "busy": False,
              "enabled": a.get("enabled", True), "priority": a.get("priority", i),
-             "order": _afb.order_indices(accounts).index(i)}
+             "order": _afb.order_indices(accounts).index(i),
+             **health_note(a["arl"])}
             for i, a in enumerate(accounts)
         ]}
     return p.status()

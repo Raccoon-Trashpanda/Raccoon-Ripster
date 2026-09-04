@@ -30,6 +30,7 @@ import time
 from pathlib import Path
 
 _KIND_DEEZER = "deezer_arl"
+_KIND_QOBUZ = "qobuz_account"
 
 
 def _base_dir() -> Path:
@@ -127,4 +128,39 @@ def strip_from_config(cfg: dict) -> list[str]:
             kept.append(a)
         if len(kept) != len(pool):
             cfg["deezer-accounts"] = kept
+
+    notes += _strip_qobuz(cfg)
+    return notes
+
+
+def _qobuz_secret(a: dict) -> str:
+    """Чем опознаётся учётка Qobuz — токен, а при входе по паролю почта.
+    Совпадает с `qobuz_accounts.account_secret`; продублировано намеренно,
+    чтобы реестр не тянул за собой сетевой модуль."""
+    if not isinstance(a, dict):
+        return ""
+    return ((a.get("qobuz-auth-token") or a.get("auth_token") or "").strip()
+            or (a.get("qobuz-email") or a.get("email") or "").strip())
+
+
+def _strip_qobuz(cfg: dict) -> list[str]:
+    notes: list[str] = []
+    main = _qobuz_secret(cfg)
+    if main and is_retired(_KIND_QOBUZ, main):
+        for k in ("qobuz-auth-token", "qobuz-user-id", "qobuz-email", "qobuz-password"):
+            if k in cfg:
+                cfg[k] = ""
+        notes.append(f"Qobuz ...{main[-6:]} (основная) снята автоматикой — поля освобождены")
+
+    pool = cfg.get("qobuz-accounts")
+    if isinstance(pool, list):
+        kept = []
+        for a in pool:
+            s = _qobuz_secret(a)
+            if s and is_retired(_KIND_QOBUZ, s):
+                notes.append(f"Qobuz ...{s[-6:]} снята автоматикой — запись удалена")
+                continue
+            kept.append(a)
+        if len(kept) != len(pool):
+            cfg["qobuz-accounts"] = kept
     return notes

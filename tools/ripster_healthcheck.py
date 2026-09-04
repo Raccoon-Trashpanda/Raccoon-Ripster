@@ -403,6 +403,34 @@ def check_deezer_arls():
             warn(line)
 
 
+def check_qobuz_accounts():
+    """Мёртвые и погасшие учётки Qobuz — то же, что для Deezer ARL.
+
+    04.09.2026, замер по живым учёткам владельца: из восьми три отвечают 401 и
+    стоят сразу за основной, у четвёртой подписка истекла 15.08. Лимит попыток
+    на задачу — 4, то есть отказ на первой учётке съедал весь бюджет на мёртвых
+    и до четырёх рабочих не доходил.
+
+    Снимаются только отвергнутые (401). Истёкшая подписка при валидном токене —
+    не повод удалять: её продлевают.
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from ripster import credential_health as ch
+    except Exception as e:
+        warn(f"credential_health недоступен: {e}")
+        return
+    lines = ch.check_all_qobuz_accounts()
+    if not lines:
+        ok("Учётки Qobuz живы (или ещё не набрали порог)")
+        return
+    for line in lines:
+        if line.startswith("💀"):
+            fixed(line)
+        else:
+            warn(line)
+
+
 def check_gamdl_cookies():
     """Отличить ДВА состояния cookies.txt, которые до 01.08.2026 выглядели одинаково.
 
@@ -1639,6 +1667,7 @@ def main():
         check_apple_bearer()
         check_apple_pool_slots()
         check_deezer_arls()
+        check_qobuz_accounts()
         check_gamdl_cookies()
         check_tokens()
         check_token_files()

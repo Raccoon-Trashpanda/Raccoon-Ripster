@@ -31,6 +31,7 @@ ripster-apple-wrapper) — автоматически заводить сесс�
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -57,11 +58,23 @@ def _archive_path() -> Path:
     return _base_dir() / "DEAD_ACCOUNTS.txt"
 
 
+_IDENT_KINDS = ("deezer_arl", "qobuz_account")
+
+
 def _load_state() -> dict:
     try:
-        return json.loads(_state_path().read_text(encoding="utf-8"))
+        st = json.loads(_state_path().read_text(encoding="utf-8"))
     except Exception:
         return {}
+    if not isinstance(st, dict):
+        return {}
+    # Записи старого формата (только хвост секрета, без `#хеш`) больше не
+    # опознаются и, что важнее, могли СКЛЕИВАТЬ разные учётки с общим хвостом —
+    # см. `_ident`. Выбрасываем их: осиротевший счётчик хуже отсутствующего,
+    # потому что выглядит как знание. Ключи Apple-слотов — имена контейнеров,
+    # их правило не касается.
+    return {k: v for k, v in st.items()
+            if "#" in k or not k.startswith(_IDENT_KINDS)}
 
 
 def _save_state(st: dict) -> None:
@@ -225,6 +238,25 @@ def _mask(secret: str) -> str:
     return f"...{s[-6:]}" if len(s) > 10 else "???"
 
 
+def _ident(secret: str) -> str:
+    """Опознание учётки в state-файле: хвост ПЛЮС короткий хеш.
+
+    Одного хвоста мало. 04.09.2026 у владельца два разных 86-символьных токена
+    Qobuz оканчивались на `0l7E4g` — и делили один счётчик неудач. Мелочь по
+    сравнению со вторым следствием: будь одна из пары живой, её успешная
+    проверка обнуляла бы streak мёртвой, и авто-снятие не сработало бы НИКОГДА.
+    Это ровно тот класс дефекта, где чинить надо не подсистему, а её
+    диагностику.
+
+    Хеш короткий и односторонний: опознать запись можно, восстановить секрет —
+    нет.
+    """
+    s = (secret or "").strip()
+    if len(s) <= 10:
+        return "???"
+    return f"...{s[-6:]}#{hashlib.sha256(s.encode()).hexdigest()[:8]}"
+
+
 def _config_paths():
     base = _base_dir()
     return base / "config.yaml", base / "tokens"
@@ -365,7 +397,7 @@ def check_all_deezer_arls(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
             continue
 
         streak, archived = record_check(
-            "deezer_arl", masked, alive, country=country, reason=reason,
+            "deezer_arl", _ident(arl), alive, country=country, reason=reason,
             threshold=threshold,
             disable_fn=lambda _k, _key, _arl=arl, _primary=primary: disable_deezer_arl(_primary, _arl),
         )
@@ -376,6 +408,129 @@ def check_all_deezer_arls(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
         elif not alive and streak > 0:
             lines.append(f"⚠️ Deezer ARL {masked} ({entry.get('label','?')}): "
                          f"{streak}/{threshold} неудачных проверок подряд ({reason})")
+    return lines
+
+
+def disable_qobuz_account(secret: str) -> None:
+    """Снимает мёртвую учётку Qobuz: ищет её ТОЧНО в том файле (config.yaml или
+    tokens/*.yaml), где она прописана. Основная учётка чистится по полям,
+    запись пула удаляется целиком.
+
+    `secret` — токен, а при входе по паролю почта: то же, чем учётка опознаётся
+    в `qobuz_accounts.account_secret`.
+    """
+    import yaml
+    from . import config_service as _cs
+    from . import retired_credentials as _retired
+    target = (secret or "").strip()
+    if not target:
+        return
+    # Сначала реестр, потом файл: правку файла отменит работающее приложение
+    # (пишет config.yaml целиком из памяти), реестр — нет. См. 03.09.2026,
+    # когда снятый ARL вернулся в конфиг через сутки.
+    _retired.retire("qobuz_account", target, "Qobuz отверг учётные данные")
+    for path in _yaml_files_to_check():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        changed = False
+        if (data.get("qobuz-auth-token") or "").strip() == target or \
+           ((data.get("qobuz-email") or "").strip() == target
+                and not (data.get("qobuz-auth-token") or "").strip()):
+            for k in ("qobuz-auth-token", "qobuz-user-id", "qobuz-email", "qobuz-password"):
+                if k in data:
+                    data[k] = ""
+            changed = True
+        pool = data.get("qobuz-accounts")
+        if isinstance(pool, list):
+            def _same(a) -> bool:
+                if not isinstance(a, dict):
+                    return False
+                tok = (a.get("qobuz-auth-token") or a.get("auth_token") or "").strip()
+                mail = (a.get("qobuz-email") or a.get("email") or "").strip()
+                return tok == target or (mail == target and not tok)
+            kept = [a for a in pool if not _same(a)]
+            if len(kept) != len(pool):
+                data["qobuz-accounts"] = kept
+                changed = True
+        if changed:
+            _cs._atomic_write_yaml(path, data)
+
+
+def check_all_qobuz_accounts(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
+    """Прогнать проверку по всем настроенным учёткам Qobuz.
+
+    Три исхода, и путать их нельзя:
+
+    * 401 — учётные данные отвергнуты. Это приговор учётке: копим streak и
+      после порога снимаем с маршрутизации.
+    * жив, но подписки нет / она истекла — токен ВАЛИДЕН, качать нельзя
+      (`credential.parameters` пуст, streamrip падает с IneligibleError).
+      Сообщаем владельцу и убираем из очереди перебора (см.
+      `qobuz_pool.health_rank`), но НЕ снимаем: подписку продлевают, и удалять
+      за это рабочий токен — потеря данных.
+    * не достучались (сеть, 5xx, неверный app_id) — про учётку не узнали
+      ничего, streak не трогаем. Иначе три сетевых сбоя подряд снесли бы живую
+      учётку; на Deezer этот дефект нашёлся 04.09.2026.
+    """
+    import asyncio
+    from . import qobuz_accounts as qa
+    lines: list[str] = []
+    cfg = _load_raw_config()
+    if not cfg:
+        return lines
+    accounts = qa.configured_accounts(cfg)
+    if not accounts:
+        return lines
+    app_id = (cfg.get("qobuz-app-id") or "").strip()
+
+    async def _check_all():
+        out = []
+        for a in accounts:
+            try:
+                info = await qa.account_info(a, app_id=app_id, fresh=True)
+            except Exception as e:
+                info = {"alive": False, "unreachable": True,
+                        "reason": f"ошибка проверки: {type(e).__name__}"}
+            out.append((a, info))
+        return out
+
+    try:
+        results = asyncio.run(_check_all())
+    except Exception as e:
+        lines.append(f"⚠️ Проверка учёток Qobuz не прошла целиком: {type(e).__name__}")
+        return lines
+
+    for acct, info in results:
+        secret = qa.account_secret(acct)
+        masked = _mask(secret)
+        label = acct.get("label") or "?"
+        reason = info.get("reason") or ""
+
+        if info.get("alive") and not info.get("eligible"):
+            lines.append(f"⚠️ Qobuz {masked} ({label}): токен рабочий, но {reason} — "
+                         f"из перебора исключён, НЕ снят (продли подписку)")
+            continue
+        if not info.get("alive") and info.get("unreachable"):
+            lines.append(f"⚠️ Qobuz {masked} ({label}): проверить не удалось "
+                         f"({reason}) — учётка не тронута")
+            continue
+
+        streak, archived = record_check(
+            "qobuz_account", _ident(secret), bool(info.get("alive")),
+            country=info.get("country", "") if info.get("alive") else "",
+            reason=reason or "не отвечает", threshold=threshold,
+            disable_fn=lambda _k, _key, _s=secret: disable_qobuz_account(_s),
+        )
+        if archived:
+            lines.append(f"💀 Qobuz {masked} ({label}) архивирован и снят из "
+                         f"config/tokens ({reason}) — запись в DEAD_ACCOUNTS.txt")
+        elif not info.get("alive") and streak > 0:
+            lines.append(f"⚠️ Qobuz {masked} ({label}): {streak}/{threshold} "
+                         f"неудачных проверок подряд ({reason})")
     return lines
 
 
