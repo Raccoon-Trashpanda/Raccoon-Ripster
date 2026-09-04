@@ -392,26 +392,69 @@ function _pairRel(ts){
   if(s<86400) return Math.floor(s/3600)+' '+t('s.pair_hr');
   return Math.floor(s/86400)+' '+t('s.pair_day');
 }
+function _pairModeDesc(m){
+  return t('s.pair_mode_'+(m||'mirror')+'_d') || '';
+}
+function _pairApplyMode(m){
+  window._pairMode = m || 'mirror';
+  document.querySelectorAll('#pair-mode-wrap [data-mode]').forEach(b=>{
+    b.classList.toggle('active', b.dataset.mode===window._pairMode);
+  });
+  const d=document.getElementById('pair-mode-desc');
+  if(d) d.textContent=_pairModeDesc(window._pairMode);
+}
+async function pairSetMode(m){
+  const msgEl=document.getElementById('pair-msg');
+  _pairApplyMode(m);
+  try{
+    const r=await fetch('/api/pair/mode',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:m})});
+    const d=await r.json().catch(()=>({}));
+    if(msgEl){
+      msgEl.textContent = r.ok ? (t('s.pair_mode')+': '+(t('s.pair_mode_'+m)||m)) : (d.detail||d.error||('HTTP '+r.status));
+      msgEl.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+    }
+  }catch(e){ if(msgEl){ msgEl.textContent=t('ui.net_err_pfx')+e.message; msgEl.style.color='var(--red)'; } }
+}
 async function pairFillHint(){
   const el=document.getElementById('pair-addr-hint');
   if(!el) return;
-  const host=(location.hostname && location.hostname!=='localhost') ? location.hostname : '127.0.0.1';
-  const addrLine = t('s.pair_addr_hint')+' <code>http://'+host+':7799</code> · '+t('s.pair_emu')+' <code>http://10.0.2.2:7799</code>';
   try{
     const r=await fetch('/api/pair/status'); const d=await r.json().catch(()=>({}));
     const shareEl=document.getElementById('pair-share');
     if(shareEl && d && typeof d.share_credentials==='boolean') shareEl.checked=d.share_credentials;
+
+    // Адреса ЭТОГО ПК — как их видит телефон (LAN / mDNS / внешний, если есть).
+    const eps=(d.endpoints||[]);
+    let addrLine;
+    if(eps.length){
+      addrLine = t('s.pair_addr_hint')+' '+eps.map(e=>'<code>'+e.url+'</code>').join(' ');
+    }else{
+      addrLine = t('s.pair_addr_lan_only');
+    }
+    let pcLine='';
+    if(d.pc_name) pcLine = '<div style="margin-top:4px;color:var(--muted)">'+t('s.pair_this_pc')+' <b>'+d.pc_name+'</b>'
+      + (d.pc_id ? ' · <code>'+String(d.pc_id).slice(0,8)+'…</code>' : '') + '</div>';
+
     let statusLine='';
-    const n=(d.devices||[]).length;
-    if(n>0){
+    const devs=(d.devices||[]);
+    if(devs.length){
       const online=d.online_devices||0;
-      const last=Math.max(0,...(d.devices||[]).map(x=>x.seen||0));
+      const last=Math.max(0,...devs.map(x=>x.seen||0));
+      const names=devs.map(x=>x.name).filter(Boolean).slice(0,3).join(', ');
       statusLine = '<div style="margin-top:6px;color:'+(online>0?'var(--green)':'var(--muted)')+'">📱 '
-        + ti('s.pair_devices',{n:n}) + (online>0 ? ' · '+ti('s.pair_online',{n:online}) : '')
+        + ti('s.pair_devices',{n:devs.length}) + (names?(' — '+names):'')
+        + (online>0 ? ' · '+ti('s.pair_online',{n:online}) : '')
         + (last ? ' · '+t('s.pair_lastseen')+' '+_pairRel(last) : '') + '</div>';
     }
-    el.innerHTML = addrLine + statusLine;
-  }catch(e){ el.innerHTML = addrLine; }
+    el.innerHTML = addrLine + pcLine + statusLine;
+
+    // режим fan-out — показываем блок только когда есть спаренные устройства
+    const mw=document.getElementById('pair-mode-wrap');
+    if(mw){
+      mw.style.display = devs.length ? 'block' : 'none';
+      _pairApplyMode(d.mode||'mirror');
+    }
+  }catch(e){ el.innerHTML = t('s.pair_addr_lan_only'); }
 }
 
 // country code → flag emoji
