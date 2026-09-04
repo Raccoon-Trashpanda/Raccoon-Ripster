@@ -215,19 +215,63 @@ def _remote_url() -> str:
     return ""
 
 
+# Кэш проверки достижимости: `_endpoints()` зовут и из /start, и из /status,
+# а связку «адрес → слушаем ли» пересчитывать на каждый вызов незачем.
+_REACH_CACHE: dict[str, tuple[float, bool]] = {}
+_REACH_TTL = 30.0
+
+
+def _listening_on(ip: str) -> bool:
+    """Правда ли, что Ripster слушает на ЭТОМ адресе.
+
+    По умолчанию сервер поднимается на 127.0.0.1 (`RIPSTER_HOST`, см. app.py),
+    и тогда все LAN-адреса этой машины существуют, но порт на них закрыт. Раньше
+    `_endpoints()` перечислял их безусловно — ПК показывал человеку адрес вида
+    http://192.168.1.98:7799, тот вбивал его на телефоне и получал «failed to
+    connect» (наступил на это 04.09.2026 при живом сопряжении). Адрес, по
+    которому мы заведомо не отвечаем, предлагать нельзя.
+
+    Проверяем не настройкой, а попыткой соединения: так покрываются и запуск с
+    `--host`, и firewall, и случай, когда порт занял другой процесс. Таймаут
+    короткий — это соединение к самому себе, оно либо мгновенное, либо не нужно.
+    """
+    now = time.time()
+    hit = _REACH_CACHE.get(ip)
+    if hit and now - hit[0] < _REACH_TTL:
+        return hit[1]
+    ok = False
+    try:
+        with socket.create_connection((ip, _PORT), timeout=0.35):
+            ok = True
+    except OSError:
+        ok = False
+    _REACH_CACHE[ip] = (now, ok)
+    return ok
+
+
 def _endpoints() -> list[dict]:
     """Адреса ТОЛЬКО этого ПК, в порядке предпочтения телефона: LAN (быстро,
     приватно) → mDNS-имя → внешний (если есть). Ни один пользователь не
-    получает чужой адрес — список строит тот ПК, с которым идёт сопряжение."""
+    получает чужой адрес — список строит тот ПК, с которым идёт сопряжение.
+
+    Локальные адреса попадают сюда, только если по ним реально отвечает порт
+    (см. [_listening_on]); иначе остаётся внешний, и он же становится первым —
+    когда сервер слушает только петлю, туннель является единственным рабочим
+    путём, а не запасным."""
     eps: list[dict] = []
+    lan_ok = False
     for ip in _lan_ips():
-        eps.append({"url": f"http://{ip}:{_PORT}", "kind": "lan"})
-    try:
-        host = socket.gethostname()
-        if host and "." not in host:
-            eps.append({"url": f"http://{host}.local:{_PORT}", "kind": "mdns"})
-    except Exception:
-        pass
+        if _listening_on(ip):
+            eps.append({"url": f"http://{ip}:{_PORT}", "kind": "lan"})
+            lan_ok = True
+    if lan_ok:
+        # mDNS-имя ведёт на те же интерфейсы: предлагаем, только если они живы.
+        try:
+            host = socket.gethostname()
+            if host and "." not in host:
+                eps.append({"url": f"http://{host}.local:{_PORT}", "kind": "mdns"})
+        except Exception:
+            pass
     rurl = _remote_url()
     if rurl:
         eps.append({"url": rurl, "kind": "remote"})
