@@ -896,6 +896,7 @@ async def _check_soundcloud_targets(items: list, broadcast, save, cfg, queue, sn
         entry["last_check"] = datetime.now().isoformat(timespec="seconds")
         if track_id and str(track_id) != str(prev) and track_url:
             entry["last_release"] = str(track_id)
+            entry["last_release_title"] = str(latest.get("title") or latest.get("name") or "")
             # Same baseline rule as the Apple branch: the first check of a newly
             # added channel records where we are, it is not a "new release".
             if prev is None:
@@ -981,6 +982,7 @@ async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> 
             if not seen_date:
                 entry["last_release_date"] = newest        # baseline only
                 entry["last_release"] = rels[0].get("title", "")
+                entry["last_release_title"] = rels[0].get("title", "")
                 save(items)
                 continue
             fresh = [r for r in rels
@@ -989,6 +991,7 @@ async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> 
                 continue
             entry["last_release_date"] = newest
             entry["last_release"] = fresh[0].get("title", "")
+            entry["last_release_title"] = fresh[0].get("title", "")
             found += len(fresh)
             save(items)
 
@@ -1393,12 +1396,19 @@ async def _check_watchlist():
                 # Тот же релиз мог прийти раньше из ранней витрины под другой
                 # ссылкой — уведомлять о нём второй раз нельзя. `last_release`
                 # для этого не годится: он хранит URL, а URL у каждой витрины свой.
+                # Имя релиза сохраняем ОТДЕЛЬНЫМ полем. `last_release` здесь
+                # хранит URL, и телефон, получая только его, вынужден был писать
+                # на карточке имя артиста вместо названия (жалоба 04.09.2026:
+                # «в радаре вместо названий альбомов имя артиста»). Имя тут
+                # есть — его просто некуда было положить.
                 if release_url and release_url != prev and _seen_has(entry, release_name):
                     entry["last_release"] = release_url
+                    entry["last_release_title"] = release_name
                     save(items)
                     continue
                 if release_url and release_url != prev:
                     entry["last_release"] = release_url
+                    entry["last_release_title"] = release_name
                     if isinstance(entry.get("seen"), list):
                         _seen_add(entry, release_name)
                     # First ever check just records a baseline: otherwise adding

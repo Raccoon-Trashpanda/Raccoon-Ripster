@@ -804,9 +804,31 @@ async def pair_radar(request: Request):
         return v if _is_url(v) else ""
 
     def _last_release_title(entry: dict) -> str:
+        # 1) Явное поле, если вотчлист успел его записать.
+        t = str(entry.get("last_release_title") or "").strip()
+        if t:
+            return t
         v = str(entry.get("last_release") or "").strip()
-        # id трека названием не является — пустое честнее выдуманного.
-        return "" if _is_url(v) or v.isdigit() else v
+        # 2) Само поле — уже название (ветки лейблов).
+        if v and not _is_url(v) and not v.isdigit():
+            return v
+        # 3) Добор для СТАРЫХ записей: явного поля у них нет и не появится до
+        #    следующей находки. Берём название ИЗ САМОЙ ССЫЛКИ — у Apple, Deezer,
+        #    Qobuz и Tidal слаг альбома лежит прямо в пути
+        #    (…/album/remember-your-life/12345). Это единственный источник,
+        #    который гарантированно относится к ТОМУ ЖЕ релизу.
+        #
+        #    Список `seen` для этого НЕ годится, хотя и выглядит подходящим: он
+        #    хранит нормализованные имена всего замеченного, и последний элемент
+        #    сплошь и рядом — другой релиз (у William Orbit ссылка на «Remember
+        #    Your Life», а в seen последним лежит чужой DJ-микс). Подставить его
+        #    значило бы совершить ровно ту ошибку, которую мы чиним.
+        if _is_url(v):
+            slug = v.split("?")[0].rstrip("/").split("/")
+            for part in reversed(slug):
+                if part and not part.isdigit() and "." not in part and part not in ("album", "track", "playlist"):
+                    return part.replace("-", " ").strip().title()
+        return ""
 
     items = []
     for e in wl:
