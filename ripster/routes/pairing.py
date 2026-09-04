@@ -351,6 +351,60 @@ def _jwt_claim(token: str, key: str) -> str:
         return ""
 
 
+def _best_slots(cfg: dict) -> dict:
+    """Лучшая учётка каждого сервиса — по уже измеренному здоровью.
+
+    Сопряжение годами отдавало телефону ОСНОВНОЕ поле конфига. Для Deezer это
+    оказался бесплатный аккаунт (BG) при двух Family с lossless в пуле: телефон
+    качал 128 kbps, и по списку полей это было незаметно. Для Qobuz — токен со
+    сроком 28.09 при соседнем до 14.10.
+
+    Берём слот с наименьшим рангом (`health_rank`: 0 — лучший), при равенстве —
+    тот, что раньше в конфиге. В сеть не ходим: ранг читается из кэша сторожа.
+    Ничего не измерено или что-то пошло не так — возвращаем пусто, и вызывающий
+    оставляет прежнее поведение.
+    """
+    out: dict[str, str] = {}
+
+    def pick(mod_name: str, secret_of, dst: str) -> None:
+        try:
+            import importlib
+            pool = importlib.import_module(mod_name)
+            accounts = pool._configured_accounts(cfg)
+            if len(accounts) < 2:
+                return                      # выбирать не из чего
+            ranked = sorted(
+                ((pool.health_rank(secret_of(a)), i, secret_of(a))
+                 for i, a in enumerate(accounts)),
+                key=lambda t: (t[0], t[1]),
+            )
+            rank, _idx, secret = ranked[0]
+            # Подменяем ТОЛЬКО на измеренном (ранг 0/1). Ранг 2 значит «не
+            # спрашивали»: выбирать по незнанию — это гадание, а прежнее
+            # поведение (основная учётка) как минимум предсказуемо.
+            if rank < 2 and secret:
+                out[dst] = secret
+        except Exception as e:              # noqa: BLE001
+            print(f"[pair] лучший слот {dst} не выбран: {e!r}", flush=True)
+
+    pick("ripster.deezer_pool", lambda a: a["arl"], "deezer.arl")
+    pick("ripster.soundcloud_pool", lambda a: a["token"], "soundcloud.oauth")
+    # У Qobuz ранг считается по всей записи, а не по строке секрета.
+    try:
+        from ripster import qobuz_pool as _qp, qobuz_accounts as _qa
+        accounts = _qp._configured_accounts(cfg)
+        if len(accounts) >= 2:
+            ranked = sorted(((_qp.health_rank(a), i, a) for i, a in enumerate(accounts)),
+                            key=lambda t: (t[0], t[1]))
+            rank, _i, best = ranked[0]
+            tok = (best.get("qobuz-auth-token") or "").strip()
+            if rank < 2 and tok:
+                out["qobuz.token"] = tok
+    except Exception as e:                  # noqa: BLE001
+        print(f"[pair] лучший слот qobuz не выбран: {e!r}", flush=True)
+    return out
+
+
 async def _credentials_payload() -> dict:
     """Only the fields the mobile CredentialStore knows how to store. Empty
     values are omitted so a missing service on the PC doesn't wipe a value the
@@ -365,6 +419,16 @@ async def _credentials_payload() -> dict:
                 out[dst] = v.strip()
                 return
 
+    # Телефон получает ЛУЧШУЮ учётку сервиса, а не первое поле конфига.
+    #
+    # 04.09.2026: основной `deezer-arl` — бесплатный аккаунт (BG), а две Deezer
+    # Family с lossless лежат в пуле. Телефон качал Deezer в 128 kbps при двух
+    # доступных lossless-учётках, и по списку полей этого было не видно. У Qobuz
+    # то же по срокам: основной токен NZ действует до 28.09, а рядом NZ до 14.10
+    # — после первой даты телефон молча остался бы без Qobuz.
+    #
+    # Здоровье слотов уже измерено сторожем (`*_accounts.known`), сети тут нет.
+    # Ничего не измерено — отдаём основную, как раньше.
     put("soundcloud.oauth", "soundcloud-oauth-token")
     put("deezer.arl", "deezer-arl")
     put("qobuz.app_id", "qobuz-app-id")
@@ -372,6 +436,8 @@ async def _credentials_payload() -> dict:
     put("qobuz.email", "qobuz-email")
     put("qobuz.password", "qobuz-password")
     put("qobuz.token", "qobuz-auth-token")
+    for dst, secret in _best_slots(cfg).items():
+        out[dst] = secret
     put("spotify.sp_dc", "spotify-sp-dc")
     put("yandex.oauth", "yandex-token")
     put("beatport.username", "beatport-username")
