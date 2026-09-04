@@ -136,7 +136,46 @@ def _ensure_media_patch() -> None:
         print(f"[deezer] media-guard patch skipped: {e}", flush=True)
 
 
+def _arl_plan() -> tuple[str, bool]:
+    """Тариф и живость ОСНОВНОГО Deezer-ARL: («Deezer Free», True) и т.п.
+
+    Живёт отдельной функцией, потому что зовут её из СИНХРОННОГО `is_finished`,
+    а проверка асинхронная: `asyncio.run` при уже работающем цикле раннера
+    бросил бы RuntimeError, и разбор молча свалился бы в старое «ARL протух» —
+    ровно ту ошибку, ради которой всё и затевалось. Поэтому отдельный поток со
+    своим циклом.
+
+    Ошибка здесь не должна ничего ломать: не смогли спросить — вернём пусто, и
+    вызывающий покажет прежнее сообщение.
+    """
+    out: dict = {}
+
+    def _run() -> None:
+        try:
+            import asyncio
+            from ripster import deezer_accounts as _da
+            from ripster.credential_health import _load_raw_config
+            cfg = _load_raw_config() or {}
+            arl = str(cfg.get("deezer-arl") or "").strip()
+            if not arl:
+                return
+            loop = asyncio.new_event_loop()
+            try:
+                out.update(loop.run_until_complete(_da.arl_info(arl, fresh=True)) or {})
+            finally:
+                loop.close()
+        except Exception:                                       # noqa: BLE001
+            pass
+
+    import threading
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=12)
+    return str(out.get("plan") or ""), bool(out.get("alive"))
+
+
 @register
+
 class DeezerEngine(EngineBase):
     name = "deezer"
 
@@ -220,6 +259,23 @@ class DeezerEngine(EngineBase):
         # "Aborted!" with 0 tracks. Both wordings are the SAME root cause and the old
         # catch-all hid it behind "no 'All done'". Surface the real fix instead.
         if tracks_ok == 0 and ("paste here your arl" in low or "aborted!" in low):
+            # СПРАШИВАЕМ САМ DEEZER, прежде чем обвинять токен.
+            #
+            # Та же строка deemix («Paste here your arl» / «Aborted!») выходит и
+            # когда ARL мёртв, и когда он ЖИВОЙ, но на аккаунте нет подписки —
+            # а качество запрошено платное. Мы говорили «протух» в обоих случаях,
+            # и 04.09.2026 гость получил совет переклеивать токен, который был
+            # исправен: обе учётки владельца оказались Deezer Free. Совет был не
+            # просто бесполезен — он уводил от настоящей причины.
+            plan, alive = _arl_plan()
+            if alive and plan and "premium" not in plan.lower() and "hifi" not in plan.lower():
+                return EngineResult(
+                    False,
+                    error=f"Deezer: у этой учётки нет подписки ({plan}) — скачивание "
+                          f"платных качеств ей недоступно. ARL живой, менять его незачем: "
+                          f"нужен ARL аккаунта с Deezer Premium, либо выбери качество, "
+                          f"доступное бесплатному аккаунту.",
+                )
             return EngineResult(
                 False,
                 error="Deezer: ARL не задан или протух. Открой deezer.com в браузере → "

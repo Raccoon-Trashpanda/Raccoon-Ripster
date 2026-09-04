@@ -2005,7 +2005,12 @@ async def _artist_spotify(artist_id: str, types: str) -> dict:
             alb_r = await c.get(f"https://api.spotify.com/v1/artists/{artist_id}/albums",
                                 headers={"Authorization": f"Bearer {token}"},
                                 # Same quota-tier limit>10 → 400 as /v1/search, see there.
-                                params={"limit": 10, "include_groups": "album,single,compilation"})
+                                # `appears_on` — сборники и чужие релизы, где артист
+                                # только участвует. Раньше группу не запрашивали
+                                # вовсе, хотя тип для неё в type_map уже был: на
+                                # телефоне строка «участие» всегда пустовала.
+                                params={"limit": 10,
+                                        "include_groups": "album,single,compilation,appears_on"})
             if alb_r.status_code == 429:
                 _record_sp_rate_limit(int(alb_r.headers.get("Retry-After", 30)))
                 if cached: return cached
@@ -2031,6 +2036,39 @@ async def _artist_spotify(artist_id: str, types: str) -> dict:
                           f"https://open.spotify.com/album/{a['id']}"),
                 "service": "spotify",
             })
+        # Чем именно артист участвует в чужом релизе. Спрашиваем ТОЛЬКО для
+        # таких строк и не больше пяти: у Spotify живой лимит запросов, и радар
+        # уже ловил 429-баны — доплата за справку не должна стоить ленты.
+        appears = [r for r in releases if r["type"] in ("appears_on", "compilation")][:5]
+        if appears and not _sp_is_rate_limited():
+            try:
+                async with _HTTP.ashared() as c2:
+                    for row in appears:
+                        tr = await c2.get(
+                            f"https://api.spotify.com/v1/albums/{row['id']}/tracks",
+                            headers={"Authorization": f"Bearer {token}"},
+                            params={"limit": 50})
+                        if tr.status_code == 429:
+                            _record_sp_rate_limit(int(tr.headers.get("Retry-After", 30)))
+                            break
+                        if not tr.content:
+                            continue
+                        mine, others = [], []
+                        for t in (tr.json().get("items") or []):
+                            names = [x.get("name", "") for x in (t.get("artists") or [])]
+                            if any(str(x.get("id")) == str(artist_id) for x in (t.get("artists") or [])):
+                                mine.append(t.get("name", ""))
+                            others.extend(names)
+                        mine = [x for x in dict.fromkeys(mine) if x]
+                        if mine:
+                            row["appears_as"] = "; ".join(mine)
+                        # Кем релиз издан — чтобы карточка не выдавала сборник за
+                        # альбом самого артиста.
+                        if others:
+                            row.setdefault("album_artist", others[0])
+            except Exception as e:          # noqa: BLE001
+                print(f"[spotify] appears_as не собран: {e!r}", flush=True)
+
         releases.sort(key=lambda r: r.get("date", ""), reverse=True)
         result = {
             "artist": {

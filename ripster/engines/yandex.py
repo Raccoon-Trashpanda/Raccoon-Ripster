@@ -134,6 +134,44 @@ class YandexEngine(EngineBase):
                     "type": (a.type or "album"),
                     "url": f"https://music.yandex.ru/album/{a.id}", "service": "yandex",
                 })
+            # Участия: у Яндекса они лежат ОТДЕЛЬНО, в `also_albums` брифа, а
+            # `artists_direct_albums` отдаёт только собственные релизы артиста.
+            # Раньше мы спрашивали лишь второе — и строка «участие» на телефоне
+            # всегда пустовала, хотя данные у сервиса есть.
+            own = {r["id"] for r in releases}
+            also = list(getattr(info, "also_albums", None) or [])
+            aname = (artist.name if artist else "").strip().lower()
+            for a in also:
+                if str(a.id) in own:
+                    continue
+                credited = ", ".join(ar.name for ar in (a.artists or []))
+                releases.append({
+                    "id": str(a.id), "title": a.title or "",
+                    "artist": credited,
+                    "album_artist": credited,
+                    "cover": _ym_cover(a.cover_uri), "year": str(a.year or ""),
+                    "date": str(getattr(a, "release_date", "") or ""),
+                    "tracks": a.track_count,
+                    "type": "compilation",
+                    "url": f"https://music.yandex.ru/album/{a.id}", "service": "yandex",
+                })
+            # Каким именно треком артист там участвует. Потолок в пять релизов:
+            # каждый — отдельный запрос, а справка не стоит того, чтобы страница
+            # артиста открывалась вдвое дольше.
+            for row in [r for r in releases if r.get("type") == "compilation"][:5]:
+                try:
+                    full = c.albums_with_tracks(row["id"])
+                    mine = []
+                    for vol in (getattr(full, "volumes", None) or []):
+                        for t in vol:
+                            names = [ar.name.strip().lower() for ar in (t.artists or [])]
+                            if aname and aname in names:
+                                mine.append(t.title or "")
+                    mine = [x for x in dict.fromkeys(mine) if x]
+                    if mine:
+                        row["appears_as"] = "; ".join(mine)
+                except Exception:
+                    continue
             releases.sort(key=lambda r: r.get("date") or r.get("year") or "", reverse=True)
             return {"artist": {
                 "id": artist_id, "name": (artist.name if artist else ""),
