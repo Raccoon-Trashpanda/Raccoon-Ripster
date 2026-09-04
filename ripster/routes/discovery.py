@@ -35,6 +35,61 @@ _sp_artist_cache: dict = {}  # "artist_id:types" -> (result_dict, expire_ts)
 _SP_ALBUM_TTL  = 1800        # 30 min
 _SP_ARTIST_TTL = 900         # 15 min
 _sp_label_cache: dict = {}   # album_id -> настоящий label из /v1/albums (навсегда: лейбл релиза не меняется)
+_sp_label_cache_loaded = False
+
+
+def _sp_label_cache_path():
+    import os
+    from pathlib import Path as _P
+    base = _P(os.environ.get("RIPSTER_BASE_DIR") or _P(__file__).resolve().parent.parent.parent)
+    p = base / "dist" / "spotify_labels.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _sp_label_cache_load() -> None:
+    """Поднять подтверждённые лейблы с диска.
+
+    Замысел сверки прямо на это и опирается: потолок в
+    `_SP_SINGLE_VERIFY_CAP` не теряет данные, «следующий обход досверяет
+    следующую порцию, и через несколько проходов подтверждено всё». Но кэш жил
+    только в памяти процесса — и каждый перезапуск app обнулял всё накопленное,
+    после чего радар заново тратил суточную квоту Spotify на те же релизы.
+    04.09.2026 у владельца квота выбрана на 17 ч 28 мин, а Deezer и Tidal в тот
+    же момент отвечают нормально: чинить надо расход, а не блокировку.
+
+    Лейбл релиза не меняется, поэтому диск здесь уместен. Пишем ТОЛЬКО
+    непустые значения: пустое — это «не подтвердили» (403/429 в тот момент), и
+    сохранять его значило бы навсегда закрепить неудачу проверки как факт.
+    """
+    global _sp_label_cache_loaded
+    if _sp_label_cache_loaded:
+        return
+    _sp_label_cache_loaded = True
+    try:
+        import json as _j
+        d = _j.loads(_sp_label_cache_path().read_text(encoding="utf-8"))
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if isinstance(v, str) and v.strip():
+                    _sp_label_cache.setdefault(k, v)
+            print(f"[label] поднято подтверждённых лейблов с диска: {len(d)}", flush=True)
+    except FileNotFoundError:
+        pass
+    except Exception as e:                       # noqa: BLE001
+        print(f"[label] кэш лейблов не прочитан: {e!r}", flush=True)
+
+
+def _sp_label_cache_save() -> None:
+    try:
+        import json as _j
+        good = {k: v for k, v in _sp_label_cache.items() if isinstance(v, str) and v.strip()}
+        if not good:
+            return
+        _sp_label_cache_path().write_text(_j.dumps(good, ensure_ascii=False, indent=1),
+                                          encoding="utf-8")
+    except Exception as e:                       # noqa: BLE001
+        print(f"[label] кэш лейблов не сохранён: {e!r}", flush=True)
 _sp_rate_limit_until: float = 0.0   # epoch-seconds; Spotify API blocked until this time
 
 
@@ -595,8 +650,10 @@ async def _sp_real_labels(ids: list[str]) -> tuple[dict, bool]:
     токеном отвечает 200 и отдаёт 10 релизов лейбла, `/v1/albums?ids=` — 403,
     `/v1/albums/{id}` — 429 без `Retry-After`. То есть подтвердить нельзя НИ
     ОДИН, и лейбл, существующий во всех каталогах, объявлялся опечаткой."""
+    _sp_label_cache_load()
     want = [i for i in ids if i and i not in _sp_label_cache]
     verified = True
+    before = len(_sp_label_cache)
     if want:
         token = await _get_spotify_app_token()
         if not token:
@@ -649,6 +706,11 @@ async def _sp_real_labels(ids: list[str]) -> tuple[dict, bool]:
                             _record_sp_rate_limit(int(r1.headers.get("Retry-After", 3600)))
                             print(f"[label] 429 на /v1/albums/{one} — {_sp_rate_limit_msg()}; "
                                   f"сверка лейблов остановлена", flush=True)
+                            # Сохраняем то, что успели подтвердить ДО стены:
+                            # иначе потраченные на них запросы пропадают, и
+                            # следующий проход платит за них снова.
+                            if len(_sp_label_cache) != before:
+                                _sp_label_cache_save()
                             return ({i: _sp_label_cache.get(i, "") for i in ids}, False)
                         if r1.status_code != 200:
                             print(f"[label] /v1/albums/{one} -> HTTP {r1.status_code}",
@@ -664,6 +726,8 @@ async def _sp_real_labels(ids: list[str]) -> tuple[dict, bool]:
         except Exception as e:
             print(f"[label] verify failed: {e}", flush=True)
             verified = False
+        if len(_sp_label_cache) != before:
+            _sp_label_cache_save()
     return {i: _sp_label_cache.get(i, "") for i in ids}, verified
 
 
