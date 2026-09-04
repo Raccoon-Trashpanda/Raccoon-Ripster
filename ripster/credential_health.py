@@ -534,6 +534,122 @@ def check_all_qobuz_accounts(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
     return lines
 
 
+def disable_soundcloud_token(token: str) -> None:
+    """Снимает мёртвый OAuth-токен SoundCloud из того файла, где он лежит."""
+    import yaml
+    from . import config_service as _cs
+    from . import retired_credentials as _retired
+    target = (token or "").strip()
+    if not target:
+        return
+    _retired.retire("soundcloud_token", target, "SoundCloud отверг токен")
+    for path in _yaml_files_to_check():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        changed = False
+        if (data.get("soundcloud-oauth-token") or "").strip() == target:
+            data["soundcloud-oauth-token"] = ""
+            changed = True
+        pool = data.get("soundcloud-accounts")
+        if isinstance(pool, list):
+            kept = [a for a in pool
+                    if not (isinstance(a, dict) and (a.get("token") or "").strip() == target)]
+            if len(kept) != len(pool):
+                data["soundcloud-accounts"] = kept
+                changed = True
+        if changed:
+            _cs._atomic_write_yaml(path, data)
+
+
+def check_all_soundcloud_tokens(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
+    """Прогнать проверку по всем токенам SoundCloud.
+
+    Владелец 04.09.2026: «внедрил третий токен, но надо проверять на наличие
+    вообще подписки». У SoundCloud это особенно нужно: токен без Go+ ВАЛИДЕН,
+    `/me` отвечает 200 — просто HQ-поток (AAC 256) такой учётке не дают, и трек
+    приезжает в 128 kbps. По коду ответа это не отличить.
+
+    Три исхода, как у Qobuz: 401 — приговор (копим streak, после порога
+    снимаем); жив без Go+ — сообщаем, но НЕ снимаем и из перебора не убираем,
+    128 kbps это рабочая загрузка; не достучались — streak не трогаем.
+
+    Отдельно предупреждаем про разные токены ОДНОЙ учётки: у владельца два из
+    трёх принадлежали аккаунту `goku`, то есть пул из трёх записей давал две
+    независимые учётки — на параллельность и перебор это влияет, а по списку
+    токенов не видно.
+    """
+    import asyncio
+    from . import soundcloud_accounts as sa
+    lines: list[str] = []
+    cfg = _load_raw_config()
+    if not cfg:
+        return lines
+    accounts = sa.configured_accounts(cfg)
+    if not accounts:
+        return lines
+
+    async def _check_all():
+        out = []
+        for a in accounts:
+            try:
+                info = await sa.account_info(a["token"], fresh=True)
+            except Exception as e:
+                info = {"alive": False, "unreachable": True,
+                        "reason": f"ошибка проверки: {type(e).__name__}"}
+            out.append((a, info))
+        return out
+
+    try:
+        results = asyncio.run(_check_all())
+    except Exception as e:
+        lines.append(f"⚠️ Проверка токенов SoundCloud не прошла целиком: {type(e).__name__}")
+        return lines
+
+    seen_logins: dict[str, str] = {}
+    for acct, info in results:
+        token = acct["token"]
+        masked = _mask(token)
+        label = acct.get("label") or "?"
+        reason = info.get("reason") or ""
+
+        if info.get("alive"):
+            login = (info.get("login") or "").strip().lower()
+            if login:
+                if login in seen_logins:
+                    lines.append(f"⚠️ SoundCloud {masked} ({label}) — тот же аккаунт "
+                                 f"«{info.get('login')}», что и {seen_logins[login]}: "
+                                 f"две записи, одна учётка")
+                else:
+                    seen_logins[login] = masked
+            if not info.get("go_plus"):
+                lines.append(f"⚠️ SoundCloud {masked} ({label}): {reason} — "
+                             f"токен рабочий, снимать не за что")
+            continue
+
+        if info.get("unreachable"):
+            lines.append(f"⚠️ SoundCloud {masked} ({label}): проверить не удалось "
+                         f"({reason}) — токен не тронут")
+            continue
+
+        streak, archived = record_check(
+            "soundcloud_token", _ident(token), False,
+            country=info.get("country", ""), reason=reason or "не отвечает",
+            threshold=threshold,
+            disable_fn=lambda _k, _key, _t=token: disable_soundcloud_token(_t),
+        )
+        if archived:
+            lines.append(f"💀 SoundCloud {masked} ({label}) архивирован и снят из "
+                         f"config/tokens ({reason}) — запись в DEAD_ACCOUNTS.txt")
+        elif streak > 0:
+            lines.append(f"⚠️ SoundCloud {masked} ({label}): {streak}/{threshold} "
+                         f"неудачных проверок подряд ({reason})")
+    return lines
+
+
 def check_all_apple_slots(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
     """Прогнать проверку по RUNNING Apple wrapper-контейнерам.
 

@@ -86,7 +86,10 @@ def _read_user(user: dict) -> dict:
         except Exception:
             pass
     return {
-        "id": str((user or {}).get("id") or ""),
+        # Чей это аккаунт — по версии Qobuz. Два разных токена могут вести в
+        # одну учётку, и узнать это можно только спросив сервис
+        # (см. ripster/dedup_accounts.py).
+        "account_id": str((user or {}).get("id") or ""),
         "country": (user or {}).get("country_code") or (user or {}).get("country") or "",
         "plan": str(sub.get("offer") or creds.get("label")
                     or creds.get("description") or params.get("short_label") or "").strip(),
@@ -163,7 +166,7 @@ async def account_info(acct: dict, app_id: str = "", fresh: bool = False) -> dic
         info["reason"] = ("подписка истекла " + info["expires"]) if info["expired"] \
             else "нет активной подписки Qobuz (скачивание невозможно)"
     _MEM[k] = (time.time(), info)
-    _cache_save(k, {kk: vv for kk, vv in info.items() if kk != "id"})
+    _cache_save(k, dict(info))
     return info
 
 

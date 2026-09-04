@@ -118,6 +118,10 @@ async def arl_info(arl: str, fresh: bool = False) -> dict:
     opts = user.get("OPTIONS") or {}
     info = {
         "alive": True,
+        # Чей это аккаунт — по версии Deezer, а не по нашей догадке о токене.
+        # Нужно для поиска дублей: два РАЗНЫХ ARL могут вести в одну учётку, и
+        # понять это можно только спросив сервис (см. ripster/dedup_accounts.py).
+        "account_id": str(uid),
         "country": str(user.get("COUNTRY") or opts.get("license_country") or "").lower(),
         "name": user.get("BLOG_NAME") or user.get("FIRSTNAME") or "",
         # Тариф: в gw-light он лежит в нескольких местах, берём первое непустое.

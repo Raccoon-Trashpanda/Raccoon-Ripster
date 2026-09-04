@@ -431,6 +431,69 @@ def check_qobuz_accounts():
             warn(line)
 
 
+def check_soundcloud_tokens():
+    """Токены SoundCloud: жив ли и есть ли Go+.
+
+    Отдельная проверка нужна потому, что токен БЕЗ подписки полностью валиден —
+    `/me` отвечает 200, а HQ-поток не отдаётся. Плюс ловим разные токены одной
+    учётки: у владельца 04.09.2026 два из трёх были аккаунтом `goku`.
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from ripster import credential_health as ch
+    except Exception as e:
+        warn(f"credential_health недоступен: {e}")
+        return
+    lines = ch.check_all_soundcloud_tokens()
+    if not lines:
+        ok("Токены SoundCloud живы, с Go+")
+        return
+    for line in lines:
+        if line.startswith("💀"):
+            fixed(line)
+        else:
+            warn(line)
+
+
+def check_account_duplicates():
+    """Разные ключи, ведущие в один аккаунт: находим и убираем лишние.
+
+    04.09.2026: в пуле SoundCloud три токена, все живые с Go+ — но два из них
+    один аккаунт `goku`. Пул давал две независимые учётки вместо трёх, а при
+    отказе «следующая учётка» оказывалась той же самой, и вторая попытка
+    гарантированно повторяла первую.
+
+    Удаление здесь автоматическое, но узкое: основанием служит только ответ
+    сервиса о том, чей это аккаунт, обе записи должны быть живы, основная не
+    трогается никогда, а перед удалением всё измеряется заново (см.
+    ripster/dedup_accounts.py). Снятое лежит в реестре и в DEAD_ACCOUNTS.txt —
+    вернуть можно.
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from ripster import credential_health as ch
+        from ripster import dedup_accounts as dd
+    except Exception as e:
+        warn(f"dedup_accounts недоступен: {e}")
+        return
+    cfg = ch._load_raw_config()
+    if not cfg:
+        return
+    import asyncio
+    for service in ("deezer", "qobuz", "soundcloud"):
+        try:
+            lines = asyncio.run(dd.apply(cfg, service, confirm=True))
+        except Exception as e:
+            warn(f"{service}: разбор дублей не прошёл ({type(e).__name__})")
+            continue
+        for line in lines:
+            if line.startswith("💀"):
+                fixed(line)
+            elif line.startswith("⚠️") or line.startswith("✗"):
+                warn(line)
+    ok("Дубли учёток проверены")
+
+
 def check_gamdl_cookies():
     """Отличить ДВА состояния cookies.txt, которые до 01.08.2026 выглядели одинаково.
 
@@ -1668,6 +1731,8 @@ def main():
         check_apple_pool_slots()
         check_deezer_arls()
         check_qobuz_accounts()
+        check_soundcloud_tokens()
+        check_account_duplicates()
         check_gamdl_cookies()
         check_tokens()
         check_token_files()

@@ -31,6 +31,7 @@ from pathlib import Path
 
 _KIND_DEEZER = "deezer_arl"
 _KIND_QOBUZ = "qobuz_account"
+_KIND_SC = "soundcloud_token"
 
 
 def _base_dir() -> Path:
@@ -130,6 +131,7 @@ def strip_from_config(cfg: dict) -> list[str]:
             cfg["deezer-accounts"] = kept
 
     notes += _strip_qobuz(cfg)
+    notes += _strip_soundcloud(cfg)
     return notes
 
 
@@ -163,4 +165,26 @@ def _strip_qobuz(cfg: dict) -> list[str]:
             kept.append(a)
         if len(kept) != len(pool):
             cfg["qobuz-accounts"] = kept
+    return notes
+
+
+def _strip_soundcloud(cfg: dict) -> list[str]:
+    """То же для SoundCloud: снятый токен не должен возвращаться сохранением."""
+    notes: list[str] = []
+    main = (cfg.get("soundcloud-oauth-token") or "").strip()
+    if main and is_retired(_KIND_SC, main):
+        cfg["soundcloud-oauth-token"] = ""
+        notes.append(f"SoundCloud ...{main[-6:]} (основной) снят автоматикой — поле освобождено")
+
+    pool = cfg.get("soundcloud-accounts")
+    if isinstance(pool, list):
+        kept = []
+        for a in pool:
+            tok = (a.get("token") or "").strip() if isinstance(a, dict) else ""
+            if tok and is_retired(_KIND_SC, tok):
+                notes.append(f"SoundCloud ...{tok[-6:]} снят автоматикой — запись удалена")
+                continue
+            kept.append(a)
+        if len(kept) != len(pool):
+            cfg["soundcloud-accounts"] = kept
     return notes
