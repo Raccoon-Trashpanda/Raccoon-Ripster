@@ -521,6 +521,17 @@ def write_downloader_config(config: Any, work_dir: str) -> bool:
         "get-m3u8-port":      config.get("m3u8-port",    "127.0.0.1:20020"),
         "max-memory-limit":   config.get("max-memory", 256),
         "atmos-max":          config.get("atmos-max", 2448),
+        # Клипы. Без этих двух ключей Go-загрузчик получал НОЛЬ в `mv-max`
+        # (yaml без ключа → нулевое значение int), а `extractVideo` берёт первый
+        # вариант с высотой ≤ потолка — то есть ни одного, и падал с «no suitable
+        # video stream found». Дефект скрытый: сегодня маршрутизатор шлёт всё
+        # видео в gamdl, поэтому ветка не выполнялась ни разу.
+        #
+        # 2160 и atmos — то, что стоит в конфиге самого загрузчика: он выбирает
+        # вариант с наибольшим битрейтом в пределах потолка, так что для клипа
+        # без 4K это просто «бери лучшее из имеющегося».
+        "mv-max":             config.get("mv-max", 2160),
+        "mv-audio-type":      config.get("mv-audio-type", "atmos"),
     }
     try:
         with open(cfg_path, "w", encoding="utf-8") as f:
