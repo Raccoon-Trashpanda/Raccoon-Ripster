@@ -407,6 +407,39 @@ def _cookies_ok(config: dict) -> bool:
         return False
 
 
+# ── ЕДИНСТВЕННЫЙ ВЫХОД ИЗ МАРШРУТИЗАТОРА ─────────────────────────────────────
+# Правило «не уезжать с локального враппера само по себе» чинится не первый раз,
+# и ломается каждый раз одинаково: его переписывают в КАЖДОЙ ветке, а новая
+# ветка про него не знает. 03.09.2026 запрет авто-перехода на публичный wrapper
+# применили к lossless — и забыли про AAC; 04.09 та же ссылка гостя за минуту
+# дала «gamdl aac error» и «zhaarey alac done».
+#
+# Поэтому решение принимает ветка, а ВЫПУСКАЕТ его только `_decide`. Он знает
+# два запрета и умеет их восстановить:
+#
+#   • `amd` (публичный wm.wol.moe) — только при `apple-wrapper = public`;
+#   • `gamdl` (куки) — только для видео, либо когда локальный wrapper реально
+#     не отвечает И владелец не прибил движок к локальному.
+#
+# Нарушение не молчит: печатается «маршрут исправлен», по строке видно, какая
+# ветка разъехалась. Тихая коррекция превратила бы сторожа в украшение.
+def _decide(engine: str, quality: str, *, pref: str, local_ok: bool,
+            is_video: bool, note: str = "", degraded: bool = False) -> dict:
+    """Проверить решение ветки на два запрета и вернуть маршрут."""
+    fixed = ""
+    if engine == "amd" and pref != "public":
+        fixed = "публичный wrapper выбирается только вручную"
+        engine = "zhaarey"
+    elif engine == "gamdl" and not is_video and (local_ok or pref == "local"):
+        fixed = ("локальный wrapper доступен" if local_ok
+                 else "движок прибит владельцем к локальному врапперу")
+        engine = "zhaarey"
+    if fixed:
+        print(f"[apple-router] маршрут исправлен → zhaarey: {fixed}", flush=True)
+        note = (note + " · " if note else "") + "маршрут удержан на локальном wrapper"
+    return {"engine": engine, "quality": quality, "degraded": degraded, "note": note}
+
+
 def route_apple(quality: str, config: dict, url: str = "") -> dict:
     """Pick the best (engine, quality) for an Apple download of ``quality``.
 
@@ -450,14 +483,16 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
         if foreign:
             note = (f"{q.upper()} · локальный wrapper · ссылка витрины '{url_sf}', "
                     f"аккаунт '{acct_sf}' — при отказе ключа сработает перебор учёток")
-        return {"engine": "zhaarey", "quality": q, "degraded": False, "note": note}
+        return _decide("zhaarey", q, pref=pref, local_ok=_local_wrapper_ok(config),
+                       is_video=False, note=note)
 
     # ── Video — gamdl only (cookies + bundled CDM, no wrapper) ───────────────
     if q in _VIDEO:
         note = "" if cookies else "⚠ нет cookies.txt — видео не скачается"
         if foreign:
             note = (note + " · " if note else "") + f"⚠ видео региона '{url_sf}' недоступно — cookies-аккаунт = '{acct_sf}'"
-        return {"engine": "gamdl", "quality": "mv", "degraded": False, "note": note}
+        return _decide("gamdl", "mv", pref=pref, local_ok=_local_wrapper_ok(config),
+                       is_video=True, note=note)
 
     # ── Lossless / spatial — a wrapper is mandatory ──────────────────────────
     # KEEP lossless (never silently fall back to lossy AAC). Non-public prefs are
@@ -472,7 +507,8 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
             note = f"{q.upper()} · публичный wrapper в очереди (выбран вручную)"
         if foreign:
             note += f" · регион {url_sf}"
-        return {"engine": "amd", "quality": q, "degraded": False, "note": note}
+        return _decide("amd", q, pref=pref, local_ok=_local_wrapper_ok(config),
+                       is_video=False, note=note)
 
     # ── AAC / lossy ──────────────────────────────────────────────────────────
     # РАНЬШЕ AAC жёстко уходил в gamdl (cookies) — а куки могут быть от аккаунта
@@ -484,20 +520,36 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
     if q in ("aac", "aac-legacy", ""):
         local_ok = _local_wrapper_ok(config)   # pref уже вычислен выше по функции
         # Локальный wrapper — первый выбор: подписка на его аккаунте живая, и он
-        # не зависит от cookies. Чужой регион он не видит — там нужен gamdl/куки.
-        if local_ok and not foreign and pref != "public":
-            return {"engine": "zhaarey", "quality": q or "aac", "degraded": False,
-                    "note": "AAC · локальный wrapper"}
-        # Враппер лёг или ссылка чужого региона — пробуем gamdl (его витрина = регион
-        # cookies-аккаунта). Это фолбэк, не основной путь.
-        if cookies:
-            return {"engine": "gamdl", "quality": q or "aac", "degraded": False,
-                    "note": (f"AAC · gamdl · регион {url_sf}" if foreign else "")}
+        # не зависит от cookies.
+        #
+        # ЧУЖОЙ РЕГИОН БОЛЬШЕ НЕ УВОДИТ ЗАДАЧУ ОТСЮДА (04.09.2026). Правило от
+        # 03.09 — «несовпадение витрины разруливает перебор Apple-аккаунтов, а не
+        # смена движка» — было применено только к lossless-ветке, а AAC по-старому
+        # прыгал на куки. Живой случай: гость дал ссылку /nz/, аккаунт враппера
+        # 'ca', и ОДНА И ТА ЖЕ ссылка за минуту дала две записи — AAC ушёл в gamdl
+        # и упал «подписка не видна» (куки протухли), а ALAC остался на локальном
+        # враппере и скачался. Владелец видел только первую, отсюда и ощущение,
+        # что Ripster «постоянно уезжает» с дефолтного движка. Перебор учёток
+        # (runner.py) умеет чужую витрину и для AAC — пусть он и работает.
+        if local_ok and pref != "public":
+            note = "AAC · локальный wrapper"
+            if foreign:
+                note += (f" · ссылка витрины '{url_sf}', аккаунт '{acct_sf}' — "
+                         f"при отказе ключа сработает перебор учёток")
+            return _decide("zhaarey", q or "aac", pref=pref, local_ok=local_ok,
+                           is_video=False, note=note)
+        # Сюда попадаем, только если локальный wrapper НЕ отвечает (или владелец
+        # сам выбрал публичный). Тогда куки — единственный оставшийся путь.
+        if cookies and pref != "local":
+            return _decide("gamdl", q or "aac", pref=pref, local_ok=local_ok,
+                           is_video=False,
+                           note=("AAC · gamdl (локальный wrapper не отвечает)"
+                                 + (f" · регион {url_sf}" if foreign else "")))
         # Ни враппера, ни куков в своей витрине нет — отдаём в локальный wrapper,
         # пусть очередит и дождётся; публичный НЕ трогаем.
-        return {"engine": "zhaarey", "quality": q or "aac", "degraded": False,
-                "note": "AAC · локальный wrapper (в очереди)"}
+        return _decide("zhaarey", q or "aac", pref=pref, local_ok=local_ok,
+                       is_video=False, note="AAC · локальный wrapper (в очереди)")
 
     # ── Unknown quality id — keep the configured engine, no override ─────────
-    return {"engine": config.get("engine", "zhaarey"), "quality": quality,
-            "degraded": False, "note": ""}
+    return _decide(config.get("engine", "zhaarey"), quality, pref=pref,
+                   local_ok=_local_wrapper_ok(config), is_video=False)
