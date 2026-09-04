@@ -1815,15 +1815,91 @@ async def accounts_overview():
         extra = _cfg.get(f"{svc}-accounts")
         return 1 + (len(extra) if isinstance(extra, (list, tuple)) else 0)
 
+    def _measured_slots(svc: str) -> list[dict]:
+        """Страна, тариф и срок КАЖДОГО слота — из того, что уже измерено.
+
+        Раньше эти поля заполняла только ручная проба `/api/test-auth/<svc>`, и
+        то лишь для основной учётки: у пула страна была неизвестна в принципе
+        («пул хранит логин/ARL, но не страну»), а срок подписки показывался
+        ровно у одного сервиса — того, где владелец однажды нажал кнопку.
+        Отсюда и ощущение, что даты со странами «пропали»: их и не было почти
+        нигде.
+
+        Теперь сторож здоровья опрашивает все слоты и складывает ответ рядом с
+        конфигом, так что здесь достаточно прочитать кэш. Сети не касаемся —
+        обзор обязан оставаться дешёвым.
+        """
+        out: list[dict] = []
+        try:
+            if svc == "deezer":
+                from ripster import deezer_accounts as m, deezer_pool as pool
+                for i, a in enumerate(pool._configured_accounts(_cfg)):
+                    info = m.known(a["arl"]) or {}
+                    out.append({"slot": i, "label": a.get("label") or f"account{i}",
+                                "country": (info.get("country") or "").upper(),
+                                "plan": info.get("plan") or "",
+                                # Deezer даты окончания подписки не отдаёт: то, что
+                                # выглядело ею, — скользящий срок годности опций
+                                # (см. deezer_accounts). Пустое честнее выдумки.
+                                "sub_end": "",
+                                "alive": info.get("alive"),
+                                "lossless": info.get("lossless")})
+            elif svc == "qobuz":
+                from ripster import qobuz_accounts as m, qobuz_pool as pool
+                for i, a in enumerate(pool._configured_accounts(_cfg)):
+                    info = m.known(m.account_secret(a)) or {}
+                    out.append({"slot": i, "label": a.get("label") or f"account{i}",
+                                "country": (info.get("country") or "").upper(),
+                                "plan": info.get("plan") or "",
+                                "sub_end": str(info.get("expires") or "")[:10],
+                                "alive": info.get("alive"),
+                                "lossless": info.get("hires") or info.get("lossless")})
+            elif svc == "soundcloud":
+                from ripster import soundcloud_accounts as m, soundcloud_pool as pool
+                for i, a in enumerate(pool._configured_accounts(_cfg)):
+                    info = m.known(a["token"]) or {}
+                    out.append({"slot": i, "label": a.get("label") or f"account{i}",
+                                "country": (info.get("country") or "").upper(),
+                                "plan": info.get("plan") or "",
+                                "sub_end": "",          # SoundCloud срока не отдаёт
+                                "account": info.get("login") or "",
+                                "alive": info.get("alive"),
+                                "lossless": info.get("go_plus")})
+        except Exception as e:                          # noqa: BLE001
+            print(f"[accounts] измеренные слоты {svc} недоступны: {e!r}", flush=True)
+        return out
+
     def _entry(svc, label, configured, accounts, cc):
         # Страну мы знаем только у ОСНОВНОЙ учётки: пул хранит логин/ARL, но не
         # страну, а у пулового аккаунта она вполне может быть другой — на этом и
         # держится ранняя доступность. Помечаем, чтобы панель не выдавала страну
         # основной за страну всего пула.
-        return {"service": svc, "label": label, "configured": configured,
-                "accounts": accounts,
-                "country_is_primary_only": accounts > 1,
-                **_country_info(cc), **_sub(svc)}
+        slots = _measured_slots(svc)
+        row = {"service": svc, "label": label, "configured": configured,
+               "accounts": accounts,
+               "country_is_primary_only": accounts > 1,
+               **_country_info(cc), **_sub(svc)}
+        if slots:
+            row["slots"] = slots
+            # Страна пула перестала быть загадкой: если измерены все слоты,
+            # оговорка «только основная» больше не нужна.
+            row["country_is_primary_only"] = any(not s.get("country") for s in slots)
+            # Срок берём ближайший из тех, что известны: именно он наступит
+            # первым и именно о нём стоит предупредить.
+            ends = sorted(s["sub_end"] for s in slots if s.get("sub_end"))
+            if ends and not row.get("sub_end"):
+                row.update(_sub_from_date(ends[0]))
+        return row
+
+    def _sub_from_date(end: str) -> dict:
+        """Пересчёт «сколько осталось» от СЕГОДНЯ — кэшированное число дней
+        устарело бы ровно на столько же дней, сколько пролежало."""
+        try:
+            from datetime import date as _date
+            y, m, d = (int(x) for x in str(end)[:10].split("-"))
+            return {"sub_end": str(end)[:10], "sub_days_left": (_date(y, m, d) - _date.today()).days}
+        except Exception:
+            return {"sub_end": str(end)[:10], "sub_days_left": None}
 
     out = []
 

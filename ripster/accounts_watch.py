@@ -94,24 +94,46 @@ def _diff(old: dict, rows: list[dict]) -> list[str]:
     return msgs
 
 
-async def _expiring(config: dict) -> list[str]:
-    """Подписки, которым осталось меньше двух недель."""
-    out = []
+def _days_left(d: str) -> int | None:
     try:
-        from ripster import deezer_accounts as _dza
-        for a in await _dza.survey(config):
-            d = a.get("expires_date")
-            if not (a.get("alive") and d):
+        from datetime import date
+        y, m, dd = (int(x) for x in str(d)[:10].split("-"))
+        return (date(y, m, dd) - date.today()).days
+    except Exception:
+        return None
+
+
+async def _expiring(config: dict) -> list[str]:
+    """Подписки, которым осталось меньше двух недель.
+
+    Раньше спрашивался ТОЛЬКО Deezer — и спрашивался не о том. Его
+    `expiration_timestamp` это срок годности набора опций, а не дата окончания
+    оплаты: 04.09.2026 три разные учётки вернули один и тот же момент, ровно
+    15.00 суток от ответа. Предупреждение молчало лишь потому, что порог 14
+    дней оказался чуть меньше этого окна; сдвинь Deezer окно до десяти — и
+    владелец получил бы вечное «подписка кончается» на бесплатном аккаунте.
+    Deezer настоящей даты не отдаёт, поэтому про него мы молчим честно.
+
+    Qobuz даты отдаёт настоящие и разные по учёткам (28.09, 15.08, 14.10) —
+    там предупреждать есть о чём, и там оно теперь и работает. Истёкшую
+    подписку называем прямо: «истекла», а не «осталось −20 дней».
+    """
+    out: list[str] = []
+    try:
+        from ripster import qobuz_accounts as _qa
+        for a in await _qa.survey(config):
+            if not a.get("alive"):
                 continue
-            try:
-                y, m, dd = (int(x) for x in d.split("-"))
-                from datetime import date
-                left = (date(y, m, dd) - date.today()).days
-            except Exception:
+            left = _days_left(a.get("expires") or "")
+            if left is None:
                 continue
-            if 0 <= left <= _EXPIRY_WARN_DAYS:
-                out.append(f"⏳ Deezer «{a['label']}»: подписка кончается {d} "
-                           f"(осталось {left} дн.)")
+            label = a.get("label") or "?"
+            if left < 0:
+                out.append(f"🔴 Qobuz «{label}»: подписка истекла "
+                           f"{str(a.get('expires'))[:10]} — учётка из перебора исключена")
+            elif left <= _EXPIRY_WARN_DAYS:
+                out.append(f"⏳ Qobuz «{label}»: подписка кончается "
+                           f"{str(a.get('expires'))[:10]} (осталось {left} дн.)")
     except Exception:
         pass
     return out

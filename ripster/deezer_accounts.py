@@ -126,15 +126,23 @@ async def arl_info(arl: str, fresh: bool = False) -> dict:
         "name": user.get("BLOG_NAME") or user.get("FIRSTNAME") or "",
         # Тариф: в gw-light он лежит в нескольких местах, берём первое непустое.
         "plan": str((res.get("OFFER_NAME") or opts.get("offer_name") or "")).strip(),
-        "expires": str(opts.get("expiration_timestamp") or "") or "",
+        # ЭТО НЕ КОНЕЦ ПОДПИСКИ. `expiration_timestamp` у Deezer — срок годности
+        # выданного набора опций, а не дата окончания оплаты: 04.09.2026 три
+        # РАЗНЫЕ учётки (бесплатная BG и две Family, CA и BR) вернули один и тот
+        # же момент, ровно 15.00 суток от ответа, с разницей в секунды. Поле
+        # называлось `expires`, показывалось в обзоре как «подписка до» и на нём
+        # висел нотификатор «подписка кончается» — тот молчал лишь потому, что
+        # порог 14 дней, а окно 15. Сдвинь Deezer окно до 10 — и владелец получал
+        # бы вечное предупреждение о конце подписки на бесплатном аккаунте.
+        "options_until_ts": str(opts.get("expiration_timestamp") or "") or "",
         "lossless": bool(opts.get("web_lossless") or opts.get("mobile_lossless")),
     }
-    if info["expires"]:
+    if info["options_until_ts"]:
         try:
-            info["expires_date"] = time.strftime("%Y-%m-%d",
-                                                 time.localtime(int(info["expires"])))
+            info["options_until"] = time.strftime("%Y-%m-%d",
+                                                  time.localtime(int(info["options_until_ts"])))
         except Exception:
-            info["expires_date"] = ""
+            info["options_until"] = ""
     _MEM[k] = (time.time(), info)
     _cache_save(k, {kk: vv for kk, vv in info.items() if kk != "name"})
     return info
