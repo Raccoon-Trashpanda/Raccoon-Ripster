@@ -796,6 +796,18 @@ async def pair_radar(request: Request):
     if not _token_valid(_bearer(request)):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     wl = _s.get("watchlist") or []
+    def _is_url(v: str) -> bool:
+        return v.startswith("http://") or v.startswith("https://")
+
+    def _last_release_url(entry: dict) -> str:
+        v = str(entry.get("last_release") or "").strip()
+        return v if _is_url(v) else ""
+
+    def _last_release_title(entry: dict) -> str:
+        v = str(entry.get("last_release") or "").strip()
+        # id трека названием не является — пустое честнее выдуманного.
+        return "" if _is_url(v) or v.isdigit() else v
+
     items = []
     for e in wl:
         name = (e.get("name") or "").strip()
@@ -808,7 +820,14 @@ async def pair_radar(request: Request):
             "kind": str(e.get("kind") or "artist").lower(),
             "last_check": e.get("last_check"),
             "date": str(e.get("last_release_date") or ""),
-            "latest_url": e.get("last_release") or "",
+            # `last_release` в вотчлисте перегружено: разные пути пишут туда то
+            # НАЗВАНИЕ релиза (watchlist.py 222/983/991), то id трека (898), то
+            # настоящую ссылку (1397). Раньше всё это уезжало на телефон под
+            # именем `latest_url` — и телефон пытался открыть название как ссылку:
+            # резолв не удавался, играло «что нашлось» (жалоба 04.09.2026 —
+            # карточка Etherwood включала чужой релиз). Отдаём по факту.
+            "latest_url": _last_release_url(e),
+            "latest_title": _last_release_title(e),
             "cover_url": e.get("last_release_cover") or e.get("cover") or "",
             "auto": bool(e.get("auto_download")),
             "seen_count": len(e.get("seen") or []),
@@ -840,6 +859,7 @@ async def pair_radar(request: Request):
                     "artist_id": str(rel.get("artist_id") or ""),
                     "kind": "artist",
                     "last_check": date, "date": date, "latest_url": url,
+                    "latest_title": str(rel.get("title") or ""),
                     "cover_url": rel.get("cover") or "",
                     "auto": False, "seen_count": 0, "_d": date,
                 }
