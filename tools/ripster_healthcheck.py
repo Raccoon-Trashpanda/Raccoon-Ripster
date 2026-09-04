@@ -497,83 +497,54 @@ def check_account_duplicates():
 def check_gamdl_cookies():
     """Отличить ДВА состояния cookies.txt, которые до 01.08.2026 выглядели одинаково.
 
-    gamdl падает с «unexpected finish»/«No active Apple Music subscription» и по
-    обоим поводам совет был один: «экспортируй cookies.txt заново». Но причины
-    две, и лечатся они по-разному:
-      * сессия ПРОТУХЛА (401/403) → повторный экспорт из браузера действительно чинит;
-      * сессия ЖИВА, а подписка на этом аккаунте КОНЧИЛАСЬ (200, active=False) →
-        повторный экспорт тех же куки не изменит НИЧЕГО, и владелец потратит
-        время впустую.
-    01.08.2026: куки жили с 06.05, mut-refresh истёк 09.06 — по всем внешним
-    признакам «протухли», а на деле сессия отвечала 200 и storefront=gb; мёртвой
-    была подписка. Второй аккаунт (враппер, ca) при этом active=True.
-
-    Проверка read-only: dev_token берём у локального враппера (30020),
-    media-user-token — из самого cookies.txt. Ни одного запроса на скачивание,
-    ни одной записи."""
+    gamdl падает с «No active Apple Music subscription», а причины две и лечатся
+    по-разному: протухшую СЕССИЮ чинит повторный экспорт, кончившуюся ПОДПИСКУ —
+    нет. Разбор переехал в `ripster/apple_cookies.py`: 04.09.2026 выяснилось, что
+    правду знал только этот отчёт, а сообщение самого движка всё равно советовало
+    «экспортируй куки заново». Теперь источник один.
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from ripster import apple_cookies as ac
+    except Exception as e:
+        warn(f"apple_cookies недоступен: {e}")
+        return
     p = Path(_cfg_get("gamdl-cookies-path") or "cookies.txt")
     if not p.is_absolute():
         p = ROOT / p
     if not p.exists():
         return  # gamdl просто не настроен — это не поломка
-    mut = ""
-    try:
-        for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
-            f = line.split("\t")
-            if len(f) >= 7 and f[5].strip() == "media-user-token":
-                mut = f[6].strip()
-    except Exception:
-        return
-    if not mut:
-        warn(f"gamdl: в {p.name} нет media-user-token — экспортируй заново "
-             f"из залогиненного music.apple.com")
-        return
-    dev, dev_src = _apple_dev_token()
-    if not dev:
-        # Без ЗАВЕДОМО живого dev_token любой ответ 401 неотличим от «протухли
-        # куки» — а это ровно тот ложный совет, ради которого проверка писалась.
-        # Молчим честно вместо того, чтобы гадать.
-        warn("gamdl: не удалось получить действующий Apple dev_token "
-             "(враппер отдал протухший, со страницы Apple добыть не вышло) — "
-             "состояние cookies.txt НЕ проверено, выводов не делаем")
-        return
+
     # gamdl в wrapper-режиме ходит на 30020 САМ и подстраховаться скрейпом не
-    # умеет: если токен враппера протух, этот путь отдаст 401 на любом качестве.
+    # умеет: протух токен враппера — этот путь отдаст 401 на любом качестве.
     # _cfg_get отдаёт СТРОКУ: "false" тоже истинна, сравниваем по значению.
-    if (dev_src != "с враппера 30020"
+    dev, dev_src = ac.dev_token()
+    if (dev and dev_src != "с враппера 30020"
             and _cfg_get("gamdl-use-wrapper").lower() in ("true", "yes", "1", "on")):
         warn("gamdl wrapper-режим: dev_token на 30020 протух (враппер выдаёт его "
              "один раз при старте, живёт он 5 минут) — качества, идущие через "
              "--wrapper-account-url, получат 401. Лечится только перезапуском "
              "враппера, а он стоит слота устройства: трогать, только если "
              "gamdl реально нужен")
-    try:
-        req = urllib.request.Request(
-            "https://amp-api.music.apple.com/v1/me/account?meta=subscription",
-            headers={"Authorization": f"Bearer {dev}", "Media-User-Token": mut,
-                     "Origin": "https://music.apple.com", "User-Agent": "Ripster"})
-        with urllib.request.urlopen(req, timeout=12) as r:
-            body = json.loads(r.read().decode("utf-8", "ignore"))
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            # dev_token заведомо жив (проверен на публичном каталоге), значит
-            # отказ действительно про media-user-token из cookies.txt.
-            warn(f"gamdl: сессия в {p.name} протухла ({e.code}, dev_token "
-                 f"проверен и жив — {dev_src}) — экспортируй cookies.txt заново "
-                 f"из браузера с активной подпиской")
-        return
-    except Exception:
-        return  # сеть — не наша поломка, молчим
-    sub = (body.get("meta") or {}).get("subscription") or {}
-    sf = sub.get("storefront") or "?"
-    if sub.get("active"):
-        ok(f"gamdl: cookies.txt жив, подписка активна (storefront {sf})")
-    else:
-        warn(f"gamdl: сессия в {p.name} ЖИВА, но подписки на этом аккаунте нет "
-             f"(storefront {sf}) — повторный экспорт ТЕХ ЖЕ куки не поможет. "
-             f"Нужны куки аккаунта С подпиской либо продлить текущий. "
-             f"Загрузки через wrapper (zhaarey/AMD) это не затрагивает")
 
+    v = ac.verdict(p)
+    st = v.get("state")
+    if st == "ok":
+        ok(f"gamdl: cookies.txt жив, {v['reason']}")
+    elif st == "no_subscription":
+        warn(f"gamdl: {v['reason']} — повторный экспорт ТЕХ ЖЕ куки не поможет. "
+             f"Нужны куки аккаунта С подпиской либо продлить текущий. Загрузки "
+             f"через wrapper (zhaarey/AMD) это не затрагивает")
+    elif st == "expired":
+        warn(f"gamdl: {v['reason']} — экспортируй cookies.txt заново из браузера "
+             f"с активной подпиской")
+    elif st == "no_token":
+        warn(f"gamdl: {v['reason']} — экспортируй заново из залогиненного "
+             f"music.apple.com")
+    else:
+        # Без ЗАВЕДОМО живого dev_token любой 401 неотличим от «протухли куки» —
+        # ровно тот ложный совет, ради которого проверка писалась. Молчим честно.
+        warn(f"gamdl: {v.get('reason', 'состояние не проверено')} — выводов не делаем")
 
 def _api_raw_30020():
     try:

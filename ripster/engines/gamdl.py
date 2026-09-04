@@ -81,6 +81,9 @@ def _flag(name: str, *args) -> list[str]:
 @register
 class GamdlEngine(EngineBase):
     name = "gamdl"
+    # Путь к файлу куки, запомненный последним build_cmd. Значение по умолчанию
+    # нужно на случай, когда is_finished зовут без сборки команды.
+    _cookies_path = "cookies.txt"
 
     def qualities(self) -> list[dict]:
         return [{**q, "engine": self.name} for q in _QUALITIES]
@@ -102,6 +105,9 @@ class GamdlEngine(EngineBase):
         is_mv = quality == "mv"
         _COOKIES_OK = {"mv", "aac", "aac-legacy", "ask"}
         cookies = (config.get("gamdl-cookies-path") or "").strip() or str(base_dir / "cookies.txt")
+        # Запоминаем на движке: `is_finished` конфига не получает, а объяснить
+        # отказ без пути к файлу куки нельзя (см. `_no_sub_reason`).
+        self._cookies_path = cookies
         cookies_friendly = quality in _COOKIES_OK and Path(cookies).is_file()
         use_wrapper = bool(config.get("gamdl-use-wrapper")) and not cookies_friendly
         if use_wrapper:
@@ -208,12 +214,49 @@ class GamdlEngine(EngineBase):
             return int(m.group(1)), int(m.group(2))
         return current, total
 
+    def _no_sub_reason(self, cookies_path: str) -> str:
+        """Почему Apple не увидела подписку — спросив, а не предположив.
+
+        Состояния два, и совет у них разный: протухшую СЕССИЮ лечит повторный
+        экспорт куки, а кончившуюся ПОДПИСКУ — нет, там нужен другой аккаунт.
+        Раньше отсюда всегда шло «протухли cookies, экспортируй заново», и
+        04.09.2026 владелец получил именно этот совет, когда сессия отвечала 200,
+        а мертва была подписка (storefront gb): выполнить совет означало
+        потратить время и получить тот же отказ.
+
+        Проверка живёт в `ripster/apple_cookies.py` — там же, откуда её берёт
+        сторож здоровья, чтобы отчёт и сообщение не расходились во мнениях.
+        Не удалось спросить — говорим оба варианта вместо того, чтобы выбрать
+        наугад.
+        """
+        try:
+            from ripster import apple_cookies as _ac
+            v = _ac.verdict(cookies_path)
+        except Exception:                       # noqa: BLE001
+            v = {"state": "unknown"}
+        st = v.get("state")
+        if st == "no_subscription":
+            return ("gamdl: у аккаунта из cookies.txt НЕТ активной подписки "
+                    f"(storefront {v.get('storefront') or '?'}). Сессия при этом жива — "
+                    "повторный экспорт ТЕХ ЖЕ куки не поможет. Нужны куки аккаунта с "
+                    "подпиской либо продлить текущий. На загрузки через wrapper "
+                    "(zhaarey) это не влияет.")
+        if st == "expired":
+            return ("gamdl: сессия в cookies.txt протухла — экспортируй файл заново "
+                    "из браузера с активной подпиской: Settings → gamdl → Cookies.")
+        if st == "no_token":
+            return ("gamdl: в cookies.txt нет media-user-token — экспортируй заново "
+                    "из ЗАЛОГИНЕННОГО music.apple.com.")
+        if st == "no_file":
+            return "gamdl: файл cookies.txt не найден — задай его в Settings → gamdl."
+        return ("gamdl: Apple не видит подписку. Проверить причину не удалось "
+                "(нет действующего dev_token или сети), поэтому два варианта: "
+                "либо протухла сессия в cookies.txt — тогда экспортируй файл заново, "
+                "либо на этом аккаунте кончилась подписка — тогда экспорт не поможет.")
+
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
         if _RE_NO_SUB.search(log_text):
-            return EngineResult(False, error=(
-                "gamdl: подписка Apple Music не видна — протухли cookies "
-                "(cookies.txt). Экспортируй их заново из браузера с активной "
-                "подпиской: Settings → gamdl → Cookies. Повторы не помогут."))
+            return EngineResult(False, error=self._no_sub_reason(self._cookies_path))
         if _RE_DRM_KEYERR.search(log_text):
             return EngineResult(False, error="ALAC без wrapper не работает в gamdl 3.x — включи wrapper в Settings → gamdl или переключись на zhaarey")
         m = _RE_FINISH.search(log_text)
