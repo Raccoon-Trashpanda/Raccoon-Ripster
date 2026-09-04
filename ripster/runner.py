@@ -153,8 +153,14 @@ _PARTIAL_REASON_PATTERNS = [
     # паттерном ниже, доезжал до финального `return "region" if permanent else ...`
     # — и человек читал «недоступно в регионе» там, где регион ни при чём, и шёл
     # искать прокси, который прав не добавляет. 14.08.2026: два таких прогона.
+    # «Учётка без подписки» — это тоже отказ ПО ПРАВАМ, и он самый выгодный для
+    # перебора: у владельца три токена Qobuz, и платная подписка есть не у всех.
+    # Раньше такая задача падала на первой же бесплатной учётке, ни разу не
+    # спросив остальные.
     ("entitlement", _re.compile(r"не\s+хватает\s+прав|do\s+not\s+have\s+permission|"
-                                r"отказал\s+в\s+правах|not\s+entitled|entitlement", _re.I)),
+                                r"отказал\s+в\s+правах|not\s+entitled|entitlement|"
+                                r"бесплатн\w+\s+аккаунт|нужна\s+(своя\s+)?платная\s+подписка|"
+                                r"нужна\s+подписка\s+Plus", _re.I)),
     # Сессия сервиса умерла ПОСРЕДИ релиза. Отдельный токен нужен потому, что без
     # него такой недобор доезжал до финального фоллбэка и получал `postprocess` —
     # «сбой постобработки, повтори, доберётся». Человеку говорили «повтори» там,
@@ -162,8 +168,19 @@ _PARTIAL_REASON_PATTERNS = [
     # отказ по правам показывался как гео-лок. Стоит ДО "region": строка про
     # сессию не содержит слова «регион», но зато `unauthorized` из сырого лога
     # ниже по списку совпало бы с чем угодно.
+    # 04.09.2026: паттерн ловил ровно ОДНУ формулировку из шести. `session` завели
+    # 21.08 специально, чтобы мёртвая учётка уводила задачу на следующую
+    # (ripster/account_fallback.py), но выдавали его только Tidal-строки. Мёртвый
+    # Deezer-ARL, мёртвый токен Qobuz, Yandex и Amazon доезжали до финального
+    # `postprocess` — а `postprocess` не в таблице перебора, значит перебор не
+    # начинался вообще, и пулы из 2 ARL и 3 токенов Qobuz лежали мёртвым грузом
+    # ровно так же, как до правки 21.08. Слово «протух» по всем движкам
+    # встречается ТОЛЬКО про учётные данные, поэтому берём его целиком.
     ("session",    _re.compile(r"сесси\w*\s+(истекла|оборвалась|недействительн)|"
-                               r"переавторизуйся|TidalAuthError|token\s+has\s+expired",
+                               r"переавторизуйся|TidalAuthError|TIDAL_NOT_AUTHED|"
+                               r"token\s+has\s+expired|протух|"
+                               r"токен\s+недействител\w*|неверный\s+ARL|"
+                               r"ARL\s+не\s+задан",
                                _re.I)),
     ("region",     _re.compile(r"not available in your country|region|"
                                r"unavailable in|geo|Territory\s+Restricted", _re.I)),
@@ -177,7 +194,14 @@ _PARTIAL_REASON_PATTERNS = [
 def _classify_partial_reason(log_text: str, permanent: bool) -> str:
     """Return a short canonical reason token for a partial download.
 
-    Tokens: decryption | entitlement | region | no-flac | removed | unavailable | postprocess.
+    Tokens: deps | decryption | entitlement | session | region | no-flac | removed |
+    unavailable | postprocess.
+
+    Three of them (entitlement, region, session) also decide whether the task gets
+    retried on the NEXT account of the same service — see
+    ripster/account_fallback.RETRY_WITH_NEXT_ACCOUNT. A wording that fails to match
+    here doesn't just show the wrong message: it silently disables the whole
+    account pool for that failure.
     `permanent` is the runner's existing region/decryption signal — when nothing
     more specific matches we fall back to it so a known-permanent shortfall never
     reads as a transient post-processing glitch."""
