@@ -1988,6 +1988,13 @@ async def _artist_spotify(artist_id: str, types: str) -> dict:
     if not token:
         return {"error_key": "err.sp_not_configured_short", "error": "Spotify API не настроен", "releases": []}
     wanted = {t.strip() for t in types.split(",") if t.strip()} if types else set()
+    # `all` — это «без фильтра», а не тип релиза. Deezer и Qobuz это знали
+    # (у них ниже стоит `wanted != {"all"}`), Spotify — нет: строка сравнивалась
+    # с `album`/`single`/`compilation`/`appears_on`, не совпадала ни с одной, и
+    # выбор «все типы» отдавал ПУСТУЮ дискографию. Проверено на живом роуте:
+    # без параметра 10 релизов, с `types=all` — 0.
+    if "all" in wanted:
+        wanted = set()
     try:
         async with _HTTP.ashared() as c:
             info_r = await c.get(f"https://api.spotify.com/v1/artists/{artist_id}",
@@ -2035,6 +2042,14 @@ async def _artist_spotify(artist_id: str, types: str) -> dict:
                 "url":    a.get("external_urls", {}).get("spotify",
                           f"https://open.spotify.com/album/{a['id']}"),
                 "service": "spotify",
+                # Чей это релиз — берём из самого объекта альбома, он уже в
+                # ответе. Раньше значение добывалось ниже из ПЕРВОГО ТРЕКА
+                # сборника, а первый трек чужого сборника принадлежит кому
+                # угодно: карточка подписывалась случайным исполнителем вместо
+                # «Various Artists». Здесь же это и бесплатно — без лишнего
+                # запроса к API, у которого мы и так выбираем суточную квоту.
+                "album_artist": ", ".join(dict.fromkeys(
+                    x.get("name", "") for x in (a.get("artists") or []) if x.get("name"))),
             })
         # Чем именно артист участвует в чужом релизе. Спрашиваем ТОЛЬКО для
         # таких строк и не больше пяти: у Spotify живой лимит запросов, и радар
@@ -2053,19 +2068,13 @@ async def _artist_spotify(artist_id: str, types: str) -> dict:
                             break
                         if not tr.content:
                             continue
-                        mine, others = [], []
+                        mine = []
                         for t in (tr.json().get("items") or []):
-                            names = [x.get("name", "") for x in (t.get("artists") or [])]
                             if any(str(x.get("id")) == str(artist_id) for x in (t.get("artists") or [])):
                                 mine.append(t.get("name", ""))
-                            others.extend(names)
                         mine = [x for x in dict.fromkeys(mine) if x]
                         if mine:
                             row["appears_as"] = "; ".join(mine)
-                        # Кем релиз издан — чтобы карточка не выдавала сборник за
-                        # альбом самого артиста.
-                        if others:
-                            row.setdefault("album_artist", others[0])
             except Exception as e:          # noqa: BLE001
                 print(f"[spotify] appears_as не собран: {e!r}", flush=True)
 

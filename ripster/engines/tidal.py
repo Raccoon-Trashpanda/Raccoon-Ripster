@@ -649,6 +649,12 @@ class TidalEngine(EngineBase):
                     "error": "Tidal access_token не настроен", "releases": []}
         headers = {"Authorization": f"Bearer {token}"}
         wanted  = {t.strip() for t in types.split(",") if t.strip()} if types else set()
+        # `all` = «без фильтра», а не тип релиза. Ниже идёт прямое сравнение
+        # `type_norm not in wanted`, поэтому без этой нормализации выбор «все
+        # типы» отдавал бы пустую дискографию — ровно то, что нашлось у Spotify
+        # 04.09.2026. У Deezer и Qobuz эта же оговорка стоит на месте фильтра.
+        if "all" in wanted:
+            wanted = set()
         import asyncio as _aio
         try:
             async with _HTTP.ashared() as c:
