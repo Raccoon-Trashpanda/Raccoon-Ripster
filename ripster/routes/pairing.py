@@ -828,6 +828,21 @@ async def pair_station(request: Request, genre: str = "", limit: int = 40):
     return res
 
 
+@router.get("/api/pair/taste")
+async def pair_taste(request: Request, limit: int = 40):
+    """Вкус владельца с ПК: Раскопки + подписки Spotify.
+
+    Телефон строит станции по своей истории прослушиваний, а это капля рядом с
+    фонотекой и пятью с лишним тысячами подписок на компьютере. Отдаём то, что
+    ПК уже знает, вместе с ИСТОЧНИКОМ каждой цифры: измеренный вес Раскопок и
+    двоичная подписка — разные вещи, и решать по ним надо по-разному.
+    """
+    if not _token_valid(_bearer(request)):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from ripster import taste as _taste
+    return await _taste.build(Path(_s.get("base_dir") or "."), limit=max(1, min(200, limit)))
+
+
 def _find_pair_task(task_id: str) -> dict | None:
     for t in _s.get("queue") or []:
         if t.get("id") == task_id:
@@ -1111,7 +1126,7 @@ def install(app, ctx) -> None:
                   "/api/pair/unpair", "/api/pair/revoke-all",
                   "/api/pair/ping", "/api/pair/mode", "/api/pair/activity",
                   "/api/pair/artist", "/api/pair/label",
-                  "/api/pair/station"):
+                  "/api/pair/station", "/api/pair/taste"):
             _auth.add_public_path(p)
             _auth._CSRF_EXEMPT_PATHS.add(p)
     except Exception as e:  # pragma: no cover
