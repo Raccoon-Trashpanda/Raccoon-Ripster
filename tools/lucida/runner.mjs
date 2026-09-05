@@ -147,33 +147,44 @@ async function _downloadCover(url, dest) {
   }
 }
 
-// Transcode the raw download to a tagged MP3 with embedded cover art.
-// Returns the final file path (the .mp3, or the original on ffmpeg failure).
+// Прописать теги и обложку, НЕ трогая сам звук.
+//
+// Раньше здесь стоял `libmp3lame -b:a 320k` для всего, что пришло не в MP3.
+// То есть AAC 160 от SoundCloud перекодировался в MP3 320: файл вдвое толще,
+// звук хуже — из lossy в lossy без единого повода. Замер 05.09.2026: исходный
+// поток aac_160k, на диске mp3 320 kbps, 14.1 МБ. Владелец: «похоже он тоже
+// не отдаёт лучшее качество». Так и было, только портили мы это сами уже
+// ПОСЛЕ загрузки.
+//
+// Теперь поток копируется как есть, а контейнер остаётся родным: что сервис
+// отдал, то человек и получает.
+// Возвращает итоговый путь (или исходный, если ffmpeg не справился).
 async function finalize(rawPath, meta) {
-  const dir   = path.dirname(rawPath)
-  const stem  = path.basename(rawPath, path.extname(rawPath))
-  const isMp3 = path.extname(rawPath).toLowerCase() === '.mp3'
-  const mp3Path   = path.join(dir, stem + '.mp3')
+  const dir  = path.dirname(rawPath)
+  const stem = path.basename(rawPath, path.extname(rawPath))
+  const ext  = path.extname(rawPath).toLowerCase() || '.mp3'
+  const isMp3 = ext === '.mp3'
+  const mp3Path   = path.join(dir, stem + ext)
   const coverPath = path.join(dir, '.' + stem + '.cover')
-  const tmpOut    = path.join(dir, '.' + stem + '.tmp.mp3')
+  const tmpOut    = path.join(dir, '.' + stem + '.tmp' + ext)
 
-  console.log('  ⚙ Кодирую в MP3 + теги…')
+  console.log('  ⚙ Пишу теги (звук не трогаю)…')
   const hasCover = await _downloadCover(meta.coverUrl, coverPath)
 
   const args = ['-y', '-loglevel', 'error', '-i', rawPath]
   if (hasCover) args.push('-i', coverPath)
   args.push('-map', '0:a:0')
   if (hasCover) args.push('-map', '1:v:0', '-c:v', 'copy', '-disposition:v', 'attached_pic')
-  args.push('-c:a', isMp3 ? 'copy' : 'libmp3lame')
-  if (!isMp3) args.push('-b:a', '320k')
-  args.push('-id3v2_version', '3')
+  args.push('-c:a', 'copy')
+  // id3v2_version — только для MP3: у mp4/ogg свои теги.
+  if (isMp3) args.push('-id3v2_version', '3')
   if (meta.title)  args.push('-metadata', `title=${meta.title}`)
   if (meta.artist) args.push('-metadata', `artist=${meta.artist}`)
   if (meta.album)  args.push('-metadata', `album=${meta.album}`)
   args.push(tmpOut)
 
   try {
-    await withHeartbeat('кодирую', 25_000, () =>
+    await withHeartbeat('пишу теги', 25_000, () =>
       execFileP('ffmpeg', args, { maxBuffer: 1 << 25 }))
   } catch (e) {
     await rm(tmpOut,    { force: true }).catch(() => {})
@@ -186,6 +197,40 @@ async function finalize(rawPath, meta) {
   if (mp3Path !== rawPath) await rm(mp3Path, { force: true }).catch(() => {})
   await rename(tmpOut, mp3Path)
   return mp3Path
+}
+
+// Что на самом деле лежит в файле — для честной строки в журнале.
+async function probeAudio(file) {
+  try {
+    const { stdout } = await execFileP('ffprobe', [
+      '-v', 'error', '-select_streams', 'a:0',
+      '-show_entries', 'stream=codec_name', '-show_entries', 'format=bit_rate',
+      '-of', 'default=nw=1', file,
+    ])
+    const m = Object.fromEntries(String(stdout).trim().split(/\r?\n/)
+      .map((l) => l.split('=')).filter((x) => x.length === 2))
+    const kbps = Math.round(Number(m.bit_rate || 0) / 1000)
+    return `${m.codec_name || '?'}${kbps ? ' ' + kbps + ' kbps' : ''}`
+  } catch { return '' }
+}
+
+// Взять ЛУЧШЕЕ, что даёт сервис по этому аккаунту.
+//
+// Lucida сама перебирает hq → aac → mp3 → opus, но при getStream(true) кидает
+// «Could not find HQ format», если тира hq нет. У большинства треков его и
+// нет: замер 05.09.2026 дал aac_160k / aac_96k / abr_sq / mp3_0_0 и ни одного
+// hq. Получалось, что просьба «дай получше» кончалась НИЧЕМ, а просьба
+// «дай похуже» приносила AAC. Просьба о лучшем не должна кончаться
+// отказом, когда лучшее из доступного лежит рядом.
+async function bestStream(source, wantHq) {
+  if (!wantHq) return source.getStream(false)
+  try {
+    return await source.getStream(true)
+  } catch (e) {
+    if (!/HQ format/i.test(e?.message || '')) throw e
+    console.log('  ℹ Тира HQ у этого трека нет — беру лучшее из доступного')
+    return source.getStream(false)
+  }
 }
 
 // ── Import Lucida (installed via npm in this directory) ───────────────────────
@@ -216,14 +261,15 @@ async function downloadTrack(lucida, trackUrl, destDir, num, total) {
 
     let raw
     await withRetry('качаю', async () => {
-      const sr  = await tr.getStream(hq)
+      const sr  = await bestStream(tr, hq)
       const ext = mimeToExt(sr.mimeType)
       raw = path.join(destDir, sanitize(`${String(num).padStart(2, '0')} ${artist} - ${title}.${ext}`))
       await withHeartbeat('качаю', 25_000, () =>
         pipeline(sr.stream, createWriteStream(raw)))
     })
-    await finalize(raw, _metaCover(tr.metadata))
-    console.log(`${label} Success: ${title} - ${artist}`)
+    const outFile = await finalize(raw, _metaCover(tr.metadata))
+    const what = await probeAudio(outFile)
+    console.log(`${label} Success: ${title} - ${artist}${what ? '  [' + what + ']' : ''}`)
     return true
   } catch (e) {
     console.error(`${label} Failed: ${title} - ${e?.message || String(e) || 'неизвестная ошибка'}`)
@@ -261,14 +307,15 @@ try {
     try {
       let raw
       await withRetry('качаю', async () => {
-        const sr  = await result.getStream(hq)
+        const sr  = await bestStream(result, hq)
         const ext = mimeToExt(sr.mimeType)
         raw = path.join(trackDir, sanitize(`${artist} - ${title}.${ext}`))
         await withHeartbeat('качаю', 25_000, () =>
           pipeline(sr.stream, createWriteStream(raw)))
       })
-      await finalize(raw, _metaCover(result.metadata))
-      console.log(`[1/1] Success: ${title} - ${artist}`)
+      const outFile = await finalize(raw, _metaCover(result.metadata))
+      const what = await probeAudio(outFile)
+      console.log(`[1/1] Success: ${title} - ${artist}${what ? '  [' + what + ']' : ''}`)
       console.log(`Summary: 1 Success, 0 Failed. Output dir: ${trackDir}`)
     } catch (e) {
       console.error(`[1/1] Failed: ${title} - ${e?.message || String(e) || 'неизвестная ошибка'}`)

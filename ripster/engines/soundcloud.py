@@ -52,18 +52,24 @@ def node_available() -> bool:
 class SoundcloudEngine(EngineBase):
     name = "soundcloud"
 
+    # Одна карточка, а не две.
+    #
+    # Их было две — «MP3 128» и «HQ AAC» — и обе врали. Выбор транскода делает
+    # не Ripster, а Lucida, и делает ОДИНАКОВО в обоих случаях: hq → aac → mp3
+    # → opus, лучшее из того, что сервис отдал по этому аккаунту. То есть
+    # «MP3 128» приносил AAC 160, а «HQ AAC» — тот же самый поток, но с
+    # единственной разницей: если тира hq у трека нет (а его нет почти нигде),
+    # он падал с «Could not find HQ format». Просьба о лучшем кончалась ничем.
+    #
+    # Два контрола, дающих один результат, — это два контрола, которые врут.
+    # SoundCloud отдаёт что отдаёт, выбирать человеку не из чего, и честнее
+    # сказать это прямо, чем изображать выбор.
     _QUALITIES = [
         {
-            "id": "mp3", "label": "MP3 128", "engine": "soundcloud",
-            "sub": "MP3 128kbps — публичные треки, без аккаунта",
-            "badge": "128kbps", "color": "#ff5500", "bitrate": "128 kbps",
-            "ext": "mp3", "req": "none",
-        },
-        {
-            "id": "hq", "label": "HQ AAC", "engine": "soundcloud",
-            "sub": "AAC HQ — требует SoundCloud Go+ и OAuth токен",
-            "badge": "HQ", "color": "#ff8800", "bitrate": "256 kbps",
-            "ext": "m4a", "req": "premium",
+            "id": "best", "label": "Лучшее доступное", "engine": "soundcloud",
+            "sub": "AAC 256 на Go+ треках, иначе AAC 160 или MP3 128 — что отдаст сервис",
+            "badge": "BEST", "color": "#ff5500", "bitrate": "до 256 kbps",
+            "ext": "m4a", "req": "none",
         },
     ]
 
@@ -83,8 +89,11 @@ class SoundcloudEngine(EngineBase):
         if oauth:
             cmd.append(f"--oauth-token={oauth}")
 
-        if quality == "hq":
-            cmd.append("--hq")
+        # `--hq` намеренно НЕ передаём. У Lucida этот флаг не «возьми получше»,
+        # а «умри, если нет тира hq»: перебор hq → aac → mp3 → opus она делает и
+        # без него, а с ним добавляется только отказ. Замер 05.09.2026 по треку
+        # с aac_160k: без флага — AAC 160, с флагом — «Could not find HQ format»
+        # и ноль файлов.
 
         # Cover-source override picked in the mix drawer (MixesDB / YouTube art).
         cover = (config.get("_sc_cover_override") or "").strip()
