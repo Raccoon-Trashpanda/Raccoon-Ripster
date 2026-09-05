@@ -133,6 +133,44 @@ _RE_WRAPPER_DEAD = _re.compile(
 )
 _MAX_DEAD_RETRIES = 1   # one quick re-check, then stop with clear guidance
 
+# Apple: «каталог не отдал альбом» — НЕ один диагноз, а целое семейство, и
+# правило «не повторять» верно лишь для ОДНОГО его члена. Строка в _RE_NO_RETRY
+# (`Failed to rip album`) добавлена 08.08.2026 по делу: релиза нет в этом
+# магазине — ответ детерминированный, три повтора по 15/45/120 с дают то же
+# «нет». Но шаблон ловит ВСЁ семейство, не глядя на причину в хвосте, а Apple
+# дописывает туда и заведомо ВРЕМЕННЫЕ отказы:
+#     Failed to rip album: error getting album response: 429 Too Many Requests
+#     Failed to rip album: error getting album response: Get "https://amp-api…" dial tcp …
+# Оба уходили в «постоянные»: ноль повторов, мгновенный отказ — и очередь тут же
+# бралась за следующий трек, попадая в тот же лимит. 05.09.2026 15:01:34–15:02:00
+# так сгорел ОДИН альбом, разложенный на треки: 13 задач за 26 секунд, все 429,
+# ноль файлов. Повторов не было вовсе — не «мало», а ни одного, и пауз тоже, так
+# что мы сами продлевали себе лимит. 04.09 20:50 тем же путём умер сетевой
+# таймаут, и владельцу пришлось ставить альбом заново руками.
+# Поэтому: временный хвост ВОЗВРАЩАЕТ право на обычный повтор с паузой. 404 и
+# ответ без статуса («нет в этом магазине») остаются постоянными, как и были.
+_RE_APPLE_CATALOG = _re.compile(r'(get|rip)\s+album(\s+response)?', _re.I)
+_RE_APPLE_CATALOG_TRANSIENT = _re.compile(
+    # \b429\b, а не голое 429: в сообщении лежит URL с id альбома/трека, и
+    # подстрока «429» встречается внутри длинного числа.
+    r'\b429\b|Too\s+Many\s+Requests|Service\s+Unavailable|Bad\s+Gateway|'
+    r'Gateway\s+Time-?out|dial\s+tcp|i/o\s+timeout|Client\.Timeout|'
+    r'context\s+deadline\s+exceeded|TLS\s+handshake|connection\s+reset|'
+    r'unexpected\s+EOF|no\s+such\s+host',
+    _re.I,
+)
+
+
+def _apple_catalog_transient(msg: str) -> bool:
+    """Apple didn't hand over the album for a reason that CAN change by itself.
+
+    Narrow on purpose: only lifts the no-retry verdict for the Apple catalog
+    family, and only when the tail names a rate-limit or a network fault. A 404
+    or a bare "error getting album response" stays permanent.
+    """
+    return bool(_RE_APPLE_CATALOG.search(msg)
+                and _RE_APPLE_CATALOG_TRANSIENT.search(msg))
+
 
 # ── Partial-download reason classifier (issue #5) ───────────────────────────────
 # When a release comes back short, name WHY in one canonical token so the bot
@@ -279,6 +317,22 @@ _NOREASON_SKIP = ("completed:", "warnings:", "errors:", "[step]", "[ok]",
 _NOREASON_HIT = ("fail", "error", "unavailable", "warning", "not found",
                  "no codec", "invalid", "denied", "unable", "cannot",
                  "не удалось", "недоступ")
+
+
+def _verdict_from_log(task: dict) -> str:
+    """Найти в журнале задачи готовый вердикт движка.
+
+    Движки помечают приговор крестиком: «✗ Apple не выдал ключ…». Такая строка
+    точнее любого обобщения, и если она есть — говорить надо ею.
+
+    Возвращает пустую строку, когда вердикта нет: тогда обобщение законно, это
+    и правда неизвестный случай.
+    """
+    for line in reversed(task.get("log") or []):
+        t = str(line).strip()
+        if t.startswith("✗") and len(t) > 8:
+            return t.lstrip("✗ ").strip()
+    return ""
 
 
 def _no_reason_msg(engine_name: str, rc: int, log_text: str) -> str:
@@ -2098,10 +2152,12 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             await _broadcast({"type": "log", "msg": msg, "level": "info", "task_id": tid})
 
         fatal_hit = False
+        _fatal_msg = ""          # вердикт движка, чтобы он не потерялся
         _fatal_amd_hint = False   # zhaarey FATAL said "переключись на AMD"
         async for ev in runner.run():
             if ev.kind is EventKind.FATAL:
                 task["log"].append(ev.message)
+                _fatal_msg = ev.message
                 await _broadcast({"type": "log", "msg": f"✗ {ev.message}", "level": "error", "task_id": tid})
                 if ev.message.startswith("ORPHEUS_NOT_AUTHED"):
                     await _broadcast({"type": "orpheus_not_authed"})
@@ -2151,6 +2207,19 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         if fatal_hit:
             if _fatal_amd_hint and (_amd_mod.get_amd_dir() / "main.py").exists():
                 raise _NeedAMDFallback()
+            # Вердикт движка ОБЯЗАН дойти до задачи, а не только до консоли.
+            #
+            # Живой случай 05.09.2026: Apple не выдал ключ (Invalid CKC) при
+            # живой сессии wrapper'а — то есть у контента нет прав в регионе
+            # аккаунта. Движок сказал это точно и подробно, строка ушла в
+            # консоль и в task["log"], но в `error` не попала. Дальше сеть
+            # безопасности видела пустой `error` и честно подставляла свой
+            # общий текст: «Задача завершилась без результата… так быть не
+            # должно — повтори загрузку». Владелец получил в бот совет
+            # повторять то, что повторяться не может, вместо настоящей
+            # причины, которая была известна за секунду до этого.
+            if _fatal_msg and not task.get("error"):
+                task["error"] = _fatal_msg.lstrip("✗ ").strip()
             _try_advance_task(task, TaskStatus.ERROR)
             return
 
@@ -2714,9 +2783,13 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 max_r = _MAX_PATIENT_RETRIES
             else:
                 max_r = _MAX_AUTO_RETRIES
+            # Временный отказ каталога Apple (429 / сетевой сбой) отменяет ТОЛЬКО
+            # вердикт регулярки — не вердикт движка и не остальные предохранители.
+            _no_retry = (bool(_RE_NO_RETRY.search(msg))
+                         and not _apple_catalog_transient(msg))
             can_retry = (
                 retry_n < max_r
-                and not _RE_NO_RETRY.search(msg)
+                and not _no_retry
                 and not _engine_aborted   # вердикт движка сильнее любой регулярки
                 and not task.get("_auto_retry")   # don't chain onto partial-fail retry
             )

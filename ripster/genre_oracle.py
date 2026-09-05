@@ -162,11 +162,16 @@ async def discogs_genre(artist: str, title: str) -> str | None:
         async with httpx.AsyncClient(timeout=20) as cl:
             r = await cl.get("https://api.discogs.com/database/search", headers=_UA,
                              params={"artist": artist, "track": title,
-                                     "type": "release", "per_page": 5})
+                                     "type": "release", "per_page": 25})
         if r.status_code == 200:
             styles: dict[str, int] = {}
             genres: dict[str, int] = {}
-            for x in (r.json().get("results") or [])[:5]:
+            # Двадцать пять, а не пять. На пяти ответах ремикс перевешивал
+            # оригинал: по «Bob Marley / Exodus» в выдачу попадал дабстеп-ремикс
+            # и становился ЕДИНСТВЕННЫМ уцелевшим после сверки — жанром Марли
+            # объявлялся Dubstep (замер цикла 3). Преобладание считается только
+            # на достаточной выборке.
+            for x in (r.json().get("results") or [])[:25]:
                 for st in (x.get("style") or []):
                     styles[st] = styles.get(st, 0) + 1
                 for gn in (x.get("genre") or []):
