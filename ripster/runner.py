@@ -750,6 +750,16 @@ def _add_to_history(task: dict) -> None:
     status = task.get("status", "done")
     if status not in ("done", "error", "cancelled"):
         return
+    # Перебор учёток оставляет в задаче текст ПОСЛЕДНЕГО отказавшего слота, и
+    # он доезжал до истории даже когда следующий слот всё скачал: 04.09.2026
+    # запись «done» несла «Deezer: ARL не задан или протух» на 12 успешно
+    # сохранённых треках. Успех с чужой ошибкой в кармане — это не история, это
+    # ложный диагноз, который потом ищут. Причину не выбрасываем: складываем в
+    # `error_recovered`, если понадобится разобрать, почему пришлось перебирать.
+    err_text = (task.get("error") or "")[:2000]
+    err_recovered = ""
+    if status == "done" and err_text and not task.get("_partial"):
+        err_recovered, err_text = err_text, ""
     entry = {
         "id":        task.get("id", ""),
         "url":       task.get("url", ""),
@@ -765,7 +775,8 @@ def _add_to_history(task: dict) -> None:
         "partial":   bool(task.get("_partial")),          # got fewer tracks than expected
         "missing":   int(task.get("_missing") or 0),      # how many tracks didn't land
         "got":       len(task.get("_files") or []) or None,
-        "error":     (task.get("error") or "")[:2000],   # captured engine error
+        "error":     err_text,                           # captured engine error
+        "error_recovered": err_recovered,                # отказ, который пережили перебором
         "progress":  task.get("progress", 0),
         "ts":        datetime.now().isoformat(timespec="seconds"),
         # Kept for /api/download-file to find output dir after queue is cleared
@@ -789,7 +800,9 @@ def _add_to_history(task: dict) -> None:
     print(
         f"[history] recorded {entry['status']:<6} {entry['service']:<8} "
         f"{entry.get('title') or entry['url']}"
-        + (f"  ERR: {entry['error'][:120]}" if entry.get("error") else ""),
+        + (f"  ERR: {entry['error'][:120]}" if entry.get("error")
+           else (f"  (пережито перебором: {entry['error_recovered'][:120]})"
+                 if entry.get("error_recovered") else "")),
         flush=True,
     )
     # Native desktop toast on finish (Windows) — only when the owner enabled it in
@@ -875,6 +888,11 @@ def _add_to_history(task: dict) -> None:
 # filenames = tags for every service), Ripster now does its OWN "already
 # complete?" check BEFORE ever invoking the engine at all.
 
+def _wants_lossless(quality: str) -> bool:
+    q = (quality or "").lower()
+    return any(k in q for k in ("lossless", "hifi", "flac", "alac", "hires", "hi-res"))
+
+
 def _find_completed_duplicate(url: str, quality: str, engine_name: str) -> dict | None:
     """A prior COMPLETE download of this exact url+quality+engine, whose
     output folder still has at least as many audio files on disk as it
@@ -892,12 +910,39 @@ def _find_completed_duplicate(url: str, quality: str, engine_name: str) -> dict 
         if not d.is_dir():
             continue
         try:
-            n_audio = sum(1 for p in d.rglob("*") if p.suffix.lower() in audio_exts)
+            files = [p for p in d.rglob("*") if p.suffix.lower() in audio_exts]
         except OSError:
             continue
+        n_audio = len(files)
         expected = h.get("got") or h.get("tracks") or 0
-        if n_audio and (not expected or n_audio >= expected):
-            return h
+        if not (n_audio and (not expected or n_audio >= expected)):
+            continue
+
+        # Совпал ЯРЛЫК качества — это ещё не значит, что на диске лежит то
+        # самое качество. Папка называется по ЗАПРОШЕННОМУ, и потому врёт
+        # (ровно об этом предупреждает integrity_verify.probe_codec).
+        # 05.09.2026: релиз, скачанный при сломанном Beatport-движке, лёг в
+        # «FLAC CD» как AAC 128. Каждая следующая попытка перекачать его в
+        # FLAC натыкалась сюда, переиспользовала ту же папку и отчитывалась
+        # «done» — движок ни разу даже не запускался. Из ямы нельзя было
+        # выбраться повтором в принципе: чем хуже скачалось в первый раз,
+        # тем прочнее оно закреплялось.
+        # Спрашиваем сам файл. Достаточно одного: внутри одной загрузки
+        # кодек одинаковый, а ffprobe на каждый трек стоил бы минуты.
+        if _wants_lossless(quality):
+            try:
+                from ripster.integrity_verify import probe_codec
+                info = probe_codec(sorted(files)[0])
+            except Exception:
+                info = {}
+            # Пустой ответ — «не знаю» (нет ffprobe, битый файл). Не знаем —
+            # не переиспользуем: перекачать дешевле, чем молча отдать не то.
+            if not info.get("lossless"):
+                print(f"[reuse] не переиспользую {d.name}: запрошено {quality}, "
+                      f"на диске {info.get('codec') or 'неизвестно'} — качаю заново",
+                      flush=True)
+                continue
+        return h
     return None
 
 

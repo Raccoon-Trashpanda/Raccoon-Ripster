@@ -269,14 +269,22 @@ async def add_to_queue(body: dict, request: Request):
     _lyrics_raw = body.get("lyrics")
     lyrics_override = bool(_lyrics_raw) if isinstance(_lyrics_raw, bool) else None
 
+    # Задачи, которые не добавили, ПОТОМУ ЧТО ОНИ УЖЕ В РАБОТЕ. Это не отказ:
+    # то, что просили, уже качается — и звонящий должен получить, за чем
+    # следить. Без этого дубль выглядел как «ничего не вышло» (см. pair_fetch).
+    dupes: list[dict] = []
+
     def _enqueue_one(turl: str, tmeta: dict | None, mark_enriched: bool):
         """Create + append one task. Returns the task, or None if it's an exact dupe."""
         # Same URL is OK at a different quality OR engine — a deliberate second
         # copy (e.g. FLAC vs MP3). Only block exact dupes that are still active.
-        if any(t["url"] == turl
-               and (t.get("quality") or "") == (quality or "")
-               and (t.get("engine")  or "") == (engine  or "")
-               and t["status"] in ("queued", "running") for t in _queue):
+        _same = [t for t in _queue
+                 if t["url"] == turl
+                 and (t.get("quality") or "") == (quality or "")
+                 and (t.get("engine")  or "") == (engine  or "")
+                 and t["status"] in ("queued", "running")]
+        if _same:
+            dupes.append(_same[0])
             return None
         t = _make_task(turl, quality, engine, svc, source, session_id=sid, lyrics=lyrics_override)
         if _route_note:
@@ -329,7 +337,10 @@ async def add_to_queue(body: dict, request: Request):
                 asyncio.create_task(_enrich_meta(t))
 
     if not added:
-        return {"ok": False, "msg": "Already in queue", "duplicate": True}
+        # `ids` — за чем следить звонящему. Поле добавлено, а не заменено:
+        # старые клиенты читают ok/msg/duplicate как раньше.
+        return {"ok": False, "msg": "Already in queue", "duplicate": True,
+                "ids": [t["id"] for t in dupes]}
 
     if _broadcast:
         await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})

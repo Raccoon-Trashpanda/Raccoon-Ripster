@@ -794,6 +794,18 @@ async def pair_fetch(body: dict, request: Request):
 
     if isinstance(res, dict) and res.get("id"):
         return {"task_id": res["id"], "duplicate": bool(res.get("duplicate"))}
+
+    # «Уже в очереди» — НЕ отказ. Просили скачать — оно качается, просто заявку
+    # подали раньше. Раньше этот ответ падал в общий 502 `enqueue_failed`, и
+    # телефон честно пересказывал его как ошибку: 05.09.2026 «Скачать альбом»
+    # на 19 треках Massive Attack дало 19 красных строк вида
+    #   __e.pc_rejected__ HTTP 502: {'ok': False, 'msg': 'Already in queue'…}
+    # при том, что ПК в это самое время спокойно скачал весь альбом в ALAC.
+    # Отдаём id той задачи, что уже идёт, — телефону есть за чем следить.
+    if isinstance(res, dict) and res.get("duplicate"):
+        ids = res.get("ids") or []
+        return {"task_id": ids[0] if ids else "", "duplicate": True}
+
     return JSONResponse({"error": "enqueue_failed", "detail": str(res)[:200]}, status_code=502)
 
 
