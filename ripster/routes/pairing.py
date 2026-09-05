@@ -857,6 +857,60 @@ async def pair_fetch_file(task_id: str, request: Request):
 # «как есть» — понимание того, ЧТО радар отслеживает, важнее, чем красивая
 # витрина. Тап по «последнему релизу» ставит его в очередь телефона.
 
+@router.get("/api/pair/upcoming")
+async def pair_upcoming(request: Request):
+    """Радар ГРЯДУЩЕГО для телефона.
+
+    Собирает и подтверждает анонсы ПК: там уже есть и обход лент, и сверка с
+    MusicBrainz, и накопленный список. Гонять то же самое с телефона значило бы
+    держать второй разбор новостей и второй лимит запросов к MusicBrainz — при
+    том, что телефон и так ходит на ПК за обычным радаром.
+    """
+    if not _token_valid(_bearer(request)):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        from pathlib import Path as _P
+        from ripster import upcoming_radar as _ur
+        items = _ur.drop_released(_ur.load(_P(_s.get("base_dir") or ".")))
+    except Exception as e:
+        print(f"[pair] upcoming failed: {e}", flush=True)
+        items = []
+
+    def _order(u):
+        return (0, u.release_date) if u.release_date else (1, "")
+
+    items.sort(key=_order)
+    return {"items": [{
+        "artist":      u.artist,
+        "title":       u.title,
+        "date":        u.release_date,
+        "label":       u.label,
+        "track_count": u.track_count,
+        "credits":     u.credits,
+        "genres":      u.genres,
+        "artwork":     u.artwork,
+        "sources":     u.sources,
+        "kind":        u.kind,
+    } for u in items[:200]]}
+
+
+@router.post("/api/pair/upcoming/wait")
+async def pair_upcoming_wait(request: Request):
+    """«Жду» с телефона: артист уходит в вишлист ПК.
+
+    Вишлист один на оба устройства — иначе телефон копил бы своё ожидание,
+    а ловил релиз всё равно ПК, и они бы расходились.
+    """
+    if not _token_valid(_bearer(request)):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    from ripster.routes import upcoming as _up
+    return await _up.api_upcoming_wait(body if isinstance(body, dict) else {})
+
+
 @router.get("/api/pair/radar")
 async def pair_radar(request: Request):
     if not _token_valid(_bearer(request)):

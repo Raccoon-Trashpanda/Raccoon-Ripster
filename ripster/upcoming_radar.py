@@ -43,8 +43,14 @@
 """
 from __future__ import annotations
 
+import json
 import re
-from dataclasses import dataclass
+import time
+import xml.etree.ElementTree as ET
+from dataclasses import dataclass, field
+from pathlib import Path
+
+import httpx
 
 # ── источники ───────────────────────────────────────────────────────────────
 
@@ -210,3 +216,281 @@ def parse_announcement(headline: str) -> Announcement | None:
 
     kind = "ep" if m.group("what").lower() == "ep" else "album"
     return Announcement(artist=artist, title=_clean_title(m.group("tail")), kind=kind)
+
+
+# ── сеть: сбор анонсов из лент ──────────────────────────────────────────────
+
+#: Обычный браузерный UA и следование редиректам — без них половина списка
+#: молча пустая (см. готчу в шапке модуля).
+_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+       "(KHTML, like Gecko) Chrome/120.0 Safari/537.36")
+
+
+def feed_titles(url: str, timeout: float = 20.0) -> list[str]:
+    """Заголовки ленты. Пустой список — лента не ответила или не разобралась.
+
+    Отказ ОДНОЙ ленты не должен ронять обход: источников много, и радар обязан
+    отдать то, что собралось, а не ничего.
+    """
+    try:
+        r = httpx.get(url, headers={"User-Agent": _UA}, follow_redirects=True, timeout=timeout)
+        if r.status_code != 200 or not r.content:
+            return []
+        root = ET.fromstring(r.content)
+    except Exception:
+        return []
+    # Первый <title> — название самой ленты, а не запись.
+    return [(t.text or "").strip() for t in root.iter("title")][1:]
+
+
+@dataclass
+class Upcoming:
+    """Один грядущий релиз, каким его знает радар."""
+
+    artist: str
+    title: str
+    kind: str = "album"
+    #: Ленты, в которых он попался. Одно и то же объявляют несколько изданий —
+    #: и чем их больше, тем очевиднее, что релиза ЖДУТ.
+    sources: list[str] = field(default_factory=list)
+    #: Дата выхода по MusicBrainz, ISO. Пусто — пока не подтверждена.
+    release_date: str = ""
+    #: Жанры артиста по тегам MusicBrainz, от сильного к слабому.
+    genres: list[str] = field(default_factory=list)
+    first_seen: float = 0.0
+    # ── то, из чего собирается обычная карточка релиза ──────────────────────
+    #: Обложка. Пусто — её ещё нигде нет: у неизданного это обычное дело.
+    artwork: str = ""
+    #: Лейбл по данным MusicBrainz.
+    label: str = ""
+    #: Сколько вещей на релизе. 0 — треклист ещё не опубликован.
+    track_count: int = 0
+    #: Полная строка авторства: «A feat. B», совместные работы.
+    credits: str = ""
+    #: Идентификатор релиз-группы MusicBrainz — по нему берётся обложка.
+    mbid: str = ""
+
+    @property
+    def key(self) -> str:
+        return _key(self.artist, self.title)
+
+
+def _key(artist: str, title: str) -> str:
+    """Ключ склейки. Название часто не названо — тогда ключ по одному артисту:
+    иначе «Andy Stott без названия» и «Andy Stott — Late Loop» из разных лент
+    остались бы двумя разными ожиданиями одного и того же альбома."""
+    a = re.sub(r"[^a-z0-9]+", "", artist.lower())
+    t = re.sub(r"[^a-z0-9]+", "", title.lower())
+    return f"{a}|{t}" if t else a
+
+
+def collect(sources: tuple[Source, ...] = SOURCES) -> list[Upcoming]:
+    """Обойти ленты и собрать анонсы. Сеть, поэтому без тестов — правило
+    разбора проверяется отдельно ([parse_announcement])."""
+    found: dict[str, Upcoming] = {}
+    now = time.time()
+    for s in sources:
+        for headline in feed_titles(s.url):
+            a = parse_announcement(headline)
+            if not a:
+                continue
+            k = _key(a.artist, a.title)
+            cur = found.get(k)
+            if cur is None:
+                found[k] = Upcoming(artist=a.artist, title=a.title, kind=a.kind,
+                                    sources=[s.name], first_seen=now)
+            else:
+                if s.name not in cur.sources:
+                    cur.sources.append(s.name)
+                # Название могло быть названо только в одной ленте.
+                if not cur.title and a.title:
+                    cur.title = a.title
+    return list(found.values())
+
+
+# ── подтверждение: дата выхода и жанр ───────────────────────────────────────
+
+#: MusicBrainz просит представляться и не чаще запроса в секунду.
+_MB_UA = "Ripster/1.0 (https://github.com/Raccoon-Trashpanda/Raccoon-Ripster)"
+_MB_GAP = 1.05
+_mb_last = 0.0
+
+
+def _mb_get(path: str, params: dict) -> dict:
+    """Запрос к MusicBrainz с обязательной паузой между вызовами."""
+    global _mb_last
+    wait = _MB_GAP - (time.time() - _mb_last)
+    if wait > 0:
+        time.sleep(wait)
+    _mb_last = time.time()
+    try:
+        r = httpx.get(f"https://musicbrainz.org/ws/2/{path}",
+                      params={**params, "fmt": "json"},
+                      headers={"User-Agent": _MB_UA}, timeout=20.0)
+        return r.json() if r.status_code == 200 else {}
+    except Exception:
+        return {}
+
+
+def _words(s: str) -> str:
+    """Название без пунктуации — для сравнения и для запроса."""
+    return re.sub(r"[^a-z0-9 ]+", " ", s.lower()).strip()
+    
+
+def _fill_card(item: Upcoming) -> None:
+    """Дособрать карточку: лейбл, число вещей, авторство, обложка.
+
+    Владелец: «по возможности обложка, дата релиза, лейбл, количество треков,
+    фиты или коллабы — карточки релизов как обычные». Всё это MusicBrainz
+    отдаёт на самом релизе, а обложку — Cover Art Archive по той же
+    релиз-группе, бесплатно и без ключа.
+
+    «По возможности» здесь буквально: у неизданного часто нет ни обложки, ни
+    треклиста. Пустое поле честнее выдуманного — карточка просто не покажет
+    строку, которой нет.
+    """
+    if not item.mbid:
+        return
+    rel = _mb_get("release", {"release-group": item.mbid,
+                              "inc": "labels+recordings+artist-credits", "limit": 3})
+    for r in rel.get("releases", [])[:1]:
+        labels = [(l.get("label") or {}).get("name") for l in (r.get("label-info") or [])]
+        item.label = next((x for x in labels if x), "")
+        item.track_count = sum(m.get("track-count") or 0 for m in (r.get("media") or []))
+        item.credits = ", ".join(
+            a.get("name", "") for a in (r.get("artist-credit") or []) if a.get("name")
+        )
+    # Обложка существует не всегда — проверяем, а не подставляем ссылку вслепую:
+    # битая картинка в карточке выглядит как поломка приложения.
+    url = f"https://coverartarchive.org/release-group/{item.mbid}/front-500"
+    try:
+        if httpx.head(url, follow_redirects=True, timeout=12.0).status_code == 200:
+            item.artwork = url
+    except Exception:
+        pass
+
+
+def confirm(item: Upcoming) -> Upcoming:
+    """Подтвердить анонс датой выхода и жанрами артиста.
+
+    Новость говорит, что релиз БУДЕТ; MusicBrainz говорит, КОГДА и в каком
+    жанре работает артист. Ни то ни другое не выдумывается: не нашлось —
+    поля остаются пустыми, и в ленте так и будет написано «дата не объявлена».
+
+    Дата берётся только БУДУЩАЯ. Совпадение по названию со старым альбомом
+    того же артиста — обычное дело (переиздания, концертники), и подставить
+    прошлогоднюю дату под анонс значит соврать в самом главном поле.
+    """
+    today = time.strftime("%Y-%m-%d")
+
+    if item.title:
+        # Точный запрос по названию ломается о пунктуацию: у MusicBrainz этот
+        # альбом записан как «It’s Nothing Personal.» — типографский апостроф и
+        # точка на конце, — и поиск по строке из новости не находил НИЧЕГО.
+        # Поэтому спрашиваем по словам, а совпадение проверяем сами.
+        words = _words(item.title)
+        if words:
+            q = f'artist:"{item.artist}" AND releasegroup:"{words}"'
+            data = _mb_get("release-group", {"query": q, "limit": 8})
+            for rg in data.get("release-groups", []):
+                got = _words(rg.get("title") or "")
+                if not got or (words not in got and got not in words):
+                    continue
+                d = (rg.get("first-release-date") or "").strip()
+                if d and d >= today:
+                    item.release_date = d
+                    item.mbid = rg.get("id") or ""
+                    _fill_card(item)
+                    break
+
+    data = _mb_get("artist", {"query": f'artist:"{item.artist}"', "limit": 1})
+    for a in data.get("artists", [])[:1]:
+        tags = sorted(a.get("tags") or [], key=lambda t: -(t.get("count") or 0))
+        item.genres = [t["name"] for t in tags[:5] if t.get("name")]
+    return item
+
+
+# ── хранилище ───────────────────────────────────────────────────────────────
+
+def _store_file(base_dir: Path) -> Path:
+    return Path(base_dir) / "upcoming_releases.json"
+
+
+def load(base_dir: Path) -> list[Upcoming]:
+    try:
+        raw = json.loads(_store_file(base_dir).read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    out = []
+    for d in raw if isinstance(raw, list) else []:
+        try:
+            out.append(Upcoming(**d))
+        except Exception:
+            continue
+    return out
+
+
+def save(base_dir: Path, items: list[Upcoming]) -> None:
+    try:
+        _store_file(base_dir).write_text(
+            json.dumps([i.__dict__ for i in items], ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+    except Exception as e:
+        print(f"[upcoming] save failed: {e}", flush=True)
+
+
+def merge(old: list[Upcoming], fresh: list[Upcoming]) -> list[Upcoming]:
+    """Слить свежий обход с накопленным.
+
+    Накопленное НЕ затирается: новость живёт в ленте пару дней, а ждать релиз
+    можно месяцами. Пропал из ленты — не значит отменён.
+    """
+    by_key = {i.key: i for i in old}
+    for f in fresh:
+        cur = by_key.get(f.key)
+        if cur is None:
+            by_key[f.key] = f
+            continue
+        for s in f.sources:
+            if s not in cur.sources:
+                cur.sources.append(s)
+        if not cur.title and f.title:
+            cur.title = f.title
+    return _fold_untitled(list(by_key.values()))
+
+
+def _fold_untitled(items: list[Upcoming]) -> list[Upcoming]:
+    """Склеить «артист без названия» с «артист + название».
+
+    Одно издание пишет «Andy Stott Unveils First Album in Five Years», другое —
+    «…, ‘Late Loop’». Это ОДИН альбом, а в ленте он выглядел двумя ожиданиями:
+    ключ у безымянной записи строится по одному артисту и с ключом названной
+    не совпадает. Поймано на живом обходе 05.09.2026.
+    """
+    by_artist: dict[str, Upcoming] = {}
+    for i in items:
+        if i.title:
+            by_artist.setdefault(_key(i.artist, ""), i)
+
+    out: list[Upcoming] = []
+    for i in items:
+        if not i.title:
+            named = by_artist.get(i.key)
+            if named is not None:
+                for s in i.sources:
+                    if s not in named.sources:
+                        named.sources.append(s)
+                continue
+        out.append(i)
+    return out
+
+
+def drop_released(items: list[Upcoming], today: str | None = None) -> list[Upcoming]:
+    """Убрать то, что уже вышло: у радара ГРЯДУЩЕГО этому места нет.
+
+    Записи без подтверждённой даты остаются — «дата неизвестна» не то же самое,
+    что «уже вышло».
+    """
+    t = today or time.strftime("%Y-%m-%d")
+    return [i for i in items if not i.release_date or i.release_date >= t]

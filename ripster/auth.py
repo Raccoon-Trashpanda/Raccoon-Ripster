@@ -112,6 +112,17 @@ def add_public_path(path: str) -> None:
     _PUBLIC_PATHS.add(path)
 
 
+# Prefixes exempt from auth — for routes with a variable segment (e.g.
+# /api/pair/fetch/{task_id}) that exact-match _PUBLIC_PATHS can't cover.
+_PUBLIC_PREFIXES: set[str] = set()
+
+
+def add_public_prefix(prefix: str) -> None:
+    """Make every path under `prefix` exempt from owner auth. The route itself
+    must carry its own authentication (a device/bearer token). Call at install."""
+    _PUBLIC_PREFIXES.add(prefix)
+
+
 def set_guest_checker(fn) -> None:
     """Register a callable that returns True if the request carries a valid guest session."""
     global _guest_session_fn
@@ -254,6 +265,19 @@ def _csrf_check(request: Request) -> bool:
     """
     if request.method.upper() not in _CSRF_METHODS:
         return True
+
+    # Запрос с bearer-токеном подделать с чужой страницы нельзя: браузер не
+    # даст поставить заголовок Authorization кросс-доменно, а CSRF — это ровно
+    # про то, что кука уезжает САМА. Значит проверять Origin тут не нужно.
+    #
+    # Без этого исключения при включённом удалённом доступе ЛЮБОЙ POST с
+    # телефона получал 403 «Cross-site request blocked»: мобильный Ripster —
+    # нативный клиент, Origin он не шлёт. Ломалось всё сопряжение целиком —
+    # /api/pair/claim, /mode, /activity, /touch (проверено 05.09.2026:
+    # `remote-enabled: true`, ответ 403 на каждый).
+    if request.headers.get("authorization", "").lower().startswith("bearer "):
+        return True
+
     origin = request.headers.get("origin", "")
     if not origin:
         # No Origin → normally a non-browser client (curl/native app), allowed.
@@ -352,7 +376,8 @@ def install(app, config: dict, save_config: Callable[[dict], None]) -> None:
         if (path in _PUBLIC_PATHS
                 or path.startswith("/static/")
                 or path.startswith("/spotify/")   # OAuth redirect target (external)
-                or path.startswith("/guest/")):   # guest landing pages
+                or path.startswith("/guest/")     # guest landing pages
+                or any(path.startswith(p) for p in _PUBLIC_PREFIXES)):
             return await call_next(request)
 
         if verify_session_cookie(request.cookies.get("ripster-session", "")):

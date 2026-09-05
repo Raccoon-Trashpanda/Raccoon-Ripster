@@ -160,3 +160,43 @@ class TestDefectsFoundOnLiveFeeds:
         a = parse_announcement("Gun Announce New Album Bloodwork Feat. Someone Else")
         assert a is not None
         assert a.title == "Bloodwork"
+
+
+class TestMerging:
+    """Склейка накопленного со свежим обходом."""
+
+    def _u(self, artist, title, src):
+        from ripster.upcoming_radar import Upcoming
+        return Upcoming(artist=artist, title=title, sources=[src])
+
+    def test_the_same_album_from_two_outlets_is_one_entry(self):
+        """Одно издание называет альбом, другое нет — это ОДНО ожидание.
+        В живом обходе Andy Stott приезжал двумя карточками."""
+        from ripster.upcoming_radar import merge
+        got = merge([], [self._u("Andy Stott", "", "Pitchfork"),
+                         self._u("Andy Stott", "Late Loop", "The Quietus")])
+        assert len(got) == 1
+        assert got[0].title == "Late Loop"
+        assert set(got[0].sources) == {"Pitchfork", "The Quietus"}
+
+    def test_different_albums_by_one_artist_stay_apart(self):
+        from ripster.upcoming_radar import merge
+        got = merge([], [self._u("Aphex Twin", "Syro", "A"),
+                         self._u("Aphex Twin", "Collapse", "B")])
+        assert len(got) == 2
+
+    def test_stored_entries_survive_a_scan_that_lost_them(self):
+        """Новость живёт в ленте пару дней, а ждать релиз можно месяцами:
+        пропал из ленты — не значит отменён."""
+        from ripster.upcoming_radar import merge
+        got = merge([self._u("Klara Lewis", "Thankful", "The Quietus")], [])
+        assert len(got) == 1
+
+    def test_released_records_leave_the_upcoming_list(self):
+        from ripster.upcoming_radar import Upcoming, drop_released
+        out = drop_released([
+            Upcoming(artist="A", title="past", release_date="2026-01-01"),
+            Upcoming(artist="B", title="future", release_date="2026-12-01"),
+            Upcoming(artist="C", title="unknown date"),
+        ], today="2026-09-05")
+        assert {i.artist for i in out} == {"B", "C"}

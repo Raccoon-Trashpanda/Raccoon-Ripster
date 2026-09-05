@@ -339,6 +339,12 @@ def get_qualities() -> list:
 queue        = []
 ws_clients   = set()
 _ws_guest_sids: dict = {}
+# ws -> paired-phone marker. Present ⇒ this socket is the owner's phone (paired
+# via /api/pair). broadcast() honours the pair's fan-out mode for these sockets:
+#   mirror   → phone sees everything the desktop sees
+#   initiator→ same visibility; only "who initiated" differs (queue layer)
+#   isolation→ phone gets nothing over /ws, runs on its own local state
+_ws_paired_phones: dict = {}
 
 from ripster.queue_manager import QueueManager
 _qs         = QueueManager()
@@ -357,6 +363,21 @@ from ripster.security import GUEST_BLOCKED_WS_TYPES as _GUEST_BLOCKED_TYPES
 from ripster.security import GUEST_BLOCKED_PATHS    as _GUEST_BLOCKED
 
 
+def _guest_queue_view(sid: str) -> list:
+    return [
+        {k: v for k, v in t.items() if k not in ("log", "session_id")}
+        for t in queue
+        if t.get("session_id") == sid
+    ]
+
+
+def _guest_owns_task(task_id: str, sid: str) -> bool:
+    return any(
+        t.get("id") == task_id and t.get("session_id") == sid
+        for t in queue
+    )
+
+
 from ripster.ws_broker import WebSocketBroker
 _ws_broker = WebSocketBroker()
 
@@ -365,6 +386,7 @@ def _ws_dead(ws) -> None:
     """Called by the broker when a client's socket dies — drop our bookkeeping."""
     ws_clients.discard(ws)
     _ws_guest_sids.pop(ws, None)
+    _ws_paired_phones.pop(ws, None)
 
 
 _ws_broker.set_dead_handler(_ws_dead)
@@ -542,7 +564,8 @@ async def _ws_heartbeat():
 
 async def broadcast(msg: dict):
     """Fan a message out to every WS client through the broker. Per-client
-    queues mean a slow client never blocks the others — see ws_broker.py."""
+    queues mean a slow client never blocks the others — see ws_broker.py.
+    Guest clients get a filtered/owned-only view."""
     if msg.get("type") == "log":
         if "text" not in msg and "msg" in msg:
             msg = {**msg, "text": msg["msg"]}
@@ -564,8 +587,63 @@ async def broadcast(msg: dict):
             pass
     if msg.get("type") == "queue_update":
         save_pending_queue()
+    msg_type = msg.get("type", "")
+    _pair_mode = None
+    if _ws_paired_phones:
+        try:
+            from ripster.routes import pairing as _pr
+            _pair_mode = _pr._state.get("mode", "mirror")
+        except Exception:
+            _pair_mode = "mirror"
     for ws in _ws_broker.clients:
-        _ws_broker.enqueue(ws, msg)
+        if ws in _ws_paired_phones:
+            # Paired phone — fan-out governed by the pair's mode.
+            # `pair_mode` always reaches it so the phone can reflect a switch
+            # made from the desktop side.
+            if msg_type == "pair_mode" or _pair_mode in ("mirror", "initiator"):
+                _ws_broker.enqueue(ws, msg)
+            # isolation → phone gets nothing else over /ws
+            continue
+        sid = _ws_guest_sids.get(ws)
+        if sid is None:
+            _ws_broker.enqueue(ws, msg)
+            continue
+        # Guest client — filtered, own-tasks-only, ALLOWLIST by default (see
+        # security.py for why: a blocklist leaks every new owner-sensitive
+        # event type until someone remembers to add it here).
+        if msg_type in _GUEST_BLOCKED_TYPES:
+            continue
+        if msg_type == "queue_update":
+            _ws_broker.enqueue(ws, {**msg, "queue": _guest_queue_view(sid)})
+        elif msg_type in ("log", "progress", "dl_counter"):
+            task_id = msg.get("task_id") or msg.get("id")
+            if task_id and _guest_owns_task(task_id, sid):
+                _ws_broker.enqueue(ws, msg)
+        elif msg_type == "sc_fallback_added":
+            task_id = msg.get("origin_task_id") or msg.get("new_task_id")
+            if task_id and _guest_owns_task(task_id, sid):
+                _ws_broker.enqueue(ws, msg)
+        elif msg_type in ("bbc_dl_start", "bbc_dl_progress", "bbc_dl_done"):
+            # These run outside the task queue (ad-hoc subprocess, no task_id),
+            # so ownership is stamped directly on the message by the route
+            # that started the download (see ripster/routes/bbc.py). Never
+            # forward one whose session_id is "" (owner-triggered) or belongs
+            # to a different guest.
+            if msg.get("session_id") == sid:
+                _ws_broker.enqueue(ws, {k: v for k, v in msg.items() if k != "session_id"})
+        elif msg_type == "guest_link_revoked":
+            try:
+                from ripster.guest_manager import get_manager as _gm_fn
+                link = _gm_fn().get_session(sid)
+                if link and link.get("token") == msg.get("token"):
+                    _ws_broker.enqueue(ws, {"type": "session_revoked"})
+            except Exception:
+                pass
+        elif msg_type in ("queue_done", "ping"):
+            # No payload, nothing user- or owner-specific — safe to fan out as-is.
+            _ws_broker.enqueue(ws, msg)
+        # Everything else (new/unlisted types) is DENIED by default — add an
+        # explicit branch above if a future feature needs guests to see it.
 
 
 async def log(text: str, level: str = "info"):
@@ -657,7 +735,7 @@ async def _apple_bearer_keeper() -> None:
 
 
 def _apple_bearer_ok(bearer: str) -> bool:
-    """True if `bearer` is accepted by the Apple catalog API (cheap GET)."""
+    """True if `bearer` is accepted by the Apple catalog API (cheap HEAD-ish GET)."""
     if not bearer or len(bearer) < 100:
         return False
     try:
@@ -669,31 +747,6 @@ def _apple_bearer_ok(bearer: str) -> bool:
         return r.status_code == 200
     except Exception:
         return False
-
-
-# ── Watchlist periodic check ───────────────────────────────────────────────────
-_watchlist_check_task = None
-
-async def _watchlist_loop():
-    # The first sleep resumes the clock from the last real pass instead of
-    # restarting it — otherwise a restart every few minutes means the 6h timer
-    # never runs out and the watchlist is never checked at all.
-    first = True
-    while True:
-        # Usually the plain 6h interval, but wake earlier when the Auckland
-        # Friday comes first — see watchlist.next_check_delay().
-        await asyncio.sleep(_watchlist.initial_check_delay(config) if first
-                            else _watchlist.next_check_delay(config))
-        first = False
-        if watchlist:
-            # One bad pass must not take the loop down with it: without this the
-            # task dies silently and the watchlist stops until the next restart.
-            try:
-                await _watchlist._check_watchlist()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:                                  # noqa: BLE001
-                print(f"[watchlist] проверка упала: {e}", flush=True)
 
 
 @asynccontextmanager
@@ -724,13 +777,20 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_startup_sync_orpheus())
     asyncio.create_task(_apple_bearer_keeper())
     asyncio.create_task(_soundcloud_routes._prewarm_client_id())
-    # Сторож самоподъёма — см. ripster/watchdog.py.
+    # Сторож: поднимает упавший сервис сам. Первая проверка через 10 с,
+    # попыток мало и они дорожают, а при причине, которую перезапуск не
+    # лечит (лимит устройств Apple), не трогает вовсе — ripster/watchdog.py.
     try:
         from ripster import watchdog as _wd
         _wd.install(config, broadcast)
         asyncio.create_task(_wd.run())
     except Exception as _e:
         print(f'[сторож] не запущен: {type(_e).__name__}: {_e}', flush=True)
+    # Auto-start the serveo tunnel when remote access is enabled (no-op otherwise).
+    try:
+        asyncio.create_task(_guest_routes.auto_start_tunnel())
+    except Exception as _e:
+        print(f"[tunnel] auto-start wiring error: {_e}", flush=True)
     # Start the stdout→WS pump so every print() reaches the UI console.
     asyncio.create_task(_stdout_pump())
     # Periodic WS heartbeat so the client watchdog doesn't false-trip on an idle
@@ -760,17 +820,41 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         print(f"[sp-keeper] wiring error: {_e}", flush=True)
 
-    # Периодический обход учёток (см. ripster/accounts_watch.py): пробы живости
-    # запускались только по кнопке, из-за чего протухшую подписку замечали лишь
-    # в момент падения загрузки.
+    # Периодический обход учёток. Пробы живости существовали для каждого
+    # сервиса, но запускались только по кнопке — то есть обхода не было вовсе.
+    # Из-за этого про кончившуюся подписку узнавали в момент падения загрузки.
     try:
         from ripster import accounts_watch as _acc_watch
         asyncio.create_task(_acc_watch.run(config, BASE_DIR))
     except Exception as _e:
         print(f"[accounts-watch] wiring error: {_e}", flush=True)
 
+    # Deferred "restart when guests idle" watcher (no-op until staged via
+    # /api/admin/restart-when-idle).
+    try:
+        asyncio.create_task(_idle_restart_watcher())
+    except Exception as _e:
+        print(f"[idle-restart] wiring error: {_e}", flush=True)
+
+    # Stats DB init + import existing history
+    try:
+        from ripster import stats_collector as _sc
+        _sc.init_db()
+        _sc.import_history(download_history)
+        print(f"[stats] DB ready, imported {len(download_history)} history entries", flush=True)
+    except Exception as _e:
+        print(f"[stats] init error: {_e}", flush=True)
 
     yield
+    if _watchlist_check_task:
+        _watchlist_check_task.cancel()
+    # Штатное выключение (Ctrl+C, сигнал) — единственный путь, который сюда
+    # доходит: перезапуски уходят через os._exit и гасят туннель у себя.
+    try:
+        from ripster.routes.guest import stop_for_restart as _stop_tunnel
+        _stop_tunnel()
+    except Exception:
+        pass
 
 
 app = FastAPI(title="Ripster", lifespan=lifespan)
@@ -783,16 +867,15 @@ app.add_middleware(
 # Defense in depth against DNS-rebinding for side-effect GETs that don't go
 # through the CORS/CSRF Origin check (that check only guards mutations and
 # cross-site response reads). A plain Starlette TrustedHostMiddleware can't
-# fully cover this: besides serveo/cloudflared (static wildcard suffixes
-# below), the owner build also supports ngrok (ripster/ngrok_service.py —
-# NOT shipped in this mirror, same as ripster/routes/guest.py) whose paid
-# `--domain` mode points at an arbitrary owner-chosen hostname read from
+# cover this: besides serveo/cloudflared (static wildcard suffixes below),
+# guest.py also supports ngrok (ngrok-auto defaults True — see
+# ripster/ngrok_service.py) whose free-tier domain we CAN wildcard, but whose
+# paid `--domain` mode points at an arbitrary owner-chosen hostname read from
 # config["public-url"] at runtime — no static suffix can match that. So this
 # checks the static list first, then falls back to comparing Host against
 # the CURRENT public-url's hostname, read live from config on every request
 # (cheap — no I/O) so it tracks tunnel restarts/reconfiguration without an
-# app restart. Kept identical to the owner build for maintainability even
-# though the ngrok path itself is inert here.
+# app restart.
 _TRUSTED_HOST_STATIC   = {"127.0.0.1", "localhost"}
 _TRUSTED_HOST_SUFFIXES = (
     "serveousercontent.com", "serveo.net", "trycloudflare.com",
@@ -805,6 +888,18 @@ def _host_is_trusted(host: str) -> bool:
         return False
     if host in _TRUSTED_HOST_STATIC:
         return True
+    # Private-range / loopback IP literals. The PC↔phone pairing bridge needs the
+    # phone to reach this box by its LAN address (or 10.0.2.2, the Android
+    # emulator's alias for the host loopback) — none of which are "trusted
+    # names". Safe: the server binds loopback/LAN only, so a public attacker
+    # can't present these as a genuine Host, and 127.0.0.1 was already trusted.
+    try:
+        import ipaddress
+        _ip = ipaddress.ip_address(host)
+        if _ip.is_private or _ip.is_loopback or _ip.is_link_local:
+            return True
+    except ValueError:
+        pass
     if any(host == s or host.endswith("." + s) for s in _TRUSTED_HOST_SUFFIXES):
         return True
     pub = (config.get("public-url") or "").strip()
@@ -843,45 +938,11 @@ if _STATIC_DIR.exists():
 from ripster import auth as _app_auth
 _app_auth.install(app, config, save_config)
 
-# Public build has no guest mode — a no-op stub so the few guest-aware call sites
-# (auth checker, /ws fan-out, /api/services/status) all behave as "local owner only".
-class _NoGuestManager:
-    def is_guest_request(self, *_a, **_k): return False
-    def active_session_count(self): return 0
-    def get_session_id_from_request(self, *_a, **_k): return ""
-    def get_session(self, *_a, **_k): return None
-    def get_effective_tokens(self, *_a, **_k): return None
-_guest_mgr = _NoGuestManager()
+from ripster.guest_manager import get_manager as _get_guest_manager
+_guest_mgr = _get_guest_manager()
 _app_auth.set_guest_checker(lambda r: _guest_mgr.is_guest_request(r))
 _app_auth.add_public_path("/api/session-info")
 _app_auth.add_public_path("/api/ping")
-
-
-# Гостевого режима в публичной сборке нет, а `guest.js` спрашивает про него на
-# КАЖДОЙ загрузке страницы. Маршрут был объявлен публичным, но не существовал —
-# и каждый пользователь получал в консоли 404 на старте. Сам по себе он безвреден
-# (`checkSessionMode` тихо выходит на !r.ok), но это красная строка в консоли
-# ровно того вида, по которому ищут чёрный экран, и она забивала счётчик ошибок
-# в `tools/check_boot.js`. Отвечаем честным «гостей тут нет».
-@app.get("/api/session-info")
-async def _session_info():
-    return {"mode": "owner", "guest": False}
-
-
-# Тот же случай, что и выше, ещё дважды. Публичная сборка НЕ содержит удалённого
-# доступа и гостевых ссылок: в её настройках нет ни одного элемента этих панелей,
-# но `remote_ui.js` грузится (его функции зовут guest.js и urlbar_detect.js, так
-# что просто выкинуть файл — это ReferenceError на старте) и на каждой загрузке
-# спрашивает два несуществующих маршрута. Отвечаем тем состоянием, которое и есть
-# правда для этой сборки: выключено.
-@app.get("/api/remote/status")
-async def _remote_status_stub():
-    return {"enabled": False, "public_url": "", "active_links": 0}
-
-
-@app.get("/api/tunnel/status")
-async def _tunnel_status_stub():
-    return {"running": False, "connecting": False, "url": ""}
 
 
 # Unauthenticated liveness/identity probe. The launcher hits this to tell OUR
@@ -968,6 +1029,12 @@ async def _guest_guard(request: Request, call_next):
             )
         if request.method in ("POST", "PUT", "PATCH", "DELETE") and path == "/api/config":
             return JSONResponse({"error": "forbidden"}, status_code=403)
+        # Least-privilege: a guest may VIEW history but must never WIPE or delete
+        # from the owner's download log (/api/history, /api/history/{id}). Mutation
+        # methods on the history routes are owner-only. (GET stays allowed.)
+        if request.method == "DELETE" and path.startswith("/api/history"):
+            return JSONResponse({"error": "forbidden",
+                                 "detail": "Not available for guests"}, status_code=403)
     return await call_next(request)
 
 
@@ -1008,9 +1075,9 @@ process_queue      = _runner.process_queue
 _ctx.process_queue = process_queue
 
 # ── Route modules ──────────────────────────────────────────────────────────────
+from ripster.routes import history    as _history
 from ripster.routes import watchlist  as _watchlist
 from ripster.routes import radar      as _radar
-from ripster.routes import history    as _history
 from ripster.routes import spotify    as _spotify
 from ripster.routes import discovery  as _discovery
 from ripster.routes import releases   as _releases
@@ -1023,20 +1090,27 @@ from ripster.routes import apple_auth as _apple_auth
 from ripster.routes import bbc        as _bbc
 from ripster.routes import spectrogram as _spectrogram
 from ripster.routes import isrc        as _isrc
+from ripster.routes import guest       as _guest_routes
 from ripster.routes import download    as _download_routes
 from ripster.routes import beatport    as _beatport_routes
+from ripster.routes import stats       as _stats_routes
 from ripster.routes import soundcloud  as _soundcloud_routes
+from ripster.routes import library     as _library_routes
+from ripster.routes import admin       as _admin_routes
 from ripster.routes import ripster_coder as _coder_routes
+from ripster.routes import tagger_routes as _tagger_routes
 from ripster.routes import telemetry    as _telemetry_routes
 from ripster.routes import service_login as _service_login_routes
 from ripster.routes import digs         as _digs_routes
+from ripster.routes import pairing      as _pairing_routes
+from ripster.routes import upcoming     as _upcoming_routes
 from ripster import telemetry as _telemetry
 from ripster import tl1001 as _tl1001
 
 _tl1001.install(config)          # 1001Tracklists source (login optional, disk-cached)
+_history.install(app, _ctx)
 _watchlist.install(app, _ctx)
 _radar.install(app, _ctx)
-_history.install(app, _ctx)
 _discovery.install(app, _ctx)
 _digs_routes.install(app, _ctx)
 _spotify.install(app, _ctx)
@@ -1051,16 +1125,27 @@ _apple_auth.install(app, _ctx)
 _bbc.install(app, _ctx)
 _spectrogram.install(app)
 _isrc.install(app, _ctx)
+_guest_routes.install(app, _ctx)
 _download_routes.install(app, _ctx)
 _beatport_routes.install(app, _ctx)
+_stats_routes.install(app, config, ws_clients_ref=ws_clients)
 _soundcloud_routes.install(app, _ctx)
+_library_routes.install(app, _ctx)
+_admin_routes.install(app, _ctx)
 _coder_routes.install(app, _ctx)
+_tagger_routes.install(app, _ctx)
 _telemetry_routes.install(app, _ctx)
 # Единый вход в сервисы: кнопка открывает окно входа и сама забирает токен,
 # вместо «открой DevTools и скопируй куку» (SoundCloud/Deezer/Apple/Яндекс).
 _service_login_routes.install(app, _ctx)
-# Diagnostics telemetry: this (tester) build forwards warn/error to the owner.
-# configure() mints an anon instance id; ingest endpoint is PUBLIC (token-gated).
+# PC↔phone pairing: handshake + service-credential handoff to the mobile app.
+_pairing_routes.install(app, _ctx)
+# Радар ГРЯДУЩЕГО: релизы, которые объявлены в прессе, но ещё не вышли.
+# Обычный радар их не видит — в каталогах сервисов их пока нет.
+_upcoming_routes.install(app, _ctx)
+# Diagnostics telemetry: tester builds forward warn/error to the owner. configure()
+# mints an anon instance id; the ingest endpoint is PUBLIC (token-gated) so tester
+# builds can reach it over the tunnel. The forwarder task is started in startup.
 config["_release_version"] = RELEASE_VERSION
 _telemetry.configure(config, save_config, BASE_DIR)
 # Матрица доступности релиза по сервисам: кэш на диске, чтобы не опрашивать
@@ -1085,6 +1170,12 @@ def _spawn_restart(delay: float = 0.4) -> None:
     import subprocess, threading
     def _do_restart():
         time.sleep(delay)   # let any in-flight HTTP response arrive first
+        # Туннель гасим ДО выхода — почему именно так, см. guest.stop_for_restart.
+        try:
+            from ripster.routes.guest import stop_for_restart as _stop_tunnel
+            _stop_tunnel()
+        except Exception:
+            pass
         if os.environ.get("RIPSTER_LAUNCHER") == "1":
             os._exit(0)     # launcher respawns us (single owner, no console flash)
             return
@@ -1099,6 +1190,36 @@ def _spawn_restart(delay: float = 0.4) -> None:
         )
         os._exit(0)
     threading.Thread(target=_do_restart, daemon=True).start()
+
+
+# When the owner stages a batch of changes but guests are mid-download, they can
+# ask for a DEFERRED restart: a watcher applies it the moment guests go idle, so
+# nobody is cut off. None = not pending.
+_restart_when_idle: bool = False
+
+
+def _guests_idle() -> bool:
+    """Safe-to-restart: no live guest sessions AND the queue isn't processing."""
+    try:
+        if _qs.is_running:
+            return False
+        if any(t.get("status") in ("running", "downloading", "queued") for t in queue):
+            return False
+        return _guest_mgr.active_session_count() == 0
+    except Exception:
+        return False
+
+
+async def _idle_restart_watcher():
+    """Apply a deferred restart as soon as guests are idle (see _restart_when_idle)."""
+    global _restart_when_idle
+    while True:
+        await asyncio.sleep(20)
+        if _restart_when_idle and _guests_idle():
+            print("[idle-restart] guests idle → applying deferred restart", flush=True)
+            _restart_when_idle = False
+            _spawn_restart()
+            return
 
 
 def _check_owner(request: Request) -> bool:
@@ -1120,6 +1241,23 @@ async def admin_restart(request: Request):
     return {"ok": True}
 
 
+@app.post("/api/admin/restart-when-idle")
+async def admin_restart_when_idle(request: Request, body: dict = None):
+    """Stage (or cancel) a deferred restart applied at the next guest-idle window.
+    body {cancel:true} clears it. If guests are ALREADY idle, restart right now."""
+    global _restart_when_idle
+    if not _check_owner(request):
+        raise HTTPException(403, "Not authorized")
+    if (body or {}).get("cancel"):
+        _restart_when_idle = False
+        return {"ok": True, "pending": False}
+    if _guests_idle():
+        _spawn_restart()
+        return {"ok": True, "pending": False, "restarting": True}
+    _restart_when_idle = True
+    sessions = _guest_mgr.active_session_count()
+    return {"ok": True, "pending": True,
+            "sessions": sessions, "queue_running": _qs.is_running}
 
 # ── Services status (used by search selector to hide unconfigured services) ───
 @app.get("/api/services/status")
@@ -1160,25 +1298,97 @@ async def services_status(request: Request):
         "beatport":   _has("beatport-username"),
         "soundcloud": _has("soundcloud-oauth-token"),
         "yandex":     _has("yandex-token"),
+        "bbc":        True,   # BBC Sounds public API — no credentials needed
     }
 
 
+# ── Watchlist periodic check ───────────────────────────────────────────────────
+_watchlist_check_task = None
+
+async def _watchlist_loop():
+    # The first sleep resumes the clock from the last real pass instead of
+    # restarting it — otherwise a restart every few minutes means the 6h timer
+    # never runs out and the watchlist is never checked at all.
+    first = True
+    while True:
+        # Usually the plain 6h interval, but wake earlier when the Auckland
+        # Friday comes first — see watchlist.next_check_delay().
+        await asyncio.sleep(_watchlist.initial_check_delay(config) if first
+                            else _watchlist.next_check_delay(config))
+        first = False
+        if watchlist:
+            # One bad pass must not take the loop down with it: without this the
+            # task dies silently and the watchlist stops until the next restart.
+            try:
+                await _watchlist._check_watchlist()
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:                                  # noqa: BLE001
+                print(f"[watchlist] проверка упала: {e}", flush=True)
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────────────
 @app.websocket("/ws")
 async def websocket_endpoint(ws: WebSocket):
-    if not _app_auth.ws_allowed(ws):
+    # Paired phone: authenticates with its device token (?pair=<token>), not the
+    # owner cookie — so /ws works from the phone even when a password is set.
+    _pair_tok = ws.query_params.get("pair", "")
+    _is_paired_phone = False
+    if _pair_tok:
+        try:
+            from ripster.routes import pairing as _pr
+            _is_paired_phone = _pr._token_valid(_pair_tok)
+        except Exception:
+            _is_paired_phone = False
+
+    if not _is_paired_phone and not _app_auth.ws_allowed(ws):
         await ws.close(code=1008)
         return
     await ws.accept()
     ws_clients.add(ws)
+    if _is_paired_phone:
+        try:
+            from ripster.routes import pairing as _pr
+            _ws_paired_phones[ws] = _pr._pc_id()
+        except Exception:
+            _ws_paired_phones[ws] = "1"
 
-    _ws_guest_sid = ""
-    _ws_is_guest  = False
+    _ws_guest_sid = None if _is_paired_phone else _guest_mgr.get_session_id_from_request(ws)
+    _ws_session   = _guest_mgr.get_session(_ws_guest_sid) if _ws_guest_sid else None
+    # Only a real GUEST-mode share session gets the filtered guest queue view. An
+    # owner-mode share session — or a stale `ripster-guest` cookie the owner picked
+    # up by opening one of his own share links — must NOT downgrade the owner to the
+    # empty guest queue: that made the queue blink empty on every WS reconnect
+    # (the ongoing queue_update broadcasts carry the real queue, so it flickered
+    # gone-on-init / back-on-update, amplified by the serveo tunnel reconnecting).
+    _ws_is_guest  = bool(_ws_session and _ws_session.get("token_mode") == "guest")
+    # …UNLESS this very browser is the authenticated OWNER. Opening one of your own
+    # GUEST-mode share links leaves a `ripster-guest` cookie that otherwise
+    # downgrades the real owner to the (empty) guest queue — exactly the "bot adds
+    # a task but it never shows in Ripster" bug. A valid owner `ripster-session`
+    # always wins over a stale guest cookie.
+    if _ws_is_guest and _app_auth.is_enabled() and \
+       _app_auth.verify_session_cookie(ws.cookies.get("ripster-session", "")):
+        _ws_is_guest = False
+    if _ws_is_guest:
+        _ws_guest_sids[ws] = _ws_guest_sid
+
     _ws_stat_row = 0
+    try:
+        from ripster import stats_collector as _sc
+        _client_ip = (ws.headers.get("x-forwarded-for") or "").split(",")[0].strip() or \
+                     (ws.client.host if ws.client else "")
+        _ws_stat_row = _sc.record_ws_connect(
+            session_id=_ws_guest_sid or "",
+            client_ip=_client_ip,
+            is_guest=_ws_is_guest,
+        )
+    except Exception:
+        _ws_stat_row = 0
 
     def _ws_queue_snapshot():
+        if _ws_is_guest:
+            return _guest_queue_view(_ws_guest_sid)
         return queue_snapshot()
 
     try:
@@ -1215,6 +1425,14 @@ async def websocket_endpoint(ws: WebSocket):
     finally:
         _ws_broker.unregister(ws)
         ws_clients.discard(ws)
+        _ws_guest_sids.pop(ws, None)
+        _ws_paired_phones.pop(ws, None)
+        try:
+            if _ws_stat_row:
+                from ripster import stats_collector as _sc
+                _sc.record_ws_disconnect(_ws_stat_row)
+        except Exception:
+            pass
 
 
 def _takeover_stale_server(host: str, port: int) -> bool:
@@ -1341,7 +1559,10 @@ if __name__ == "__main__":
     print("─" * 52)
     Path(config.get("save-path", "downloads")).mkdir(parents=True, exist_ok=True)
     save_config(config)
-    # Самопроверка связей — см. ripster/selfcheck.py.
+    # Самопроверка связей: ловит «всё на месте, но не соединено» — переключатель
+    # без права записи, скрипт с чужого CDN, сервис, который умеет искать и не
+    # предлагается. Работает по файлам, в сеть не ходит, занимает миллисекунды.
+    # На первом же прогоне нашла три таких расхождения (02.08.2026).
     try:
         from ripster import selfcheck as _sc
         _sc.run(verbose=True)
