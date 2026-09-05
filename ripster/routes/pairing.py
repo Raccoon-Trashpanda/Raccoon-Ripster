@@ -809,6 +809,25 @@ async def pair_fetch(body: dict, request: Request):
     return JSONResponse({"error": "enqueue_failed", "detail": str(res)[:200]}, status_code=502)
 
 
+@router.get("/api/pair/station")
+async def pair_station(request: Request, genre: str = "", limit: int = 40):
+    """Редакторская подборка Apple по жанру — для станций на телефоне.
+
+    Телефон сам Apple не стримит и dev-токена не имеет, зато умеет разрешить
+    вещь в играбельную копию у своего сервиса по ISRC. Поэтому ПК отдаёт
+    только МЕТАДАННЫЕ подборки, без ссылок на поток.
+
+    Отдаём и то, ЧЬЯ это подборка: редакция Apple или сторонний составитель.
+    Разница по качеству между ними велика, и прятать её от клиента нельзя —
+    пусть решает, ставить такой список во главу станции или на добор.
+    """
+    if not _token_valid(_bearer(request)):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from ripster import apple_stations as _as
+    res = await _as.station(genre, _s.get("config") or {}, limit=max(1, min(100, limit)))
+    return res
+
+
 def _find_pair_task(task_id: str) -> dict | None:
     for t in _s.get("queue") or []:
         if t.get("id") == task_id:
@@ -1091,7 +1110,8 @@ def install(app, ctx) -> None:
                   "/api/pair/share", "/api/pair/status", "/api/pair/fetch",
                   "/api/pair/unpair", "/api/pair/revoke-all",
                   "/api/pair/ping", "/api/pair/mode", "/api/pair/activity",
-                  "/api/pair/artist", "/api/pair/label"):
+                  "/api/pair/artist", "/api/pair/label",
+                  "/api/pair/station"):
             _auth.add_public_path(p)
             _auth._CSRF_EXEMPT_PATHS.add(p)
     except Exception as e:  # pragma: no cover

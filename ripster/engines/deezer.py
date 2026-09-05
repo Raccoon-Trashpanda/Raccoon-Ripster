@@ -136,8 +136,15 @@ def _ensure_media_patch() -> None:
         print(f"[deezer] media-guard patch skipped: {e}", flush=True)
 
 
-def _arl_plan() -> tuple[str, bool]:
-    """Тариф и живость ОСНОВНОГО Deezer-ARL: («Deezer Free», True) и т.п.
+def _arl_plan(arl: str = "") -> tuple[str, bool, bool]:
+    """Тариф, живость и права на lossless у ARL, которым шёл ЭТОТ прогон:
+    («Deezer Free», True, False).
+
+    `arl` пустой — спросим основной из конфига (одиночная учётка, прежнее
+    поведение). При включённом пуле сюда обязан прийти ARL слота: 04.09.2026
+    отказал слот 3, а диагноз ставили слоту 0 — и на живую бесплатную учётку
+    выдали «ARL протух, переклей токен». Диагноз не про того, кто упал, хуже
+    отсутствующего: он уводит от настоящей причины.
 
     Живёт отдельной функцией, потому что зовут её из СИНХРОННОГО `is_finished`,
     а проверка асинхронная: `asyncio.run` при уже работающем цикле раннера
@@ -155,13 +162,15 @@ def _arl_plan() -> tuple[str, bool]:
             import asyncio
             from ripster import deezer_accounts as _da
             from ripster.credential_health import _load_raw_config
-            cfg = _load_raw_config() or {}
-            arl = str(cfg.get("deezer-arl") or "").strip()
-            if not arl:
+            arl_use = (arl or "").strip()
+            if not arl_use:
+                cfg = _load_raw_config() or {}
+                arl_use = str(cfg.get("deezer-arl") or "").strip()
+            if not arl_use:
                 return
             loop = asyncio.new_event_loop()
             try:
-                out.update(loop.run_until_complete(_da.arl_info(arl, fresh=True)) or {})
+                out.update(loop.run_until_complete(_da.arl_info(arl_use, fresh=True)) or {})
             finally:
                 loop.close()
         except Exception:                                       # noqa: BLE001
@@ -171,13 +180,19 @@ def _arl_plan() -> tuple[str, bool]:
     t = threading.Thread(target=_run, daemon=True)
     t.start()
     t.join(timeout=12)
-    return str(out.get("plan") or ""), bool(out.get("alive"))
+    return (str(out.get("plan") or ""), bool(out.get("alive")),
+            bool(out.get("lossless")))
 
 
 @register
 
 class DeezerEngine(EngineBase):
     name = "deezer"
+    # ARL, которым реально запустили ЭТОТ прогон (слот пула или основной).
+    # `is_finished` конфига не получает, а объяснять отказ надо про упавшую
+    # учётку, а не про первую в списке. Экземпляр движка свой на задачу
+    # (`get_engine` → `cls()`), так что параллельные загрузки не мешают.
+    _last_arl = ""
 
     def qualities(self) -> list[dict]:
         return [{**q, "engine": self.name} for q in _QUALITIES]
@@ -189,6 +204,7 @@ class DeezerEngine(EngineBase):
         # a plain single-account setup never sets `_deezer_cfg_dir`, so this is
         # a no-op (behaves exactly as before the pool existed).
         arl      = (config.get("deezer-arl") or "").strip()
+        self._last_arl = arl
         cfg_override = config.get("_deezer_cfg_dir") or ""
         out_path = config.get("deezer-save-path") or config.get("save-path", "downloads")
         bitrate  = _BITRATE.get(quality, "3")
@@ -267,13 +283,32 @@ class DeezerEngine(EngineBase):
             # и 04.09.2026 гость получил совет переклеивать токен, который был
             # исправен: обе учётки владельца оказались Deezer Free. Совет был не
             # просто бесполезен — он уводил от настоящей причины.
-            plan, alive = _arl_plan()
-            if alive and plan and "premium" not in plan.lower() and "hifi" not in plan.lower():
+            plan, alive, lossless = _arl_plan(self._last_arl)
+            if alive and lossless:
+                # Deezer говорит «учётка платная, lossless разрешён», а deemix
+                # всё равно спросил ARL. Значит дело не в подписке и не в самом
+                # токене: до deemix он не доехал (изолированный конфиг слота,
+                # файл `.arl`) либо был отвергнут при входе. Совет «переклей
+                # токен» здесь заведомо ложный — 04.09.2026 его получили три
+                # раза подряд на живых учётках.
                 return EngineResult(
                     False,
-                    error=f"Deezer: у этой учётки нет подписки ({plan}) — скачивание "
-                          f"платных качеств ей недоступно. ARL живой, менять его незачем: "
-                          f"нужен ARL аккаунта с Deezer Premium, либо выбери качество, "
+                    error=f"Deezer: учётка живая и с подпиской ({plan or 'тариф неизвестен'}), "
+                          f"но deemix её не принял — токен либо не доехал до его конфига "
+                          f"(слот пула, файл .arl), либо отвергнут при входе. Менять ARL "
+                          f"незачем: повтори загрузку; если повторяется — проверь слоты "
+                          f"Deezer в настройках.",
+                )
+            # Тариф читаем ТОЛЬКО как право на lossless (`web_lossless` от самого
+            # Deezer). Проверка на слова «premium»/«hifi» в названии врала:
+            # Deezer Family — платный тариф с lossless, и его назвали бы
+            # «учётка без подписки».
+            if alive and plan:
+                return EngineResult(
+                    False,
+                    error=f"Deezer: у этой учётки нет прав на платные качества ({plan}) — "
+                          f"FLAC/320 ей недоступны. ARL живой, менять его незачем: "
+                          f"нужен ARL аккаунта с платной подпиской, либо выбери качество, "
                           f"доступное бесплатному аккаунту.",
                 )
             return EngineResult(
