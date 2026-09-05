@@ -843,6 +843,57 @@ async def pair_taste(request: Request, limit: int = 40):
     return await _taste.build(Path(_s.get("base_dir") or "."), limit=max(1, min(200, limit)))
 
 
+@router.post("/api/pair/genre")
+async def pair_genre(body: dict, request: Request):
+    """Жанры пачки треков по справочнику Beatport.
+
+    Зачем отдельный маршрут, а не поле в другом ответе: у Apple, Deezer и
+    Яндекса поджанров НЕТ вовсе — замер 05.09.2026 даёт «Dance, Music», где
+    «Music» это корневая категория каталога. Точный ярлык есть только у
+    Beatport, и он висит на релизе, поэтому спрашивать надо про конкретный
+    трек. Телефон своего Beatport-токена не имеет — спрашивает ПК.
+
+    Вход: `{"tracks": [{"artist": "...", "title": "..."}, ...]}`.
+    Выход: `{"genres": {"<artist>|<title>": "<жанр>"}}` — ТОЛЬКО то, что
+    удалось узнать. Отсутствие ключа означает «не знаю», и подставлять туда
+    пустую строку нельзя: обучаемый модуль на той стороне отличает одно от
+    другого.
+    """
+    if not _token_valid(_bearer(request)):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    items = (body or {}).get("tracks") or []
+    if not isinstance(items, list) or not items:
+        return {"genres": {}, "reason": "no_tracks"}
+
+    from ripster.engines import orpheus_beatport as _bp
+    from ripster import genre_oracle as _go
+    # Токена Beatport может не быть — это не повод молчать: Discogs работает
+    # без ключа и покрывает шире, включая всё неэлектронное, где Beatport
+    # прямо ошибается.
+    token = ""
+    try:
+        token = await _bp._beatport_access_token()
+    except Exception:
+        token = ""
+
+    out: dict = {}
+    sources: dict = {}
+    # Потолок на пачку: справочник ходит в сеть на каждый трек, и пускать сюда
+    # список любой длины значит подвесить и ПК, и телефон.
+    for it in items[:40]:
+        artist = str((it or {}).get("artist") or "").strip()
+        title = str((it or {}).get("title") or "").strip()
+        if not artist or not title:
+            continue
+        g, src = await _go.best_genre(artist, title, token)
+        if g:
+            key = f"{artist}|{title}"
+            out[key] = g
+            sources[key] = src
+    return {"genres": out, "sources": sources, "asked": min(len(items), 40),
+            "beatport": bool(token)}
+
+
 def _find_pair_task(task_id: str) -> dict | None:
     for t in _s.get("queue") or []:
         if t.get("id") == task_id:
@@ -1126,7 +1177,8 @@ def install(app, ctx) -> None:
                   "/api/pair/unpair", "/api/pair/revoke-all",
                   "/api/pair/ping", "/api/pair/mode", "/api/pair/activity",
                   "/api/pair/artist", "/api/pair/label",
-                  "/api/pair/station", "/api/pair/taste"):
+                  "/api/pair/station", "/api/pair/taste",
+                  "/api/pair/genre"):
             _auth.add_public_path(p)
             _auth._CSRF_EXEMPT_PATHS.add(p)
     except Exception as e:  # pragma: no cover
