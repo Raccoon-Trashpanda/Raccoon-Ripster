@@ -1104,6 +1104,7 @@ from ripster.routes import service_login as _service_login_routes
 from ripster.routes import digs         as _digs_routes
 from ripster.routes import pairing      as _pairing_routes
 from ripster.routes import upcoming     as _upcoming_routes
+from ripster.routes import audio        as _audio_routes
 from ripster import telemetry as _telemetry
 from ripster import tl1001 as _tl1001
 
@@ -1143,6 +1144,10 @@ _pairing_routes.install(app, _ctx)
 # Радар ГРЯДУЩЕГО: релизы, которые объявлены в прессе, но ещё не вышли.
 # Обычный радар их не видит — в каталогах сервисов их пока нет.
 _upcoming_routes.install(app, _ctx)
+# Свой аудиотракт ПК: вывод локального lossless мимо микшера Windows.
+# Замер 05.09.2026: WASAPI exclusive берёт 44.1/48/96 кГц, shared — только 48,
+# то есть web-плеер физически не может отдать частоту файла без пересчёта.
+_audio_routes.install(app, _ctx)
 # Diagnostics telemetry: tester builds forward warn/error to the owner. configure()
 # mints an anon instance id; the ingest endpoint is PUBLIC (token-gated) so tester
 # builds can reach it over the tunnel. The forwarder task is started in startup.

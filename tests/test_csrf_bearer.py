@@ -25,9 +25,21 @@ def _req(method="POST", headers=None):
 
 
 class TestBearerIsNotCsrfable:
+    """`auth._config` — ОБЩЕЕ состояние модуля на весь прогон.
+
+    Его нельзя ни чистить, ни менять по месту: в полном прогоне другой тест
+    подставляет туда ConfigService, у которого нет ни `clear`, ни `update`, и
+    первые две попытки изоляции разваливались именно об это. Подменяем САМО
+    ИМЯ на время теста и возвращаем обратно — тест не должен чинить одно,
+    ломая соседа.
+    """
+
     def setup_method(self):
-        auth._config.clear()
-        auth._config["remote-enabled"] = True
+        self._saved = auth._config
+        auth._config = {"remote-enabled": True}
+
+    def teardown_method(self):
+        auth._config = self._saved
 
     def test_a_paired_phone_post_is_allowed(self):
         assert auth._csrf_check(_req(headers={"Authorization": "Bearer abc123"})) is True
@@ -57,5 +69,9 @@ class TestBearerIsNotCsrfable:
 class TestLocalBoxUnchanged:
     def test_without_remote_access_a_plain_post_is_fine(self):
         """На локальной машине без удалённого доступа поведение прежнее."""
-        auth._config.clear()
-        assert auth._csrf_check(_req()) is True
+        saved = auth._config
+        auth._config = {}
+        try:
+            assert auth._csrf_check(_req()) is True
+        finally:
+            auth._config = saved
