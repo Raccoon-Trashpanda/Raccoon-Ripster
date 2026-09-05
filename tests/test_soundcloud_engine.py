@@ -12,10 +12,19 @@ def sc():
 
 
 def test_sc_qualities(sc):
+    """Одна карточка, а не две.
+
+    Их было две — «MP3 128» и «HQ AAC», — и обе врали: выбор транскода делает
+    Lucida и делает одинаково (hq → aac → mp3 → opus), так что «MP3 128»
+    приносил AAC 160, а «HQ AAC» — тот же поток либо отказ «Could not find HQ
+    format» на треках без тира hq (замер 05.09.2026: их подавляющее
+    большинство). Два контрола с одним результатом — это два контрола, которые
+    врут; выбирать человеку тут не из чего, и честнее сказать это прямо.
+    """
     qs = sc.qualities()
-    assert len(qs) == 2
+    assert len(qs) == 1
     assert all(q["engine"] == "soundcloud" for q in qs)
-    assert {"mp3", "hq"} == {q["id"] for q in qs}
+    assert {"best"} == {q["id"] for q in qs}
 
 
 @pytest.mark.parametrize("line,expected", [
