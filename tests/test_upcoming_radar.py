@@ -138,3 +138,25 @@ class TestDefectsFoundOnLiveFeeds:
         a = parse_announcement("Fontaines D.C. Announce New Album ‘Dopamine Chamber,’ Out In March")
         assert a is not None
         assert a.title == "Dopamine Chamber"
+
+    def test_a_description_is_stripped_from_the_artist(self):
+        """Живой заголовок The Line of Best Fit: «Alternative metal band
+        Prodigal announce EP…» — в вишлисте нужен артист, а не кто он такой."""
+        a = parse_announcement("Alternative metal band Prodigal announce EP ‘The Floating World’")
+        assert a is not None
+        assert a.artist == "Prodigal"
+        assert a.title == "The Floating World"
+
+    def test_of_is_not_a_title(self):
+        """«Remix EP of Latrec’s Kutika» — «of …» это не название нового
+        релиза, а указание на чужой."""
+        a = parse_announcement("Viscera Transmissions announce Remix EP of Latrec’s Kutika")
+        assert a is not None
+        assert a.title == ""
+
+    def test_a_dangling_feat_is_not_part_of_the_title(self):
+        """Живой Stereogum: «…New Album Bloodwork Feat. Someone» — разрез по
+        точке оставлял в названии висящее «Feat»."""
+        a = parse_announcement("Gun Announce New Album Bloodwork Feat. Someone Else")
+        assert a is not None
+        assert a.title == "Bloodwork"

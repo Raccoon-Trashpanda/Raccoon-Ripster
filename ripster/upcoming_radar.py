@@ -11,26 +11,31 @@
 этого и только в новостях — в каталоге его ещё нет.
 
 Список источников СОБРАН ЗАМЕРАМИ 05.09.2026, а не по представлению о том, кто
-пишет про музыку. Проверялось одно: сколько заголовков в свежей ленте являются
-анонсами релиза.
+пишет про музыку: у каждого кандидата считалось, сколько заголовков свежей ленты
+на самом деле являются анонсами релиза. Плотность каждого оставленного источника
+стоит рядом с ним в [SOURCES].
 
-    Quietus          34 заголовка,  7 анонсов   — лучший по плотности
-    Pitchfork news   30            7
-    BrooklynVegan    16            9  (много про КОНЦЕРТЫ, не про альбомы)
-    Clash            10            2
-    XLR8R            10            2  (электроника)
-    NME              10            1
-    FACT             11            0  в этот заход, но формат подходящий
+Что НЕ прошло проверку и почему это стоит знать:
 
-    Guardian music   31            0  — рецензии и очерки, НЕ новости релизов
-    Bandcamp Daily   36            0  — то же самое
-    Stereogum / Consequence / Loud and Quiet — сеть не пустила
-    Reddit           403 и на JSON, и на RSS — нужен зарегистрированный app (OAuth)
+* Guardian music (0 из 31) и Bandcamp Daily (0 из 36) — рецензии и очерки, а не
+  новости релизов. Guardian был назван владельцем как пример; для этой задачи он
+  не годится.
+* Rolling Stone (0/11), Gorilla vs Bear (0/36) — новости есть, анонсов в срезе
+  нет; формат не про них.
+* Blabbermouth (0/30, металл) — анонсы там ЕСТЬ, но заголовок устроен иначе:
+  имя капсом и вставные обороты («UMBILICUS, Featuring CANNIBAL CORPSE And
+  DEICIDE Members, Announces New EP»). Разбор под такое пришлось бы ослабить
+  ровно там, где он отсекает пересказы новостей, — поэтому источник не заведён,
+  а не заведён «мёртвым».
+* Reddit — 403 и на JSON, и на RSS: нужен зарегистрированный app (OAuth).
+  Владелец назвал его источником инсайдов, так что это стоит завести отдельно.
+* Mixmag (404), The Fader / Resident Advisor / Exclaim / Under the Radar (403),
+  Northern Transmissions и HipHopDX (лента не разбирается как XML).
 
-Отсюда честная цифра: открытых источников семь, а не «20+». Guardian, названный
-владельцем, для этой задачи не годится — он про уже вышедшее; Reddit годится, но
-требует регистрации приложения. Обе вещи стоит знать до того, как строить поверх
-них ожидания.
+Готча для того, кто будет писать сетевой слой: Stereogum отвечает 308, HipHopDX
+— 301, и `urllib` в нашем окружении на части лент падает с URLError там, где
+`curl -L` с браузерным User-Agent проходит. Значит: ходить с обычным UA и
+СЛЕДОВАТЬ редиректам, иначе половина списка молча окажется пустой.
 
 Здесь только РАЗБОР — чистые функции над строками. Сеть отдельно: правило
 «является ли этот заголовок анонсом альбома» должно проверяться тестом на живых
@@ -54,17 +59,28 @@ class Source:
 
 
 SOURCES: tuple[Source, ...] = (
+    # Замеры 05.09.2026: сколько заголовков свежей ленты оказались анонсами.
+    Source("Stereogum", "https://www.stereogum.com/feed/", "12/41",
+           "лучшая плотность из всех проверенных; инди и мейнстрим"),
     Source("The Quietus", "https://thequietus.com/feed/", "7/34",
-           "лучшая плотность анонсов; много андеграунда и электроники"),
+           "андеграунд и электроника"),
     Source("Pitchfork", "https://pitchfork.com/rss/news/", "7/30",
            "крупные анонсы, инди и мейнстрим"),
     Source("Brooklyn Vegan", "https://www.brooklynvegan.com/feed/", "9/16",
            "много про концерты — заголовки о турах отсеиваются разбором"),
+    Source("The Line of Best Fit", "https://www.thelineofbestfit.com/feed", "3/11", ""),
     Source("Clash", "https://www.clashmusic.com/feed/", "2/10", ""),
     Source("XLR8R", "https://xlr8r.com/feed/", "2/10", "электроника"),
+    Source("Consequence", "https://consequence.net/feed/", "1/16", ""),
+    Source("DJ Mag", "https://djmag.com/rss.xml", "1/15", "танцевальная сцена"),
+    Source("The Ransom Note", "https://www.theransomnote.com/feed/", "1/11",
+           "андеграундная электроника"),
     Source("NME", "https://www.nme.com/news/music/feed", "1/10", ""),
-    Source("FACT", "https://www.factmag.com/feed/", "0/11",
-           "в замер анонсов не попало, но формат ленты подходящий"),
+    # Ленты новостного формата, у которых в замеряемый заход анонсов не
+    # оказалось. Держим: один срез — это не приговор источнику.
+    Source("FACT", "https://www.factmag.com/feed/", "0/11", ""),
+    Source("Attack Magazine", "https://www.attackmagazine.com/feed/", "0/11", "электроника"),
+    Source("Spin", "https://www.spin.com/feed/", "0/11", ""),
 )
 
 
@@ -98,7 +114,15 @@ _NOT_RELEASE = re.compile(
 _FILLER = (
     "in", "since", "for", "after", "with", "from", "on", "this", "next",
     "and", "that", "which", "ft", "feat", "featuring", "out", "due",
-    "shares", "share", "song", "single", "track", "video",
+    "shares", "share", "song", "single", "track", "video", "of", "by",
+)
+
+#: Описательная приставка перед именем: «Alternative metal band Prodigal
+#: announces…». В вишлисте нужен артист, а не пересказ, кто он такой.
+_DESCRIPTOR = re.compile(
+    r"^.{0,40}?\b(?:band|duo|trio|quartet|collective|project|singer|songwriter"
+    r"|rapper|producer|artist|group|composer|dj)\s+(?=\S)",
+    re.I,
 )
 
 #: Кавычки, в которые ленты заворачивают название: обычные, типографские, «ёлочки».
@@ -147,7 +171,10 @@ def _clean_title(tail: str) -> str:
     if re.match(rf"^(?:{'|'.join(_FILLER)})\b", t, re.I):
         return ""
     first = re.split(r"\s+[–—|]\s+|,\s|\.\s", t)[0]
-    return first.strip(" ,.;:–—-")
+    first = first.strip(" ,.;:–—-")
+    # «…New Album Bloodwork Feat. Someone» — разрез по точке оставлял в конце
+    # висящее «Feat»/«Ft». К названию оно не относится.
+    return re.sub(r"\s+(?:feat|ft|featuring|with)$", "", first, flags=re.I).strip()
 
 
 def parse_announcement(headline: str) -> Announcement | None:
@@ -172,6 +199,11 @@ def parse_announcement(headline: str) -> Announcement | None:
     # предложение.
     if artist.endswith(",") or len(artist.split()) > 6:
         return None
+    # «Alternative metal band Prodigal» → «Prodigal». Живой заголовок The Line
+    # of Best Fit: без этого в вишлист уезжает описание вместо имени.
+    stripped = _DESCRIPTOR.sub("", artist).strip()
+    if stripped and stripped != artist and len(stripped) >= 2:
+        artist = stripped
     # «Listen to» / «Watch» — это про уже вышедшее, а не про анонс.
     if re.match(r"^(?:listen|watch|hear|stream)\b", artist, re.I):
         return None
