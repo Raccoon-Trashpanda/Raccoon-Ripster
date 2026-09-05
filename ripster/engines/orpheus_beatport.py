@@ -142,9 +142,16 @@ async def _beatport_access_token() -> str:
             return at
     except Exception:
         pass
+    # Сюда попадаем, когда срок токена ИСТЁК. Дальше либо обновим, либо
+    # честно скажем «нет токена». Возвращать протухший нельзя: он выглядит
+    # рабочим, а каждый вызов с ним получает 401 — источник молча выпадает, и
+    # причину не найти. Поймано 06.09.2026: справочник жанров перестал видеть
+    # Beatport, а функция бодро отдавала строку.
     rt = sess.get("refresh_token") or ""
     if not rt:
-        return at
+        print("[beatport] токен истёк, refresh_token отсутствует — нужен повторный вход",
+              flush=True)
+        return ""
     try:
         import httpx
         async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
@@ -157,9 +164,14 @@ async def _beatport_access_token() -> str:
             _BP_AT_CACHE["token"] = j["access_token"]
             _BP_AT_CACHE["exp"]   = now + max(60, int(j.get("expires_in", 3600)) - 120)
             return _BP_AT_CACHE["token"]
-    except Exception:
-        pass
-    return at
+        print(f"[beatport] обновление токена отклонено ({r.status_code}: "
+              f"{r.text[:80]}) — нужен повторный вход логином и паролем", flush=True)
+    except Exception as e:
+        print(f"[beatport] обновление токена не удалось ({type(e).__name__}) — "
+              f"считаю, что токена нет", flush=True)
+    # Ни обновить, ни подтвердить. «Нет токена» — правда; протухший был бы
+    # ложью, из-за которой вызывающий пошёл бы за 401.
+    return ""
 
 
 # ── patterns ─────────────────────────────────────────────────────────────────

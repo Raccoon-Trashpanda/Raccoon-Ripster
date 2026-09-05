@@ -165,18 +165,47 @@ class GenreResolver:
         by_key: dict[str, list[str]] = {}
 
         for src, labels in (votes or {}).items():
+            # Голос ОДНОГО источника сначала складывается внутри себя.
+            #
+            # MusicBrainz про Кендрика Ламара говорит «hip hop», «conscious hip
+            # hop», «jazz rap», «west coast hip hop» — это одно и то же,
+            # сказанное четырьмя способами. Пока каждый ярлык считался
+            # отдельным кандидатом, источник ДРОБИЛ собственный голос и
+            # проигрывал тому, кто сказал одно слово. Замер 06.09.2026: из-за
+            # этого у Кендрика побеждал «deep house» со страницы однофамильца
+            # на Bandcamp, а у Fugees — «Drum n Bass» знаменитого ремикса.
+            #
+            # Складываем по вложенности: «conscious hip hop» содержит «hip
+            # hop», значит усиливает его, а не спорит с ним. «jazz rap» не
+            # содержит — остаётся отдельным кандидатом, и это честно.
+            own: dict[str, float] = {}
+            own_label: dict[str, str] = {}
             for i, lab in enumerate(labels or []):
                 k = canon(lab)
                 if not k:
                     continue
-                w = self.weight(src, area_hint or "")
-                w *= 1.0 / (1.0 + i)                # затухание по порядку
+                w = 1.0 / (1.0 + i)                 # затухание по порядку
                 if is_bucket(lab):
                     w *= 0.25                       # ведро — не ответ
                 elif is_modifier(lab):
                     w *= 0.35                       # уточнение — почти не ответ
-                score[k] = score.get(k, 0.0) + w
-                label_of.setdefault(k, lab)
+                host = next((h for h in own if h in k or k in h), None)
+                if host is None:
+                    own[k] = w
+                    own_label[k] = lab
+                else:
+                    own[host] += w
+                    # Имя группы — то, что источник назвал ПЕРВЫМ, а не самое
+                    # короткое. По длине выходило хуже: Django Reinhardt
+                    # становился «jazz» вместо «Gypsy Jazz», Sun Ra — «jazz»
+                    # вместо «Free Jazz», Robert Hood терял «(Raw / Deep /
+                    # Hypnotic)». Источник ставит главное первым, и это знание
+                    # надо использовать, а не заменять своей меркой.
+
+            trust = self.weight(src, area_hint or "")
+            for k, w in own.items():
+                score[k] = score.get(k, 0.0) + w * trust
+                label_of.setdefault(k, own_label[k])
                 by_key.setdefault(k, []).append(src)
 
         if not score:
