@@ -52,6 +52,46 @@ def _orpheus_python() -> str:
     # и именно про такие копии предупреждал разбор 16.08: расходятся они молча.
     return app_python()
 
+def _tier_now() -> str:
+    """Тариф аккаунта прямо сейчас: 'bp_link_pro_plus_2' / 'bp_basic' / '' если
+    узнать не удалось. Синхронно — вызывается из build_cmd.
+
+    Пустая строка означает ровно «не знаю», а не «нет подписки»: сеть могла
+    отвалиться, токен — протухнуть. Отличать эти два случая обязательно, вся
+    починка ниже держится именно на этом различии.
+    """
+    import httpx
+    sess = _read_bp_session() or {}
+    at = sess.get("access_token") or ""
+    rt = sess.get("refresh_token") or ""
+    for attempt in ("stored", "refreshed"):
+        if attempt == "refreshed":
+            if not rt:
+                return ""
+            try:
+                r = httpx.post("https://api.beatport.com/v4/auth/o/token/",
+                               data={"client_id": _BP_CLIENT_ID, "refresh_token": rt,
+                                     "grant_type": "refresh_token"}, timeout=10)
+                at = r.json()["access_token"] if r.status_code == 200 else ""
+            except Exception:
+                return ""
+        if not at:
+            continue
+        try:
+            r = httpx.get("https://api.beatport.com/v4/auth/o/introspect/",
+                          headers={"Authorization": f"Bearer {at}"}, timeout=10)
+        except Exception:
+            return ""
+        if r.status_code == 200:
+            try:
+                return (r.json().get("subscription") or "").strip()
+            except Exception:
+                return ""
+        if r.status_code != 401:
+            return ""
+    return ""
+
+
 def _settings_path() -> Path:
     return _orpheus_dir() / "config" / "settings.json"
 
@@ -187,10 +227,12 @@ def is_authenticated(config: dict) -> bool:
     )
 
 
-def _update_orpheus_settings(quality: str, save_path: str, config: dict) -> None:
+def _update_orpheus_settings(quality: str, save_path: str, config: dict) -> str:
+    """Возвращает предупреждение для лога ('' — всё в порядке)."""
+    note = ""
     sp = _settings_path()
     if not sp.exists():
-        return
+        return note
     try:
         cfg = json.loads(sp.read_text(encoding="utf-8"))
         gen = cfg.setdefault("global", {}).setdefault("general", {})
@@ -199,15 +241,33 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict) -> None
         if save_path:
             gen["download_path"] = save_path.rstrip("/\\") + "\\"
 
-        # The owner's Beatport account has an active (Pro Plus) subscription, but the
-        # module's post-login `get_account()` introspect can transiently return an
-        # empty `subscription` (e.g. right after a refresh-token rotation), which
-        # makes OrpheusDL raise a FALSE "Account does not have an active 'Link'
-        # subscription" and blocks every download. Skip that check — a real lack of
-        # entitlement still surfaces later as a stream/territory error, so we lose no
-        # honesty, only the false-negative that paralysed Beatport for guests.
+        # `disable_subscription_checks` — НЕ безобидный тумблер «не мешай».
+        # В orpheusdl-beatport ровно тот же флаг гейтит ПОВЫШЕНИЕ КАЧЕСТВА
+        # (interface.py, valid_account): по умолчанию весь quality_parse — это
+        # "medium", то есть AAC 128, и апгрейд до "high"/"lossless" происходит
+        # ТОЛЬКО внутри той же ветки, что и проверка подписки. Выключив проверку
+        # ради обхода ложного отказа, мы вместе с ней выключили и апгрейд —
+        # аккаунт Professional+ полгода качал 128 kbps в папку «FLAC CD».
+        # Замер 05.09.2026: introspect отдаёт bp_link_pro_plus_2, а файл на диске —
+        # aac 133 kbps при запрошенном hifi.
+        #
+        # Поэтому решает не флаг, а ФАКТ: спрашиваем тариф сами.
+        #   тариф известен  → проверку ВКЛЮЧАЕМ (модуль возьмёт правду из API и
+        #                     поднимет качество; ложного отказа быть не может —
+        #                     мы только что видели непустую подписку);
+        #   тариф неизвестен→ проверку выключаем, как раньше, чтобы сеть или
+        #                     протухший токен не рвали закачку, но ЧЕСТНО
+        #                     предупреждаем: качество будет 128k.
         adv = cfg["global"].setdefault("advanced", {})
-        adv["disable_subscription_checks"] = True
+        tier = _tier_now()
+        adv["disable_subscription_checks"] = not tier
+        if not tier:
+            note = ("Beatport: не удалось подтвердить тариф аккаунта — качество будет "
+                    "ограничено AAC 128 kbps (модуль поднимает FLAC/AAC 256 только по "
+                    "подтверждённой подписке). Проверь сеть и логин Beatport.")
+        elif not tier.startswith("bp_link_pro") and quality in ("hifi", "high"):
+            note = (f"Beatport: тариф аккаунта — {tier}, это не Professional. FLAC и AAC 256 "
+                    f"на нём недоступны, скачается AAC 128 kbps.")
 
         covers = cfg["global"].setdefault("covers", {})
         covers["embed_cover"]         = True
@@ -231,6 +291,7 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict) -> None
         sp.write_text(json.dumps(cfg, indent=4, ensure_ascii=False), encoding="utf-8")
     except Exception:
         pass
+    return note
 
 
 # Сколько отказов «нет прав» подряд терпим, прежде чем прекратить прогон.
@@ -251,6 +312,7 @@ class OrpheusBeatportEngine(EngineBase):
         self.abort_reason = ""
         self._perm_fails = 0
         self._attempts = 0
+        self._tier_note = ""
 
     def qualities(self) -> list[dict]:
         return list(_QUALITIES)
@@ -273,7 +335,7 @@ class OrpheusBeatportEngine(EngineBase):
 
         save_path = config.get("beatport-save-path") or config.get("save-path") or ""
         orpheus_quality = _QUALITY_ORPHEUS.get(quality, "hifi")
-        _update_orpheus_settings(orpheus_quality, save_path, config)
+        self._tier_note = _update_orpheus_settings(orpheus_quality, save_path, config)
 
         # The bundled embeddable Python runs ISOLATED (sys.flags.isolated==1, a side
         # effect of the ._pth) → it does NOT add the script's directory to sys.path AND
@@ -300,6 +362,13 @@ class OrpheusBeatportEngine(EngineBase):
         clean = _strip_ansi(line).strip()
         if not clean:
             return
+
+        # Предупреждение о тарифе рождается в build_cmd, где отдавать события
+        # некуда. Отдаём его первой же строкой прогона, чтобы человек увидел
+        # причину ДО того, как получит на диск не то качество.
+        if self._tier_note:
+            yield Event(kind=EventKind.LINE, message=self._tier_note, level=LineLevel.WARN)
+            self._tier_note = ""
 
         # Ранняя отсечка: чарт, на который у аккаунта нет прав, не станет
         # доступнее к 87-му треку. Две части условия обязательны — если хоть
