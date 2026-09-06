@@ -2521,7 +2521,24 @@ async def _resolve_release_id(url: str) -> str:
             qz_app   = (_config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
             hdr = {"X-User-Auth-Token": qz_token} if qz_token else {}
             mt = _re.search(r"/track/(\d+)", u)
-            ma = _re.search(r"/album/(?:-/)?([A-Za-z0-9]+)", u)
+            # ID АЛЬБОМА У QOBUZ — ПОСЛЕДНИЙ СЕГМЕНТ ПУТИ, А НЕ ПЕРВЫЙ ПОСЛЕ
+            # `/album/`.
+            #
+            # Ссылка выглядит так:
+            #   qobuz.com/us-en/album/random-access-memories-daft-punk/0886443927087
+            # Здесь после `/album/` идёт СЛАГ, и `([A-Za-z0-9]+)` откусывал от
+            # него «random» (дефис в класс не входит), после чего album/get
+            # спрашивался про несуществующий альбом и ветка молча падала в
+            # `url:`-фолбэк. Дальше по цепочке это выглядело не как ошибка
+            # разбора, а как «релиза нигде нет»: матрица получала ключ
+            # `name:…`, ни одного идентификатора у неё не было, и она честно
+            # отвечала «не спрашивал, нет ISRC» про все пять сервисов сразу
+            # (замер 06.09.2026 на живой ссылке Daft Punk).
+            #
+            # Тот же дефект в тот же день чинился в мобильном `QobuzUrl.kt` —
+            # правило одно: берём последний сегмент, а старую форму
+            # `/album/-/<id>` он покрывает сам собой.
+            ma = _re.search(r"/album/(?:[^/?#]+/)*([A-Za-z0-9]+)/?(?:[?#]|$)", u)
             async with _HTTP.ashared() as c:
                 if mt:
                     r = await c.get("https://www.qobuz.com/api.json/0.2/track/get",
