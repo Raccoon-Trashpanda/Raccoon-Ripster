@@ -12,6 +12,41 @@
  * увести человека на соседний жанр хуже, чем честно ничего не предложить.
  */
 
+/* ── Вид плитки: один в один с мобильной WaveTile ─────────────────────────
+ *
+ * Палитра и правило выбора цветов взяты из `ui/screens/HomeScreen.kt`
+ * (WAVE_PALETTE + WaveTile), включая ФОРМУЛУ ХЕША. Это не педантизм: хеш
+ * там — обычный `String.hashCode()` из Java, и повторив его здесь, мы
+ * получаем ОДИН И ТОТ ЖЕ цвет у одного и того же жанра на телефоне и на
+ * компьютере. Разъехавшиеся цвета выглядели бы как два разных продукта.
+ */
+const ST_PALETTE = ['#FF4D8F', '#A238FF', '#3A5FD9', '#1ECBE1', '#FF5C3C', '#38E0A0'];
+
+/** `String.hashCode()` из Java: h = 31*h + c, с переполнением в 32 бита. */
+function stHash(s) {
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (Math.imul(31, h) + s.charCodeAt(i)) | 0;
+  return Math.abs(h);
+}
+
+function stHexA(hex, a) {
+  const n = parseInt(hex.slice(1), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a})`;
+}
+
+/** Градиент плитки по её имени. Те же альфы, что в WaveTile: .9 → .55. */
+function stGradient(seed, a1, a2) {
+  const h = stHash(String(seed || ''));
+  const i = h % ST_PALETTE.length;
+  let j = (Math.floor(h / 7) + 3) % ST_PALETTE.length;
+  // Если оба индекса совпали, градиента нет — плитка выходит плоской заливкой.
+  // На тридцати наших станциях так случалось у трёх; сдвиг на один цвет
+  // убирает это, не трогая остальные. Та же страховка добавлена в мобильную
+  // WaveTile, чтобы вид не разъехался между версиями.
+  if (j === i) j = (j + 1) % ST_PALETTE.length;
+  return `linear-gradient(135deg, ${stHexA(ST_PALETTE[i], a1)}, ${stHexA(ST_PALETTE[j], a2)})`;
+}
+
 let _stHome = null;          // ответ /api/stations/home
 let _stBusy = false;
 let _stSeed = 0;             // растёт на «ещё раз» — тот же жанр, другой эфир
@@ -50,7 +85,8 @@ function stRender() {
         const bits = [];
         if (a.plays) bits.push(`♪ ${a.plays}`);
         if (a.downloads) bits.push(`↓ ${a.downloads}`);
-        return `<button class="st-chip" onclick="stPlayArtist(${escJ2(a.name)})" title="${esc(t('st.play_artist'))}">
+        return `<button class="st-chip" style="background:${stGradient(a.name, .30, .16)}"
+                        onclick="stPlayArtist(${escJ2(a.name)})" title="${esc(t('st.play_artist'))}">
                   <span class="st-chip-name">${esc(a.name)}</span>
                   <span class="st-chip-num">${bits.join('  ')}</span>
                 </button>`;
@@ -61,7 +97,8 @@ function stRender() {
   // ── Твои жанры ────────────────────────────────────────────────────────────
   if ((d.genres || []).length) {
     const rows = (d.genres || []).map(g => g.station
-      ? `<button class="st-chip" onclick="stPlay(${escJ2(g.station)})">
+      ? `<button class="st-chip" style="background:${stGradient(g.genre, .30, .16)}"
+                 onclick="stPlay(${escJ2(g.station)})">
            <span class="st-chip-name">${esc(g.genre)}</span>
            <span class="st-chip-num">♪ ${g.plays}</span>
          </button>`
@@ -80,7 +117,9 @@ function stRender() {
   parts.push(stSection(
     t('st.all_genres'), t('st.all_genres_hint'),
     (d.tiles || []).map(s =>
-      `<button class="st-tile" onclick="stPlay(${escJ2(s.id)})">
+      `<button class="st-tile" style="background:${stGradient(s.id, .9, .55)}"
+               onclick="stPlay(${escJ2(s.id)})">
+         <span class="st-tile-play">&#9654;</span>
          <span class="st-tile-name">${esc(s.title)}</span>
        </button>`).join('')
   ));
