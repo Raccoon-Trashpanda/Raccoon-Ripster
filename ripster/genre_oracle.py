@@ -185,23 +185,87 @@ async def discogs_genre(artist: str, title: str) -> str | None:
     return out
 
 
-async def best_genre(artist: str, title: str, beatport_token: str = "") -> tuple[str | None, str]:
+_RESOLVER: "object | None" = None
+
+
+def _resolver():
+    """Один разборщик на процесс — он копит доверие к источникам по областям.
+
+    Новый на каждый вызов забывал бы всё выученное, и самокоррекция, ради
+    которой модуль писался, не работала бы вовсе.
+    """
+    global _RESOLVER
+    if _RESOLVER is None:
+        from pathlib import Path
+
+        from ripster.genre_resolver import GenreResolver
+        _RESOLVER = GenreResolver(Path(__file__).resolve().parent.parent / "genre_trust.json")
+    return _RESOLVER
+
+
+async def best_genre(artist: str, title: str, beatport_token: str = "",
+                     budget: float = 8.0) -> tuple[str | None, str]:
     """Лучший доступный ярлык и ЧЕЙ он.
 
-    Порядок не «кто первый ответит», а по области компетенции:
-      1. Beatport — если ответил не ведром, это ярлык лейбла на релизе, точнее
-         не бывает; но он молчит обо всём, что не танцевальная электроника;
-      2. Discogs — шире и почти всегда попадает, включая то, где Beatport врёт.
+    Спрашиваем ВСЕ четыре источника разом и сводим ответ в
+    [ripster.genre_resolver]: там живут правила, купленные четырьмя циклами
+    замеров — область компетенции магазина, корзины остатков, уточнение
+    подвида, свёртка синонимов внутри источника.
 
-    Возвращает `(ярлык, источник)`; `(None, "")` означает честное «не знаю».
-    Источник отдаётся наружу намеренно: обучаемому модулю на той стороне важно,
-    насколько доверять учителю, а не только что он сказал.
+    До 06.09.2026 здесь стояло «Beatport, а если молчит — Discogs». Правила
+    были написаны, проверены на сорока треках — и не подключены ни к чему:
+    продукт всё это время звал вот эту функцию и получал ровно те ошибки,
+    которые я считал исправленными. Curtis Mayfield приходил как «House»,
+    Sun Ra — как «Nu Disco / Disco».
+
+    Бюджет нужен потому, что маршрут спрашивает до сорока треков подряд, а у
+    MusicBrainz свой ограничитель в запрос в секунду. Не успел — значит НЕ
+    ОТВЕТИЛ; резолвер сводит по тем, кто успел, и это честно. Ответ «не знаю»
+    остаётся возможным: `(None, "")`.
+
+    Возвращает `(ярлык, источник)` — источник отдаётся наружу намеренно:
+    обучаемому модулю на той стороне важно, насколько доверять учителю.
     """
+    import asyncio
+
+    from ripster import genre_sources as _gs
+    from ripster.genre_resolver import GenreResolver
+
+    async def _one(name, coro):
+        try:
+            return name, await coro
+        except Exception:
+            return name, None
+
+    jobs = [
+        _one("discogs", discogs_genre(artist, title)),
+        _one("bandcamp", _gs.bandcamp_tags(artist, title)),
+        _one("musicbrainz", _gs.musicbrainz_tags(artist)),
+    ]
     if beatport_token:
-        g = await genre_for(artist, title, beatport_token)
-        if g:
-            return g, "beatport"
-    g = await discogs_genre(artist, title)
-    if g:
-        return g, "discogs"
-    return None, ""
+        jobs.append(_one("beatport", genre_for(artist, title, beatport_token)))
+
+    votes: dict[str, list[str]] = {}
+    try:
+        done = await asyncio.wait_for(asyncio.gather(*jobs), timeout=budget)
+    except (asyncio.TimeoutError, Exception):
+        done = []
+    for name, got in done:
+        if not got:
+            continue
+        votes[name] = [got] if isinstance(got, str) else list(got)[:4]
+
+    if not votes:
+        return None, ""
+
+    out = _resolver().resolve_and_learn(votes)
+    label = out.get("genre")
+    if not label:
+        return None, ""
+    # Чей ответ победил: из согласившихся берём самого весомого. Наружу должно
+    # уйти ИМЯ источника, а не «сводка» — тот, кто учится на этом, сверяет его
+    # со своим списком доверия.
+    agreed = (out.get("evidence") or {}).get(label) or []
+    order = ["beatport", "discogs", "musicbrainz", "bandcamp"]
+    src = next((s for s in order if s in agreed), (agreed or [""])[0])
+    return label, src
