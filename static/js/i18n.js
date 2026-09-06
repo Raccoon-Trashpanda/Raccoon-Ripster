@@ -2,6 +2,11 @@
 var LANG = {
   ru: {
     'dlorb.title':'Индикатор загрузки: круг показывает текущую загрузку, силуэты позади — что стоит следом','dlorb.more':'+{n}','dlorb.section':'🌀 Круг загрузки в панели','dlorb.enable':'Показывать круг загрузки','dlorb.enable_sub':'Выкатывается в пустом низу левой панели, когда вкладка задач не открыта. Только свои ручные загрузки — гости и автоматика его не запускают.','dlorb.variant':'Оформление круга','dlorb.variant_sub':'Четыре варианта. Отличаются не только видом, но и тем, откуда берётся цвет: доминирующий тон обложки или её средний цвет.','dlorb.v_neon':'Неон','dlorb.v_aurora':'Сияние','dlorb.v_vinyl':'Винил','dlorb.v_mono':'Кольцо','dlorb.mode_dominant':'доминирующий тон','dlorb.mode_average':'средний цвет',
+    // Поле метаданных слева от круга загрузки (dlorb.js). Строка «своих» верна и
+    // для владельца, и для гостя: у обоих в снимке очереди только их задачи.
+    'dlmeta.running':'Скачивается','dlmeta.queued':'В очереди','dlmeta.last':'Последняя загрузка',
+    'dlmeta.failed':'Последняя попытка','dlmeta.idle':'Своих загрузок в очереди нет',
+    'dlmeta.unknown_title':'Название неизвестно','dlmeta.more_queued':'ещё {n} в очереди',
     // ── discography button 2026-07-19 ──
     'ck.dl_all':'Скачать всё',
     'ck.dl_filtered':'Скачать выбранное',
@@ -1621,6 +1626,9 @@ var LANG = {
   },
   en: {
     'dlorb.title':'Download orb: the coloured circle is the current download, the silhouettes behind it are what comes next','dlorb.more':'+{n}','dlorb.section':'🌀 Download orb in the sidebar','dlorb.enable':'Show the download orb','dlorb.enable_sub':'Rolls out in the empty bottom of the left sidebar while the tasks tab is not open. Your own manual downloads only — guests and automation never trigger it.','dlorb.variant':'Orb design','dlorb.variant_sub':'Four options. They differ not only in looks but in where the colour comes from: the cover\'s dominant hue or its average colour.','dlorb.v_neon':'Neon','dlorb.v_aurora':'Aurora','dlorb.v_vinyl':'Vinyl','dlorb.v_mono':'Ring','dlorb.mode_dominant':'dominant hue','dlorb.mode_average':'average colour',
+    'dlmeta.running':'Downloading','dlmeta.queued':'Queued','dlmeta.last':'Last download',
+    'dlmeta.failed':'Last attempt','dlmeta.idle':'No downloads of your own in the queue',
+    'dlmeta.unknown_title':'Title unknown','dlmeta.more_queued':'{n} more queued',
     // ── discography button 2026-07-19 ──
     'ck.dl_all':'Download all',
     'ck.dl_filtered':'Download selected',

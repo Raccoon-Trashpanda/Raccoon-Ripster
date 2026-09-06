@@ -4,11 +4,23 @@
  * процентов, ни шкалы больше нигде нет. Пустая полоса под пунктом «Бот» —
  * единственное место в панели, которое ничем не занято.
  *
- * ДВИЖЕНИЕ. Круг выкатывается из левого края, ПАРКУЕТСЯ ПОСЕРЕДИНЕ и стоит,
- * пока идёт загрузка; по завершении укатывается направо. На область карточек
- * не вылезает НИКОГДА — правая граница панели это стена, и держит её CSS
- * (.dlorb-dock{overflow:hidden;contain:layout paint}), а не аккуратность
+ * ДВИЖЕНИЕ. Круг выкатывается из левого края, ПАРКУЕТСЯ У ПРАВОГО КРАЯ дока и
+ * стоит, пока идёт загрузка; по завершении укатывается направо. На область
+ * карточек не вылезает НИКОГДА — правая граница панели это стена, и держит её
+ * CSS (.dlorb-dock{overflow:hidden;contain:layout paint}), а не аккуратность
  * арифметики: даже если расчёт X ошибётся, за прямоугольник ничего не выйдет.
+ *
+ * ПОЧЕМУ НЕ ПОСЕРЕДИНЕ (было так до 06.09.2026). Слева от круга появилось поле
+ * метаданных, а при центральной парковке слева оставалось ~77px, из которых
+ * стопка силуэтов съедала ещё 39px: в оставшиеся 30px не влезает ни одно
+ * название. Круг сдвинут вправо, и левая часть дока отдана тексту.
+ *
+ * ПОЛЕ МЕТАДАННЫХ (слева от круга). Отвечает на «что качается прямо сейчас»
+ * и живёт даже когда не качается ничего: тогда показывает ПОСЛЕДНЮЮ задачу из
+ * очереди, а если и её нет — честную нейтральную строку. Ничего не додумывает:
+ * нет названия — так и написано «название неизвестно», а не выдуманный текст.
+ * Область отбора у поля ТА ЖЕ, что у круга (свои ручные), чтобы текст и круг
+ * физически не могли говорить о разных задачах.
  *
  * ОЧЕРЕДЬ. Цветной только тот круг, чья задача ТЕКУЩАЯ. Следующие стоят
  * стопкой позади СИЛУЭТАМИ — без цвета и оттенков. Силуэту обложка не нужна,
@@ -45,8 +57,12 @@
   const CIRC  = 2 * Math.PI * RAD;
   const EXIT_MS = 720;
   const DOCK_W_FALLBACK = 198;   // ширина панели 220 минус padding 2×10
+  const PAD_R    = 6;        // отступ припаркованного круга от правого края дока
+  const META_GAP = 10;       // зазор между полем метаданных и стопкой кругов
+  const META_MIN = 56;       // уже этого поле не сжимаем — читать станет нечего
 
-  const ACTIVE = { queued: 1, running: 1, pending: 1 };
+  const ACTIVE   = { queued: 1, running: 1, pending: 1 };
+  const TERMINAL = { done: 1, error: 1, cancelled: 1 };
 
   // Честный запасной цвет: обложки может не быть, она может не догрузиться,
   // и она почти всегда с чужого домена — canvas тогда «пачкается».
@@ -54,6 +70,7 @@
 
   let host    = null;
   let moreEl  = null;
+  let metaEl  = null;        // { root, label, title, sub } — поле слева от круга
   let enabled = true;
   let variant = DEF_VARIANT;
   let overflow = 0;
@@ -190,10 +207,18 @@
 
   // ── чтение очереди ──────────────────────────────────────────────────────
 
-  function isEligible(task) {
+  // «Задача этого человека, добавленная руками». Вынесено из isEligible отдельно,
+  // потому что поле метаданных показывает и ЗАВЕРШЁННЫЕ задачи — а им статус из
+  // ACTIVE по определению не подходит. Оба отбора обязаны совпадать по владельцу
+  // и источнику, иначе текст и круг заговорят о разных задачах.
+  function isMine(task) {
     if (!task) return false;
     if ((task.session_id || '') !== '') return false;      // гость — не наш случай
-    if (task.source !== 'manual') return false;            // watchlist/batch/retry — тоже
+    return task.source === 'manual';                       // watchlist/batch/retry — тоже
+  }
+
+  function isEligible(task) {
+    if (!isMine(task)) return false;
     return !!ACTIVE[task.status || 'queued'];
   }
 
@@ -224,6 +249,32 @@
     try { return (task && task.meta && task.meta.artworkUrl) || ''; } catch (_) { return ''; }
   }
 
+  // Название задачи. Порядок источников — от достоверного к грубому:
+  // meta.title (пришёл от сервиса) → разбор ссылки → сама ссылка. Если и её нет,
+  // возвращаем ПУСТО, и наверху это превращается в честное «название неизвестно»:
+  // подставлять сюда правдоподобный текст нельзя, пустая строка значит «не знаю».
+  function titleOf(task) {
+    try {
+      const m  = task && task.meta;
+      const tt = (m && typeof m.title === 'string') ? m.title.trim() : '';
+      if (tt) return tt;
+      const url = (task && typeof task.url === 'string') ? task.url.trim() : '';
+      if (!url) return '';
+      if (typeof _titleFromUrl === 'function') {
+        const guess = String(_titleFromUrl(url) || '').trim();
+        if (guess) return guess;
+      }
+      return url;
+    } catch (_) { return ''; }
+  }
+
+  function artistOf(task) {
+    try {
+      const a = task && task.meta && task.meta.artist;
+      return (typeof a === 'string') ? a.trim() : '';
+    } catch (_) { return ''; }
+  }
+
   function pctOf(task) {
     const p = Number(task && task.progress) || 0;
     return Math.max(0, Math.min(100, Math.round(p)));
@@ -246,8 +297,20 @@
   // ── раскладка ───────────────────────────────────────────────────────────
 
   // Чистая функция: слот i (0 — текущий) → X в пикселях внутри дока.
+  // Парковка у ПРАВОГО края, а не по центру: левая половина дока отдана полю
+  // метаданных (см. шапку файла). При центре тексту оставалось ~30px.
   function slotX(i, w) {
-    return Math.round((w - ORB) / 2) - i * GAP;
+    return Math.round(w - ORB - PAD_R) - i * GAP;
+  }
+
+  // Ширина поля метаданных = всё, что осталось слева от самого левого видимого
+  // элемента стопки. Кругов нет вовсе → поле занимает док целиком: именно в этом
+  // состоянии («ничего не качается») ему и нужнее всего место под текст.
+  function metaWidth(w, visCount, hasOverflow) {
+    if (visCount <= 0) return Math.max(META_MIN, w);
+    let x = slotX(Math.max(0, visCount - 1), w);
+    if (hasOverflow) x = slotX(MAX_GHOSTS, w) - 20;   // «+N» стоит левее стопки
+    return Math.max(META_MIN, x - META_GAP);
   }
 
   function dockWidth() {
@@ -332,6 +395,11 @@
     setTimeout(function () {
       try { o.el.remove(); } catch (_) {}
       if (orbs.get(id) === o) orbs.delete(id);
+      // Пересчёт ПОСЛЕ уката. Поле метаданных резервирует место под живые круги,
+      // а sync зовётся только на события очереди: последний укатившийся круг не
+      // порождает ни одного события, и поле навсегда оставалось ужатым под уже
+      // исчезнувшую стопку — снаружи это «текст почему-то в половину дока».
+      try { sync(); } catch (_) {}
     }, EXIT_MS);
   }
 
@@ -376,6 +444,108 @@
       o.pct.textContent = p + '%';
       o.cnt.textContent = cntTxt || '';
     } catch (_) {}
+  }
+
+  // ── поле метаданных слева от круга ──────────────────────────────────────
+  //
+  // Стили заданы прямо здесь, а не в main.css, СОЗНАТЕЛЬНО: узел целиком
+  // создаётся этим файлом, и держать его вид в другом файле — значит завести
+  // ещё одну пару, которую надо не забыть обновить вместе (и ещё один ?v=).
+  function buildMeta() {
+    const root = el('div', 'dlmeta');
+    root.style.cssText =
+      'position:absolute;left:0;top:50%;transform:translateY(-50%);' +
+      'box-sizing:border-box;padding:0 2px;overflow:hidden;z-index:1;' +
+      'opacity:0;transition:opacity .3s ease';
+    const label = el('div', 'dlmeta-label');
+    label.style.cssText =
+      'font-family:var(--display);font-size:8px;font-weight:800;letter-spacing:.6px;' +
+      'text-transform:uppercase;color:var(--muted);' +
+      'white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+    const title = el('div', 'dlmeta-title');
+    title.style.cssText =
+      'font-family:var(--display);font-size:11px;font-weight:700;line-height:1.22;' +
+      'color:var(--text);margin-top:2px;word-break:break-word;overflow:hidden;' +
+      'display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical';
+    const sub = el('div', 'dlmeta-sub');
+    sub.style.cssText =
+      'font-size:9px;line-height:1.25;color:var(--muted);margin-top:2px;' +
+      'white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+    root.appendChild(label); root.appendChild(title); root.appendChild(sub);
+    return { root: root, label: label, title: title, sub: sub };
+  }
+
+  // Что показать. Возвращает {task, state, active}:
+  //   running/queued — есть незавершённая задача (running важнее просто стоящей);
+  //   last/failed    — активных нет, показываем последнюю ЗАВЕРШЁННУЮ, причём
+  //                    'failed' отдельно: назвать «загрузкой» то, что упало с
+  //                    ошибкой или было отменено, — это соврать об успехе;
+  //   idle           — своих задач в очереди нет вообще.
+  // Времени завершения у задачи нет (в _make_task только "added"), поэтому
+  // «последняя» = последняя по порядку в массиве очереди. Другого источника нет,
+  // и придумывать порядок по прогрессу/логу было бы догадкой, а не фактом.
+  function pickMeta() {
+    const q = readQueue();
+    const active = [], finished = [];
+    for (let i = 0; i < q.length; i++) {
+      const tk = q[i];
+      if (!isMine(tk)) continue;
+      if (ACTIVE[tk.status || 'queued']) active.push(tk);
+      else if (TERMINAL[tk.status]) finished.push(tk);
+    }
+    if (active.length) {
+      let cur = null;
+      for (let i = 0; i < active.length; i++) if (active[i].status === 'running') { cur = active[i]; break; }
+      return { task: cur || active[0], state: cur ? 'running' : 'queued', active: active.length };
+    }
+    if (finished.length) {
+      const last = finished[finished.length - 1];
+      return { task: last, state: last.status === 'done' ? 'last' : 'failed', active: 0 };
+    }
+    return { task: null, state: 'idle', active: 0 };
+  }
+
+  function renderMeta(w, visCount, hasOverflow) {
+    if (!host) return;
+    if (!metaEl) {
+      metaEl = buildMeta();
+      // Вставляем ПЕРВЫМ, чтобы круги в потоке шли после и перекрывали текст,
+      // а не наоборот, если ширина вдруг посчиталась с запасом.
+      try { host.insertBefore(metaEl.root, host.firstChild); } catch (_) { metaEl = null; return; }
+    }
+    const show = enabled && !queueTabActive();
+    metaEl.root.style.opacity = show ? '1' : '0';
+    if (!show) return;
+    metaEl.root.style.width = metaWidth(w, visCount, hasOverflow) + 'px';
+
+    const pick = pickMeta();
+
+    if (!pick.task) {
+      // Ничего своего в очереди. Строку кладём в крупный узел, а не в мелкую
+      // подпись: это единственное, что здесь есть, и оно должно читаться.
+      metaEl.label.textContent = '';
+      metaEl.title.textContent = _t('dlmeta.idle');
+      metaEl.title.style.color = 'var(--muted)';
+      metaEl.sub.textContent   = '';
+      return;
+    }
+
+    metaEl.label.textContent = _t('dlmeta.' + pick.state);
+    metaEl.title.style.color = 'var(--text)';
+    const name = titleOf(pick.task);
+    metaEl.title.textContent = name || _t('dlmeta.unknown_title');
+
+    const parts = [];
+    const art = artistOf(pick.task);
+    if (art) parts.push(art);
+    else {
+      // Исполнитель неизвестен — говорим ПОЧЕМУ, если сервер это сообщил.
+      const m = pick.task.meta || {};
+      if (m.meta_error) parts.push('⚠ ' + m.meta_error);
+      else if (!m.enriched && (pick.state === 'running' || pick.state === 'queued')) parts.push(_t('q.meta_loading'));
+    }
+    if (pick.active > 1) parts.push(_t('dlmeta.more_queued', { n: pick.active - 1 }));
+    metaEl.sub.textContent = parts.join(' · ');
   }
 
   function renderMore(w) {
@@ -455,6 +625,10 @@
     }
     if (vis.length > 1) warm(vis[1]);
     renderMore(w);
+    // Ширину считаем по ЧИСЛУ ЖИВЫХ УЗЛОВ, а не по vis: укатывающийся круг ещё
+    // 0.72s едет по доку, и поле, успевшее развернуться на всю ширину, оказывалось
+    // под ним — текст на эти доли секунды перечёркивало кругом.
+    renderMeta(w, Math.max(vis.length, orbs.size), overflow > 0);
   }
 
   function onProgress(msg) {
@@ -563,13 +737,22 @@
       count:    cur ? cur.o.cnt.textContent : '',
       colored:  on.map(function (x) { return !!x.o.colorKey; }),
       dashoffset: cur ? Number(cur.o.arc.getAttribute('stroke-dashoffset')) : null,
-      circumference: CIRC
+      circumference: CIRC,
+      meta: metaEl ? {
+        visible: metaEl.root.style.opacity === '1',
+        width:   metaEl.root.style.width,
+        label:   metaEl.label.textContent,
+        title:   metaEl.title.textContent,
+        sub:     metaEl.sub.textContent,
+        state:   pickMeta().state
+      } : null
     };
   }
 
   function attach(node) {
     host = node || null;
     moreEl = null;
+    metaEl = null;
     orbs.clear();
     if (host) host.setAttribute('data-orb-variant', variant);
     return host;
@@ -579,6 +762,7 @@
     orbs.forEach(function (o) { try { o.el.remove(); } catch (_) {} });
     orbs.clear();
     if (moreEl) { try { moreEl.remove(); } catch (_) {} moreEl = null; }
+    if (metaEl) { try { metaEl.root.remove(); } catch (_) {} metaEl = null; }
     colorCache.clear();
     overflow = 0;
   }
@@ -613,9 +797,22 @@
     resizeT = setTimeout(sync, 150);   // ресайз сыплет десятками событий подряд
   }
 
+  // Смена языка. applyLang() перерисовывает ТОЛЬКО узлы с data-i18n, а поле
+  // метаданных собирается в момент отрисовки, и вешать на него data-i18n нельзя —
+  // там динамический текст, applyLang затёр бы название трека переводом ключа.
+  // Признак смены языка — атрибут lang на <html>, его ставит тот же applyLang.
+  function watchLang() {
+    try {
+      if (typeof MutationObserver !== 'function' || typeof document === 'undefined') return;
+      new MutationObserver(function () { sync(); })
+        .observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
+    } catch (_) {}
+  }
+
   function init() {
     mount();
     sync();
+    watchLang();
     try { window.addEventListener('resize', onResize); } catch (_) {}
   }
   try {
