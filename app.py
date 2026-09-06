@@ -1105,6 +1105,7 @@ from ripster.routes import digs         as _digs_routes
 from ripster.routes import pairing      as _pairing_routes
 from ripster.routes import upcoming     as _upcoming_routes
 from ripster.routes import audio        as _audio_routes
+from ripster.routes import stations     as _stations_routes
 from ripster import telemetry as _telemetry
 from ripster import tl1001 as _tl1001
 
@@ -1126,6 +1127,7 @@ _apple_auth.install(app, _ctx)
 _bbc.install(app, _ctx)
 _spectrogram.install(app)
 _isrc.install(app, _ctx)
+_stations_routes.install(app, _ctx)
 _guest_routes.install(app, _ctx)
 _download_routes.install(app, _ctx)
 _beatport_routes.install(app, _ctx)

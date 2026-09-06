@@ -191,6 +191,77 @@ _mb_cache: dict[str, tuple[list[str], float]] = {}
 _mb_last = 0.0
 
 
+async def musicbrainz_get(params: dict, what: str = "запрос"):
+    """Один вежливый запрос к MusicBrainz. `None` — не ответили.
+
+    ОДИН НА ПРОЦЕСС, и это не педантизм. У MusicBrainz правило «не чаще
+    запроса в секунду» на клиента; два независимых клиента внутри одной
+    программы сбивают ограничитель ДРУГ ДРУГУ и получают 503 оба. Ровно это и
+    случилось 06.09.2026, когда станции завели себе собственный запрос мимо
+    этого троттлера: минуту назад те же теги отдавались с кодом 200, а из
+    приложения пошли сплошные 503.
+
+    503 у них значит «слишком часто, повтори», а не «ничего нет»: молча
+    превращать его в пустой ответ нельзя — источник тогда пропадает на
+    случайных запросах, и общий вывод прыгает.
+    """
+    global _mb_last
+    import asyncio
+    for attempt in range(3):
+        try:
+            wait = 1.1 - (time.time() - _mb_last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _mb_last = time.time()
+            async with httpx.AsyncClient(timeout=20) as cl:
+                r = await cl.get("https://musicbrainz.org/ws/2/artist",
+                                 params=params, headers=_UA)
+            if r.status_code == 200:
+                return r
+            if r.status_code not in (429, 503):
+                print(f"[musicbrainz] {what}: ответ {r.status_code}", flush=True)
+                return None
+        except Exception as e:                                 # noqa: BLE001
+            if attempt == 2:
+                print(f"[musicbrainz] {what}: связь не удалась ({type(e).__name__})",
+                      flush=True)
+                return None
+        await asyncio.sleep(1.5 * (attempt + 1))
+    print(f"[musicbrainz] {what}: ограничитель не отпустил за три попытки", flush=True)
+    return None
+
+
+async def musicbrainz_artists_by_tag(tag: str, limit: int = 40) -> list[tuple[int, str]]:
+    """Артисты жанра: пары «вес тега — имя», от сильного к слабому.
+
+    Вес тега, а не `score` выдачи: score — релевантность СТРОКИ запросу, по
+    нему в «melodic techno» лезла Лана Дель Рей.
+    """
+    t = (tag or "").strip()
+    if not t:
+        return []
+    r = await musicbrainz_get({"query": f'tag:"{t}"', "fmt": "json", "limit": limit},
+                              f"артисты жанра «{t}»")
+    if r is None:
+        return []
+    want = t.lower()
+    out: list[tuple[int, str]] = []
+    try:
+        for a in (r.json() or {}).get("artists") or []:
+            name = (a.get("name") or "").strip()
+            if not name:
+                continue
+            weight = 0
+            for tg in (a.get("tags") or []):
+                if str(tg.get("name") or "").lower() == want:
+                    weight = int(tg.get("count") or 0)
+            out.append((weight, name))
+    except Exception:                                          # noqa: BLE001
+        return []
+    out.sort(key=lambda x: -x[0])
+    return out
+
+
 async def musicbrainz_tags(artist: str) -> list[str]:
     """Теги артиста в MusicBrainz, от сильного к слабому.
 
