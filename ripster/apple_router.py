@@ -183,6 +183,104 @@ def _cached(key: str, fn) -> bool:
     return val
 
 
+# Ответ `/status` публичного менеджера, разобранный. Пустой словарь = спросить
+# не удалось (а не «пул пуст»: это разные вещи и путать их нельзя).
+_pool_status: dict = {}
+_pool_status_ts: float = 0.0
+_POOL_TTL = 60.0
+
+
+def public_pool_status(config: dict) -> dict:
+    """Что НА САМОМ ДЕЛЕ у публичного пула: готов ли, сколько клиентов, какие регионы.
+
+    Раньше здоровье публичного враппера проверялось запросом в корень с
+    условием «код меньше 500». Это доказывает ровно одно: веб-сервер жив. Про
+    ПУЛ за ним — который и делает работу — оттуда не узнать ничего, и мы
+    годами отправляли задачи в пустой пул, чтобы через ~28 секунд получить
+    «no healthy and ready instances available».
+
+    А правда лежит рядом, в одном дешёвом запросе. Замер 06.09.2026::
+
+        GET https://wm.wol.moe/status
+        {"code":0,"data":{"clientCount":19,"ready":true,
+                          "regions":["cn","in","th","br","sg","jp","nz","tw",
+                                     "it","id","kr","tr","my"],"status":true}}
+
+    Здесь важны ОБА поля. `ready` отвечает «пул вообще работает», а `regions` —
+    «для каких витрин у него есть живые устройства». Второе для нас решающее:
+    витрина у нас `us`, аккаунт канадский, и ни того ни другого в списке нет.
+    То есть пул может быть совершенно здоров и всё равно бесполезен именно нам
+    — и это надо говорить сразу, а не после проваленной загрузки.
+
+    Пустой словарь означает «спросить не удалось». Не «пул пуст»: незнание
+    нельзя записывать как отрицательный ответ.
+
+    Автор сервиса — WorldObservationLog (`wol.moe`), он же автор
+    AppleMusicDecrypt, которым работает движок `amd`. Форму эндпоинта видно в
+    его же браузерном клиенте amd.wol.moe; кода оттуда не взято ничего, только
+    знание, КУДА спрашивать. См. CREDITS.md.
+    """
+    global _pool_status, _pool_status_ts
+    host = (config.get("amd-instance-url") or "").strip()
+    if not host:
+        return {}
+    now = time.time()
+    if _pool_status and now - _pool_status_ts < _POOL_TTL:
+        return _pool_status
+    scheme = "https" if config.get("amd-instance-secure", True) else "http"
+    try:
+        r = httpx.get(f"{scheme}://{host}/status", timeout=6.0)
+        data = (r.json() or {}).get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:                                          # noqa: BLE001
+        data = {}
+    _pool_status, _pool_status_ts = data, now
+    return data
+
+
+def public_pool_serves(config: dict, storefront: str = "") -> bool | None:
+    """Есть ли в пуле устройства для НАШЕЙ витрины.
+
+    True / False — знаем; None — спросить не удалось, и тогда решение принимать
+    не по догадке, а по прежнему поведению.
+    """
+    st = public_pool_status(config)
+    regions = st.get("regions")
+    if not isinstance(regions, list) or not regions:
+        return None
+    sf = (storefront or config.get("apple-country") or config.get("storefront") or "us")
+    return str(sf).strip().lower() in {str(x).strip().lower() for x in regions}
+
+
+def public_pool_pick_region(config: dict, want: str = "") -> str:
+    """Какую витрину просить у публичного пула, чтобы он смог отдать ключ.
+
+    Владелец 06.09.2026: «плевать, что он обслуживает — если он работает, он
+    нужен в комбайне как вспомогательная опция». Верно: пул отдаёт тринадцать
+    витрин, и среди них `nz` — та самая, с которой у нас начинается пятница в
+    радаре. То есть его непокрытие нашей витрины это не приговор, а вопрос,
+    какую витрину попросить.
+
+    Порядок: сперва та, что просили (вдруг она в пуле и есть), затем
+    предпочтения владельца, затем что осталось. Пусто — пул не спросился или
+    ничего не обслуживает; тогда вызывающий не выдумывает и оставляет всё как
+    было.
+    """
+    st = public_pool_status(config)
+    regions = [str(x).strip().lower() for x in (st.get("regions") or []) if x]
+    if not regions:
+        return ""
+    w = str(want or "").strip().lower()
+    if w and w in regions:
+        return w
+    pref = config.get("amd-region-preference") or ["nz", "jp", "it", "tw", "kr", "sg", "my", "th"]
+    for cc in [str(x).strip().lower() for x in pref]:
+        if cc in regions:
+            return cc
+    return regions[0]
+
+
 def _public_wrapper_ok(config: dict) -> bool:
     # Honour the pool health gate first — the server can answer HTTP fine while
     # its instance pool has nobody connected (see public_wrapper_healthy below).
@@ -191,6 +289,10 @@ def _public_wrapper_ok(config: dict) -> bool:
     host = (config.get("amd-instance-url") or "").strip()
     if not host:
         return False
+    st = public_pool_status(config)
+    if st:
+        # Спросили пул и получили ответ — верим ему, а не факту «сервер жив».
+        return bool(st.get("ready"))
     scheme = "https" if config.get("amd-instance-secure", True) else "http"
     url = f"{scheme}://{host}"
     return _cached(f"pub:{url}", lambda: httpx.get(url, timeout=6.0).status_code < 500)
@@ -505,6 +607,22 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
         note = f"{q.upper()} · публичный wrapper (выбран вручную)"
         if not _public_wrapper_ok(config):
             note = f"{q.upper()} · публичный wrapper в очереди (выбран вручную)"
+        # ГЛАВНОЕ СКАЗАТЬ СРАЗУ, А НЕ ПОСЛЕ ПРОВАЛЕННОЙ ЗАГРУЗКИ.
+        #
+        # Пул может быть совершенно здоров и всё равно бесполезен именно нам:
+        # устройства в него подключают волонтёры, и витрин там ровно столько,
+        # сколько их стран. Замер 06.09.2026 — пул готов, 19 клиентов, регионы
+        # cn/in/th/br/sg/jp/nz/tw/it/id/kr/tr/my; нашей витрины `us` и
+        # канадского аккаунта в списке нет. Без этой строки человек узнавал бы
+        # об этом из «0 треков» через полминуты перебора.
+        want_sf = (url_sf or acct_sf or config.get("storefront") or "us")
+        if public_pool_serves(config, want_sf) is False:
+            alt = public_pool_pick_region(config, want_sf)
+            if alt and config.get("amd-region-rewrite", True) is not False:
+                note += f" · витрины '{want_sf}' в пуле нет → берём '{alt}'"
+            elif alt:
+                note += (f" · ⚠ витрины '{want_sf}' в пуле нет "
+                         f"(есть, например, '{alt}'), смена региона выключена")
         if foreign:
             note += f" · регион {url_sf}"
         return _decide("amd", q, pref=pref, local_ok=_local_wrapper_ok(config),

@@ -105,6 +105,41 @@ class AMDEngine(EngineBase):
         _p = _up.urlparse(url)
         _qs = {k: v for k, v in _up.parse_qs(_p.query).items() if k in ("i",)}
         clean_url = _up.urlunparse(_p._replace(query=_up.urlencode(_qs, doseq=True)))
+
+        # ВИТРИНА ПОД ПУЛ.
+        #
+        # Устройства в публичный пул подключают волонтёры, поэтому витрин там
+        # ровно столько, сколько их стран — на замере 06.09.2026 тринадцать, и
+        # нашей `us` среди них нет, а `nz` есть. Просить у пула ключ для
+        # витрины, которой он не обслуживает, — гарантированный «0 треков»
+        # через полминуты перебора.
+        #
+        # Каталог у Apple по странам почти общий, поэтому релиз почти всегда
+        # достаётся из другой витрины; номер альбома там свой, и его
+        # пересчитывает `rewrite_storefront_resolved` (у одного релиза
+        # ca/us/jp — три разных номера).
+        #
+        # Выключается ключом `amd-region-rewrite: false`; порядок витрин —
+        # `amd-region-preference`. Это вспомогательная опция, а не поведение
+        # по умолчанию для всего Apple: сюда попадают только задачи, для
+        # которых владелец сам выбрал публичный wrapper.
+        if config.get("amd-region-rewrite", True) is not False:
+            try:
+                from ripster import apple_router as _ar
+                want = _ar.url_storefront(clean_url) or str(config.get("storefront") or "us")
+                if _ar.public_pool_serves(config, want) is False:
+                    alt = _ar.public_pool_pick_region(config, want)
+                    if alt and alt != want:
+                        moved = _ar.rewrite_storefront_resolved(clean_url, alt)
+                        if moved and moved != clean_url:
+                            print(f"[amd] витрина '{want}' пулом не обслуживается → '{alt}': {moved}",
+                                  flush=True)
+                            clean_url = moved
+            except Exception as e:                             # noqa: BLE001
+                # Смена витрины — удобство, а не условие работы: не смогли
+                # выбрать — идём как есть и получим честную ошибку от пула.
+                print(f"[amd] витрину сменить не вышло: {e!r}", flush=True)
+
         return [app_python(), str(runner), clean_url, codec, lang]
 
     def working_dir(self) -> str | None:

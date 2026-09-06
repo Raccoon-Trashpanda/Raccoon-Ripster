@@ -251,6 +251,12 @@ DEFAULT_CONFIG: dict = {
     # ── AMD v2 (AppleMusicDecrypt) ───────────────────────────────────────────
     "amd-dir":           "",
     "amd-instance-url":  "wm.wol.moe",
+    # Публичный пул обслуживает столько витрин, сколько стран у волонтёров
+    # (06.09.2026 — тринадцать, нашей `us` среди них нет, `nz` есть). Ссылку
+    # переводим в обслуживаемую витрину; выключается этим ключом, порядок
+    # витрин задаётся следующим.
+    "amd-region-rewrite": True,
+    "amd-region-preference": ["nz", "jp", "it", "tw", "kr", "sg", "my", "th"],
     "amd-instance-secure": True,
     "amd-parallel":      8,
     "amd-save-lyrics":   True,
