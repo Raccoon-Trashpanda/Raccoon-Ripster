@@ -389,19 +389,108 @@ def _best_slots(cfg: dict) -> dict:
 
     pick("ripster.deezer_pool", lambda a: a["arl"], "deezer.arl")
     pick("ripster.soundcloud_pool", lambda a: a["token"], "soundcloud.oauth")
-    # У Qobuz ранг считается по всей записи, а не по строке секрета.
+    for dst, secret in _best_qobuz(cfg).items():
+        out[dst] = secret
+    return out
+
+
+def _best_qobuz(cfg: dict) -> dict:
+    """Какую учётку Qobuz отдать телефону — и почему именно её.
+
+    Правило владельца 06.09.2026, дословно: «токены и секреты должны вшиваться
+    в телефон, но именно валидные, самые лучшие, желательно Зеландия».
+
+    Прошлая версия брала слот с наименьшим рангом и молча падала обратно на
+    основное поле конфига, если ничего не измерено. Из-за этого телефон
+    получал `qobuz-auth-token` первого слота вне зависимости от того, что
+    сторож про него знает, и заменить это на телефоне было нечем — синк
+    перекрывал ручной ввод при каждом запуске.
+
+    Теперь порядок явный и в одном месте:
+
+      1. МЁРТВОЕ НЕ ОТДАЁМ ВОВСЕ. Ранг 3 (401, снятая, погасшая подписка) —
+         не «хуже», а непригодно: отдать такое значит сломать телефон молча.
+      2. Ранг: 0 (lossless/hi-res) лучше 1 (обычное качество) лучше 2 (не
+         спрашивали). Неизмеренное берём, только если измеренного нет вообще,
+         и говорим об этом в журнале.
+      3. При равном ранге — предпочитаемая страна (`pair-qobuz-country`,
+         по умолчанию `qobuz-country`, иначе NZ).
+      4. Дальше — у кого дольше действует подписка. Неизвестный срок — не
+         «бесконечный» и не «нулевой»: нейтральные 30 дней, чтобы известный
+         длинный срок выигрывал, а известный короткий — проигрывал.
+      5. При полном равенстве — порядок в конфиге.
+
+    Отдаём КОМПЛЕКТ: токен + app_id + secret. Токен от одной учётки с ключами
+    от другой — это ровно те 400/401, за которыми не видно настоящей причины.
+    """
+    out: dict[str, str] = {}
     try:
         from ripster import qobuz_pool as _qp, qobuz_accounts as _qa
-        accounts = _qp._configured_accounts(cfg)
-        if len(accounts) >= 2:
-            ranked = sorted(((_qp.health_rank(a), i, a) for i, a in enumerate(accounts)),
-                            key=lambda t: (t[0], t[1]))
-            rank, _i, best = ranked[0]
-            tok = (best.get("qobuz-auth-token") or "").strip()
-            if rank < 2 and tok:
-                out["qobuz.token"] = tok
     except Exception as e:                  # noqa: BLE001
-        print(f"[pair] лучший слот qobuz не выбран: {e!r}", flush=True)
+        print(f"[pair] qobuz: пул недоступен ({e!r}) — отдаю поля конфига", flush=True)
+        return out
+
+    want_cc = str(cfg.get("pair-qobuz-country") or cfg.get("qobuz-country") or "NZ").strip().upper()
+
+    def days_left(info: dict) -> int:
+        end = str((info or {}).get("expires") or "")[:10]
+        if not end:
+            return 30                       # не знаем — нейтрально, не «навсегда»
+        try:
+            from datetime import date as _date
+            y, m, d = (int(x) for x in end.split("-"))
+            return (_date(y, m, d) - _date.today()).days
+        except Exception:                   # noqa: BLE001
+            return 30
+
+    try:
+        accounts = _qp._configured_accounts(cfg)
+    except Exception as e:                  # noqa: BLE001
+        print(f"[pair] qobuz: список учёток не прочитан: {e!r}", flush=True)
+        return out
+
+    cands = []
+    for i, a in enumerate(accounts):
+        tok = (a.get("qobuz-auth-token") or "").strip()
+        if not tok:
+            continue                        # телефон умеет только токен-режим
+        rank = _qp.health_rank(a)
+        if rank >= 3:
+            continue                        # непригодное не отдаём вообще
+        info = _qa.known(_qa.account_secret(a)) or {}
+        cc = str(info.get("country") or "").upper()
+        cands.append((rank, 0 if cc == want_cc else 1, -days_left(info), i, tok, cc, info))
+
+    if not cands:
+        print("[pair] qobuz: пригодных учёток нет — токен НЕ отдаю "
+              "(лучше без токена, чем с мёртвым)", flush=True)
+        return out
+
+    cands.sort()
+    measured = [c for c in cands if c[0] < 2]
+    if measured:
+        cands = measured
+    else:
+        print("[pair] qobuz: ни одна учётка не измерена — отдаю первую по конфигу", flush=True)
+
+    rank, _cc_pen, negdays, idx, tok, cc, _info = cands[0]
+    out["qobuz.token"] = tok
+    print(f"[pair] qobuz: слот {idx} ({cc or '??'}), ранг {rank}, "
+          f"осталось {-negdays} дн., токен {tok[:4]}…", flush=True)
+
+    # Ключи идут ВМЕСТЕ с токеном. Они у Qobuz общие на приложение, а не на
+    # учётку, но отдать токен без них — оставить телефон с «Invalid or missing
+    # app_id», где виноватым выглядит токен.
+    app_id = str(cfg.get("qobuz-app-id") or "").strip()
+    secret = str(cfg.get("qobuz-secrets") or cfg.get("qobuz-secret") or "").strip()
+    if app_id:
+        out["qobuz.app_id"] = app_id
+    if secret:
+        out["qobuz.secret"] = secret
+    if not (app_id and secret):
+        print("[pair] qobuz: ВНИМАНИЕ — отдаю токен без полной пары app_id/secret "
+              f"(app_id={'есть' if app_id else 'нет'}, secret={'есть' if secret else 'нет'})",
+              flush=True)
     return out
 
 
@@ -435,7 +524,10 @@ async def _credentials_payload() -> dict:
     put("qobuz.secret", "qobuz-secrets", "qobuz-secret")
     put("qobuz.email", "qobuz-email")
     put("qobuz.password", "qobuz-password")
-    put("qobuz.token", "qobuz-auth-token")
+    # qobuz.token НЕ берётся из поля конфига напрямую: выбор учётки — целиком
+    # за _best_qobuz(), и он же обязан не отдать мёртвую. Прямой put() здесь
+    # означал «слот 0 в любом случае», из-за чего телефон получал основной
+    # токен даже когда рядом лежал лучший (06.09.2026).
     for dst, secret in _best_slots(cfg).items():
         out[dst] = secret
     put("spotify.sp_dc", "spotify-sp-dc")
