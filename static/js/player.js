@@ -3487,3 +3487,70 @@ function _rwInit() {
 }
 if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _rwInit);
 else _rwInit();
+
+
+/* ══ АУДИОДВИЖОК ПК (настройки → Плеер) ══════════════════════════════════════
+ *
+ * Маршруты `/api/audio/*` существовали давно, а интерфейса к ним не было ни
+ * одного — движок нельзя было ни выбрать, ни увидеть его состояние. Здесь он
+ * появляется там же, где на телефоне: в настройках плеера.
+ *
+ * Экран показывает ТОЛЬКО измеренное. `bit_perfect` приходит с сервера как
+ * факт вывода (какую частоту запросили и какую устройство выдало), а не как
+ * обещание режима: эксклюзивный режим можно попросить и не получить.
+ */
+async function audioEngineInit() {
+  const box = document.getElementById('aeng-body');
+  if (!box) return;
+  box.innerHTML = `<div class="toggle-sub">${esc(t('aeng.loading'))}</div>`;
+  let d = null;
+  try { d = await api('GET', '/api/audio/devices'); }
+  catch (e) {
+    box.innerHTML = `<div class="toggle-sub">${esc(t('aeng.failed'))}: ${esc(String(e))}</div>`;
+    return;
+  }
+  if (!d || !d.available) {
+    // Честная причина вместо пустого списка: движок есть не на всякой машине.
+    box.innerHTML = `<div class="toggle-sub">${esc(t('aeng.unavailable'))}</div>`;
+    return;
+  }
+  const saved = String(S.config?.['audio-device'] ?? '');
+  const opts = (d.devices || []).map(x =>
+    `<option value="${x.index}"${String(x.index) === saved ? ' selected' : ''}>` +
+    `${esc(x.name)} — ${x.default_rate} Hz</option>`).join('');
+  // Текст подставляем через t() ПРЯМО ЗДЕСЬ, а не пишем по-русски в расчёте
+  // на повторный проход переводчика. Первая версия звала `applyI18n()` —
+  // функции с таким именем в проекте нет вовсе (она называется `applyLang`),
+  // то есть блок остался бы русским навсегда, при любом языке интерфейса.
+  // Владелец увидел это сразу. `data-i18n` оставлены, чтобы блок пережил
+  // переключение языка без перерисовки.
+  box.innerHTML = `
+    <div class="settings-grid">
+      <div class="field-group">
+        <label class="lbl" data-i18n="aeng.device">${esc(t('aeng.device'))}</label>
+        <select id="aeng-device" onchange="saveSetting('audio-device', this.value)">${opts}</select>
+      </div>
+    </div>
+    <div class="toggle-row mt4">
+      <div class="toggle-info">
+        <div class="toggle-label" data-i18n="aeng.exclusive">${esc(t('aeng.exclusive'))}</div>
+        <div class="toggle-sub" data-i18n="aeng.exclusive_sub">${esc(t('aeng.exclusive_sub'))}</div>
+      </div>
+      <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="aeng-exclusive"
+        ${S.config?.['audio-exclusive'] === false ? '' : 'checked'}
+        onchange="saveSetting('audio-exclusive', this.checked)"><div class="toggle-slider"></div></label>
+    </div>
+    <div id="aeng-state" class="toggle-sub mt8"></div>`;
+  audioEngineState();
+}
+
+/** Что тракт делает ПРЯМО СЕЙЧАС. Молчит, когда не играет, — врать нечем. */
+async function audioEngineState() {
+  const el = document.getElementById('aeng-state');
+  if (!el) return;
+  let s = null;
+  try { s = await api('GET', '/api/audio/state'); } catch (_) { return; }
+  if (!s || !s.playing) { el.textContent = t('aeng.idle'); return; }
+  const bp = s.bit_perfect ? t('aeng.bp_yes') : t('aeng.bp_no');
+  el.textContent = `${s.file_rate} Hz -> ${s.granted_rate} Hz · ${s.bits} bit · ${s.channels}ch · ${bp}`;
+}

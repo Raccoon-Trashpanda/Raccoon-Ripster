@@ -545,6 +545,16 @@
 
         <!-- ══════════ PLAYER TAB ══════════ -->
         <div class="stab-panel" id="stab-player">
+          <!-- ══ Аудиодвижок ══
+               Маршруты своего тракта (/api/audio/*) были в проекте давно, а
+               интерфейса к ним не существовало вовсе — то есть движок нельзя
+               было ни выбрать, ни даже увидеть. На телефоне эта настройка
+               живёт в «Плеере», здесь теперь тоже. -->
+          <div class="block mt12">
+            <div class="block-title" data-i18n="aeng.title">🔊 Аудиодвижок</div>
+            <div class="toggle-sub" data-i18n="aeng.hint">Свой тракт отдаёт файл на устройство как есть: без пересчёта частоты и без микшера Windows. Браузеру такое недоступно — он всегда идёт через общий режим.</div>
+            <div id="aeng-body" class="mt8"></div>
+          </div>
           <div class="block mt12">
             <div class="block-title" data-i18n="pset.title">🎧 Плеер</div>
             <div class="toggle-row">

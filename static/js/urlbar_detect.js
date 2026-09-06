@@ -114,6 +114,10 @@ function showStab(id, btn) {
     const el=document.getElementById('stab-'+id); if(el) el.classList.add('active');
     // «Файлы» (бывш. stab-global-shared) держит сетку цветов сервисов — рисуем её здесь.
     if(id==='files') { try { renderSvcColorGrid?.(); } catch {} }
+    // Блок аудиодвижка спрашивает устройства у сервера, поэтому наполняется
+    // при ОТКРЫТИИ вкладки, а не при загрузке страницы: иначе список тянулся
+    // бы у каждого, кто в настройки даже не заходил.
+    if(id==='player') { try { audioEngineInit?.(); } catch {} }
   }
   if(btn) btn.classList.add('active');
   const vb = document.querySelector('#view-settings .view-body');
