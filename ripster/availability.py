@@ -89,12 +89,42 @@ def _save() -> None:
         pass
 
 
+def norm_barcode(upc: str) -> str:
+    """Штрихкод к ОДНОЙ форме: 14 знаков с ведущими нулями (GTIN-14).
+
+    Один и тот же релиз приходит с разной разрядностью в зависимости от того,
+    кто его назвал: Apple отдаёт `00600574110367`, Deezer — `0600574110367`,
+    страница Odesli — `886443927087` вовсе без ведущего нуля. Пока ключ резал
+    только нецифры, это были ТРИ РАЗНЫХ КЛЮЧА для одной пластинки: карточка
+    спрашивала под одним, рантайм записывал вердикт под другим, и встретиться
+    они не могли никогда — тот же силуэт, что у ошибки `name:` против `upc:`.
+
+    UPC-12, EAN-13 и GTIN-14 отличаются только ведущими нулями, поэтому
+    приведение к 14 знакам ничего не теряет и делает форму единственной.
+    """
+    d = "".join(ch for ch in (upc or "") if ch.isdigit()).lstrip("0")
+    return d.rjust(14, "0") if d else ""
+
+
 def _key(upc: str, isrc: str, title: str, artist: str) -> str:
     if upc:
-        return "upc:" + "".join(ch for ch in upc if ch.isdigit())
+        return "upc:" + norm_barcode(upc)
     if isrc:
         return "isrc:" + isrc.upper()
     return "name:" + (title or "").lower().strip() + "|" + (artist or "").lower().strip()
+
+
+def _legacy_keys(upc: str) -> list:
+    """Как этот же релиз мог лежать в кэше ДО нормализации.
+
+    Выбросить накопленное было бы дороже, чем прочитать его: там лежат вердикты
+    настоящих загрузок, которые заново не получить.
+    """
+    d = "".join(ch for ch in (upc or "") if ch.isdigit())
+    if not d:
+        return []
+    bare = d.lstrip("0")
+    return ["upc:" + v for v in {d, bare, bare.rjust(12, "0"), bare.rjust(13, "0")} if v]
 
 
 def _fresh(rec: dict) -> bool:
@@ -178,7 +208,10 @@ async def _probe_one(service: str, upc: str, isrc: str) -> dict:
             # /catalog/releases/?upc= и /catalog/tracks/?isrc= оба отдают count=1),
             # поэтому штрихкод первым, ISRC — запасной ход ниже.
             hit = await _disc._find_by_upc(upc, service)
-        if hit is None and isrc and service in ("qobuz", "tidal", "beatport"):
+        # ISRC как ЗАПАСНОЙ ключ — для всех, кто его умеет, а не только для тех,
+        # у кого нет штрихкода. Издание Deezer или Apple может нести другой
+        # штрихкод, и тогда поиск по UPC промахивается при живом релизе.
+        if hit is None and isrc and service in ("qobuz", "tidal", "beatport", "deezer", "apple"):
             # Список ISRC (несколько первых треков) — одного мало: его может не
             # быть в каталоге при том, что релиз там есть.
             for one in (isrc.split(",") if isinstance(isrc, str) else list(isrc)):
@@ -253,6 +286,43 @@ async def _derive_isrc(service: str, hit: dict) -> str:
             vals = [str(t.get("isrc") or "").strip()
                     for t in ((r.json() or {}).get("results") or [])[:4]]
             return ",".join(v for v in vals if v)
+        if service == "apple":
+            # ISRC ИЗ APPLE. Раньше этой ветки не было, и когда Apple
+            # оказывался ЕДИНСТВЕННЫМ сеятелем, нашедшим релиз, добывать ISRC
+            # было не из чего: Qobuz и Tidal навсегда оставались в состоянии
+            # «не спрашивал, нет идентификатора». Замер 06.09.2026, Daft Punk
+            # «Random Access Memories» по ссылке Qobuz: Apple нашёл по
+            # штрихбарку в магазине `ca`, а два лучших по качеству сервиса
+            # так и не были опрошены.
+            #
+            # `_seed_isrcs` сюда не годится: он умеет только Spotify и Deezer.
+            # У Apple ISRC лежит прямо в атрибутах трека альбома, и магазин
+            # брать надо ТОТ, в котором релиз реально нашёлся (его кладёт
+            # `_probe_one`), а не из конфига — права у учёток разные, и в
+            # чужом магазине альбома может не быть вовсе.
+            bearer = str((_cfg or {}).get("authorization-token") or "").strip()
+            if not bearer or bearer == "your-authorization-token":
+                return ""
+            alb = str(hit.get("id") or "")
+            if not alb:
+                import re
+                m = re.search(r"/album/[^/]*/(\d+)", str(hit.get("url") or ""))
+                alb = m.group(1) if m else ""
+            if not alb:
+                return ""
+            sf = str(hit.get("storefront") or (_cfg or {}).get("storefront") or "us").lower()
+            from ripster import http_client as _HTTP
+            async with _HTTP.ashared() as c:
+                r = await c.get(
+                    f"https://api.music.apple.com/v1/catalog/{sf}/albums/{alb}/tracks",
+                    params={"limit": 4},
+                    headers={"Authorization": f"Bearer {bearer}",
+                             "Origin": "https://music.apple.com"})
+            if r.status_code != 200:
+                return ""
+            vals = [str(((t.get("attributes") or {}).get("isrc") or "")).strip()
+                    for t in ((r.json() or {}).get("data") or [])[:4]]
+            return ",".join(v for v in vals if v)
         if not aid:
             return ""
         vals = await _disc._seed_isrcs({"id": aid, "service": service}) or []
@@ -271,7 +341,16 @@ async def matrix(upc: str = "", isrc: str = "", title: str = "", artist: str = "
     _load()
     svcs = tuple(services or SERVICES)
     k = _key(upc, isrc, title, artist)
-    rec = _cache.get(k) or {"services": {}}
+    rec = _cache.get(k)
+    if rec is None and upc:
+        # Запись могла быть создана до нормализации штрихкода — переносим её на
+        # новый ключ, а не начинаем с нуля.
+        for lk in _legacy_keys(upc):
+            if lk != k and lk in _cache:
+                rec = _cache.pop(lk)
+                print(f"[availability] запись перенесена {lk} → {k}", flush=True)
+                break
+    rec = rec or {"services": {}}
     out = dict(rec.get("services") or {})
 
     # По штрихкоду умеют Apple, Deezer и Beatport, поэтому идём ими первыми: если
@@ -297,6 +376,24 @@ async def matrix(upc: str = "", isrc: str = "", title: str = "", artist: str = "
         out[svc] = await _probe_one(svc, upc, isrc)
         if (svc in _SEEDERS and out[svc].get("available") and not isrc):
             isrc = await _derive_isrc(svc, out[svc])
+
+    # ВТОРОЙ ПРОХОД. Сеятели ходят первыми и на своём ходу ISRC ещё не знают —
+    # значит те из них, кто промахнулся по штрихкоду, спрашивались НЕПОЛНО.
+    # У Deezer и Apple есть точный поиск по ISRC, и издание с другим штрихкодом
+    # ловится именно им: замер 06.09.2026 по «Random Access Memories» — Deezer
+    # по UPC не нашёл, хотя релиз у него есть.
+    if isrc:
+        for svc in ordered:
+            v = out.get(svc) or {}
+            if v.get("available"):
+                continue
+            if v.get("reason") not in (REASON_NOT_YET, REASON_NO_ID):
+                continue                      # регион, права, токен — ISRC не лечит
+            if v.get("verified_by") == "download":
+                continue                      # вердикт загрузки важнее опроса
+            again = await _probe_one(svc, upc, isrc)
+            if again.get("available"):
+                out[svc] = again
 
     # Запись ДОПОЛНЯЕТСЯ, а не переписывается. Один и тот же релиз спрашивают из
     # разных мест с разной полнотой данных: карточка — со штрихкодом и названием,

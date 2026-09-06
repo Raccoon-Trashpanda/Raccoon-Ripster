@@ -1157,6 +1157,11 @@ _telemetry.configure(config, save_config, BASE_DIR)
 # витрины заново после каждого перезапуска.
 from ripster import availability as _availability
 _availability.configure(config, BASE_DIR)
+# Odesli — последний ход за идентификатором релиза по ссылке площадки, которую
+# наш резолвер не разбирает (YouTube, Amazon, Яндекс…). Ключ `odesli-lookup:
+# false` в конфиге выключает походы наружу целиком.
+from ripster import odesli as _odesli
+_odesli.configure(BASE_DIR, enabled=config.get("odesli-lookup", True) is not False)
 _app_auth.add_public_path("/api/telemetry/ingest")
 # Полный архив логов, который пользователь отправляет кнопкой. Тоже публичный и
 # token-gated: он приходит с чужой машины, сессии у неё быть не может.

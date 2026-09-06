@@ -1040,6 +1040,34 @@ async def _find_by_isrc(isrc: str, service: str) -> dict | None:
                     "cover": ((rel.get("image") or {}).get("uri") or "")
                              .replace("{w}", "400").replace("{h}", "400"),
                     "service": "beatport", "type": "album", "matched_by": "isrc"}
+        elif service == "deezer":
+            # Публичный `track/isrc:` — токен не нужен. Нужен он затем, что
+            # издание Deezer часто несёт ДРУГОЙ штрихкод, и поиск по UPC его не
+            # находит при том, что релиз в каталоге есть (замер 06.09.2026,
+            # «Random Access Memories»).
+            hit = await _isrc_mod._deezer_search_isrc(isrc)
+        elif service == "apple":
+            bearer = (_config.get("authorization-token") or "").strip()
+            if not bearer or bearer == "your-authorization-token":
+                return None
+            sf = (_config.get("apple-country") or _config.get("storefront") or "us").strip().lower()
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.music.apple.com/v1/catalog/{sf}/songs",
+                                params={"filter[isrc]": isrc},
+                                headers={"Authorization": f"Bearer {bearer}",
+                                         "Origin": "https://music.apple.com"})
+            data = (r.json().get("data") or []) if r.status_code == 200 else []
+            if not data:
+                return None
+            at = (data[0].get("attributes") or {})
+            # У песни ссылка ведёт на альбом с якорем ?i=<song>; альбомный
+            # адрес получаем отсечением якоря — отдельный запрос ради этого
+            # не нужен.
+            u = str(at.get("url") or "").split("?")[0]
+            return {"id": "", "title": at.get("albumName") or at.get("name", ""),
+                    "artist": at.get("artistName", ""), "url": u,
+                    "cover": _amp_art(at, 300), "service": "apple",
+                    "type": "album", "matched_by": "isrc"}
         else:
             return None
         if not hit:
@@ -2940,8 +2968,45 @@ async def _upc_from_url(url: str) -> str:
     try:
         rid = await _resolve_release_id(url or "")
     except Exception:
-        return ""
-    return rid[4:] if rid.startswith("upc:") else ""
+        rid = ""
+    if rid.startswith("upc:"):
+        return rid[4:]
+
+    # ПОСЛЕДНИЙ ХОД: спросить Odesli.
+    #
+    # Свой резолвер знает шесть хостов (apple, deezer, qobuz, tidal, spotify,
+    # beatport). Ссылка с YouTube Music, Amazon, Яндекса, Napster или Pandora
+    # для него — `url:`-фолбэк, то есть идентификатора нет вовсе, и матрица
+    # честно отвечает «не спрашивал» про все сервисы разом. Odesli эти площадки
+    # знает и отдаёт штрихкод.
+    #
+    # Берём отсюда ТОЛЬКО идентификатор. Ни одно «есть на платформе X» с их
+    # стороны не становится нашим `available`: доступность у нас значит «эта
+    # учётка может скачать сейчас», а этого Odesli знать не может — проверяем
+    # сами. Подробности и замер закрытого API — в ripster/odesli.py.
+    try:
+        from ripster import odesli as _od
+        info = await _od.identify(url or "")
+        if info and info.get("upc"):
+            print(f"[availability] штрихкод получен через Odesli: {info['upc']}", flush=True)
+            return info["upc"]
+        # Штрихкода у них может не быть: он есть только когда его сообщила
+        # ИСХОДНАЯ площадка. Замер 06.09.2026 по одному и тому же альбому —
+        # ссылка Spotify даёт upc 886443927087, ссылки Яндекса и Amazon не дают
+        # ничего. Зато Odesli отдаёт ссылки на площадки, которые наш резолвер
+        # РАЗБИРАЕТ, — и это его настоящая польза: перевести незнакомую ссылку
+        # в знакомую, а идентификатор добыть уже своими руками.
+        for known in ("spotify", "deezer", "appleMusic", "tidal", "qobuz"):
+            alt = (info or {}).get("links", {}).get(known) or ""
+            if not alt:
+                continue
+            rid2 = await _resolve_release_id(alt)
+            if rid2.startswith("upc:"):
+                print(f"[availability] штрихкод через Odesli→{known}: {rid2[4:]}", flush=True)
+                return rid2[4:]
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[availability] Odesli не помог: {e!r}", flush=True)
+    return ""
 
 
 @router.get("/api/availability")
