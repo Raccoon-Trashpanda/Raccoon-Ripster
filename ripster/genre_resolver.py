@@ -79,6 +79,11 @@ MODIFIERS = {
 # проходит одиночное упоминание вроде «jazz guitar».
 SPECIFIC_SHARE = 0.30
 
+# Насколько заметным должно быть настоящее имя, чтобы корзина ему уступила.
+# Не ноль: одинокий случайный тег не должен вытеснять пусть и пустой, но
+# согласованный ответ.
+BIN_YIELDS_AT = 0.25
+
 # У магазина полка одна, и на неё кладут ВСЁ, что он продаёт.
 #
 # Beatport торгует танцевальной электроникой. Спроси его про «Move On Up»
@@ -284,6 +289,25 @@ class GenreResolver:
             # сказанный точнее.
             score[spec] += score[best_k]
             best_k = spec
+
+        # Корзина остатков — ответ последней надежды, а не ответ.
+        #
+        # «Experimental» у Discogs и «Electronica» у Beatport — это не жанры, а
+        # полки, куда сваливают всё, что не разложилось. Штраф множителем их не
+        # останавливал: корзину называет САМЫЙ доверенный источник, а настоящее
+        # имя — самый слабый, и 0.95×0.35 перевешивает 0.5×0.5. Так Caribou и
+        # Kraftwerk получали «Experimental», хотя в тех же данных лежали
+        # «folktronica» и «krautrock» (замер 06.09.2026).
+        #
+        # Поэтому не множитель, а порядок: если сказано хоть что-то настоящее —
+        # корзина уступает. Она остаётся ответом ровно тогда, когда сказать
+        # больше нечего: назвать корзину честнее, чем промолчать.
+        if is_bucket(label_of[best_k]) or is_modifier(label_of[best_k]):
+            real = [k for k in score
+                    if not is_bucket(label_of[k]) and not is_modifier(label_of[k])
+                    and score[k] >= score[best_k] * BIN_YIELDS_AT]
+            if real:
+                best_k = max(real, key=lambda k: score[k])
 
         total = sum(score.values()) or 1.0
         conf = score[best_k] / total
