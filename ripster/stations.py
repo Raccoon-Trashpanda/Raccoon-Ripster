@@ -106,6 +106,19 @@ def norm(s: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
 
 
+def norm_any(s: str) -> str:
+    """Как [norm], но не выбрасывает нелатинские буквы.
+
+    [norm] оставляет только `[a-z0-9]` — она для сравнения латинских
+    написаний, и менять её нельзя: на ней стоят сверки жанров и имён. Но
+    сервисы называют жанр на языке своей витрины («Денс», «Джаз», «Електро»),
+    и через [norm] такие строки становились ПУСТЫМИ — то есть ни одно русское
+    написание не находилось в таблице вовсе (поймано на живой истории
+    06.09.2026).
+    """
+    return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+
 def genre_matches(station_id: str, declared: str) -> Optional[bool]:
     """Подходит ли объявленный сервисом жанр этой станции.
 
@@ -123,6 +136,60 @@ def genre_matches(station_id: str, declared: str) -> Optional[bool]:
     if not d:
         return None
     return any(w and (w in d or d in w) for w in want)
+
+
+# ── Как сервисы называют жанры ───────────────────────────────────────────────
+#
+# Это ВХОДНЫЕ данные, а не подписи: сервис отдаёт жанр на языке своей витрины и
+# своей широты. Замер по живой истории 06.09.2026: «Electronic», «Dance»,
+# «Денс», «Джаз», «Hip-Hop/Rap» — ни одно из этих написаний не совпадало с
+# нашими плитками, и целый пласт прослушиваний никуда не вёл.
+#
+# Кириллица здесь законна по той же причине, что и в мобильном GenreKey:
+# перевести её нельзя — сравнение сломается.
+#
+# Широкие названия («Electronic», «Dance») ведут на КОНКРЕТНУЮ плитку
+# намеренно: это не утверждение «вы слушаете техно», а кратчайший честный путь
+# от «электроника» к чему-то, что реально играет. Плитка при этом называется
+# своим именем, подмены нет.
+GENRE_ALIASES: dict[str, str] = {
+    "electronic": "techno", "electronica": "techno", "электроника": "techno",
+    "електро": "techno", "electro": "techno",
+    "dance": "deephouse", "денс": "deephouse", "танцевальная": "deephouse",
+    "house": "deephouse", "хаус": "deephouse",
+    "hiphoprap": "hiphop", "rap": "hiphop", "хипхоп": "hiphop", "рэп": "hiphop",
+    "jazz": "jazz", "джаз": "jazz",
+    "classical": "classical", "классика": "classical", "классическая": "classical",
+    "rock": "rock", "рок": "rock",
+    "metal": "metal", "метал": "metal",
+    "pop": "indiepop", "поп": "indiepop",
+    "rnb": "rnb", "rbsoul": "rnb", "соул": "soul", "soul": "soul",
+    "reggae": "reggae", "регги": "reggae",
+    "blues": "blues", "блюз": "blues",
+    "funk": "funk", "фанк": "funk",
+    "disco": "disco", "диско": "disco",
+    "ambient": "ambient", "эмбиент": "ambient",
+    "drumbass": "dnb", "drumandbass": "dnb", "dnb": "dnb", "драмнбейс": "dnb",
+    "techno": "techno", "техно": "techno",
+    "trance": "trance", "транс": "trance",
+    "indie": "indie", "инди": "indie",
+    "latin": "latin", "латина": "latin",
+}
+
+
+def station_for_declared(declared: str) -> str:
+    """Плитка, которой соответствует объявленный сервисом жанр. Пусто — не знаем.
+
+    Сперва прямое совпадение с плиткой, потом таблица написаний. Не нашли —
+    возвращаем пусто: жанр останется в списке как факт, но без ссылки. Это
+    честнее, чем увести человека на соседний жанр.
+    """
+    if not (declared or "").strip():
+        return ""
+    for s in STATIONS:
+        if genre_matches(s[0], declared):
+            return s[0]
+    return GENRE_ALIASES.get(norm_any(declared), "")
 
 
 def popularity_weight(item: dict) -> float:
@@ -488,6 +555,215 @@ async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) ->
             "artists": artists[:10],
             "from_artists": sum(1 for t in out[:limit] if t.get("from_artist")),
             "took_ms": int((time.time() - started) * 1000)}
+
+
+# ── Личная часть: что человек СЛУШАЛ и что КАЧАЛ ─────────────────────────────
+#
+# Два разных следа, и складывать их в один счёт нельзя. Скачивание — это
+# намерение («хочу иметь»), прослушивание — факт («правда слушаю»). Скачанное
+# и ни разу не тронутое говорит о вкусе меньше, чем то, что играется каждый
+# день, поэтому прослушивание весит больше. Но и выбрасывать загрузки нельзя:
+# у свежескачанного просто ещё не было времени накопить прослушивания.
+
+_PLAY_WEIGHT = 2.0
+_DOWNLOAD_WEIGHT = 1.0
+
+
+def _split_credits(credited: str) -> list[str]:
+    """«Massive Attack, Elizabeth Fraser, Trevor Jackson» → три имени.
+
+    В истории соавторы лежат одной строкой, и без разбора Massive Attack
+    делился на четыре разных «артиста»: замер по живой истории дал 73 + 23
+    + 13 прослушиваний у трёх написаний одного коллектива.
+
+    По «&» НЕ режем, и это осознанно. В строке исполнителей амперсанд почти
+    всегда часть ИМЕНИ дуэта — «Calyx & TeeBee», «Above & Beyond», «Dom &
+    Roland», — а соавторство пишут запятой или «feat.». Разрез по «&»
+    превратил бы один коллектив в двух несуществующих артистов и разбил бы
+    его счёт пополам. Обратная сторона известна и записана в тестах: по
+    строке дуэт от совместной вещи не отличить, для этого нужен айди.
+
+    Точка после «feat.» съедается вместе с разделителем — иначе в списке
+    оставался артист с именем «. Baby Keem».
+    """
+    if not credited:
+        return []
+    parts = re.split(r"\s*(?:,|;|/|\bfeat(?:uring)?(?:\.|\b)|\bft(?:\.|\b)|\bvs(?:\.|\b)|\bwith\b)\s*",
+                     credited, flags=re.IGNORECASE)
+    return [p.strip(" .,&") for p in parts if p.strip(" .,&")]
+
+
+def _history_rows(base_dir) -> tuple[list[dict], list[dict]]:
+    """Скачанное и прослушанное. Отказ одного файла не отменяет второй."""
+    import json
+    from pathlib import Path
+    base = Path(base_dir or ".")
+    downloads, plays = [], []
+    try:
+        downloads = json.loads((base / "history.json").read_text(encoding="utf-8"))
+    except Exception:                                          # noqa: BLE001
+        downloads = []
+    try:
+        st = json.loads((base / "pairing_state.json").read_text(encoding="utf-8"))
+        plays = st.get("phone_plays") or []
+    except Exception:                                          # noqa: BLE001
+        plays = []
+    return (downloads if isinstance(downloads, list) else [],
+            plays if isinstance(plays, list) else [])
+
+
+def personal(base_dir=".", top: int = 18) -> dict:
+    """Чем насытить вкладку: свои артисты, свои жанры, что играло недавно.
+
+    Ничего не выдумываем: пустая история — пустые списки и честные счётчики,
+    а не подставленные «рекомендации».
+    """
+    downloads, plays = _history_rows(base_dir)
+
+    weight: dict[str, float] = {}
+    label: dict[str, str] = {}
+    plays_n: dict[str, int] = {}
+    dl_n: dict[str, int] = {}
+
+    def add(credited: str, w: float, is_play: bool) -> None:
+        for name in _split_credits(credited):
+            k = norm(name)
+            if not k or len(k) < 2:
+                continue
+            weight[k] = weight.get(k, 0.0) + w
+            label.setdefault(k, name)
+            if is_play:
+                plays_n[k] = plays_n.get(k, 0) + 1
+            else:
+                dl_n[k] = dl_n.get(k, 0) + 1
+
+    for row in plays:
+        add(str(row.get("artist") or ""), _PLAY_WEIGHT, True)
+    for row in downloads:
+        if str(row.get("status") or "") == "error":
+            continue                      # неудачная загрузка о вкусе не говорит
+        add(str(row.get("artist") or ""), _DOWNLOAD_WEIGHT, False)
+
+    artists = sorted(weight.items(), key=lambda kv: -kv[1])
+    top_artists = [{
+        "name": label[k],
+        "plays": plays_n.get(k, 0),
+        "downloads": dl_n.get(k, 0),
+    } for k, _w in artists[:top] if label.get(k)]
+
+    # Жанры берём ТОЛЬКО объявленные сервисом. У большинства прослушиваний
+    # жанра нет вовсе (замер: 250 из 300 пустых), и досочинять его здесь —
+    # значит подменить факт догадкой. Сколько записей без жанра, говорим вслух.
+    genre_hits: dict[str, int] = {}
+    unknown = 0
+    for row in plays:
+        g = str(row.get("genre") or "").strip()
+        if not g:
+            unknown += 1
+            continue
+        genre_hits[g] = genre_hits.get(g, 0) + 1
+
+    # Сопоставляем объявленные жанры с нашими плитками — чтобы «Electronic»
+    # вело на живую станцию, а не в никуда.
+    tiles = []
+    for g, n in sorted(genre_hits.items(), key=lambda kv: -kv[1]):
+        sid = station_for_declared(g)
+        tiles.append({"genre": g, "plays": n, "station": sid or None})
+
+    # «Играло недавно» — это СПИСОК, а не журнал событий. В сырых данных один
+    # трек лежит столько раз, сколько его слушали: на живой истории Teardrop
+    # шёл шесть раз подряд, и секция читалась как поломка. Схлопываем по
+    # «артист + название», оставляя самое свежее и считая повторы — счёт тут
+    # полезен, он и есть «часто слушаю».
+    seen_recent: dict[str, dict] = {}
+    for row in plays:
+        k = norm(str(row.get("artist") or "")) + "|" + norm(str(row.get("title") or ""))
+        if k in seen_recent:
+            seen_recent[k]["times"] += 1
+            continue
+        seen_recent[k] = {
+            "artist": row.get("artist", ""), "title": row.get("title", ""),
+            "service": row.get("service", ""), "at": row.get("at", ""),
+            "genre": row.get("genre", ""), "times": 1,
+        }
+        if len(seen_recent) >= 40:
+            break
+    recent = list(seen_recent.values())
+
+    services: dict[str, int] = {}
+    for row in downloads:
+        sv = str(row.get("service") or "")
+        if sv:
+            services[sv] = services.get(sv, 0) + 1
+
+    return {
+        "artists": top_artists,
+        "genres": tiles,
+        "genres_unknown": unknown,
+        "recent": recent,
+        "services": sorted(services.items(), key=lambda kv: -kv[1]),
+        "counts": {"downloads": len(downloads), "plays": len(plays)},
+    }
+
+
+async def by_artist(name: str, limit: int = 25, seed: Optional[int] = None) -> dict:
+    """Станция вокруг одного артиста: он сам и те, кто рядом по жанру.
+
+    Только его треки — это дискография, а не станция; поэтому берём его жанры
+    в MusicBrainz и подмешиваем соседей по тегу.
+    """
+    who = (name or "").strip()
+    if not who:
+        return {"ok": False, "tracks": [], "reason": "нужно имя артиста"}
+
+    from ripster import genre_sources as _gs
+    tags = []
+    try:
+        tags = await _gs.musicbrainz_tags(who) or []
+    except Exception:                                          # noqa: BLE001
+        tags = []
+
+    neighbours: list[str] = []
+    for tg in tags[:2]:
+        neighbours += await artists_for_genre(tg, limit=8)
+    # Сам артист впереди, соседи следом, без повторов и без него самого.
+    seen = {norm(who)}
+    line = [who]
+    for n in neighbours:
+        if norm(n) in seen:
+            continue
+        seen.add(norm(n))
+        line.append(n)
+
+    tasks, names = [], []
+    for a in line[:9]:
+        for svc in ("deezer", "qobuz", "tidal"):
+            tasks.append(_artist_tracks(svc, a, 3))
+            names.append(f"artist:{svc}")
+    got = await asyncio.gather(*tasks, return_exceptions=True)
+
+    pool: list[dict] = []
+    for res in got:
+        if isinstance(res, Exception) or not res:
+            continue
+        pool.extend(res)
+    if not pool:
+        return {"ok": False, "tracks": [], "artist": who, "tags": tags[:3],
+                "reason": "ни один сервис не дал треков этого артиста"}
+
+    uniq: dict[str, dict] = {}
+    for it in pool:
+        uniq.setdefault(_key(it), it)
+    items = list(uniq.values())
+    rnd = random.Random(seed if seed is not None else int(time.time() * 1000))
+    rnd.shuffle(items)
+    # Сам артист не должен занять весь эфир: не больше трети.
+    own_cap = max(2, limit // 3)
+    own = [i for i in items if credited_is(i.get("artist", ""), who)][:own_cap]
+    rest = [i for i in items if i not in own]
+    out = (own[:2] + rest)[:limit] if own else rest[:limit]
+    return {"ok": True, "artist": who, "tags": tags[:3],
+            "neighbours": line[1:7], "tracks": out}
 
 
 def catalog() -> list[dict]:

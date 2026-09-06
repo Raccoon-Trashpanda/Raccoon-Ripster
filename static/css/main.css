@@ -2849,3 +2849,71 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   /* Вкладки вишлиста: активная переставала отличаться от обычной. */
   .wl-kind-tab.active{background:var(--surface2);border-color:var(--red)}
 }
+
+/* ══ СТАНЦИИ ══════════════════════════════════════════════════════════════
+   Все цвета — из переменных темы: вкладка обязана жить и в светлой, и в
+   тёмной, а вшитый цвет ломает ровно одну из них и замечается не сразу. */
+#view-stations { padding: 18px 22px 0; }
+/* В main.css есть страховка: ЛЮБОЙ прямой div активного вида получает
+   `flex:1 1 auto; overflow-y:auto` (строка ~609) — она нужна старым экранам,
+   которые верстались одним контейнером. У этой вкладки прямых div-а два, и
+   шапка честно растягивалась на половину свободной высоты: между заголовком и
+   первой секцией зияла дыра, которая РОСЛА вместе с окном. Поэтому шапке
+   рост запрещаем явно, а прокрутку отдаём только телу. */
+#view-stations > .st-top { flex: 0 0 auto; overflow: visible; }
+#view-stations > #st-body { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding-bottom: 60px; }
+.st-top { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:14px; }
+.st-title { font-size:19px; font-weight:600; color:var(--text); }
+.st-status { font-size:12px; color:var(--muted); min-height:16px; flex:1; }
+
+.st-sec { margin-bottom:22px; }
+.st-sec-h { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:9px; }
+.st-sec-t { font-size:13px; font-weight:600; color:var(--text); letter-spacing:.02em; }
+.st-sec-hint { font-size:11px; color:var(--muted2); }
+.st-sec-b { display:flex; flex-wrap:wrap; gap:7px; }
+
+/* Плитка жанра и «чип» артиста — родня, но не одно и то же: у чипа есть
+   счётчик, и он шире. */
+.st-tile, .st-chip {
+  display:flex; align-items:center; gap:8px;
+  padding:9px 13px; border-radius:9px;
+  background:var(--surface); border:1px solid var(--border);
+  color:var(--text); font-size:12.5px; font-family:inherit;
+  cursor:pointer; transition:border-color .13s, background .13s;
+}
+.st-tile:hover, .st-chip:hover { border-color:var(--border2); background:var(--surface2); }
+.st-tile:focus-visible, .st-chip:focus-visible { outline:2px solid var(--border2); outline-offset:1px; }
+.st-chip-name { font-weight:500; }
+.st-chip-num { font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; }
+
+/* Жанр, для которого станции нет. Выглядит НЕ как кнопка — потому что ею и не
+   является: нажимаемое, но неработающее и есть врущий контрол. */
+.st-chip-dead { cursor:default; opacity:.55; background:transparent; }
+.st-chip-dead:hover { border-color:var(--border); background:transparent; }
+
+.st-list { display:flex; flex-direction:column; gap:2px; width:100%; }
+.st-row {
+  display:flex; align-items:center; gap:12px;
+  padding:7px 10px; border-radius:8px;
+}
+.st-row:hover { background:var(--surface); }
+.st-row-main { flex:1; min-width:0; }
+.st-row-t { font-size:12.5px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.st-row-a { font-size:11px; color:var(--muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.st-mini {
+  padding:4px 9px; border-radius:6px; font-size:11px; cursor:pointer;
+  background:transparent; color:var(--muted); border:1px solid var(--border);
+  font-family:inherit;
+}
+.st-mini:hover { color:var(--text); border-color:var(--border2); }
+
+.st-svcs { display:flex; flex-wrap:wrap; gap:6px; }
+.st-svc {
+  padding:5px 10px; border-radius:999px; font-size:11.5px;
+  background:var(--surface); border:1px solid var(--border); color:var(--muted);
+}
+.st-svc b { color:var(--text); font-weight:600; font-variant-numeric:tabular-nums; }
+
+.st-note { font-size:11px; color:var(--muted2); width:100%; margin-top:6px; line-height:1.5; }
+.st-foot { margin-top:26px; padding-top:12px; border-top:1px solid var(--border); }
+.st-err { color:var(--red, #e0567a); }
