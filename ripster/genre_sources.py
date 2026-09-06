@@ -46,6 +46,9 @@ _NOT_GENRE = {
     "happy", "dark", "dreamy", "melancholy", "energetic", "workout", "study",
     "focus", "sleep", "night", "summer", "winter", "driving", "road trip",
     # служебное
+    # роли и занятия, а не направления: у Арво Пярта MusicBrainz первым
+    # тегом ставит «composer», и он побеждал как «жанр» (замер 06.09.2026)
+    "composer", "songwriter", "producer", "dj", "band", "singer", "musician",
     "music", "all", "other", "misc", "various", "va", "compilation", "album",
     "ep", "lp", "single", "remix", "remixes", "instrumental", "vocal", "live",
     "demo", "bootleg", "free", "free download", "download", "new", "2026",
@@ -202,18 +205,41 @@ async def musicbrainz_tags(artist: str) -> list[str]:
         return hit[0]
     if not artist.strip():
         return []
+    import asyncio
+    # 503 у них означает «слишком часто, повтори», а не «тегов нет». Пока это
+    # молча превращалось в пустой список, источник выпадал на случайных
+    # артистах — и ответ всего модуля прыгал: в замере 06.09.2026 MusicBrainz
+    # не ответил на шести из сорока, и на Кендрике Ламаре победил «deep house»
+    # с чужой страницы, потому что возразить стало некому.
+    r = None
+    for attempt in range(3):
+        try:
+            wait = 1.1 - (time.time() - _mb_last)
+            if wait > 0:
+                await asyncio.sleep(wait)
+            _mb_last = time.time()
+            async with httpx.AsyncClient(timeout=20) as cl:
+                r = await cl.get("https://musicbrainz.org/ws/2/artist",
+                                 params={"query": f'artist:"{artist}"', "fmt": "json",
+                                         "limit": 1}, headers=_UA)
+            if r.status_code == 200:
+                break
+            if r.status_code not in (429, 503):
+                print(f"[musicbrainz] {artist}: ответ {r.status_code} — "
+                      f"тегов не будет", flush=True)
+                return []
+        except Exception as e:
+            if attempt == 2:
+                print(f"[musicbrainz] {artist}: связь не удалась "
+                      f"({type(e).__name__}) — тегов не будет", flush=True)
+                return []
+        await asyncio.sleep(1.5 * (attempt + 1))
+    else:
+        print(f"[musicbrainz] {artist}: ограничитель не отпустил за три "
+              f"попытки — тегов не будет", flush=True)
+        return []
+
     try:
-        wait = 1.1 - (time.time() - _mb_last)
-        if wait > 0:
-            import asyncio
-            await asyncio.sleep(wait)
-        _mb_last = time.time()
-        async with httpx.AsyncClient(timeout=20) as cl:
-            r = await cl.get("https://musicbrainz.org/ws/2/artist",
-                             params={"query": f'artist:"{artist}"', "fmt": "json",
-                                     "limit": 1}, headers=_UA)
-        if r.status_code != 200:
-            return []
         arr = r.json().get("artists") or []
         if not arr:
             return []

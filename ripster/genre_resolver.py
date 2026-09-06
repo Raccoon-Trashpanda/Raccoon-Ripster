@@ -74,6 +74,53 @@ MODIFIERS = {
     "ambient/experimental", "leftfield", "downbeat",
 }
 
+# Какую долю поддержки семьи должен иметь подвид, чтобы вытеснить её.
+# 0.30 подобрано замером: при нём проходят «Gypsy Jazz» и «Free Jazz», но не
+# проходит одиночное упоминание вроде «jazz guitar».
+SPECIFIC_SHARE = 0.30
+
+# У магазина полка одна, и на неё кладут ВСЁ, что он продаёт.
+#
+# Beatport торгует танцевальной электроникой. Спроси его про «Move On Up»
+# Кёртиса Мэйфилда 1970 года — он найдёт клубный эдит и ответит «House»
+# с полным доверием, потому что другого ответа у него не бывает. Про Sun Ra
+# он сказал «Nu Disco / Disco», про Fugees — тоже (замер 06.09.2026). Это не
+# ошибка Beatport: внутри танцевальной музыки он точнее всех. Это ошибка
+# того, кто спрашивает его про то, чем он не торгует.
+#
+# Отсюда правило: голос магазина о ТАНЦЕВАЛЬНОМ жанре — довод о подвиде, но
+# НЕ довод о том, что пластинка вообще танцевальная. Установить это может
+# только каталог (Discogs, MusicBrainz), который описывает издания, а не
+# полки. Если каталог назвал семью вне танцпола и ни одной танцевальной —
+# значит магазин показывает другую пластинку, эдит или однофамильца.
+SHOP_SOURCES = {"beatport", "bandcamp"}
+CATALOGUE_SOURCES = {"discogs", "musicbrainz"}
+OUT_OF_AREA = 0.15
+
+_DANCE = ("house", "techno", "trance", "dubstep", "drumbass", "dnb", "garage",
+          "breakbeat", "bigbeat", "electro", "disco", "minimal", "deeptech",
+          "hardstyle", "dance", "downtempo", "electronica", "idm", "leftfield",
+          "basslin", "psy", "club", "rave", "jungle", "hardcore")
+
+
+def is_dance(label: str) -> bool:
+    k = canon(label)
+    return any(d in k for d in _DANCE)
+
+
+def out_of_area_shops(votes: dict) -> set[str]:
+    """Магазины, которые сейчас говорят не о своём товаре.
+
+    Пусто, если каталог промолчал: без него мы не знаем, где пластинка стоит,
+    а незнание — не повод снимать голос. Пусто и если каталог сам назвал
+    танцевальное: тогда магазин по адресу и точнее каталога.
+    """
+    cat = [l for src in CATALOGUE_SOURCES for l in (votes.get(src) or [])]
+    if not cat or any(is_dance(l) for l in cat):
+        return set()
+    return {src for src in votes
+            if src in SHOP_SOURCES and any(is_dance(l) for l in (votes.get(src) or []))}
+
 _WORD = re.compile(r"[a-zа-яё0-9]+", re.I)
 
 
@@ -160,6 +207,7 @@ class GenreResolver:
         десять тегов, и если считать их наравне, один болтливый источник
         перевесит остальных числом.
         """
+        off_area = out_of_area_shops(votes)
         score: dict[str, float] = {}
         label_of: dict[str, str] = {}
         by_key: dict[str, list[str]] = {}
@@ -203,6 +251,8 @@ class GenreResolver:
                     # надо использовать, а не заменять своей меркой.
 
             trust = self.weight(src, area_hint or "")
+            if src in off_area:
+                trust *= OUT_OF_AREA
             for k, w in own.items():
                 score[k] = score.get(k, 0.0) + w * trust
                 label_of.setdefault(k, own_label[k])
@@ -213,6 +263,28 @@ class GenreResolver:
                     "dropped": [], "area": area_hint or ""}
 
         best_k = max(score, key=lambda k: score[k])
+
+        # Уточнение НАСЛЕДУЕТ поддержку своей семьи.
+        #
+        # «Gypsy Jazz» не спорит с «jazz» — он его уточняет, и согласие
+        # источников на слове «jazz» это довод ЗА него, а не против. Пока
+        # этого не было, широкий ярлык от двоих побеждал точный от одного:
+        # Django Reinhardt получал «jazz» вместо «Gypsy Jazz», Sun Ra — «jazz»
+        # вместо «Free Jazz» (замер 06.09.2026), хотя оба точных ответа лежали
+        # в тех же данных.
+        #
+        # Порог нужен, чтобы одиночная экзотика не уводила ответ: подвид
+        # должен иметь СВОЮ заметную поддержку, а не одно упоминание на фоне
+        # общего согласия.
+        narrower = [k for k in score
+                    if k != best_k and best_k in k and score[k] >= score[best_k] * SPECIFIC_SHARE]
+        if narrower:
+            spec = max(narrower, key=lambda k: score[k])
+            # Вес семьи переходит к подвиду: он и есть тот же ответ, только
+            # сказанный точнее.
+            score[spec] += score[best_k]
+            best_k = spec
+
         total = sum(score.values()) or 1.0
         conf = score[best_k] / total
 
