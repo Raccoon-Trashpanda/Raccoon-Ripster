@@ -265,6 +265,77 @@ def _artist_cache_put(genre: str, names: list) -> None:
         pass
 
 
+# ── Превью станции ───────────────────────────────────────────────────────────
+#
+# Плитка показывает обложки из НАСТОЯЩЕЙ выдачи станции, а не подобранную
+# картинку. Значит превью появляется только тогда, когда станция хоть раз
+# собиралась: рисовать «примерную» обложку для жанра — это то же враньё, что и
+# бейдж качества, взятый из константы.
+#
+# Собирать все тридцать станций разом ради красоты нельзя: это тридцать
+# опросов витрин ради данных, на которые ещё никто не смотрел. Поэтому превью
+# КОПИТСЯ: каждая собранная станция оставляет своё, а вкладка догревает
+# недостающие по одной, в фоне.
+_PREVIEW_TTL = 7 * 24 * 3600
+_preview: dict = {}
+_preview_loaded = False
+
+
+def _preview_file():
+    from pathlib import Path
+    return Path("station_preview_cache.json")
+
+
+def _preview_load() -> None:
+    global _preview, _preview_loaded
+    if _preview_loaded:
+        return
+    import json
+    try:
+        _preview = json.loads(_preview_file().read_text(encoding="utf-8"))
+    except Exception:                                          # noqa: BLE001
+        _preview = {}
+    _preview_loaded = True
+
+
+def _preview_save() -> None:
+    import json
+    try:
+        _preview_file().write_text(json.dumps(_preview, ensure_ascii=False),
+                                   encoding="utf-8")
+    except Exception:                                          # noqa: BLE001
+        pass
+
+
+def _preview_put(station_id: str, tracks: list) -> None:
+    """Запомнить, чем станция выглядит: обложки, сервисы, сколько треков."""
+    covers, services = [], []
+    for t in tracks:
+        c = (t.get("cover") or "").strip()
+        if c and c not in covers and len(covers) < 4:
+            covers.append(c)
+        sv = (t.get("service") or "").strip()
+        if sv and sv not in services:
+            services.append(sv)
+    if not covers:
+        return                       # нечего показывать — и не запоминаем
+    _preview_load()
+    _preview[station_id] = {"covers": covers, "services": services,
+                            "tracks": len(tracks), "ts": time.time()}
+    _preview_save()
+
+
+def preview_of(station_id: str) -> dict:
+    """Что известно о виде станции. Пусто — ещё не собирали, и это честно."""
+    _preview_load()
+    rec = _preview.get(station_id)
+    if not isinstance(rec, dict):
+        return {}
+    if time.time() - float(rec.get("ts") or 0) > _PREVIEW_TTL:
+        return {}
+    return rec
+
+
 async def artists_for_genre(genre: str, limit: int = 14) -> list[str]:
     """Кто ИГРАЕТ этот жанр — по весу тега в MusicBrainz.
 
@@ -550,6 +621,7 @@ async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) ->
         if idx not in used:
             out.append(order[idx]); used.add(idx)
 
+    _preview_put(_id, out[:limit])
     return {"ok": True, "id": _id, "title": title,
             "tracks": out[:limit], "sources": sources,
             "artists": artists[:10],
@@ -767,5 +839,19 @@ async def by_artist(name: str, limit: int = 25, seed: Optional[int] = None) -> d
 
 
 def catalog() -> list[dict]:
-    """Список плиток для интерфейса."""
-    return [{"id": s[0], "title": s[3], "curated": bool(s[1])} for s in STATIONS]
+    """Список плиток для интерфейса, вместе с тем, что о них известно.
+
+    `covers`/`services`/`tracks` появляются только у станций, которые уже
+    собирались хоть раз. Пустые поля — это «ещё не знаем», и плитка честно
+    показывает заглушку вместо выдуманной картинки.
+    """
+    out = []
+    for st in STATIONS:
+        row = {"id": st[0], "title": st[3], "curated": bool(st[1])}
+        pv = preview_of(st[0])
+        if pv:
+            row["covers"] = pv.get("covers") or []
+            row["services"] = pv.get("services") or []
+            row["tracks"] = pv.get("tracks") or 0
+        out.append(row)
+    return out

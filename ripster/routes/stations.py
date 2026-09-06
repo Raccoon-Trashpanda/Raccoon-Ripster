@@ -42,6 +42,26 @@ async def api_stations_home():
     return {"ok": True, "tiles": _st.catalog(), **_st.personal(_base_dir)}
 
 
+@router.get("/api/station/preview")
+async def api_station_preview(id: str = Query("")):
+    """Догреть превью ОДНОЙ станции — обложки для плитки.
+
+    Отдельным маршрутом, а не пачкой в /home: собрать тридцать станций разом
+    ради картинок — это тридцать опросов витрин ради данных, на которые ещё
+    никто не смотрел. Вкладка догревает их по одной, в фоне и только те,
+    которых не хватает.
+    """
+    from ripster import stations as _st
+    if not id:
+        return {"ok": False, "reason": "нужен id станции"}
+    have = _st.preview_of(id)
+    if have:
+        return {"ok": True, "id": id, **have}
+    res = await _st.build(id, limit=12)
+    return {"ok": bool(res.get("ok")), "id": id, **_st.preview_of(id),
+            "reason": res.get("reason", "")}
+
+
 @router.get("/api/station/artist")
 async def api_station_artist(name: str = Query(""), limit: int = Query(25),
                              seed: int = Query(0)):

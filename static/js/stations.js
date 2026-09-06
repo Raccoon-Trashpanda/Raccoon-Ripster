@@ -116,12 +116,7 @@ function stRender() {
   // ── Все жанровые станции ──────────────────────────────────────────────────
   parts.push(stSection(
     t('st.all_genres'), t('st.all_genres_hint'),
-    (d.tiles || []).map(s =>
-      `<button class="st-tile" style="background:${stGradient(s.id, .9, .55)}"
-               onclick="stPlay(${escJ2(s.id)})">
-         <span class="st-tile-play">&#9654;</span>
-         <span class="st-tile-name">${esc(s.title)}</span>
-       </button>`).join('')
+    (d.tiles || []).map(stTileHtml).join('')
   ));
 
   // ── Что играло недавно ────────────────────────────────────────────────────
@@ -153,6 +148,75 @@ function stRender() {
     t('st.footer').replace('{0}', c.plays || 0).replace('{1}', c.downloads || 0))}</div>`);
 
   box.innerHTML = parts.join('');
+  stWarmPreviews();
+}
+
+/**
+ * Плитка станции.
+ *
+ * Обложки — из НАСТОЯЩЕЙ выдачи этой станции, а не подобранная под жанр
+ * картинка: подставить «примерную» обложку значит соврать ровно так же, как
+ * бейджем качества из константы. Пока станция ни разу не собиралась, обложек
+ * нет — и на их месте честно остаётся градиент, а не заглушка, притворяющаяся
+ * музыкой.
+ */
+function stTileHtml(s) {
+  const covers = (s.covers || []).slice(0, 2);
+  const grad = stGradient(s.id, .9, .55);
+  // Обложка — <img>, а не фон: только у картинки есть `onerror`, и без него
+  // не загрузившаяся обложка оставляла на плитке пустую половину (видно на
+  // снимке 07.09.2026 у Techno и Drum & Bass — часть ссылок отдаёт 404).
+  // Не пришла — прячем картинку, и под ней остаётся градиент плитки.
+  const art = covers.length
+    ? `<span class="st-tile-art" style="background:${grad}">${covers.map(u =>
+         `<img src="${esc(u)}" alt="" loading="lazy" onerror="this.style.display='none'">`
+       ).join('')}</span>`
+    : `<span class="st-tile-art" style="background:${grad}"></span>`;
+  const sub = (s.services || []).length
+    ? (s.services || []).slice(0, 3).join(' · ')
+    : t('st.tile_no_preview');
+  const cnt = s.tracks ? `${s.tracks} · ` : '';
+  return `<button class="st-tile" data-st="${esc(s.id)}" onclick="stPlay(${escJ2(s.id)})">
+    ${art}
+    <span class="st-tile-body">
+      <span class="st-tile-name">${esc(s.title)}</span>
+      <span class="st-tile-sub">${esc(cnt + sub)}</span>
+    </span>
+    <span class="st-tile-play" style="background:${stGradient(s.id, 1, .8)}">&#9654;</span>
+  </button>`;
+}
+
+/**
+ * Догреть недостающие превью — по одной станции, в фоне.
+ *
+ * Собрать все тридцать разом нельзя: это тридцать опросов витрин ради
+ * картинок, на которые ещё никто не смотрел. Поэтому берём небольшую порцию
+ * за посещение, строго по очереди, и обновляем плитку сразу, как узнали. Кэш
+ * на сервере живёт неделю, так что со временем страница наполняется сама.
+ */
+const ST_WARM_PER_VISIT = 6;
+let _stWarming = false;
+
+async function stWarmPreviews() {
+  if (_stWarming || !_stHome) return;
+  _stWarming = true;
+  try {
+    const need = (_stHome.tiles || []).filter(s => !(s.covers || []).length)
+                                      .slice(0, ST_WARM_PER_VISIT);
+    for (const s of need) {
+      // Вкладку могли закрыть — тогда греть незачем.
+      if (!document.getElementById('view-stations')?.classList.contains('active')) break;
+      let r = null;
+      try { r = await api('GET', '/api/station/preview?id=' + encodeURIComponent(s.id)); }
+      catch (_) { continue; }
+      if (!r || !(r.covers || []).length) continue;
+      s.covers = r.covers; s.services = r.services || []; s.tracks = r.tracks || 0;
+      const el = document.querySelector(`.st-tile[data-st="${CSS.escape(s.id)}"]`);
+      if (el) el.outerHTML = stTileHtml(s);
+    }
+  } finally {
+    _stWarming = false;
+  }
 }
 
 function stSection(title, hint, inner) {
