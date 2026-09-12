@@ -1821,6 +1821,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
     _sc_slot = None
     _yx_pool = None
     _yx_slot = None
+    # Пул учёток Tidal. Изолируется РАБОЧИМ КАТАЛОГОМ, а не файлом конфига:
+    # у OrpheusDL нет флага «свой конфиг», и папку данных он читает
+    # относительно cwd (см. ripster/tidal_pool.py).
+    _td_pool = None
+    _td_slot = None
 
     try:
         # Build a per-task config view so the quality-subfolder is visible to
@@ -1919,6 +1924,58 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 _dz_pool = None
                 _dz_slot = None
                 print(f"[deezer-pool] acquire failed → single-account fallback: {_dze}", flush=True)
+        # Пул Tidal: слот = отдельный рабочий каталог со своей сессией
+        # OrpheusDL. Любая осечка здесь оставляет `_task_cwd` пустым, то есть
+        # прогон идёт как раньше, на основной учётке, — пул не имеет права
+        # ломать загрузку, которая и без него работала.
+        if engine_name == "tidal":
+            try:
+                from ripster import tidal_pool as _tdp
+                # Импорт СВОЙ, а не общий `_afb` ниже по функции: тот
+                # импортируется позже, поэтому Python считает имя локальным и
+                # необъявленным здесь. Поймано первой же боевой загрузкой
+                # (12.09.2026): пул молча уходил в запасной путь с ошибкой
+                # «cannot access local variable '_afb'».
+                from ripster import account_fallback as _afb_td
+                _td_pool = _tdp.get_pool(_config)
+                if _td_pool is not None:
+                    _got = await asyncio.to_thread(
+                        _td_pool.acquire, tuple(_afb_td.tried_slots(task, "tidal")))
+                    if _got:
+                        _td_slot, _td_acct, _td_dir = _got
+                        # Слот без сессии бесполезен: OrpheusDL не умеет войти
+                        # без терминала. Выписываем её из refresh-токена — и
+                        # ТОЛЬКО если файла ещё нет, иначе каждый прогон дёргал
+                        # бы Tidal тремя запросами на ровном месте.
+                        _sess = _td_dir / "config" / "loginstorage.bin"
+                        if _td_slot > 0 and not _sess.is_file() and _td_acct.get("tidal-refresh"):
+                            _rep = await asyncio.to_thread(
+                                _tdp.write_session, _td_slot,
+                                _td_acct["tidal-refresh"], _td_acct.get("tidal-country", ""))
+                            if _rep.get("ok"):
+                                task["log"].append(
+                                    f"🌊 tidal-pool: слот {_td_slot} получил сессию "
+                                    f"({', '.join(_rep.get('clients') or [])})")
+                            else:
+                                # Честная причина в лог: слот без сессии уедет
+                                # на основную учётку, и молчание об этом
+                                # выглядело бы как «пул не работает».
+                                task["log"].append(
+                                    f"🌊 tidal-pool: слоту {_td_slot} не выписать сессию — "
+                                    f"{_rep.get('why')}")
+                                _td_pool.release(_td_slot)
+                                _td_pool, _td_slot = None, None
+                        if _td_slot is not None:
+                            if _td_slot > 0:
+                                _task_cwd = str(_td_dir)
+                            if _td_acct.get("tidal-country"):
+                                _cfg_view["tidal-country"] = _td_acct["tidal-country"]
+                            task["log"].append(
+                                f"🌊 tidal-pool: слот {_td_slot} ({_td_acct.get('label')})")
+            except Exception as _tde:
+                _td_pool = None
+                _td_slot = None
+                print(f"[tidal-pool] acquire failed → single-account fallback: {_tde}", flush=True)
         # Qobuz multi-account pool: same idea, even simpler — streamrip's CLI
         # takes an explicit --config-path, so no subprocess env override is
         # needed at all (unlike deezer). ANY failure here → _cfg_view never
@@ -2952,6 +3009,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             try:
                 from ripster import wrapper_pool as _wp_rel
                 await _broadcast({"type": "pool_update", "pool": _wp_rel.live_status()})
+            except Exception:
+                pass
+        if _td_pool is not None and _td_slot is not None:
+            try:
+                _td_pool.release(_td_slot)
             except Exception:
                 pass
         if _dz_pool is not None and _dz_slot is not None:

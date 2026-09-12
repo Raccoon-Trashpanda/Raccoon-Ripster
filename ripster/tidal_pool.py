@@ -34,9 +34,15 @@ _SHARED_DIRS = ("modules", "extensions", "orpheus", "utils")
 
 
 def _base_dir() -> Path:
-    import sys
+    """Корень установки — от ЭТОГО файла, а не от `sys.argv[0]`.
 
-    return Path(sys.argv[0]).resolve().parent if sys.argv else Path(".").resolve()
+    Первая версия брала каталог запускающего скрипта, и это ломалось ровно там,
+    где пул и проверяют: прогон из отдельного скрипта создал слот рядом со
+    скриптом, ссылки на общие папки указали в пустоту, и OrpheusDL упал на
+    `makedirs('extensions')` — junction был, но вёл в никуда. Путь к своему
+    модулю известен всегда и не зависит от того, чем запущен процесс.
+    """
+    return Path(__file__).resolve().parent.parent
 
 
 def orpheus_dir() -> Path:
@@ -84,6 +90,108 @@ def ensure_slot(slot: int) -> Path:
     if src.is_file() and not dst.is_file():
         dst.write_bytes(src.read_bytes())
     return d
+
+
+#: Клиенты, которыми OrpheusDL держит сессию Tidal. Их идентификаторы лежат в
+#: его же настройках, и подставлять свои нельзя: сессия, выписанная чужим
+#: клиентом, не даст тех прав, за которыми слот и заводится.
+_CLIENT_KEYS = {
+    "TV":             ("tv_atmos_token", "tv_atmos_secret"),
+    "MOBILE_ATMOS":   ("mobile_atmos_hires_token", None),
+    "MOBILE_DEFAULT": ("mobile_hires_token", None),
+}
+
+
+def _orpheus_clients() -> dict[str, tuple[str, str]]:
+    """(client_id, client_secret) по имени сессии — из настроек OrpheusDL."""
+    import json
+
+    try:
+        st = json.loads((orpheus_dir() / "config" / "settings.json").read_text(encoding="utf-8"))
+        mod = st.get("modules", {}).get("tidal", {})
+    except Exception:  # noqa: BLE001
+        mod = {}
+    out: dict[str, tuple[str, str]] = {}
+    for name, (id_key, sec_key) in _CLIENT_KEYS.items():
+        cid = (mod.get(id_key) or "").strip()
+        if cid:
+            out[name] = (cid, (mod.get(sec_key) or "").strip() if sec_key else "")
+    return out
+
+
+def write_session(slot: int, refresh: str, country: str = "") -> dict:
+    """Выписать слоту собственную сессию OrpheusDL из refresh-токена.
+
+    Зачем так, а не «войти»: вход у OrpheusDL интерактивный (TV-логин требует
+    открыть ссылку и подтвердить, mobile-логин спрашивает пароль через
+    ``input()``), а мы запускаем его без терминала. Зато формат его хранилища
+    прост и известен — три клиента, у каждого access/refresh/expires/user_id/
+    country_code, — и refresh-токен Tidal принимает от ЛЮБОГО из этих клиентов.
+
+    Возвращает отчёт: по каким клиентам сессия получена, а по каким нет и
+    почему. Пустой словарь вместо исключения не отдаём — молчаливый провал
+    здесь означал бы слот, который «есть», но ничего не качает.
+    """
+    import datetime as _dt
+    import pickle
+
+    import httpx
+
+    d = ensure_slot(slot)
+    clients = _orpheus_clients()
+    if not clients:
+        return {"ok": False, "why": "в настройках OrpheusDL нет идентификаторов клиентов Tidal"}
+
+    sessions: dict[str, dict] = {}
+    errors: dict[str, str] = {}
+    for name, (cid, csec) in clients.items():
+        data = {"refresh_token": refresh, "client_id": cid, "grant_type": "refresh_token"}
+        if csec:
+            data["client_secret"] = csec
+        try:
+            r = httpx.post("https://auth.tidal.com/v1/oauth2/token", data=data, timeout=30)
+        except Exception as e:  # noqa: BLE001
+            errors[name] = f"сеть: {type(e).__name__}"
+            continue
+        if r.status_code != 200:
+            # Тело ответа Tidal называет причину точнее нашей догадки.
+            errors[name] = f"HTTP {r.status_code}: {r.text[:120]}"
+            continue
+        j = r.json()
+        user = j.get("user") or {}
+        sessions[name] = {
+            "access_token": j["access_token"],
+            "refresh_token": j.get("refresh_token") or refresh,
+            "expires": _dt.datetime.now() + _dt.timedelta(seconds=int(j.get("expires_in", 3600))),
+            "user_id": int(user.get("userId") or j.get("user_id") or 0),
+            "country_code": (user.get("countryCode") or country or "").upper(),
+        }
+
+    if not sessions:
+        return {"ok": False, "why": "ни один клиент не принял токен", "errors": errors}
+
+    # За основу берём хранилище основной установки: в нём уже есть разделы
+    # других модулей (beatport, spotify), и затирать их нулём значило бы
+    # разлогинить слот во всём остальном.
+    blob: dict = {"advancedmode": False, "modules": {}}
+    src = orpheus_dir() / "config" / "loginstorage.bin"
+    if src.is_file():
+        try:
+            from ripster.safe_pickle import safe_loads
+
+            blob = safe_loads(src.read_bytes())
+        except Exception:  # noqa: BLE001
+            pass
+    mod = blob.setdefault("modules", {}).setdefault("tidal", {})
+    mod.setdefault("selected", "default")
+    sess = mod.setdefault("sessions", {}).setdefault("default", {})
+    sess["clear_session"] = False
+    sess["custom_data"] = {"sessions": sessions}
+
+    (d / "config").mkdir(parents=True, exist_ok=True)
+    (d / "config" / "loginstorage.bin").write_bytes(pickle.dumps(blob))
+    return {"ok": True, "clients": sorted(sessions), "errors": errors,
+            "country": next(iter(sessions.values())).get("country_code", "")}
 
 
 def _account_from_dict(a: dict, label_fallback: str) -> dict | None:
@@ -142,6 +250,33 @@ def configured_accounts(config: dict) -> list[dict]:
         if (src or {}).get("priority") is None:
             acc["priority"] = float(health_rank(acc) * 100 + i)
     return accounts
+
+
+_pool_instance: "TidalPool | None" = None
+_pool_fingerprint: tuple = ()
+
+
+def get_pool(config: dict) -> "TidalPool | None":
+    """Единственный экземпляр; пересобирается, только когда изменился список
+    учёток — иначе занятость слотов терялась бы между задачами.
+
+    ``None``, когда учётка одна: пул из одного слота ничего не решает, а
+    рабочий каталог остаётся тем же, что был до его появления.
+    """
+    global _pool_instance, _pool_fingerprint
+    accounts = configured_accounts(config)
+    if len(accounts) < 2:
+        return None
+    fp = tuple((a.get("tidal-refresh") or a.get("tidal-email") or "")[-12:] for a in accounts)
+    if _pool_instance is None or fp != _pool_fingerprint:
+        _pool_instance = TidalPool(config)
+        _pool_fingerprint = fp
+    return _pool_instance
+
+
+def live_status(config: dict) -> dict:
+    p = get_pool(config)
+    return p.status() if p else {"pool_enabled": False, "accounts": []}
 
 
 class TidalPool:
