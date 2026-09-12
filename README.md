@@ -51,6 +51,12 @@ is no account with *us*, no cloud, and your files never leave your computer.
 - 🎧 Built-in **gapless player** with a visualizer, and a **timed tracklist**
   for DJ mixes / radio shows (SoundCloud) — click through to any track inside
   a 2-hour set instead of scrubbing blind.
+- 🔊 **Bit-perfect output** (**Settings → Player**) — an exclusive-mode path
+  that hands the device the file's own rate, with no Windows mixer in between,
+  and reports what the device actually granted rather than what was asked for.
+  A browser tab cannot do this.
+- 📻 **Stations** — genre radio built from the artists who actually make a
+  genre, drawn from your own history, downloads and subscriptions.
 - 🌍 **5-language interface** — English, Russian, Hindi, Japanese, Chinese.
 - 🖥 Opens in a **real desktop window** (no browser tab needed).
 
@@ -267,6 +273,9 @@ by the excellent open-source projects below. **Huge thanks to every author and
 contributor.** If your project is used here and you'd like the credit adjusted or
 removed, please open an issue.
 
+The full attribution list — including which projects are *called* versus which
+code is actually *vendored* — is kept in [CREDITS.md](CREDITS.md).
+
 ### Download engines
 - [zhaarey / apple-music-downloader](https://github.com/zhaarey/apple-music-downloader) — Apple Music in ALAC & Dolby Atmos via a local wrapper *(this project builds on it)*
 - [glomatico / gamdl](https://github.com/glomatico/gamdl) — Apple Music via account cookies — AAC & music videos
@@ -296,6 +305,9 @@ removed, please open an issue.
 - [iTunes Search API](https://performance-partners.apple.com/search-api) — Apple Music catalog
 - [Deezer API](https://developers.deezer.com/api) · [Qobuz API](https://www.qobuz.com/api.json/0.2) · [Tidal API](https://developer.tidal.com/documentation)
 - [MarshalX / yandex-music-api](https://github.com/MarshalX/yandex-music-api) — Yandex Music search, metadata & token
+- [MusicBrainz](https://musicbrainz.org/doc/MusicBrainz_API) · [Discogs](https://www.discogs.com/developers) · [Beatport](https://api.beatport.com) — genre and catalogue data behind Stations
+- [Odesli / song.link](https://odesli.co) — release identification from a platform link Ripster does not parse itself. Their public API has been closed since 2026-07-31 (`401 PUBLIC_API_ACCESS_DEPRECATED`), so only the identifier is read from the public page — never availability.
+- [WorldObservationLog / amd.wol.moe](https://amd.wol.moe) — no code taken; the shape of the public pool endpoints (`/status`, `/m3u8`, `/key`, `/license`) and the fact that pool health must be asked of `/status` came from it
 
 ### Built with
 [FastAPI](https://github.com/tiangolo/fastapi) ·
