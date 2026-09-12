@@ -169,3 +169,37 @@ def test_tidal_auth_streak_resets_on_new_save():
     _drive(eng, ["=== Track 2 downloaded ==="])
     _drive(eng, ["HTTP 401 unauthorized"] * 9)
     assert not eng.abort_reason
+
+
+# ── неподдерживаемый тип ссылки (video/mix) ──────────────────────────────────
+# 07.09.2026: ссылка на клип (tidal.com/browse/video/475048726) доезжала до
+# общего финала `is_finished` и получала «трек не докачался (DASH/сеть
+# прервалась) — повтори; при медленном VPN смени нод» — причину подменяло
+# ровно противоположное по смыслу утверждение, а раннер крутил её четыре раза
+# за три минуты. Третий случай того же класса в этом движке, поэтому пиним.
+@pytest.mark.parametrize("kind,word", [("video", "видео"), ("mix", "микс")])
+def test_unsupported_link_type_fails_before_spawning(kind, word, monkeypatch):
+    monkeypatch.setattr(t, "is_authenticated", lambda cfg: True)
+    with pytest.raises(ValueError) as ei:
+        TidalEngine().build_cmd(f"https://tidal.com/browse/{kind}/475048726", "lossless", {})
+    assert word in str(ei.value)
+    assert "не поддерживается движком" in str(ei.value)
+
+
+def test_unsupported_url_in_log_is_not_reported_as_network_loss():
+    r = TidalEngine().is_finished("Unsupported URL: https://tidal.com/browse/video/1\n", rc=0)
+    assert r.success is False
+    assert "не поддерживается движком" in r.error
+    assert "не докачался" not in r.error   # НЕ подменять причину сетевой
+
+
+def test_unsupported_link_message_stops_the_auto_retry():
+    """Отсечка обязана ловить ИМЕННО ту строку, что попадает в `result.error`,
+    иначе детектор стоит в коде и не срабатывает ни разу (класс «мёртвый
+    детектор»). И не должна задевать настоящий сетевой недобор — он повторяем."""
+    from ripster.runner import _RE_NO_RETRY
+    r = TidalEngine().is_finished("Unsupported URL: https://tidal.com/browse/video/1\n", rc=0)
+    assert _RE_NO_RETRY.search(r.error)
+    assert not _RE_NO_RETRY.search(
+        "Tidal: трек не докачался (DASH/сеть прервалась) — повтори; "
+        "при медленном VPN смени нод")

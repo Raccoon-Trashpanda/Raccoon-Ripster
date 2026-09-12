@@ -354,6 +354,26 @@ class TidalEngine(EngineBase):
         return str(_orpheus_dir())
 
     def build_cmd(self, url: str, quality: str, config: dict) -> list[str]:
+        # Тип ссылки, которого движок не умеет ВООБЩЕ. `_RE_TIDAL_URL` ниже
+        # нормализует ещё `video` и `mix`, но модуль OrpheusDL принимает только
+        # track|album|playlist|artist (`custom_url_parse`, interface.py:279) — на
+        # остальном он печатает «Unsupported URL» и делает `exit()`. Наш разбор
+        # хвоста этой строки не знал, поэтому прогон доезжал до общего финала и
+        # получал «трек не докачался (DASH/сеть прервалась) — повтори; при
+        # медленном VPN смени нод»: причина подменялась ровно противоположной по
+        # смыслу — сеть тут ни при чём, и повтор не может помочь никогда.
+        # 07.09.2026, https://tidal.com/browse/video/475048726: четыре захода
+        # (03:55:12 → 03:58:24), три минуты ожидания, один и тот же тупик.
+        # Третий случай того же класса в этом файле (см. TidalAuthError выше и
+        # ветку 403 ниже), поэтому ловим ПЕРЕД запуском процесса, а не после.
+        m_type = _RE_TIDAL_URL.search(url or "")
+        if m_type and m_type.group(1).lower() in ("video", "mix"):
+            kind = "видео" if m_type.group(1).lower() == "video" else "микс"
+            raise ValueError(
+                f"Tidal: {kind} не поддерживается движком — OrpheusDL умеет только "
+                f"треки, альбомы, плейлисты и артистов. Повтор не поможет; "
+                f"возьми ссылку на трек или альбом."
+            )
         if not (_orpheus_dir() / "orpheus.py").exists():
             raise ValueError("OrpheusDL не установлен — см. Settings → Tidal")
         if not (_module_path() / "interface.py").exists():
@@ -538,6 +558,16 @@ class TidalEngine(EngineBase):
         _cls = classify_download_error(log_text)
         if _cls:
             return EngineResult(False, error=f"Tidal: {_cls[1]}")
+
+        # То же самое, но уже из ЛОГА — на случай, если тип ссылки проскочит мимо
+        # ранней отсечки в build_cmd (например, OrpheusDL сузит `custom_url_parse`
+        # ещё раз). Без этой ветки строка снова утекала бы в общий финал и снова
+        # звала бы человека «повторить и сменить нод».
+        if re.search(r'Unsupported URL', log_text, re.I):
+            return EngineResult(
+                False,
+                error="Tidal: такая ссылка не поддерживается движком — OrpheusDL умеет "
+                      "только треки, альбомы, плейлисты и артистов. Повтор не поможет.")
 
         if not log_text.strip():
             return EngineResult(False, error="Tidal/OrpheusDL: нет вывода — проверь сессию Tidal")
