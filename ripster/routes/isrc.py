@@ -197,6 +197,17 @@ async def resolve_isrc(body: dict):
     meta = await _fetch_meta_any(url, svc) if _fetch_meta_any else None
 
     isrc = ((meta or {}).get("isrc") or "").strip().upper()
+    src  = "meta"
+    if not isrc:
+        # Наш разбор ссылки не дал ISRC (сервис, который мы не парсим, или
+        # метаданные без штрихкода). Спрашиваем feature.fm, прежде чем сдаться.
+        ff = await _featurefm_ids(url)
+        isrc = (ff.get("isrc") or "").strip().upper()
+        if isrc:
+            src = "featurefm"
+            meta = dict(meta or {})
+            meta.setdefault("title", ff.get("title", ""))
+            meta.setdefault("artist", ff.get("artist", ""))
     if not isrc:
         return {"ok": False, "error_key": "err.isrc_not_in_meta", "error": "ISRC не найден в метаданных"}
 
@@ -215,16 +226,45 @@ async def resolve_isrc(body: dict):
     matches = {svc: r for svc, r in zip(tasks.keys(), results) if r}
 
     return {
-        "ok":      True,
-        "isrc":    isrc,
-        "title":   (meta or {}).get("title", ""),
-        "artist":  (meta or {}).get("artist", ""),
-        "matches": matches,
+        "ok":       True,
+        "isrc":     isrc,
+        "isrc_src": src,
+        "title":    (meta or {}).get("title", ""),
+        "artist":   (meta or {}).get("artist", ""),
+        "matches":  matches,
     }
 
 
 async def _noop() -> None:
     return None
+
+
+async def _featurefm_ids(url: str) -> dict:
+    """ISRC/UPC от feature.fm, когда наш собственный разбор ссылки промолчал.
+
+    Кабинет feature.fm знает штрихкод релиза по URL любого крупного сервиса и
+    отдаёт его напрямую — это тот же «последний ход», что и Odesli, только по
+    API и с UPC в придачу. Любая беда (нет учётки, протухла сессия, релиз не
+    опознан) превращается в пустой dict, а не в исключение: источник
+    опциональный, и падать из-за него штатный резолв не должен.
+    """
+    try:
+        from ripster import featurefm as _ffm
+        if not _ffm.configured(_config):
+            return {}
+        d = await _ffm.a_ids_for(url, cfg=_config)
+        if not d.get("found"):
+            return {}
+        return {
+            "isrc":   (d.get("isrc") or [""])[0],
+            "upc":    (d.get("upc") or [""])[0],
+            "title":  d.get("title") or "",
+            "artist": ", ".join(d.get("artists") or []),
+            "label":  (d.get("label") or [""])[0] if d.get("label") else "",
+        }
+    except Exception as _e:                                        # noqa: BLE001
+        print(f"[isrc] feature.fm fallback недоступен: {_e!r}", flush=True)
+        return {}
 
 
 # ── Smart release resolver: pick the BEST available source ───────────────────
@@ -290,6 +330,7 @@ async def smart_resolve(body: dict):
     artist = (body.get("artist") or "").strip()
     isrc   = (body.get("isrc") or "").strip().upper()
 
+    ff_upc = ""
     if url and (not isrc or not title):
         try:
             svc  = _detect_service(url) if _detect_service else ""
@@ -300,6 +341,13 @@ async def smart_resolve(body: dict):
                 artist = artist or (meta.get("artist") or "")
         except Exception:
             pass
+    # Наш разбор не дал ISRC — добираем feature.fm (заодно UPC для матрицы).
+    if url and not isrc:
+        ff = await _featurefm_ids(url)
+        isrc   = isrc   or (ff.get("isrc") or "").strip().upper()
+        title  = title  or ff.get("title", "")
+        artist = artist or ff.get("artist", "")
+        ff_upc = (ff.get("upc") or "").strip()
 
     matches: dict = {}
     # Apple (always available via wrapper; multi-region catches NZ pre-releases)
@@ -348,6 +396,8 @@ async def smart_resolve(body: dict):
                     isrc = _cid[5:]
             except Exception:
                 pass
+        if not _upc and ff_upc:
+            _upc = ff_upc  # UPC от feature.fm, когда свой резолвер id не дал
         if _upc or isrc or title:
             _m = await _av.matrix(upc=_upc, isrc=isrc, title=title, artist=artist)
             _svcs = _m.get("services") or {}
