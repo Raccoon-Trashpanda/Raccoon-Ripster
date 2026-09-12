@@ -34,6 +34,11 @@ def _state_dict() -> dict:
         "channels":    st.channels,
         "bits":        st.bits,
         "exclusive":   st.exclusive,
+        "paused":      st.paused,
+        # «Доиграл сам» ≠ «остановили»: по первому интерфейс включает следующий
+        # трек, по второму — нет. Без этого различия очередь либо стоит, либо
+        # проматывается после нажатия «стоп».
+        "finished":    st.finished,
         "bit_perfect": st.bit_perfect,
         "position":    round(st.position_sec, 2),
         "duration":    round(st.duration_sec, 2),
@@ -78,4 +83,33 @@ async def audio_play(body: dict):
 @router.post("/api/audio/stop")
 async def audio_stop():
     _ae.ENGINE.stop()
+    return {"ok": True, **_state_dict()}
+
+
+@router.post("/api/audio/pause")
+async def audio_pause():
+    """Придержать кадры, не отпуская устройство.
+
+    Именно не отпуская: закрытие эксклюзивного потока на паузу давало бы щелчок
+    и освобождало устройство — его мог бы перехватить кто угодно, и снятие
+    паузы уже не вернуло бы bit-perfect.
+    """
+    _ae.ENGINE.pause()
+    return {"ok": True, **_state_dict()}
+
+
+@router.post("/api/audio/resume")
+async def audio_resume():
+    _ae.ENGINE.resume()
+    return {"ok": True, **_state_dict()}
+
+
+@router.post("/api/audio/seek")
+async def audio_seek(body: dict):
+    """Перемотка внутри текущего файла. Ничего не играет — не ошибка."""
+    try:
+        sec = float(body.get("sec"))
+    except (TypeError, ValueError):
+        raise HTTPException(400, imsg("err.seek_seconds", "нужны секунды (sec)"))
+    _ae.ENGINE.seek(sec)
     return {"ok": True, **_state_dict()}

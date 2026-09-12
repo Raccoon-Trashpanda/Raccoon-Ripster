@@ -60,6 +60,13 @@ class Playback:
     exclusive: bool = False
     position_sec: float = 0.0
     duration_sec: float = 0.0
+    #: Пауза: поток открыт и устройство наше, но кадры не льются. Отличается от
+    #: `playing=False` тем, что возвращаться некуда — достаточно снять паузу.
+    paused: bool = False
+    #: Файл доиграл САМ. Без этого признака интерфейс не отличает «кончился»
+    #: от «остановили» и либо не включает следующий трек, либо включает его
+    #: после нажатия «стоп» — обе ошибки одинаково заметны.
+    finished: bool = False
     #: Почему не играет. Пусто — всё в порядке.
     error: str = ""
 
@@ -169,6 +176,14 @@ class Engine:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._stop = threading.Event()
+        #: Взведён — кадры льются. Снят — пауза. Поток вывода при этом ОСТАЁТСЯ
+        #: открытым: закрыть и открыть заново эксклюзивное устройство — это
+        #: щелчок и риск, что его перехватит кто-то ещё, пока оно свободно.
+        self._go = threading.Event()
+        self._go.set()
+        #: Куда перемотать, в секундах. Забирает рабочий поток: seek делает тот,
+        #: кто держит файл, иначе две руки двигают один курсор.
+        self._seek_to: float | None = None
         self._thread: threading.Thread | None = None
         self._state = Playback()
 
@@ -221,7 +236,11 @@ class Engine:
             path=str(p), file_rate=int(info.samplerate), channels=int(info.channels),
             bits=_bits_of(info.subtype), duration_sec=float(info.frames) / info.samplerate,
             position_sec=0.0, granted_rate=0, exclusive=exclusive, error="", playing=False,
+            paused=False, finished=False,
         )
+        self._go.set()
+        with self._lock:
+            self._seek_to = None
         # Эксклюзивный режим есть ТОЛЬКО у WASAPI. Устройство по умолчанию в
         # Windows принадлежит MME, и настройки WASAPI на нём дают
         # «Incompatible host API specific stream info» — поймано первым же
@@ -242,11 +261,45 @@ class Engine:
 
     def stop(self) -> None:
         self._stop.set()
+        # Снять паузу ПЕРЕД join: поток стоит на `self._go.wait()`, и без этого
+        # остановка на паузе висела бы три секунды таймаута и уходила с живым
+        # потоком — устройство осталось бы занятым.
+        self._go.set()
         t = self._thread
         if t and t.is_alive():
             t.join(timeout=3.0)
         self._thread = None
-        self._set(playing=False)
+        self._set(playing=False, paused=False)
+
+    def pause(self) -> Playback:
+        """Придержать кадры, не отпуская устройство."""
+        if self._thread and self._thread.is_alive():
+            self._go.clear()
+            self._set(paused=True)
+        return self.state
+
+    def resume(self) -> Playback:
+        if self._thread and self._thread.is_alive():
+            self._go.set()
+            self._set(paused=False)
+        return self.state
+
+    def seek(self, sec: float) -> Playback:
+        """Перемотать внутри текущего файла.
+
+        Ничего не играет — перематывать нечего, и это не ошибка: интерфейс
+        может дёрнуть перемотку на остывшем плеере.
+        """
+        if not (self._thread and self._thread.is_alive()):
+            return self.state
+        st = self.state
+        with self._lock:
+            self._seek_to = clamp_seek(sec, st.duration_sec)
+        # Перемотка на паузе должна СРАБОТАТЬ, а не ждать снятия паузы: человек
+        # тянет полосу именно на паузе чаще всего. Позицию показываем сразу,
+        # звук догонит на возобновлении.
+        self._set(position_sec=clamp_seek(sec, st.duration_sec))
+        return self.state
 
     # ── рабочий поток ────────────────────────────────────────────────────
     def _run(self, path: str, device: int | None, exclusive: bool,
@@ -276,13 +329,28 @@ class Engine:
                 started.set()
                 block = 8192
                 done = 0
+                ended_on_its_own = False
                 while not self._stop.is_set():
+                    # Пауза: ждём с таймаутом, чтобы `stop()` во время паузы не
+                    # упирался в вечное ожидание.
+                    if not self._go.wait(timeout=0.2):
+                        continue
+                    with self._lock:
+                        target, self._seek_to = self._seek_to, None
+                    if target is not None:
+                        frame = int(target * f.samplerate)
+                        f.seek(frame)
+                        done = frame
+                        self._set(position_sec=float(target))
                     data = f.read(block, dtype=stream.dtype, always_2d=True)
                     if len(data) == 0:
+                        ended_on_its_own = True
                         break
                     stream.write(data)
                     done += len(data)
                     self._set(position_sec=done / f.samplerate)
+                if ended_on_its_own:
+                    self._set(finished=True)
                 stream.stop()
                 stream.close()
         except Exception as e:
@@ -294,6 +362,21 @@ class Engine:
         finally:
             self._set(playing=False)
             started.set()
+
+
+def clamp_seek(sec: float, duration_sec: float) -> float:
+    """Куда на самом деле встанет перемотка.
+
+    Отдельной функцией, потому что это единственная часть перемотки, которую
+    можно проверить без звуковой карты, а ошибиться в ней легко: отрицательная
+    секунда роняет `f.seek`, а секунда за концом файла даёт мгновенный «трек
+    закончился» — и очередь проматывает альбом целиком за пару секунд.
+    """
+    if duration_sec <= 0:
+        return 0.0
+    # Полсекунды у хвоста: ровно в конец вставать бессмысленно — файл сразу
+    # кончится, и перемотка прочитается как пропуск трека.
+    return max(0.0, min(float(sec), duration_sec - 0.5))
 
 
 def _bits_of(subtype: str | None) -> int:

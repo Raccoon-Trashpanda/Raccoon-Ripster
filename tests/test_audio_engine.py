@@ -9,7 +9,7 @@ WASAPI exclusive открылся на 44100/48000/96000, а shared — толь
 Браузеру доступен лишь shared, поэтому web-плеер физически не может отдать
 44.1 кГц без пересчёта.
 """
-from ripster.audio_engine import LOSSLESS_EXT, Playback
+from ripster.audio_engine import LOSSLESS_EXT, Playback, clamp_seek
 
 
 class TestBitPerfectClaim:
@@ -49,6 +49,47 @@ class TestWhatItAgreesToPlay:
         потерями — бессмысленное обещание, а декод у них свой."""
         for ext in (".mp3", ".m4a", ".aac", ".opus"):
             assert ext not in LOSSLESS_EXT
+
+
+class TestSeekBounds:
+    """Перемотка — единственная часть тракта, проверяемая без звуковой карты.
+
+    Обе границы здесь не теоретические: отрицательная секунда роняет
+    `SoundFile.seek`, а секунда за концом файла даёт мгновенное «трек
+    закончился» — и очередь пролистывает альбом целиком за пару секунд, что со
+    стороны выглядит как «плеер сошёл с ума», а не как промах перемотки.
+    """
+
+    def test_negative_target_lands_at_the_start(self):
+        assert clamp_seek(-5, 180.0) == 0.0
+
+    def test_past_the_end_stops_short_of_it(self):
+        assert clamp_seek(999, 180.0) == 179.5
+
+    def test_a_normal_target_is_left_alone(self):
+        assert clamp_seek(42.5, 180.0) == 42.5
+
+    def test_unknown_duration_refuses_to_guess(self):
+        """Длительности нет — перематывать некуда; ставим в начало, а не в
+        произвольную точку файла, которого ещё не измерили."""
+        assert clamp_seek(42.5, 0.0) == 0.0
+
+
+class TestPausedAndFinishedAreDifferentThings:
+    def test_fresh_state_claims_neither(self):
+        p = Playback()
+        assert p.paused is False and p.finished is False
+
+    def test_paused_is_not_finished(self):
+        """Пауза — это «играет, но придержали». Если интерфейс спутает её с
+        концом файла, он включит следующий трек посреди текущего."""
+        p = Playback(playing=True, paused=True)
+        assert p.finished is False
+
+    def test_finished_is_not_a_bit_perfect_claim(self):
+        """Доигравший файл больше ничего не выводит — утверждать про вывод
+        нечего, ровно как у пустого состояния."""
+        assert Playback(finished=True).bit_perfect is False
 
 
 class TestHonestFailure:

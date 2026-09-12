@@ -1269,6 +1269,139 @@ function _waAttachEnded(src, idx) {
     else _WA.curSource = null;
   };
 }
+/* ══ СВОЙ ТРАКТ ДЛЯ ЛОКАЛЬНЫХ ФАЙЛОВ ═══════════════════════════════════════
+ *
+ * До 12.09.2026 маршруты `/api/audio/*` умели играть, но их не звал НИКТО:
+ * экран настройки показывал устройства и состояние, а звук всё равно шёл через
+ * браузер, то есть через общий микшер Windows. Настройка была честная, провод
+ * к ней — не подключён; ровно то, что в проекте называется «декоративный
+ * движок».
+ *
+ * Здесь этот провод. Правила, по которым тракт вообще берётся за трек:
+ *   • только локальный файл с диска (`/api/library/file?p=…`). `/api/localmix/flac`
+ *     — транскод на лету, файла под ним нет, и путь из него взять неоткуда;
+ *   • только lossless-контейнер: libsndfile читает FLAC/WAV/AIFF, а bit-perfect
+ *     для mp3 — обещание без смысла;
+ *   • только если человек включил это сам (`audio-native-local`). Эксклюзивный
+ *     режим отбирает звук у всей системы — включать такое молча нельзя.
+ * Всё остальное играет как играло.
+ */
+const _NA = { active: false, idx: -1, dur: 0, cur: 0, paused: false, timer: null };
+const _NA_LOSSLESS = /\.(flac|wav|aiff?|w64)$/i;
+
+function _naEnabled() { return !!(S.config?.['audio-native-local']); }
+
+/** Физический путь файла, если этот трек тракту по зубам. Иначе пустая строка. */
+function _naPathOf(item) {
+  if (!item || !item.url) return '';
+  let u;
+  try { u = new URL(item.url, location.origin); } catch { return ''; }
+  if (u.origin !== location.origin) return '';
+  if (u.pathname !== '/api/library/file') return '';
+  const p = u.searchParams.get('p') || '';
+  return _NA_LOSSLESS.test(p) ? p : '';
+}
+
+function _naSyncPlayBtns(paused) {
+  ['pp-play', 'pp-play-big', 'fp-play'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = paused ? '▶' : '⏸';
+  });
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = paused ? 'paused' : 'playing';
+}
+
+/** Начать через свой тракт. `false` — не взялись, зовущий играет как обычно. */
+async function _naPlay(idx) {
+  const item = Preview.queue[idx];
+  const path = _naPathOf(item);
+  if (!path) return false;
+  try { _waStopIfPlaying?.(); } catch (_) {}
+  try { _plainStopIfPlaying?.(); } catch (_) {}
+  const dev = String(S.config?.['audio-device'] ?? '');
+  let st;
+  try {
+    st = await api('POST', '/api/audio/play', {
+      path,
+      exclusive: S.config?.['audio-exclusive'] !== false,
+      device: dev === '' ? null : Number(dev),
+    });
+  } catch (e) {
+    toast(t('aeng.na_failed') + ': ' + String(e), 'var(--orange)', '', 5000);
+    return false;
+  }
+  if (!st || st.error) {
+    // Отказ НЕ проглатывается: человек включил свой тракт, и подмена его
+    // браузером за спиной обесценивает всю настройку. Говорим причину вслух и
+    // только потом играем обычным путём — иначе он останется в тишине.
+    toast(t('aeng.na_failed') + ': ' + String(st?.error || '?'), 'var(--orange)', '', 6000);
+    return false;
+  }
+  _NA.active = true; _NA.idx = idx; _NA.paused = false;
+  _NA.dur = st.duration || 0; _NA.cur = st.position || 0;
+  Preview.idx = idx;
+  const bar = document.getElementById('preview-player');
+  const main = document.querySelector('.main');
+  if (bar) bar.classList.add('visible');
+  if (main) {
+    const isExpanded = document.getElementById('pp-expanded')?.style.display !== 'none';
+    main.removeAttribute('data-preview-open');
+    main.removeAttribute('data-preview-expanded');
+    main.setAttribute(isExpanded ? 'data-preview-expanded' : 'data-preview-open', '1');
+  }
+  _ppSyncNowPlaying(item, idx);
+  const durStr = fmtDur(Math.floor(_NA.dur));
+  ['pp-dur', 'pp-dur-big', 'fp-dur'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = durStr;
+  });
+  _naSyncPlayBtns(false);
+  _naStartTick();
+  return true;
+}
+
+async function _naPause()  { if (!_NA.active) return; _NA.paused = true;  _naSyncPlayBtns(true);  try { await api('POST', '/api/audio/pause'); } catch (_) {} }
+async function _naResume() { if (!_NA.active) return; _NA.paused = false; _naSyncPlayBtns(false); try { await api('POST', '/api/audio/resume'); } catch (_) {} }
+async function _naSeek(sec) {
+  if (!_NA.active) return;
+  _NA.cur = Math.max(0, sec);          // полоса не должна ждать ответа сервера
+  try { await api('POST', '/api/audio/seek', { sec }); } catch (_) {}
+}
+async function _naStop() {
+  if (!_NA.active) return;
+  _NA.active = false;
+  clearInterval(_NA.timer); _NA.timer = null;
+  try { await api('POST', '/api/audio/stop'); } catch (_) {}
+}
+
+/** Опрос состояния: у своего тракта нет событий, спрашивать приходится нам. */
+function _naStartTick() {
+  clearInterval(_NA.timer);
+  _NA.timer = setInterval(async () => {
+    if (!_NA.active) return;
+    let s;
+    try { s = await api('GET', '/api/audio/state'); } catch (_) { return; }
+    _NA.cur = s.position || 0;
+    _NA.dur = s.duration || _NA.dur;
+    _NA.paused = !!s.paused;
+    const item = Preview.queue[_NA.idx];
+    if (item) _mixPosSave?.(item.posKey, _NA.cur, _NA.dur);
+    try { _lrcSyncTick?.(_NA.cur); } catch (_) {}
+    if (!_seekDragging) {
+      const pct = _NA.dur ? (_NA.cur / _NA.dur * 100) : 0;
+      const tt = `${Math.floor(_NA.cur / 60)}:${String(Math.floor(_NA.cur % 60)).padStart(2, '0')}`;
+      ['pp-fill', 'pp-fill-big', 'fp-fill'].forEach(id => { const el = document.getElementById(id); if (el) el.style.width = pct + '%'; });
+      ['pp-cur-big', 'fp-cur'].forEach(id => { const el = document.getElementById(id); if (el) el.textContent = tt; });
+      const thumb = document.getElementById('fp-thumb'); if (thumb) thumb.style.setProperty('--x-pct', _fpThumbPx(pct));
+    }
+    // «Доиграл сам» ≠ «остановили»: следующий трек включается только по первому,
+    // иначе нажатие «стоп» проматывало бы очередь дальше.
+    if (s.finished) {
+      _NA.active = false;
+      clearInterval(_NA.timer); _NA.timer = null;
+      if (_NA.idx + 1 < Preview.queue.length) _playPreviewAt(_NA.idx + 1);
+      else _naSyncPlayBtns(true);
+    }
+  }, 250);
+}
+
 function _waPause() {
   if (_WA.ctx && _WA.curSource) {
     _WA.suspendedAt = _WA.ctx.currentTime - _WA.curStartT;
@@ -1407,6 +1540,7 @@ function _ppNowTime(){
   // separate <audio id="bbc-audio"> (its own ontimeupdate drives the time); if we
   // read a paused pp-audio with a stale src here we'd overwrite — and freeze — the
   // BBC clock. The !paused guards prevent that.
+  try{ if(_NA.active && !_NA.paused) return {cur:_NA.cur, loaded:true}; }catch(_){}
   try{ if(_waEnabled() && _WA && _WA.curSource && !_waIsPaused()) return {cur:_waCurrentTime(), loaded:true}; }catch(_){}
   try{ const v=Preview&&Preview._fpsEl; if(v && v.src && !v.paused) return {cur:v.currentTime||0, loaded:true}; }catch(_){}
   const a=document.getElementById('pp-audio'); if(a && a.src && !a.paused) return {cur:a.currentTime||0, loaded:true};
@@ -1723,6 +1857,7 @@ function _setupAudioEvents() {
   if ('mediaSession' in navigator) {
     try {
       navigator.mediaSession.setActionHandler('play',  () => {
+        if (_NA.active) { _naResume(); return; }
         if (_waEnabled() && _WA.curSource) {
           _waResume();
         } else {
@@ -1731,24 +1866,28 @@ function _setupAudioEvents() {
         }
       });
       navigator.mediaSession.setActionHandler('pause', () => {
+        if (_NA.active) { _naPause(); return; }
         if (_waEnabled() && _WA.curSource) _waPause(); else audio.pause();
       });
       navigator.mediaSession.setActionHandler('previoustrack',  () => previewPrev());
       navigator.mediaSession.setActionHandler('nexttrack',      () => previewNext());
       navigator.mediaSession.setActionHandler('seekbackward',   (e) => {
         const offset = (e && e.seekOffset) || 10;
+        if (_NA.active) { _naSeek(Math.max(0, _NA.cur - offset)); return; }
         if (_waEnabled() && _WA.curSource) { _waSeek(Math.max(0, _waCurrentTime() - offset)); return; }
         const a = document.getElementById('pp-audio'); if (!a) return;
         a.currentTime = Math.max(0, a.currentTime - offset);
       });
       navigator.mediaSession.setActionHandler('seekforward',    (e) => {
         const offset = (e && e.seekOffset) || 10;
+        if (_NA.active) { _naSeek(Math.min(_NA.dur, _NA.cur + offset)); return; }
         if (_waEnabled() && _WA.curSource) { _waSeek(Math.min(_waDuration(), _waCurrentTime() + offset)); return; }
         const a = document.getElementById('pp-audio'); if (!a) return;
         a.currentTime = Math.min(a.duration || 0, a.currentTime + offset);
       });
       navigator.mediaSession.setActionHandler('seekto',         (e) => {
         if (!e || e.seekTime == null) return;
+        if (_NA.active) { _naSeek(e.seekTime); return; }
         if (_waEnabled() && _WA.curSource) { _waSeek(e.seekTime); return; }
         const a = document.getElementById('pp-audio'); if (!a) return;
         try { a.currentTime = e.seekTime; } catch {}
@@ -1955,6 +2094,13 @@ async function _playPreviewAt(idx) {
       _playerSetChapters([]);
     }
   } catch (_) {}
+  // Свой тракт — ПЕРВЫМ, до Web Audio: если человек его включил и трек ему по
+  // зубам (локальный lossless с диска), играть должен он. Не взялся — честно
+  // сказал причину и пропустил ход дальше, к обычным путям.
+  if (_naEnabled()) {
+    if (await _naPlay(idx)) return;
+  }
+  if (_NA.active) await _naStop();   // уходим с тракта на обычный путь — отпустить устройство
   // Gapless Web Audio path — only for same-origin URLs (cross-origin CDNs
   // block decodeAudioData by missing CORS headers).
   if (_waEnabled() && _waCanPlay(item)) {
@@ -2297,6 +2443,11 @@ function playAlbumTrackPreview(idx) {
 
 function previewToggle() {
   if (Preview.mode === 'bbc') { bbcTogglePlay(); return; }
+  if (_NA.active) {
+    if (_NA.paused) _naResume(); else _naPause();
+    setTimeout(() => _syncAlbumPlayBtns?.(), 50);
+    return;
+  }
   if (_waEnabled() && _WA.curSource) {
     if (_waIsPaused()) _waResume(); else _waPause();
     setTimeout(() => _syncAlbumPlayBtns?.(), 50);
@@ -2351,6 +2502,7 @@ function previewSeek(event) {
     if (audio && audio.duration) audio.currentTime = frac * audio.duration;
     return;
   }
+  if (_NA.active && _NA.dur) { _naSeek(frac * _NA.dur); return; }
   if (_waEnabled() && _WA.curBuffer) { _waSeek(frac * _waDuration()); return; }
   if (Preview._fpsEl && Preview._fpsEl.duration && isFinite(Preview._fpsEl.duration)) {
     try { Preview._fpsEl.currentTime = frac * Preview._fpsEl.duration; } catch (_) {}
@@ -3233,6 +3385,9 @@ function closePreview() {
   const btn   = document.getElementById('pp-expand-btn');
   if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load(); }
   if (_WA.curSource) { try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch {} _WA.curSource = null; }
+  // Свой тракт держит устройство эксклюзивно — закрыть панель и оставить его
+  // играющим значит отобрать звук у системы у человека за спиной.
+  if (_NA.active) { try { _naStop(); } catch (_) {} }
   _waStopKeepalive();
   if (bar)   bar.classList.remove('visible');
   if (exp)   exp.style.display = 'none';
@@ -3539,6 +3694,15 @@ async function audioEngineInit() {
       <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="aeng-exclusive"
         ${S.config?.['audio-exclusive'] === false ? '' : 'checked'}
         onchange="saveSetting('audio-exclusive', this.checked)"><div class="toggle-slider"></div></label>
+    </div>
+    <div class="toggle-row mt4">
+      <div class="toggle-info">
+        <div class="toggle-label" data-i18n="aeng.native">${esc(t('aeng.native'))}</div>
+        <div class="toggle-sub" data-i18n="aeng.native_sub">${esc(t('aeng.native_sub'))}</div>
+      </div>
+      <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="aeng-native"
+        ${S.config?.['audio-native-local'] ? 'checked' : ''}
+        onchange="saveSetting('audio-native-local', this.checked)"><div class="toggle-slider"></div></label>
     </div>
     <div id="aeng-state" class="toggle-sub mt8"></div>`;
   audioEngineState();
