@@ -382,6 +382,51 @@ def check_apple_pool_slots():
             warn(line)
 
 
+def check_tidal_accounts():
+    """Мёртвые и безлицензионные учётки Tidal (основная + пул).
+
+    Отличие от Deezer: Tidal умеет отвечать «жива, но lossless не отдам» —
+    такую учётку снимать нельзя (ею можно качать AAC), но молчать о ней тоже
+    нельзя. Ровно так 12.09.2026 выяснилось, что основная учётка этой машины —
+    INTRO с истёкшим сроком, и все загрузки Tidal шли через неё.
+    """
+    try:
+        sys.path.insert(0, str(ROOT))
+        from ripster import credential_health as ch
+    except Exception as e:
+        warn(f"credential_health недоступен: {e}")
+        return
+    lines = ch.check_all_tidal_accounts()
+    if not lines:
+        ok("Учётки Tidal живы и отдают lossless")
+        return
+    for line in lines:
+        if line.startswith("💀"):
+            fixed(line)
+        else:
+            warn(line)
+
+
+def check_yandex_tokens():
+    """Мёртвые токены Яндекса (основной + пул). 403 = «не смогли спросить»
+    (сервис геозависим), и в порог снятия такое не засчитывается."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from ripster import credential_health as ch
+    except Exception as e:
+        warn(f"credential_health недоступен: {e}")
+        return
+    lines = ch.check_all_yandex_tokens()
+    if not lines:
+        ok("Токены Яндекса живы, Plus на месте")
+        return
+    for line in lines:
+        if line.startswith("💀"):
+            fixed(line)
+        else:
+            warn(line)
+
+
 def check_deezer_arls():
     """Мёртвые Deezer ARL (основной + пул): та же логика, что check_apple_pool_slots,
     но для Deezer. Проверка — приватный gw-light.php (ripster/deezer_accounts.py),
@@ -1729,6 +1774,11 @@ def main():
         check_deezer_arls()
         check_qobuz_accounts()
         check_soundcloud_tokens()
+        # Tidal и Яндекс заведены 12.09.2026 по просьбе владельца «автохил по
+        # ВСЕМ сервисам»: до этого их учётки никто не мерил, и протухшая уходила
+        # в загрузку первой просто потому, что стояла выше в списке.
+        check_tidal_accounts()
+        check_yandex_tokens()
         check_account_duplicates()
         check_gamdl_cookies()
         check_tokens()

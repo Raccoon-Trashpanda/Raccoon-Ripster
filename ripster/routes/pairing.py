@@ -531,7 +531,23 @@ async def _credentials_payload() -> dict:
     for dst, secret in _best_slots(cfg).items():
         out[dst] = secret
     put("spotify.sp_dc", "spotify-sp-dc")
-    put("yandex.oauth", "yandex-token")
+    # Яндекс: тоже ЛУЧШИЙ токен, а не первый. Без Plus сервис отдаёт только
+    # lossy, и телефон, получив такую учётку при живой Plus-учётке рядом,
+    # молча качал бы хуже, чем может ПК.
+    _yx_done = False
+    try:
+        from ripster import yandex_accounts as _ya
+
+        for _e in _ya.configured_tokens(cfg):
+            _info = _ya.known(_e["token"]) or {}
+            if _info.get("alive") and _info.get("plus"):
+                out["yandex.oauth"] = _e["token"]
+                _yx_done = True
+                break
+    except Exception:
+        pass
+    if not _yx_done:
+        put("yandex.oauth", "yandex-token")
     put("beatport.username", "beatport-username")
     put("beatport.password", "beatport-password")
 
@@ -549,14 +565,55 @@ async def _credentials_payload() -> dict:
     access = ""
     refresh = ""
     cc = ""
+    # ЛУЧШАЯ учётка Tidal, а не первая попавшаяся сессия.
+    #
+    # 12.09.2026: сессия OrpheusDL принадлежит ОСНОВНОЙ учётке, а основная на
+    # этой машине оказалась INTRO (GB) со сроком, истёкшим 20.05 — lossless она
+    # не отдаёт вовсе. Телефон получал именно её, хотя рядом лежали две
+    # PREMIUM с HI_RES. Ровно тот же дефект, что закрыли у Deezer и Qobuz:
+    # «первое поле конфига» вместо «лучший слот».
+    #
+    # Порядок слотов даёт пул: сперва пригодность (измеренная подписка), затем
+    # страна — новозеландская витрина получает пятничные релизы первой.
     try:
-        from ripster.engines.tidal import _orpheus_access_token, _read_tv_session
-        access, cc = await _orpheus_access_token()
-        tv = _read_tv_session() or {}
-        refresh = (tv.get("refresh_token") or "").strip()
-        cc = (cc or (tv.get("country_code") or "")).upper()
+        from ripster import account_fallback as _afb_p
+        from ripster import tidal_pool as _tp
+
+        _accts = _tp.configured_accounts(cfg)
+        for _i in _afb_p.order_indices(_accts):
+            _a = _accts[_i]
+            _rt = (_a.get("tidal-refresh") or "").strip()
+            if not _rt or _tp.health_rank(_a) >= 3:
+                continue
+            import httpx as _httpx
+
+            async with _httpx.AsyncClient(timeout=25) as _c:
+                _r = await _c.post(
+                    "https://auth.tidal.com/v1/oauth2/token",
+                    data={"refresh_token": _rt,
+                          "client_id": "cgiF7TQuB97BUIu3",
+                          "client_secret": "1nqpgx8uvBdZigrx4hUPDV2hOwgYAAAG5DYXOr6uNf8=",
+                          "grant_type": "refresh_token"},
+                )
+            if _r.status_code != 200:
+                continue
+            _j = _r.json()
+            access = _j.get("access_token") or ""
+            refresh = _j.get("refresh_token") or _rt
+            cc = ((_j.get("user") or {}).get("countryCode")
+                  or _a.get("tidal-country") or "").upper()
+            break
     except Exception:
         pass
+    if not access:
+        try:
+            from ripster.engines.tidal import _orpheus_access_token, _read_tv_session
+            access, cc = await _orpheus_access_token()
+            tv = _read_tv_session() or {}
+            refresh = (tv.get("refresh_token") or "").strip()
+            cc = (cc or (tv.get("country_code") or "")).upper()
+        except Exception:
+            pass
     if not access:
         access = (cfg.get("tidal-token") or "").strip()
         refresh = (cfg.get("tidal-refresh") or "").strip()

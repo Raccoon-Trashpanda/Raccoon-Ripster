@@ -285,8 +285,45 @@ def configured_accounts(config: dict) -> list[dict]:
             sources.append(a)
     for i, (acc, src) in enumerate(zip(accounts, sources)):
         if (src or {}).get("priority") is None:
-            acc["priority"] = float(health_rank(acc) * 100 + i)
+            # Порядок: сперва пригодность, потом СТРАНА, и лишь затем позиция в
+            # списке. Страна здесь не вкус, а календарь: новая неделя релизов
+            # начинается в Новой Зеландии, и пятничный альбом появляется в её
+            # витрине на сутки раньше, чем в европейской. Правило владельца
+            # («Новая Зеландия первая») и та же логика, что у автоскачки
+            # вишлиста по новозеландской пятнице.
+            acc["priority"] = float(health_rank(acc) * 1000 + country_rank(acc) * 10 + i)
     return accounts
+
+
+#: Чем МЕНЬШЕ число, тем раньше витрина получает релиз. Список задаётся здесь,
+#: а не в конфиге, потому что это факт про часовые пояса, а не настройка вкуса;
+#: `tidal-country-order` в конфиге его перекрывает, если владелец решит иначе.
+_COUNTRY_ORDER = ("NZ", "AU", "JP", "GB", "DE", "US")
+
+
+def country_rank(acct: dict, config: dict | None = None) -> int:
+    """Насколько рано витрина этой страны отдаёт новинки."""
+    order = None
+    if config:
+        raw = config.get("tidal-country-order")
+        if isinstance(raw, (list, tuple)) and raw:
+            order = tuple(str(x).strip().upper() for x in raw if str(x).strip())
+        elif isinstance(raw, str) and raw.strip():
+            order = tuple(x.strip().upper() for x in raw.split(",") if x.strip())
+    order = order or _COUNTRY_ORDER
+    cc = (acct.get("tidal-country") or "").strip().upper()
+    if not cc:
+        # Страну можно ещё и ИЗМЕРИТЬ: она приходит в ответе Tidal вместе с
+        # подпиской. Это точнее метки в конфиге, которую легко забыть проставить.
+        try:
+            from ripster import tidal_accounts as _ta
+
+            cc = ((_ta.known(_ta.account_secret(acct)) or {}).get("country") or "").upper()
+        except Exception:  # noqa: BLE001
+            cc = ""
+    if not cc:
+        return len(order)          # неизвестна — в середину, не в конец
+    return order.index(cc) if cc in order else len(order) + 1
 
 
 _pool_instance: "TidalPool | None" = None

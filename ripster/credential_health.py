@@ -411,6 +411,226 @@ def check_all_deezer_arls(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
     return lines
 
 
+def disable_tidal_account(primary: bool, secret: str) -> None:
+    """Снять мёртвую учётку Tidal с маршрутизации.
+
+    Как и у Deezer: сперва реестр снятых, потом файл. Приложение пишет
+    config.yaml целиком из памяти и вернуло бы удалённую запись обратно —
+    реестр этого не даст.
+    """
+    import yaml
+
+    from . import config_service as _cs
+    from . import retired_credentials as _retired
+
+    target = (secret or "").strip()
+    if not target:
+        return
+    _retired.retire("tidal_account", target, "учётка отвергнута Tidal")
+    for path in _yaml_files_to_check():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(data, dict):
+            continue
+        changed = False
+        if primary and (data.get("tidal-refresh") or "").strip() == target:
+            # Чистим ВСЮ основную учётку, а не только refresh: оставленный
+            # access-токен живёт ещё сутки и всё это время выглядел бы рабочим.
+            for k in ("tidal-refresh", "tidal-token", "tidal-user-id", "tidal-token-expiry"):
+                if data.get(k):
+                    data[k] = ""
+            changed = True
+        pool = data.get("tidal-accounts")
+        if isinstance(pool, list):
+            kept = [a for a in pool
+                    if not (isinstance(a, dict)
+                            and ((a.get("refresh") or a.get("tidal-refresh") or "").strip() == target
+                                 or (a.get("email") or a.get("tidal-email") or "").strip() == target))]
+            if len(kept) != len(pool):
+                data["tidal-accounts"] = kept
+                changed = True
+        if changed:
+            _cs._atomic_write_yaml(path, data)
+
+
+def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
+    """Прогнать проверку по всем учёткам Tidal (основная + пул).
+
+    Меряется тем же способом, что показывают настройки: обновление токена,
+    затем подписка (`tidal_accounts.account_info`). Секрет наружу не идёт — ни
+    в отчёт, ни в state-файл попадает только хвост.
+
+    Как и у Deezer: сетевая авария НЕ засчитывается в streak. Три обрыва подряд
+    иначе сняли бы живую учётку, и виноват был бы наш канал, а не она.
+
+    Всё в ОДНОМ `asyncio.run()`: общий httpx-клиент привязывается к первому же
+    циклу, и второй запуск в том же процессе получил бы RuntimeError вместо
+    ответа — на этом уже наступали с Deezer 29.08.2026.
+    """
+    import asyncio
+
+    from . import tidal_accounts as ta
+    from . import tidal_pool as tp
+
+    lines: list[str] = []
+    cfg = _load_raw_config()
+    if not cfg:
+        return lines
+    accounts = tp.configured_accounts(cfg)
+    if not accounts:
+        return lines
+
+    async def _check_all():
+        out = []
+        for i, acct in enumerate(accounts):
+            try:
+                info = await ta.account_info(acct, fresh=True)
+            except Exception as e:  # noqa: BLE001
+                info = {"alive": False, "unreachable": True,
+                        "reason": f"ошибка проверки: {type(e).__name__}"}
+            out.append((i, acct, info))
+        return out
+
+    try:
+        results = asyncio.run(_check_all())
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"⚠️ Проверка учёток Tidal не прошла целиком: {type(e).__name__}")
+        return lines
+
+    for i, acct, info in results:
+        secret = ta.account_secret(acct)
+        masked = _mask(secret)
+        label = acct.get("label") or f"слот {i}"
+        alive = info.get("alive")
+        reason = "" if alive else (info.get("reason") or "не отвечает")
+
+        if alive is None:
+            # «Не знаем» — это не «мертва». Вход по паролю измерить нечем, а
+            # сетевой сбой — свойство канала.
+            lines.append(f"⚠️ Tidal {label} ({masked}): {reason} — учётка не тронута")
+            continue
+
+        streak, archived = record_check(
+            "tidal_account", _ident(secret), bool(alive),
+            country=info.get("country", "") if alive else "",
+            reason=reason, threshold=threshold,
+            disable_fn=lambda _k, _key, _s=secret, _p=(i == 0): disable_tidal_account(_p, _s),
+        )
+        if archived:
+            lines.append(f"💀 Tidal {label} ({masked}) архивирована и снята из "
+                         f"config/tokens ({reason}) — запись в DEAD_ACCOUNTS.txt")
+        elif not alive and streak > 0:
+            lines.append(f"⚠️ Tidal {label} ({masked}): {streak}/{threshold} "
+                         f"неудачных проверок подряд ({reason})")
+        elif alive and not info.get("lossless"):
+            # Живая, но без lossless — не повод снимать, повод СКАЗАТЬ: именно
+            # так 12.09.2026 выяснилось, что основная учётка ПК это INTRO с
+            # истёкшим сроком, и все загрузки Tidal шли через неё.
+            lines.append(f"⚠️ Tidal {label} ({masked}): жива, но lossless не отдаёт "
+                         f"({info.get('plan') or '?'}, {info.get('quality') or '?'}, "
+                         f"до {str(info.get('valid_until') or '?')[:10]})")
+    return lines
+
+
+def disable_yandex_token(primary: bool, token: str) -> None:
+    """Снять мёртвый токен Яндекса: реестр, затем тот файл, где он лежит."""
+    import yaml
+
+    from . import config_service as _cs
+    from . import retired_credentials as _retired
+
+    target = (token or "").strip()
+    if not target:
+        return
+    _retired.retire("yandex_token", target, "токен отвергнут Яндексом")
+    for path in _yaml_files_to_check():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(data, dict):
+            continue
+        changed = False
+        if primary and (data.get("yandex-token") or "").strip() == target:
+            data["yandex-token"] = ""
+            changed = True
+        pool = data.get("yandex-accounts")
+        if isinstance(pool, list):
+            kept = [a for a in pool
+                    if not (isinstance(a, dict)
+                            and (a.get("token") or a.get("yandex-token") or "").strip() == target)]
+            if len(kept) != len(pool):
+                data["yandex-accounts"] = kept
+                changed = True
+        if changed:
+            _cs._atomic_write_yaml(path, data)
+
+
+def check_all_yandex_tokens(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
+    """Прогнать проверку по всем токенам Яндекса (основной + пул).
+
+    Тонкость, которой нет у других сервисов: `account/status` отвечает 403 вне
+    России. Это «не смогли спросить», а не «токен мёртв», и в streak такое не
+    засчитывается — иначе VPN, упавший на сутки, снял бы все живые учётки.
+    """
+    import asyncio
+
+    from . import yandex_accounts as ya
+
+    lines: list[str] = []
+    cfg = _load_raw_config()
+    if not cfg:
+        return lines
+    entries = ya.configured_tokens(cfg)
+    if not entries:
+        return lines
+
+    async def _check_all():
+        out = []
+        for e in entries:
+            try:
+                info = await ya.token_info(e["token"], fresh=True)
+            except Exception as ex:  # noqa: BLE001
+                info = {"alive": None, "unreachable": True,
+                        "reason": f"ошибка проверки: {type(ex).__name__}"}
+            out.append((e, info))
+        return out
+
+    try:
+        results = asyncio.run(_check_all())
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"⚠️ Проверка токенов Яндекса не прошла целиком: {type(e).__name__}")
+        return lines
+
+    for entry, info in results:
+        token = entry["token"]
+        masked = _mask(token)
+        label = entry.get("label") or "?"
+        alive = info.get("alive")
+        reason = "" if alive else (info.get("reason") or "не отвечает")
+
+        if alive is None:
+            lines.append(f"⚠️ Яндекс {label} ({masked}): {reason} — учётка не тронута")
+            continue
+
+        streak, archived = record_check(
+            "yandex_token", _ident(token), bool(alive), reason=reason, threshold=threshold,
+            disable_fn=lambda _k, _key, _t=token, _p=bool(entry.get("primary")):
+                disable_yandex_token(_p, _t),
+        )
+        if archived:
+            lines.append(f"💀 Яндекс {label} ({masked}) архивирован и снят из "
+                         f"config/tokens ({reason}) — запись в DEAD_ACCOUNTS.txt")
+        elif not alive and streak > 0:
+            lines.append(f"⚠️ Яндекс {label} ({masked}): {streak}/{threshold} "
+                         f"неудачных проверок подряд ({reason})")
+        elif alive and not info.get("plus"):
+            lines.append(f"⚠️ Яндекс {label} ({masked}): жив, но без Plus — FLAC не отдаст")
+    return lines
+
+
 def disable_qobuz_account(secret: str) -> None:
     """Снимает мёртвую учётку Qobuz: ищет её ТОЧНО в том файле (config.yaml или
     tokens/*.yaml), где она прописана. Основная учётка чистится по полям,
