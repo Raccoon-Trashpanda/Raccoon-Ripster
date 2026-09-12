@@ -218,19 +218,56 @@ def _account_from_dict(a: dict, label_fallback: str) -> dict | None:
 def health_rank(acct: dict) -> int:
     """Насколько учётка пригодна: 0 — лучшая, 3 — непригодная.
 
-    Читаем только измеренное; в сеть здесь не ходим — `acquire()` зовут во
-    время загрузки. Пока измерений нет, все учётки равны (ранг 2 — «не
-    спрашивали»), и это честнее, чем выдумывать порядок.
+    Читаем ТОЛЬКО измеренное (`tidal_accounts` кэширует ответ Tidal на сутки);
+    в сеть отсюда не ходим — `acquire()` зовут во время загрузки.
+
+    «Не спрашивали» и «мертва» — разные состояния, и разводить их обязательно:
+    спутав их, мы отправили бы живую, но ещё не измеренную учётку в конец
+    очереди. Поэтому неизвестность — это 2, а не 3.
     """
     try:
         from ripster import retired_credentials as _retired
+        from ripster import tidal_accounts as _ta
 
-        ident = acct.get("tidal-refresh") or acct.get("tidal-email") or ""
-        if ident and _retired.is_retired("tidal_account", ident):
+        secret = _ta.account_secret(acct)
+        if secret and _retired.is_retired("tidal_account", secret):
             return 3
+        info = _ta.known(secret) if secret else None
+        if not info:
+            return 2                       # не спрашивали — не судим
+        if info.get("alive") is None:
+            return 2                       # сеть не ответила: не свойство учётки
+        if not info.get("alive"):
+            return 3
+        if info.get("hires") or info.get("lossless"):
+            return 0
+        return 1                           # жива, но lossless не отдаст
     except Exception:  # noqa: BLE001
-        pass
-    return 2
+        return 2
+
+
+def health_note(acct: dict) -> dict:
+    """Почему слот стоит там, где стоит — словами, для панели настроек.
+
+    Без этой строки в списке видно восемь учёток и непонятно, какими из них
+    вообще можно качать: перебор обходит их молча.
+    """
+    rank = health_rank(acct)
+    try:
+        from ripster import tidal_accounts as _ta
+
+        info = _ta.known(_ta.account_secret(acct)) or {}
+    except Exception:  # noqa: BLE001
+        info = {}
+    state = {0: "ok", 1: "lossy", 2: "unknown", 3: "unusable"}[rank]
+    if rank == 3:
+        why = info.get("reason") or "снята автоматикой"
+    elif rank == 2:
+        why = info.get("reason") or "ещё не проверялась"
+    else:
+        why = " · ".join(x for x in (info.get("plan"), info.get("quality"),
+                                     info.get("country")) if x)
+    return {"health": state, "health_why": why, "usable": rank < 3}
 
 
 def configured_accounts(config: dict) -> list[dict]:
