@@ -52,6 +52,10 @@ _POOL_MODULES = {
     "qobuz":      "ripster.qobuz_pool",
     "soundcloud": "ripster.soundcloud_pool",
     "yandex":     "ripster.yandex_pool",
+    # Tidal заведён 12.09.2026. Позже остальных не по забывчивости: у OrpheusDL
+    # нет флага «свой конфиг», и слоты изолируются рабочим каталогом — см.
+    # ripster/tidal_pool.py.
+    "tidal":      "ripster.tidal_pool",
 }
 
 

@@ -56,6 +56,10 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "deezer-accounts",   # multi-account Deezer pool (load-balanced) — list of {arl,label}
     "tidal-token", "tidal-refresh",
     "tidal-user-id", "tidal-country", "tidal-token-expiry",
+    # Пул учёток Tidal — список {refresh | email+password, country, label}.
+    # Вход обоими способами: TV-логин отдаёт refresh, mobile-логин принимает
+    # логин с паролем, и оба пути у OrpheusDL есть.
+    "tidal-accounts", "tidal-email", "tidal-password",
     "tidal-quality", "tidal-save-path",
     "spotify-client-id", "spotify-client-secret", "spotify-sp-dc",
     "spotify-engine",
