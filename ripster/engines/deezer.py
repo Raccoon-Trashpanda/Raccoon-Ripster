@@ -88,6 +88,21 @@ def _write_deemix_config(lyrics: bool | None = None, synced_lyrics: bool | None 
             data = {}
     data["embeddedArtworkSize"] = 1000
     data["saveArtwork"]         = True
+    # Раскладка «артист / релиз / файл» — общая для ВСЕХ сервисов (требование
+    # владельца 09.08.2026). У deemix по умолчанию `createSingleFolder` и
+    # `createArtistFolder` выключены, и одиночный трек ложился ПЛОСКО прямо в
+    # `deezer/<качество>/`. Последствие было не косметическим: `_get_task_dir`
+    # ищет папку релиза, плоский файл ей не является — в лог уходило
+    # «dir unresolved at completion», манифест не писался вовсе, а бот по
+    # пустому манифесту честно сообщал «нет файлов» и ставил задачу заново.
+    # 06-07.09.2026 так утонули четыре гостевые выдачи подряд, 12.09 случай
+    # воспроизведён заново: задача `done` за 10 секунд, манифеста нет и через
+    # две минуты, файл при этом лежал на диске.
+    # Отдавать резолверу саму папку качества нельзя — в ней лежат треки ДРУГИХ
+    # задач, и гость получил бы чужое. Поэтому чиним раскладку, а не резолвер.
+    data["createArtistFolder"] = True
+    data["createAlbumFolder"]  = True
+    data["createSingleFolder"] = True
     # Keep the saved cover.jpg high-res (only set a default if unset, so a
     # user-customised value survives).
     data.setdefault("localArtworkSize", 1400)

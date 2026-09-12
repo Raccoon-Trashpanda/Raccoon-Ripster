@@ -2669,9 +2669,26 @@ function previewMute() {
   ['pp-vol','pp-vol-big'].forEach(id => { const el = document.getElementById(id); if(el) el.value = vol; });
 }
 
+// Громкость, выставленная В ПЛЕЕРЕ, должна пережить следующий трек.
+// 12.09.2026, владелец: «громкость постоянно сбрасывается с той позиции,
+// которую я выставил, на ту, что ставит сам Ripster». Так и было: ползунок
+// плеера двигал звук и НИЧЕГО не сохранял, а `_waInit` при каждой сборке
+// звукового графа ставит усиление из `player-volume` — то есть возвращал
+// значение из настроек. Сохранял только ползунок в Настройках, куда никто не
+// ходит ради громкости.
+// Пишем с задержкой: тянуть ползунок — это десятки событий в секунду, и слать
+// столько же запросов в конфиг незачем.
+let _volSaveT = null;
+
 function previewVolume(val) {
   const v = parseFloat(val);
   if (Preview.mode === 'bbc') { bbcVol(v); return; }
+  clearTimeout(_volSaveT);
+  _volSaveT = setTimeout(() => {
+    // Ноль — это «выключил звук», а не выбранная громкость: сохранив его, мы
+    // открыли бы плеер в тишине и человек решил бы, что звук сломан.
+    if (v > 0) { try { saveSetting('player-volume', v); } catch (_) {} }
+  }, 400);
   if (Preview._fpsEl) { Preview._fpsEl.volume = v; Preview._fpsEl.muted = (v === 0); }
   const audio = document.getElementById('pp-audio');
   if (_WA._audioSourceNode || (_waEnabled() && _WA.curSource)) {
