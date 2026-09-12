@@ -19,8 +19,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse
+
+from ripster.i18n_msg import imsg
 
 router = APIRouter()
 
@@ -195,6 +197,35 @@ async def post_config(body: dict):
     if _save_cfg:
         _save_cfg(_cfg)
     return {"ok": True, "blocked": blocked}
+
+
+@router.post("/api/config/reload")
+async def post_config_reload(request: Request):
+    """Перечитать config.yaml и tokens/*.yaml в память приложения.
+
+    Только с этой же машины: маршрут ничего не принимает и ничего не отдаёт
+    наружу, но перечитывание конфига — это смена учёток и путей, и делать её
+    по запросу извне нельзя.
+
+    Зачем маршрут вообще: приложение держит конфиг в памяти и сохраняет ЦЕЛИКОМ,
+    а сторож здоровья правит файл из другого процесса — снимает мёртвую учётку,
+    назначает основной ту, что отдаёт lossless. Без перечитывания первая же
+    запись из памяти вернула бы старое, и починка выглядела бы сделанной,
+    молча откатываясь (поймано 12.09.2026 на автозамене учётки Tidal).
+    """
+    host = (request.client.host if request.client else "") or ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(403, imsg("err.loopback_only", "только с этой машины"))
+    # Пути считаем от этого файла: корень установки известен всегда, а
+    # `sys.argv[0]` зависит от того, чем запущен процесс — на этом уже
+    # обожглись в пуле Tidal в тот же день.
+    base = Path(__file__).resolve().parents[2]
+    try:
+        n = _cfg.reload(base / "config.yaml", base / "tokens")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, imsg("err.config_reload", "не удалось перечитать конфиг: {e}", e=str(e)))
+    print(f"[config] перечитан с диска: {n} ключей", flush=True)
+    return {"ok": True, "keys": n}
 
 
 # ── Yandex Music OAuth (device flow — automated token capture) ─────────────────

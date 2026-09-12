@@ -69,6 +69,31 @@ class ConfigService:
 
     # ── MutableMapping protocol ───────────────────────────────────────────────
 
+    def reload(self, config_file: "_Path", tokens_dir: "_Path") -> int:
+        """Перечитать конфиг с диска В ТОТ ЖЕ словарь. Возвращает число ключей.
+
+        Зачем: приложение держит конфиг в памяти и сохраняет его ЦЕЛИКОМ, а
+        внешние правки (сторож снял мёртвую учётку, автозамена поставила
+        основной другую) идут прямо в файл. Без перечитывания первая же запись
+        из памяти вернула бы всё обратно — правка выглядела бы сделанной и
+        молча откатывалась (12.09.2026, автозамена учётки Tidal).
+
+        Обновляем НА МЕСТЕ, а не подменяем объект: ссылку на этот словарь уже
+        держат маршруты и движки, и подмена оставила бы их со старой копией.
+        """
+        fresh = load_config(config_file, tokens_dir)
+        if not isinstance(fresh, dict) or not fresh:
+            return 0
+        d = self._data
+        # Ключи, начинающиеся с подчёркивания, ставит само приложение в
+        # рантайме (`_release_version` и подобные) — их в файле нет, и терять
+        # их нельзя.
+        runtime = {k: v for k, v in d.items() if str(k).startswith("_")}
+        d.clear()
+        d.update(fresh)
+        d.update(runtime)
+        return len(d)
+
     def get(self, key: str, default: Any = _UNSET) -> Any:
         if default is _UNSET:
             return self._data.get(key)

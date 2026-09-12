@@ -455,7 +455,8 @@ def disable_tidal_account(primary: bool, secret: str) -> None:
             _cs._atomic_write_yaml(path, data)
 
 
-def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
+def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD,
+                             promote: bool = True) -> list[str]:
     """Прогнать проверку по всем учёткам Tidal (основная + пул).
 
     Меряется тем же способом, что показывают настройки: обновление токена,
@@ -525,12 +526,163 @@ def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
             lines.append(f"⚠️ Tidal {label} ({masked}): {streak}/{threshold} "
                          f"неудачных проверок подряд ({reason})")
         elif alive and not info.get("lossless"):
-            # Живая, но без lossless — не повод снимать, повод СКАЗАТЬ: именно
-            # так 12.09.2026 выяснилось, что основная учётка ПК это INTRO с
-            # истёкшим сроком, и все загрузки Tidal шли через неё.
+            # Живая, но без lossless — снимать не за что (AAC она отдаёт), а вот
+            # держать такую ОСНОВНОЙ незачем: ниже `promote_best_tidal()`
+            # заменит её на полноценную, если та есть.
             lines.append(f"⚠️ Tidal {label} ({masked}): жива, но lossless не отдаёт "
                          f"({info.get('plan') or '?'}, {info.get('quality') or '?'}, "
                          f"до {str(info.get('valid_until') or '?')[:10]})")
+
+    if promote:
+        # Замена делается ПОСЛЕ измерений и по их результату — иначе решение
+        # принималось бы по вчерашнему кэшу.
+        try:
+            lines += promote_best_tidal()
+        except Exception as e:  # noqa: BLE001
+            lines.append(f"⚠️ Tidal: автозамена основной учётки не отработала: {type(e).__name__}")
+    return lines
+
+
+def _notify_app_config_changed() -> bool:
+    """Попросить работающее приложение перечитать конфиг с диска.
+
+    Сторож правит файл из ОТДЕЛЬНОГО процесса, а приложение держит конфиг в
+    памяти и сохраняет его целиком — без этого звонка первая же запись вернула
+    бы снятую учётку обратно. Приложение не запущено — правка просто доживёт
+    до следующего старта, и это не ошибка.
+    """
+    try:
+        import urllib.request
+
+        # Origin/Referer обязательны: у приложения стоит гард против запросов
+        # с чужих страниц, и POST без них он отбивает как межсайтовый — что и
+        # случилось при первой проверке (403 «Cross-site request blocked»).
+        req = urllib.request.Request(
+            "http://127.0.0.1:7799/api/config/reload", data=b"", method="POST",
+            headers={"Origin": "http://127.0.0.1:7799",
+                     "Referer": "http://127.0.0.1:7799/"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            return r.status == 200
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def promote_best_tidal() -> list[str]:
+    """Поставить основной учёткой Tidal ту, что реально отдаёт hi-res.
+
+    Владелец 12.09.2026: «в таких случаях нужно заменять учётку на полностью
+    рабочую, автоматически по результату проверки». Сообщить «основная — INTRO
+    без lossless» и оставить всё как есть — это ровно тот случай, когда отчёт
+    подменяет починку.
+
+    Замена делается в ДВУХ местах, и второе важнее первого:
+
+    * ключи `tidal-*` в конфиге — из них берут поиск, карточки и сопряжение;
+    * **сессия OrpheusDL** (`orpheus/config/loginstorage.bin`) — именно ею
+      скачивает движок. Поменять только конфиг значит переставить вывеску:
+      качать ПК продолжил бы прежней учёткой.
+
+    Прежняя основная не выбрасывается, а переезжает в пул: она может быть
+    жива и годиться на AAC, а её потеря была бы молчаливым уроном.
+    """
+    import yaml
+
+    from . import config_service as _cs
+    from . import tidal_accounts as ta
+    from . import tidal_pool as tp
+    from . import account_fallback as _afb
+
+    lines: list[str] = []
+    cfg = _load_raw_config()
+    if not cfg:
+        return lines
+    accounts = tp.configured_accounts(cfg)
+    if len(accounts) < 2:
+        return lines
+
+    cur = accounts[0]
+    cur_info = ta.known(ta.account_secret(cur)) or {}
+    # Менять есть смысл, только если основная НЕ отдаёт lossless. Живая
+    # премиум-учётка не трогается никогда: перестановка ради перестановки
+    # сбросила бы сессию и ничего не улучшила.
+    if cur_info.get("lossless"):
+        return lines
+
+    best = None
+    for i in _afb.order_indices(accounts):
+        if i == 0:
+            continue
+        info = ta.known(ta.account_secret(accounts[i])) or {}
+        if info.get("alive") and info.get("lossless"):
+            best = (i, accounts[i], info)
+            break
+    if not best:
+        return lines
+
+    idx, acct, info = best
+    new_refresh = (acct.get("tidal-refresh") or "").strip()
+    old_refresh = (cur.get("tidal-refresh") or "").strip()
+    if not new_refresh or new_refresh == old_refresh:
+        return lines
+
+    # 1. Сессия движка. Делаем ПЕРВОЙ: если не выйдет, конфиг лучше не трогать —
+    #    иначе вывеска сменится, а качать продолжит старая учётка.
+    rep = tp.write_session(0, new_refresh, acct.get("tidal-country") or info.get("country", ""))
+    if not rep.get("ok"):
+        lines.append(f"⚠️ Tidal: замена основной учётки отменена — сессию выписать не вышло "
+                     f"({rep.get('why')})")
+        return lines
+
+    # 2. Конфиг: новая — основной, старая — в пул (если жива), без дублей.
+    old_country = (cur.get("tidal-country") or cur_info.get("country") or "").upper()
+    old_alive = bool(cur_info.get("alive"))
+    for path in _yaml_files_to_check():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(data, dict):
+            continue
+        changed = False
+        if (data.get("tidal-refresh") or "").strip() == old_refresh:
+            data["tidal-refresh"] = new_refresh
+            data["tidal-country"] = (acct.get("tidal-country") or info.get("country") or "").upper()
+            # Прежний access-токен и uid принадлежат СТАРОЙ учётке и живут ещё
+            # сутки: оставить их значит отдавать телефону чужую пару.
+            for k in ("tidal-token", "tidal-user-id", "tidal-token-expiry"):
+                if k in data:
+                    data[k] = ""
+            changed = True
+        pool = data.get("tidal-accounts")
+        if isinstance(pool, list):
+            kept = [a for a in pool
+                    if not (isinstance(a, dict)
+                            and (a.get("refresh") or a.get("tidal-refresh") or "").strip() == new_refresh)]
+            if old_alive and old_refresh and not any(
+                isinstance(a, dict)
+                and (a.get("refresh") or a.get("tidal-refresh") or "").strip() == old_refresh
+                for a in kept
+            ):
+                kept.append({"label": f"{cur.get('label') or 'прежняя основная'}"
+                                      f" ({cur_info.get('plan') or 'тариф неизвестен'})",
+                             "refresh": old_refresh, "country": old_country})
+            if kept != pool:
+                data["tidal-accounts"] = kept
+                changed = True
+        if changed:
+            _cs._atomic_write_yaml(path, data)
+
+    # 3. Сказать живому приложению перечитать конфиг. Без этого оно сохранит
+    #    свой снимок памяти и вернёт старую основную — правка выглядела бы
+    #    сделанной и молча откатилась бы.
+    _notify_app_config_changed()
+
+    lines.append(
+        f"🔁 Tidal: основной назначена «{acct.get('label')}» "
+        f"({info.get('plan')}, {info.get('quality')}, {info.get('country')}) — "
+        f"прежняя ({cur_info.get('plan') or '?'}, {cur_info.get('quality') or 'без lossless'}) "
+        f"{'перенесена в пул' if old_alive else 'снята'}; сессия движка переписана "
+        f"({', '.join(rep.get('clients') or [])})")
     return lines
 
 

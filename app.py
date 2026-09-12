@@ -943,6 +943,11 @@ _guest_mgr = _get_guest_manager()
 _app_auth.set_guest_checker(lambda r: _guest_mgr.is_guest_request(r))
 _app_auth.add_public_path("/api/session-info")
 _app_auth.add_public_path("/api/ping")
+# Перечитывание конфига с диска. Пароль тут не защита, а помеха: зовёт его
+# сторож здоровья из СОСЕДНЕГО процесса, у которого пароля владельца нет и
+# быть не должно. Сам маршрут пускает только петлю (см. routes/core.py), то
+# есть доступ к нему равносилен доступу к машине.
+_app_auth.add_public_path("/api/config/reload")
 
 
 # Unauthenticated liveness/identity probe. The launcher hits this to tell OUR

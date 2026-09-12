@@ -396,7 +396,9 @@ def check_tidal_accounts():
     except Exception as e:
         warn(f"credential_health недоступен: {e}")
         return
-    lines = ch.check_all_tidal_accounts()
+    # Автозамена основной учётки — это ПОЧИНКА, а не проверка: под --no-fix
+    # сторож обязан только рассказать, что нашёл.
+    lines = ch.check_all_tidal_accounts(promote=not NO_FIX)
     if not lines:
         ok("Учётки Tidal живы и отдают lossless")
         return
