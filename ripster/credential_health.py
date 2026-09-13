@@ -500,12 +500,24 @@ def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD,
         lines.append(f"⚠️ Проверка учёток Tidal не прошла целиком: {type(e).__name__}")
         return lines
 
+    from . import account_roster as _ar
+    active_secret = (cfg.get("tidal-refresh") or "").strip()
+    roster: list[str] = []
+
     for i, acct, info in results:
         secret = ta.account_secret(acct)
         masked = _mask(secret)
         label = acct.get("label") or f"слот {i}"
         alive = info.get("alive")
         reason = "" if alive else (info.get("reason") or "не отвечает")
+
+        # Единая карточка учётки: флаг · страна · тариф · срок · статус.
+        # active — та, что реально в config; premium у Tidal = отдаёт lossless.
+        if alive is not None:
+            _status = _ar.classify(
+                info, is_active=(secret and secret == active_secret),
+                premium=bool(info.get("lossless")))
+            roster.append(_ar.line("Tidal", label, info, _status))
 
         if alive is None:
             # «Не знаем» — это не «мертва». Вход по паролю измерить нечем, а
@@ -532,6 +544,10 @@ def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD,
             lines.append(f"⚠️ Tidal {label} ({masked}): жива, но lossless не отдаёт "
                          f"({info.get('plan') or '?'}, {info.get('quality') or '?'}, "
                          f"до {str(info.get('valid_until') or '?')[:10]})")
+
+    if roster:
+        lines.append("Tidal — учётки:")
+        lines += [f"  {r}" for r in roster]
 
     if promote:
         # Замена делается ПОСЛЕ измерений и по их результату — иначе решение
@@ -981,12 +997,24 @@ def check_all_soundcloud_tokens(threshold: int = DEFAULT_THRESHOLD) -> list[str]
         lines.append(f"⚠️ Проверка токенов SoundCloud не прошла целиком: {type(e).__name__}")
         return lines
 
+    from . import account_roster as _ar
+    active_token = (cfg.get("soundcloud-oauth-token") or "").strip()
+    roster: list[str] = []
+
     seen_logins: dict[str, str] = {}
     for acct, info in results:
         token = acct["token"]
         masked = _mask(token)
         label = acct.get("label") or "?"
         reason = info.get("reason") or ""
+
+        # Карточка учётки: у SoundCloud premium = Go+; страна из /me, срока у
+        # OAuth-токена нет (non-expiring), поэтому в строке будет «срок ?».
+        if info.get("alive") is not None:
+            _status = _ar.classify(
+                info, is_active=(token and token == active_token),
+                premium=bool(info.get("go_plus")))
+            roster.append(_ar.line("SoundCloud", label, info, _status))
 
         if info.get("alive"):
             login = (info.get("login") or "").strip().lower()
@@ -1019,6 +1047,10 @@ def check_all_soundcloud_tokens(threshold: int = DEFAULT_THRESHOLD) -> list[str]
         elif streak > 0:
             lines.append(f"⚠️ SoundCloud {masked} ({label}): {streak}/{threshold} "
                          f"неудачных проверок подряд ({reason})")
+
+    if roster:
+        lines.append("SoundCloud — учётки:")
+        lines += [f"  {r}" for r in roster]
     return lines
 
 
