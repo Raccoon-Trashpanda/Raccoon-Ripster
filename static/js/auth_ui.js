@@ -944,5 +944,52 @@ async function renderAccountsOverview() {
     </div>`;
   }).join('');
   box.innerHTML = hint + rows +
-    `<div style="font-size:10px;color:var(--muted2);margin-top:4px">${esc(t('s.acc_note'))}</div>`;
+    `<div style="font-size:10px;color:var(--muted2);margin-top:4px">${esc(t('s.acc_note'))}</div>` +
+    `<div id="accounts-slots"></div>`;
+  renderAccountSlots();
+}
+
+// ── По-слотовый мультиаккаунт: КАЖДАЯ учётка по сервису отдельной карточкой ──
+// Панель выше по-сервисная (одна строка + счётчик), из-за чего «мультиаки не
+// видно» (владелец 13.09.2026). Здесь — каждый слот: флаг · страна · тариф ·
+// срок · статус (активна / запас / снята), плюс пометка «активна без премиума».
+async function renderAccountSlots() {
+  const box = document.getElementById('accounts-slots');
+  if (!box) return;
+  let d;
+  try {
+    d = await (await fetch('/api/accounts/roster')).json();
+  } catch (e) { return; }
+  if (!d || !d.ok || !d.services) return;
+  const SVC = {
+    tidal: '🌊 Tidal', qobuz: '🟦 Qobuz', deezer: '🎧 Deezer',
+    yandex: '🟡 Yandex', soundcloud: '🟠 SoundCloud', beatport: '🟢 Beatport',
+  };
+  const badge = (c) => {
+    const st = c.status;
+    const col = st === 'active' ? (c.degraded ? 'var(--orange)' : 'var(--green)')
+              : st === 'bench' ? 'var(--muted)' : 'var(--muted2)';
+    const label = st === 'active' ? (c.degraded ? t('s.slot_active') + ' ⚠️' : t('s.slot_active'))
+                : st === 'bench' ? t('s.slot_bench') : t('s.slot_retired');
+    const dot = st === 'active' ? (c.degraded ? '⚠️' : '✅') : st === 'bench' ? '🟢' : '⚪';
+    return `<span style="color:${col};font-size:10px;white-space:nowrap">${dot} ${esc(label)}</span>`;
+  };
+  let html = `<div style="font-size:11px;color:var(--muted);margin:10px 0 6px">${esc(t('s.slots_title'))}</div>`;
+  for (const [svc, cards] of Object.entries(d.services)) {
+    if (!Array.isArray(cards) || !cards.length) continue;
+    html += `<div style="font-size:11px;font-weight:600;color:var(--text);margin:8px 0 3px">${esc(SVC[svc] || svc)}</div>`;
+    for (const c of cards) {
+      const bits = [c.plan, c.expiry ? t('s.slot_until') + ' ' + c.expiry : '']
+        .filter(Boolean).join(' · ');
+      html += `<div style="display:flex;align-items:center;gap:8px;padding:5px 9px;background:var(--surface);border:1px solid var(--border);border-radius:7px;margin-bottom:4px">
+        <span style="font-size:14px">${c.flag || '🏳'}</span>
+        <div style="flex:1;min-width:0">
+          <div style="font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.label || c.country || '—')}</div>
+          <div style="font-size:10px;color:var(--muted)">${esc((c.country ? c.country + ' · ' : '') + bits)}</div>
+        </div>
+        ${badge(c)}
+      </div>`;
+    }
+  }
+  box.innerHTML = html;
 }
