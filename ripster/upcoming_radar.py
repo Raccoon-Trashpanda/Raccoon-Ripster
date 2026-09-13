@@ -78,7 +78,9 @@ SOURCES: tuple[Source, ...] = (
     Source("Clash", "https://www.clashmusic.com/feed/", "2/10", ""),
     Source("XLR8R", "https://xlr8r.com/feed/", "2/10", "электроника"),
     Source("Consequence", "https://consequence.net/feed/", "1/16", ""),
-    Source("DJ Mag", "https://djmag.com/rss.xml", "1/15", "танцевальная сцена"),
+    # `/feed` отдаёт 30 записей против 15 у `/rss.xml` (замер 13.09.2026) —
+    # вдвое больше шансов поймать танцевальный анонс. Тот же валидный RSS.
+    Source("DJ Mag", "https://djmag.com/feed", "1/15", "танцевальная сцена"),
     Source("The Ransom Note", "https://www.theransomnote.com/feed/", "1/11",
            "андеграундная электроника"),
     Source("NME", "https://www.nme.com/news/music/feed", "1/10", ""),
