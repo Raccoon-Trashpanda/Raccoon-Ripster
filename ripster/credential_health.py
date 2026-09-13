@@ -517,7 +517,7 @@ def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD,
             _status = _ar.classify(
                 info, is_active=(secret and secret == active_secret),
                 premium=bool(info.get("lossless")))
-            roster.append(_ar.line("Tidal", label, info, _status))
+            roster.append(_ar.line("Tidal", label, info, _status, premium=bool(info.get("lossless"))))
 
         if alive is None:
             # «Не знаем» — это не «мертва». Вход по паролю измерить нечем, а
@@ -1014,7 +1014,7 @@ def check_all_soundcloud_tokens(threshold: int = DEFAULT_THRESHOLD) -> list[str]
             _status = _ar.classify(
                 info, is_active=(token and token == active_token),
                 premium=bool(info.get("go_plus")))
-            roster.append(_ar.line("SoundCloud", label, info, _status))
+            roster.append(_ar.line("SoundCloud", label, info, _status, premium=bool(info.get("go_plus"))))
 
         if info.get("alive"):
             login = (info.get("login") or "").strip().lower()
