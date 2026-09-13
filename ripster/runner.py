@@ -1900,6 +1900,26 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                       f"{'found' if _alt else 'NONE'}", flush=True)
                                 if _alt:
                                     _dz_arl = _alt
+                            elif not _inf.get("lossless"):
+                                # Жив, но БЕЗ lossless (Free-тариф). Раньше автоматика
+                                # пропускала только МЁРТВЫЕ учётки, а Free брала как
+                                # есть — и рядом лежащий Family с FLAC простаивал,
+                                # приходилось «подтягивать руками» (владелец 13.09.2026:
+                                # «где автоматизм?»). Теперь предпочитаем lossless сами.
+                                _better = await _dza.pick_arl(_config, need_lossless=True)
+                                if _better and _better != _dz_arl:
+                                    task["log"].append(
+                                        f"🎧 ARL слота {_dz_slot} без lossless "
+                                        f"({_inf.get('plan') or '?'}) → беру Family с FLAC")
+                                    print(f"[deezer-pool] slot {_dz_slot}: no lossless "
+                                          f"→ swapped to lossless ARL", flush=True)
+                                    _dz_arl = _better
+                                elif _inf.get("country"):
+                                    task["log"].append(
+                                        f"🎧 ARL слота {_dz_slot}: "
+                                        f"{_inf['country'].upper()}, "
+                                        f"{_inf.get('plan') or '?'} (без lossless, "
+                                        f"замены нет)")
                             elif _inf.get("country"):
                                 _msg = (f"ARL слота {_dz_slot}: {_inf['country'].upper()}"
                                         f", {_inf.get('plan') or 'тариф неизвестен'}")

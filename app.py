@@ -1112,6 +1112,7 @@ from ripster.routes import upcoming     as _upcoming_routes
 from ripster.routes import audio        as _audio_routes
 from ripster.routes import stations     as _stations_routes
 from ripster.routes import featurefm    as _featurefm_routes
+from ripster.routes import accounts     as _accounts_routes
 from ripster import telemetry as _telemetry
 from ripster import tl1001 as _tl1001
 
@@ -1153,6 +1154,7 @@ _pairing_routes.install(app, _ctx)
 # Обычный радар их не видит — в каталогах сервисов их пока нет.
 _upcoming_routes.install(app, _ctx)
 _featurefm_routes.install(app, _ctx)
+_accounts_routes.install(app, _ctx)
 # Свой аудиотракт ПК: вывод локального lossless мимо микшера Windows.
 # Замер 05.09.2026: WASAPI exclusive берёт 44.1/48/96 кГц, shared — только 48,
 # то есть web-плеер физически не может отдать частоту файла без пересчёта.
