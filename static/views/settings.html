@@ -1562,6 +1562,24 @@
           </div>
           </details>
 
+          <!-- Multi-account pool: несколько refresh-токенов, автозамена на lossless -->
+          <div style="background:rgba(0,212,179,.06);border:1px solid rgba(0,212,179,.15);border-radius:9px;padding:10px 12px;margin-bottom:10px">
+            <div style="font-size:11px;font-weight:700;color:#00d4b3;margin-bottom:8px"><span data-i18n="s.extra_accounts">➕ Доп. аккаунты (балансировка загрузок)</span></div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5" data-i18n="s.pool_hint_tidal">
+              Добавь refresh-токены других аккаунтов Tidal — параллельные загрузки распределятся по ним, а автозамена сделает основным тот, что реально отдаёт lossless.
+            </div>
+            <div id="tidal-accounts-list" style="margin-bottom:8px"></div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap">
+              <input id="s-tidal-pool-refresh" type="password" placeholder="refresh_token второго аккаунта (eyJ…)" data-i18n-ph="s.tidal_pool_refresh_ph"
+                style="font-family:var(--mono);font-size:11px;flex:2;min-width:160px"/>
+              <input id="s-tidal-pool-country" type="text" placeholder="страна (NZ)" data-i18n-ph="s.pool_country_ph"
+                style="font-size:11px;flex:0 0 72px;min-width:60px"/>
+              <input id="s-tidal-pool-label" type="text" placeholder="Метка" data-i18n-ph="s.label_ph"
+                style="font-size:11px;flex:1;min-width:90px"/>
+              <button class="btn-sm" onclick="addTidalAccount()" style="padding:6px 12px;background:rgba(0,212,179,.18);color:#00d4b3;border:1px solid rgba(0,212,179,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"><span data-i18n="s.add_btn">+ Добавить</span></button>
+            </div>
+          </div>
+
           <div class="settings-grid">
             <div class="field-group">
               <label class="lbl" data-i18n="s.qobuz_quality"><span data-i18n="s.def_quality">Качество по умолчанию</span></label>

@@ -140,6 +140,7 @@ function showStab(id, btn) {
     _setSecret('s-tidal-token',c['tidal-token']); _setSecret('s-tidal-refresh',c['tidal-refresh']); setVal('s-tidal-userid',c['tidal-user-id']||''); setVal('s-tidal-country',c['tidal-country']||'US'); setVal('s-tidal-expiry',c['tidal-token-expiry']||''); setVal('s-tidal-qual',c['tidal-quality']||'lossless'); setVal('s-tidal-path',c['tidal-save-path']||'');
     if(c['tidal-token']) testAuth('tidal');
     loadTokenExpiry('tidal');
+    try { loadTidalAccounts?.(); } catch {}
   }
   if(id==='spotify') { setVal('s-sp-cid',c['spotify-client-id']||''); setVal('s-sp-csecret',c['spotify-client-secret']||''); _setSecret('s-sp-dc',c['spotify-sp-dc']); setVal('s-orp-path',c['orpheus-save-path']||''); setChk('s-orp-mp3',c['orpheus-convert-mp3']===true); setVal('s-orp-quality',c['orpheus-quality']||'hifi'); _renderSpotifySavedTarget(); loadSpotifyStatus(); loadOrpheusStatus(); testAuth('spotify'); }
   if(id==='digs') {

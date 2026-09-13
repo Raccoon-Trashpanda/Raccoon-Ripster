@@ -563,6 +563,78 @@ async function loadDeezerAccounts() {
   } catch(e) { list.innerHTML = ''; }
 }
 
+// ── Tidal multi-account pool (несколько refresh-токенов) ────────────────────
+function _tidalRenderRows(list, accs, probe) {
+  const byslot = {};
+  (probe || []).forEach(p => { byslot[p.slot] = p; });
+  list.innerHTML = accs.map(a => {
+    const p = byslot[a.slot];
+    // Точка статуса единообразно с Deezer/Qobuz, но по ЗДОРОВЬЮ: зелёная —
+    // жив и отдаёт lossless; оранжевая — жив, но без lossless; красная —
+    // отвергнут; серая — ещё не спросили / «не знаю».
+    let dot = 'var(--muted2)';
+    if (p) {
+      if (p.alive === false) dot = 'var(--red)';
+      else if (p.alive === true) dot = p.lossless ? 'var(--green)' : 'var(--orange)';
+    }
+    const cc = ((p && p.country) || a.country || '').trim().toUpperCase();
+    const plan = (p && (p.plan || p.quality)) || '';
+    const meta = [cc, plan].filter(Boolean).join(' · ');
+    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+      <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}"></span>
+      <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${meta?` <span style="color:var(--muted)">· ${escapeHtml(meta)}</span>`:''}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
+      ${a.primary ? '' : `<button onclick="removeTidalAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+    </div>`;
+  }).join('');
+}
+
+async function loadTidalAccounts() {
+  const list = document.getElementById('tidal-accounts-list');
+  if(!list) return;
+  try {
+    // Сначала быстро — список без пробы (серые точки), чтобы панель не висла.
+    const r = await api('GET', '/api/tidal/accounts');
+    const accs = r.pool || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    _tidalRenderRows(list, accs, null);
+    // Затем в фоне спрашиваем здоровье каждой и красим точки — «что работает».
+    try {
+      const rp = await api('GET', '/api/tidal/accounts?probe=1');
+      _tidalRenderRows(list, rp.pool || accs, rp.probe || []);
+    } catch(_) {}
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addTidalAccount() {
+  const refEl = document.getElementById('s-tidal-pool-refresh');
+  const ccEl  = document.getElementById('s-tidal-pool-country');
+  const lblEl = document.getElementById('s-tidal-pool-label');
+  const refresh = (refEl?.value || '').trim();
+  const country = (ccEl?.value || '').trim();
+  const label   = (lblEl?.value || '').trim();
+  if(!refresh) { toast(t('t.error'), 'var(--red)'); return; }
+  try {
+    const r = await api('POST', '/api/tidal/accounts/add', {refresh, country, label});
+    if(r.ok) {
+      toast(r.msg || t('t.added'), 'var(--green)');
+      if(refEl) refEl.value = '';
+      if(ccEl) ccEl.value = '';
+      if(lblEl) lblEl.value = '';
+      loadTidalAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeTidalAccount(slot) {
+  try {
+    const r = await api('POST', `/api/tidal/accounts/${slot}/remove`, {});
+    toast(r.msg || (r.ok ? t('t.done') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    if(r.ok) loadTidalAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
 async function addDeezerAccount() {
   const arlEl   = document.getElementById('s-deezer-pool-arl');
   const labelEl = document.getElementById('s-deezer-pool-label');

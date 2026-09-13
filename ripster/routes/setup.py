@@ -755,6 +755,87 @@ async def deezer_accounts_remove(slot: int):
     return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
 
 
+# ── Tidal multi-account pool ───────────────────────────────────────────────────
+#   GET  /api/tidal/accounts         — список учёток Tidal в пуле (основной + доп.)
+#   POST /api/tidal/accounts/add     — добавить учётку по refresh-токену
+#   POST /api/tidal/accounts/{slot}/remove — убрать доп. учётку (не слот 0)
+
+@router.get("/api/tidal/accounts")
+async def tidal_accounts_list(probe: int = 0):
+    """Учётки Tidal: основной (`tidal-refresh`) + пул (`tidal-accounts`).
+    С ?probe=1 — спрашивает каждую о стране/тарифе/сроке/lossless."""
+    from ripster import tidal_pool as _tp
+    accts = _tp.configured_accounts(_cfg)
+    out = {"pool": [{"slot": i,
+                     "label": a.get("label") or (f"основной" if i == 0 else f"слот {i}"),
+                     "country": (a.get("tidal-country") or a.get("country") or "").upper(),
+                     "primary": i == 0}
+                    for i, a in enumerate(accts)]}
+    if not probe:
+        return out
+    try:
+        from ripster import tidal_accounts as _ta
+        probed = []
+        for i, a in enumerate(accts):
+            info = await _ta.account_info(a, fresh=True)
+            probed.append({"slot": i, "alive": info.get("alive"),
+                           "country": info.get("country", ""), "plan": info.get("plan", ""),
+                           "quality": info.get("quality", ""), "lossless": info.get("lossless"),
+                           "valid_until": info.get("valid_until", "")})
+        out["probe"] = probed
+    except Exception as e:  # noqa: BLE001
+        out["probe_error"] = f"{type(e).__name__}: {e}"
+    return out
+
+
+@router.post("/api/tidal/accounts/add")
+async def tidal_accounts_add(body: dict):
+    """Добавить учётку Tidal в пул по refresh-токену. Основной (`tidal-refresh`,
+    слот 0) не трогает. Вступает в силу на следующей загрузке через пул —
+    рестарт не нужен. Автопромоут (`promote_best_tidal`) поднимет её основной,
+    если она реально отдаёт lossless, а текущая основная — нет."""
+    refresh = (body.get("refresh") or body.get("token") or "").strip()
+    country = (body.get("country") or "").strip().upper()
+    label   = (body.get("label") or "").strip() or "account"
+    if not refresh:
+        return {"ok": False, "msg": "Нужен refresh-токен Tidal (eyJ…)"}
+    existing = list(_cfg.get("tidal-accounts") or [])
+    if (_cfg.get("tidal-refresh") or "").strip() == refresh or any(
+            (a.get("refresh") or a.get("tidal-refresh") or "").strip() == refresh
+            for a in existing if isinstance(a, dict)):
+        return {"ok": False, "msg": "Эта учётка уже добавлена"}
+    entry = {"label": label, "refresh": refresh}
+    if country:
+        entry["country"] = country
+    existing.append(entry)
+    _cfg["tidal-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "msg": f"Учётка добавлена как «{label}»"}
+
+
+@router.post("/api/tidal/accounts/{slot}/remove")
+async def tidal_accounts_remove(slot: int):
+    """Убрать доп. учётку Tidal (slot >= 1; слот 0 — основной, через обычное поле)."""
+    if slot < 1:
+        return {"ok": False, "msg": "Слот 0 — основная учётка, убирается через поле Tidal"}
+    existing = list(_cfg.get("tidal-accounts") or [])
+    idx = slot - 1
+    if idx < 0 or idx >= len(existing):
+        return {"ok": False, "msg": "Нет такой учётки"}
+    removed = existing.pop(idx)
+    _cfg["tidal-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:  # noqa: BLE001
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "msg": f"Учётка {removed.get('label', '')} убрана"}
+
+
 # ── Qobuz multi-account pool (load-balanced, no Docker) ────────────────────────
 #   GET  /api/qobuz/accounts        — list accounts in the pool
 #   POST /api/qobuz/accounts/add    — add an account (token or email/password mode)
