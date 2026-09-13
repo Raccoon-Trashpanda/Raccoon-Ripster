@@ -408,6 +408,11 @@ def check_all_deezer_arls(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
         elif not alive and streak > 0:
             lines.append(f"⚠️ Deezer ARL {masked} ({entry.get('label','?')}): "
                          f"{streak}/{threshold} неудачных проверок подряд ({reason})")
+    # Основной Free, а в пуле есть Family с lossless → повышаем автоматически.
+    try:
+        lines += promote_best_deezer()
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"⚠️ Deezer: автозамена основного не отработала: {type(e).__name__}")
     return lines
 
 
@@ -699,6 +704,93 @@ def promote_best_tidal() -> list[str]:
         f"прежняя ({cur_info.get('plan') or '?'}, {cur_info.get('quality') or 'без lossless'}) "
         f"{'перенесена в пул' if old_alive else 'снята'}; сессия движка переписана "
         f"({', '.join(rep.get('clients') or [])})")
+    return lines
+
+
+def promote_best_deezer() -> list[str]:
+    """Поставить основным ARL Deezer тот, что реально отдаёт lossless.
+
+    Владелец 13.09.2026: активный Deezer оказался BG Free, а Family с FLAC
+    простаивали в пуле — «где автоматизм?». Раннер уже берёт Family per-download
+    (см. runner.py), но ОСНОВНОЙ в конфиге оставался Free: его видит панель,
+    сопряжение отдаёт телефону именно его, а «основной = Free» — это скрытая
+    беда. Здесь основной меняется на lossless персистентно, прежний уезжает в
+    пул (жив — годится, терять нельзя). У Deezer нет сессии-файла (ARL пишется в
+    `.arl` при каждой загрузке), поэтому правим только конфиг.
+    """
+    import asyncio
+
+    import yaml
+
+    from . import config_service as _cs
+    from . import deezer_accounts as da
+
+    lines: list[str] = []
+    cfg = _load_raw_config()
+    if not cfg:
+        return lines
+    arls = da.configured_arls(cfg)
+    if len(arls) < 2:
+        return lines
+
+    async def _survey():
+        out = []
+        for a in arls:
+            info = await da.arl_info(a["arl"])
+            out.append((a, info))
+        return out
+
+    try:
+        results = asyncio.run(_survey())
+    except Exception as e:  # noqa: BLE001
+        lines.append(f"⚠️ Deezer: автозамена основного не отработала: {type(e).__name__}")
+        return lines
+
+    cur, cur_info = results[0]
+    # Основной уже lossless — не трогаем: перестановка ради перестановки только
+    # сбросила бы порядок пула и ничего не улучшила.
+    if cur_info.get("lossless"):
+        return lines
+
+    best = next(((a, info) for a, info in results[1:]
+                 if info.get("alive") and info.get("lossless")), None)
+    if not best:
+        return lines
+
+    new_arl = best[0]["arl"].strip()
+    old_arl = cur["arl"].strip()
+    if not new_arl or new_arl == old_arl:
+        return lines
+    old_alive = bool(cur_info.get("alive"))
+
+    for path in _yaml_files_to_check():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(data, dict):
+            continue
+        if (data.get("deezer-arl") or "").strip() != old_arl:
+            continue
+        data["deezer-arl"] = new_arl
+        pool = data.get("deezer-accounts") or []
+        # Убираем повышенный из пула, старый основной (если жив) — в пул.
+        kept = [a for a in pool if isinstance(a, dict)
+                and (a.get("arl") or "").strip() != new_arl]
+        if old_alive and not any(isinstance(a, dict)
+                                 and (a.get("arl") or "").strip() == old_arl for a in kept):
+            kept.append({"arl": old_arl,
+                         "label": f"{cur.get('label') or 'прежняя основная'}"
+                                  f" ({cur_info.get('plan') or 'Free'})"})
+        data["deezer-accounts"] = kept
+        _cs._atomic_write_yaml(path, data)
+
+    _notify_app_config_changed()
+    lines.append(
+        f"🔁 Deezer: основным назначен lossless-ARL "
+        f"({best[1].get('country') or '?'}, {best[1].get('plan') or 'Family'}) — "
+        f"прежний ({cur_info.get('plan') or 'Free'}) "
+        f"{'перенесён в пул' if old_alive else 'снят'}")
     return lines
 
 
