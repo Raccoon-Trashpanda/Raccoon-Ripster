@@ -52,6 +52,43 @@ def _orpheus_python() -> str:
     # и именно про такие копии предупреждал разбор 16.08: расходятся они молча.
     return app_python()
 
+#: Куда кладём последний ПОДТВЕРЖДЁННЫЙ тариф. Тариф меняется раз в месяц
+#: (биллинг), а `introspect` может транзиентно отвалиться (сеть, гонка refresh).
+#: Без памяти любой блип ронял качество до 128k AAC при живом Pro+ — ровно так
+#: гость и получил .m4a 13.09.2026. Свежий known-good — куда лучшая основа, чем
+#: «раз не ответило — значит не Pro».
+_TIER_CACHE = Path(__file__).resolve().parent.parent.parent / "tokens" / "beatport_tier.json"
+#: Сколько доверяем закэшированному тарифу при сбое живой проверки. Две недели
+#: с запасом переживают сетевые перебои, но если подписку реально свернули —
+#: кэш протухнет и мы честно вернёмся к «не знаю», а не к вечному Pro.
+_TIER_CACHE_TTL = 14 * 24 * 3600.0
+
+
+def _tier_cache_write(tier: str) -> None:
+    """Запомнить подтверждённый тариф. Пустой не пишем — «не знаю» не факт."""
+    if not tier:
+        return
+    try:
+        import time
+        _TIER_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        _TIER_CACHE.write_text(json.dumps({"tier": tier, "ts": time.time()}),
+                               encoding="utf-8")
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _tier_cache_read() -> str:
+    """Свежий known-good тариф или '' — если кэша нет / он протух."""
+    try:
+        import time
+        d = json.loads(_TIER_CACHE.read_text(encoding="utf-8"))
+        if time.time() - float(d.get("ts", 0)) <= _TIER_CACHE_TTL:
+            return str(d.get("tier") or "")
+    except Exception:  # noqa: BLE001
+        pass
+    return ""
+
+
 def _tier_now() -> str:
     """Тариф аккаунта прямо сейчас: 'bp_link_pro_plus_2' / 'bp_basic' / '' если
     узнать не удалось. Синхронно — вызывается из build_cmd.
@@ -59,37 +96,47 @@ def _tier_now() -> str:
     Пустая строка означает ровно «не знаю», а не «нет подписки»: сеть могла
     отвалиться, токен — протухнуть. Отличать эти два случая обязательно, вся
     починка ниже держится именно на этом различии.
+
+    При живом ответе тариф кэшируется; при сбое проверки возвращаем свежий
+    known-good из кэша, а не пустоту — иначе сетевой блип роняет Pro+ до 128k
+    AAC (см. `_TIER_CACHE`). Пусто отдаём, только когда и кэш пуст/протух.
     """
     import httpx
+
+    def _fail() -> str:
+        return _tier_cache_read()
+
     sess = _read_bp_session() or {}
     at = sess.get("access_token") or ""
     rt = sess.get("refresh_token") or ""
     for attempt in ("stored", "refreshed"):
         if attempt == "refreshed":
             if not rt:
-                return ""
+                return _fail()
             try:
                 r = httpx.post("https://api.beatport.com/v4/auth/o/token/",
                                data={"client_id": _BP_CLIENT_ID, "refresh_token": rt,
                                      "grant_type": "refresh_token"}, timeout=10)
                 at = r.json()["access_token"] if r.status_code == 200 else ""
             except Exception:
-                return ""
+                return _fail()
         if not at:
             continue
         try:
             r = httpx.get("https://api.beatport.com/v4/auth/o/introspect/",
                           headers={"Authorization": f"Bearer {at}"}, timeout=10)
         except Exception:
-            return ""
+            return _fail()
         if r.status_code == 200:
             try:
-                return (r.json().get("subscription") or "").strip()
+                tier = (r.json().get("subscription") or "").strip()
+                _tier_cache_write(tier)
+                return tier
             except Exception:
-                return ""
+                return _fail()
         if r.status_code != 401:
-            return ""
-    return ""
+            return _fail()
+    return _fail()
 
 
 def _settings_path() -> Path:
