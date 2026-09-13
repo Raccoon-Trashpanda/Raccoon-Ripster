@@ -24,6 +24,7 @@ Shepard feat. Nadia Ali», и любой из них, принятый за ар
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -54,6 +55,12 @@ _loaded = False
 def configure(cfg: dict, base_dir: Path) -> None:
     global _cfg, _base_dir
     _cfg, _base_dir = cfg, Path(base_dir)
+    # MusicBrainz-дизамбигуация делит кэш-каталог с нами.
+    try:
+        from . import musicbrainz as _mb
+        _mb.configure(Path(base_dir))
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _cache_path() -> Path:
@@ -223,14 +230,29 @@ def has_credentials(service: str) -> bool:
 
 
 async def resolve(name: str, service: str,
-                  client: Optional[httpx.AsyncClient] = None) -> Optional[dict]:
+                  client: Optional[httpx.AsyncClient] = None,
+                  genre_hint: str = "") -> Optional[dict]:
     """id артиста в каталоге `service`, или None.
 
     Кэш на диске: найденное навсегда, ненайденное — на две недели (артиста могли
     ещё не завести в этой витрине).
+
+    При наличии `genre_hint` СНАЧАЛА спрашиваем MusicBrainz: он разводит
+    одноимённых по жанру и отдаёт прямую ссылку на витрину (13.09.2026 — «левые
+    артисты по одному имени», кейс Bop-DnB против Kidz Bop). Не вышло — падаем на
+    прежний name-search, поведение без подсказки не меняется.
     """
     if not name or service not in _SEARCH or not has_credentials(service):
         return None
+
+    if genre_hint:
+        try:
+            from . import musicbrainz as _mb
+            mbhit = await asyncio.to_thread(_mb.resolve_service_id, name, service, genre_hint)
+            if mbhit and mbhit.get("id"):
+                return {"id": str(mbhit["id"]), "name": mbhit.get("name", name)}
+        except Exception as e:  # noqa: BLE001
+            print(f"[xref] MB «{name}»/{service}: {type(e).__name__}", flush=True)
 
     rec = _cached(service, name)
     if rec is not None:
@@ -254,12 +276,19 @@ async def resolve(name: str, service: str,
 
 async def resolve_many(names: list, service: str,
                        client: Optional[httpx.AsyncClient] = None,
-                       concurrency: int = 4) -> dict:
-    """Резолв пачки имён. Возвращает {имя: {"id", "name", "url"}} только по найденным."""
+                       concurrency: int = 4,
+                       genres: Optional[dict] = None) -> dict:
+    """Резолв пачки имён. Возвращает {имя: {"id", "name", "url"}} только по найденным.
+
+    `genres` — необязательная карта {имя: жанр}: если у артиста известен жанр,
+    он уходит в MusicBrainz-дизамбигуацию (разводит одноимённых), иначе прежний
+    name-search. Так «Bop» из dnb-релиза больше не подтянет чужого Bop.
+    """
     import asyncio
 
     if not names or not has_credentials(service):
         return {}
+    gmap = genres or {}
 
     own = client is None
     c = client or httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=20,
@@ -269,7 +298,7 @@ async def resolve_many(names: list, service: str,
 
     async def _one(nm: str) -> None:
         async with sem:
-            hit = await resolve(nm, service, c)
+            hit = await resolve(nm, service, c, genre_hint=str(gmap.get(nm, "")))
         if hit:
             out[nm] = hit
 
