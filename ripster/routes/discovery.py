@@ -363,6 +363,25 @@ async def lyrics(artist: str = "", track: str = "", album: str = "", duration: i
         got = _lyrics_from_file(path)
         if got:
             return got
+    # Пословно (караоке) из Apple `syllable-lyrics` — высшая точность. Раньше
+    # считали, что «пословной не дают», но она есть в storefront ПОДПИСКИ
+    # (14.09.2026). Отдаём `words` для караоке-рендера + построчный `synced`/
+    # `plain` как фолбэк, чтобы старый фронт (без word-режима) не сломался.
+    if track:
+        try:
+            from ripster import apple_lyrics
+            wl = await apple_lyrics.word_lyrics(track, artist)
+        except Exception:  # noqa: BLE001
+            wl = None
+        if wl and wl.get("lines"):
+            def _line_txt(ln):
+                return "".join(w["w"] + (" " if w.get("sp") else "") for w in ln["words"]).strip()
+            synced = "\n".join(
+                f"[{int(l['s'] // 60000):02d}:{(l['s'] % 60000) / 1000:05.2f}]{_line_txt(l)}"
+                for l in wl["lines"]
+            )
+            return {"synced": synced, "plain": "\n".join(_line_txt(l) for l in wl["lines"]),
+                    "words": wl["lines"], "source": "Apple (word)"}
     if apple_id:
         got = await _lyrics_from_apple(apple_id)
         if got and (got.get("synced") or got.get("plain")):

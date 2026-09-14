@@ -3109,7 +3109,7 @@ function fpSetSleep(minutes) {
 }
 
 // ── Lyrics (LRCLIB) — slide-up panel with synced line scrolling ───────────
-const _LRC = { lines: [], plain: '', activeIdx: -1, fetchKey: '', open: false };
+const _LRC = { lines: [], words: [], plain: '', activeIdx: -1, wordKey: '', fetchKey: '', open: false };
 function fpToggleLyrics() {
   const panel = document.getElementById('fp-lyrics');
   if (!panel) return;
@@ -3132,7 +3132,7 @@ async function fpFetchLyrics() {
   const status = document.getElementById('fp-lyrics-status');
   const body   = document.getElementById('fp-lyrics-body');
   if (_LRC.fetchKey === key) { _renderLrcBody(); return; }
-  _LRC.fetchKey = key; _LRC.lines = []; _LRC.plain = ''; _LRC.activeIdx = -1;
+  _LRC.fetchKey = key; _LRC.lines = []; _LRC.words = []; _LRC.plain = ''; _LRC.activeIdx = -1; _LRC.wordKey = '';
   if (status) status.textContent = t('player.loading');
   if (body)   body.innerHTML = '';
   if (!item.artist || !item.title) {
@@ -3157,7 +3157,16 @@ async function fpFetchLyrics() {
     if (aid) params.set('apple_id', String(aid));
     const r = await fetch('/api/lyrics?' + params.toString());
     const d = await r.json();
-    if (d.synced) {
+    if (Array.isArray(d.words) && d.words.length) {
+      // Пословное караоке (Apple syllable-lyrics): строки для скролла + слова
+      // с таймингами (мс) для подсветки. Строчный синк остаётся фолбэком.
+      _LRC.words = d.words;
+      _LRC.lines = d.synced ? _lrcParse(d.synced) : d.words.map(ln => ({
+        t: (ln.s || 0) / 1000,
+        text: (ln.words || []).map(w => w.w + (w.sp ? ' ' : '')).join('').trim()
+      }));
+      if (status) status.textContent = ti('p.lrc_words',{n:_LRC.words.length});
+    } else if (d.synced) {
       _LRC.lines = _lrcParse(d.synced);
       if (status) status.textContent = ti('p.lrc_lines',{n:_LRC.lines.length});
     } else if (d.plain) {
@@ -3185,7 +3194,14 @@ function _lrcParse(lrc) {
 function _renderLrcBody() {
   const body = document.getElementById('fp-lyrics-body');
   if (!body) return;
-  if (_LRC.lines.length) {
+  if (_LRC.words.length) {
+    body.innerHTML = _LRC.words.map((ln, i) => {
+      const inner = (ln.words || []).map((w, j) =>
+        `<span class="lrc-w" data-li="${i}" data-wi="${j}" style="transition:color .12s ease-out">${esc(w.w)}</span>${w.sp ? ' ' : ''}`
+      ).join('') || '·';
+      return `<div class="lrc-line" data-i="${i}" style="padding:6px 0;color:rgba(255,255,255,.45);transition:opacity .25s,transform .25s">${inner}</div>`;
+    }).join('');
+  } else if (_LRC.lines.length) {
     body.innerHTML = _LRC.lines.map((l, i) =>
       `<div class="lrc-line" data-i="${i}" style="padding:6px 0;transition:opacity .25s,transform .25s,color .25s">${esc(l.text || '·')}</div>`
     ).join('');
@@ -3196,7 +3212,9 @@ function _renderLrcBody() {
   }
 }
 function _lrcSyncTick(currentTime) {
-  if (!_LRC.open || !_LRC.lines.length) return;
+  if (!_LRC.open) return;
+  if (_LRC.words.length) { _lrcWordTick(currentTime); return; }
+  if (!_LRC.lines.length) return;
   let idx = -1;
   for (let i = 0; i < _LRC.lines.length; i++) {
     if (_LRC.lines[i].t <= currentTime) idx = i; else break;
@@ -3218,6 +3236,44 @@ function _lrcSyncTick(currentTime) {
       el.style.fontSize = '15px';
       el.style.transform = 'scale(1)';
     }
+  });
+}
+// Пословное караоке: спетые слова белым, текущее — акцентом, будущие тусклые.
+// Тайминги слов в МС, currentTime в секундах. Строка масштабируется как активная.
+function _lrcWordTick(currentTime) {
+  const ms = currentTime * 1000;
+  let idx = -1;
+  for (let i = 0; i < _LRC.words.length; i++) {
+    if ((_LRC.words[i].s || 0) <= ms) idx = i; else break;
+  }
+  const body = document.getElementById('fp-lyrics-body');
+  if (!body) return;
+  // Ключ = активная строка + грубый шаг времени (250мс), чтобы не трогать DOM
+  // на каждый timeupdate без изменений.
+  const key = idx + ':' + Math.floor(ms / 120);
+  if (key === _LRC.wordKey) return;
+  _LRC.wordKey = key;
+  if (idx !== _LRC.activeIdx) {
+    _LRC.activeIdx = idx;
+    const lines = body.querySelectorAll('.lrc-line');
+    lines.forEach((el, i) => {
+      const on = i === idx;
+      el.style.fontSize = on ? '18px' : '15px';
+      el.style.transform = on ? 'scale(1.04)' : 'scale(1)';
+      el.style.opacity = on ? '1' : '.6';
+      if (on) el.scrollIntoView({behavior: 'smooth', block: 'center'});
+    });
+  }
+  const active = body.querySelector(`.lrc-line[data-i="${idx}"]`);
+  if (!active) return;
+  const ws = active.querySelectorAll('.lrc-w');
+  const wl = _LRC.words[idx].words || [];
+  ws.forEach((el, j) => {
+    const w = wl[j]; if (!w) return;
+    const end = (w.t || 0) + (w.d || 0);
+    if (ms >= end) el.style.color = '#fff';
+    else if (ms >= (w.t || 0)) el.style.color = 'var(--accent, #ff6b8b)';
+    else el.style.color = 'rgba(255,255,255,.4)';
   });
 }
 

@@ -875,6 +875,26 @@ async def pair_artist(request: Request, service: str = "", id: str = "",
         return {"error": str(e), "releases": []}
 
 
+@router.get("/api/pair/lyrics-word")
+async def pair_lyrics_word(request: Request, title: str = "", artist: str = "", isrc: str = ""):
+    """Пословная (караоке) лирика из Apple по ИСКОМОМУ треку — независимо от того,
+    из какого сервиса/скачанного он играет (владелец 14.09.2026). Матч по ISRC/
+    названию → Apple syllable-lyrics → word-timed JSON. Нет токена/совпадения →
+    `{lines: []}` (телефон честно падает на построчный LRCLIB)."""
+    if not _token_valid(_bearer(request)):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    t = (title or "").strip()
+    if not t:
+        return {"src": "", "lines": []}
+    try:
+        from ripster import apple_lyrics
+        res = await apple_lyrics.word_lyrics(t, (artist or "").strip(), (isrc or "").strip())
+        return res or {"src": "", "lines": []}
+    except Exception as e:  # pragma: no cover
+        print(f"[pairing] word-lyrics failed: {e}", flush=True)
+        return {"src": "", "lines": [], "error": str(e)}
+
+
 @router.get("/api/pair/label")
 async def pair_label(request: Request, name: str = "", limit: int = 60):
     """Релизы лейбла для мобильного «перехода на лейбл» — та же форма ответа,
