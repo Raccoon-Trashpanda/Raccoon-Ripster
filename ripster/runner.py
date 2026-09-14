@@ -78,7 +78,13 @@ _RE_NO_RETRY = _re.compile(
     # же, все три попытки дадут ровно то же. 07.09.2026 ссылка на клип прокрутила
     # четыре захода за три минуты. Якорь — по строке, которая реально попадает в
     # `msg` (это `result.error`), её порождает `engines/tidal.py`.
-    r'не\s+поддерживается\s+движком|Unsupported\s+URL',
+    r'не\s+поддерживается\s+движком|Unsupported\s+URL|'
+    # Spotify: вход исправен, но треки этой учётке не отдают (регион/лицензия).
+    # 13.09.2026 караоке-альбом на 20 треков прошёл три авто-повтора по 15/45/120 с
+    # — 12 минут и 240 строк ошибок ради того же «недоступно». Сообщение само
+    # говорит «перелогин не поможет»; якорь — по строке `result.error` из
+    # engines/orpheus_spotify.py.
+    r'недоступно\s+для\s+этой\s+учётной\s+записи',
     _re.I,
 )
 _MAX_AUTO_RETRIES = 3
@@ -2838,6 +2844,10 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 if (_amd_mod.get_amd_dir() / "main.py").exists():
                     raise _NeedAMDFallback()
             elif "New settings detected" in msg or "обнаружены новые настройки" in msg:
+                # Задача не завершена — её перезапустит run_task. Без метки finally
+                # ниже видит «running», срабатывает SAFETY NET и в историю ложится
+                # ложная ошибка «внутреннее состояние running» (12–13.09.2026).
+                task["_in_retry"] = True
                 raise _NeedRetry()
 
             # SoundCloud DRM-only fallback — Lucida can't decrypt FairPlay HLS,
@@ -3536,7 +3546,12 @@ async def run_task(task: dict) -> None:
         except _NeedRetry:
             await _broadcast(_i18n.log_event("console.orpheus_retry", level="warn",
                                              task_id=task.get("id", "")))
-            task["log"].append("─── auto-retry (new settings) ───")
+            # Лог ОБНУЛЯЕМ, как и обычный авто-повтор: is_finished() читает весь
+            # task["log"], и старая строка «New settings detected» заставляла его
+            # снова вернуть «новые настройки» — повторный _NeedRetry улетал в
+            # except Exception («✗ » без текста), а настоящий вердикт прогона
+            # терялся. 13.09.2026: «недоступно для учётки» превратилось в SAFETY NET.
+            task["log"] = ["─── auto-retry (new settings) ───"]
             # Same reason as _NeedZhaareyFallback above: the OrpheusDL run that
             # raised _NeedRetry ("New settings detected") had already errored the
             # task, so error→running was rejected — "Illegal transition for task
