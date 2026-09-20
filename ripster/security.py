@@ -63,10 +63,20 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "tidal-quality", "tidal-save-path",
     "spotify-client-id", "spotify-client-secret", "spotify-sp-dc",
     "spotify-engine",
+    # Мультиакк Spotify для СКАЧИВАНИЯ — список {label, enabled, priority}.
+    # Сам durable-blob в конфиге НЕ хранится (секрет+бинарь): он лежит файлом в
+    # dist/spotify_pool/acct{i}/. См. ripster/spotify_pool.py — пул ротирует
+    # (фейловер), а не параллелит, потому что OrpheusDL читает blob по
+    # фиксированному пути.
+    "spotify-accounts", "spotify-account-label",
+    # Отдельная учётка РАДАРА: свои sp_dc/OAuth, чтобы 429 и баны радара не
+    # жгли аккаунты, которыми качаем.
+    "spotify-radar-sp-dc", "spotify-radar-client-id", "spotify-radar-client-secret",
     "spotify-proxy", "spotify-crawl-interval", "spotify-bg-scan",
     "spotify-totp",   # spotify-totp-secret / -ver (owner drops in a fresh TOTP when Spotify rotates)
     "orpheus-",   # orpheus-quality, orpheus-save-path, orpheus-convert-mp3, …
     "beatport-username", "beatport-password", "beatport-quality", "beatport-save-path",
+    "jiosaavn-quality", "jiosaavn-save-path",
     "soundcloud-save-path", "soundcloud-oauth-token", "soundcloud-hq",
     "sc-isrc-fallback", "sc-widevine-wrapper-url",   # found unsaveable in the 2026-07-22 settings audit
     "soundcloud-accounts",   # multi-account SoundCloud pool (load-balanced) — list of {token,label}
@@ -79,6 +89,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     # Без записи из интерфейса выключить это было бы нечем.
     "radar-cross-service",
     "watchlist-early-services", "watchlist-early-download",
+    "watchlist-nz-early",   # opt-in NZ-Friday pass + NZ-account routing (default OFF)
     "watchlist-compilations",
     "queue-autostart", "max-parallel",
     "minimize-to-tray",

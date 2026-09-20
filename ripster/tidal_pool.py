@@ -341,7 +341,10 @@ def get_pool(config: dict) -> "TidalPool | None":
     accounts = configured_accounts(config)
     if len(accounts) < 2:
         return None
-    fp = tuple((a.get("tidal-refresh") or a.get("tidal-email") or "")[-12:] for a in accounts)
+    # enabled/priority обязаны входить в отпечаток: иначе выключатель и
+    # перетаскивание порядка не пересобирали закэшированный пул (18.09.2026).
+    fp = tuple(((a.get("tidal-refresh") or a.get("tidal-email") or "")[-12:],
+                a.get("enabled", True), a.get("priority")) for a in accounts)
     if _pool_instance is None or fp != _pool_fingerprint:
         _pool_instance = TidalPool(config)
         _pool_fingerprint = fp
@@ -401,7 +404,13 @@ class TidalPool:
                         "busy": self._busy[i],
                         "mode": "token" if a.get("tidal-refresh") else "password",
                         "country": a.get("tidal-country") or "",
-                        "order": order.index(i),
+                        # order_pos, а не order.index(i): order_indices НЕ включает
+                        # выключенные учётки, и .index падал ValueError'ом, роняя
+                        # ВЕСЬ список (500) — тот же баг, что 18.09 выбил пул Qobuz.
+                        # Здесь он спал только потому, что выключенных Tidal не было.
+                        "order": _afb.order_pos(self.accounts, i),
+                        "enabled": a.get("enabled", True),
+                        "priority": a.get("priority", i),
                     }
                     for i, a in enumerate(self.accounts)
                 ],

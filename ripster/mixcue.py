@@ -126,7 +126,8 @@ def _probe(ffprobe: str, f: Path) -> dict:
         cp = subprocess.run(
             [ffprobe, "-v", "error", "-show_entries",
              "format=duration:format_tags=title,artist,album,album_artist,"
-             "date,genre,copyright,publisher,track,disc:stream=codec_name",
+             "date,genre,copyright,publisher,track,disc:stream=codec_name,sample_rate,"
+             "sample_fmt,bits_per_raw_sample,bits_per_sample",
              "-select_streams", "a:0", "-of", "json", str(f)],
             capture_output=True, timeout=60,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -145,12 +146,47 @@ def _probe(ffprobe: str, f: Path) -> dict:
             "copyright":    tags.get("copyright", ""),
             "track":        tags.get("track", ""),
             "disc":         tags.get("disc", ""),
+            "sample_rate":  str((streams[0] or {}).get("sample_rate", "") or ""),
             "codec":        (streams[0] or {}).get("codec_name", ""),
+            "sample_fmt":   (streams[0] or {}).get("sample_fmt", "") or "",
+            "bits":         _stream_bits(streams[0] or {}),
         }
     except Exception:
         return {"duration": 0.0, "title": f.stem, "artist": "", "album": "",
                 "album_artist": "", "date": "", "genre": "", "copyright": "",
-                "track": "", "disc": "", "codec": ""}
+                "track": "", "disc": "", "codec": "", "sample_rate": "",
+                "sample_fmt": "", "bits": 0}
+
+
+def _stream_bits(st: dict) -> int:
+    """Настоящая разрядность источника: 16 / 24 / 32, 0 — не узнали.
+
+    `sample_fmt` сам по себе врёт: 24-битный FLAC декодируется в s32, поэтому
+    сначала bits_per_raw_sample (FLAC/ALAC), потом bits_per_sample (PCM/WAV) и
+    только потом формат. Float (декод lossy, float-WAV) — считаем 32: он глубже
+    16 бит, и при переходе в s16 ему тоже нужен дизеринг."""
+    for k in ("bits_per_raw_sample", "bits_per_sample"):
+        try:
+            b = int(st.get(k) or 0)
+        except (TypeError, ValueError):
+            b = 0
+        if b > 0:
+            return b
+    sf = (st.get("sample_fmt") or "").rstrip("p")
+    return {"u8": 8, "s16": 16, "s32": 32, "s64": 64, "flt": 32, "dbl": 64}.get(sf, 0)
+
+
+def _dither_to_16(fmt: str, sr: str = "") -> str:
+    """Фильтр перевода в 16 бит С дизерингом (TPDF), а не усечением.
+
+    Голый `-sample_fmt s16` / `pcm_s16le` просто отрезает младшие биты 24-битного
+    источника — на тихих местах это слышимые гармонические искажения вместо
+    ровного шума. swresample с `dither_method=triangular` делает то же понижение
+    честно. Частота задаётся здесь же: отдельный `-ar` заставил бы ffmpeg вставить
+    ВТОРОЙ, автоматический ресемплер уже после дизеринга, который снова округлил
+    бы без него."""
+    osf = "s16p" if fmt == "alac" else "s16"
+    return f"aresample={sr + ':' if sr else ''}osf={osf}:dither_method=triangular"
 
 
 def _fmt_name(template: str, m: dict) -> str:
@@ -254,6 +290,10 @@ def convert_tracks(files: list[str], out_dir: str, fmt: str = "mp3",
             resample += ["-sample_fmt", sf + "p" if fmt == "alac" else sf]
     # EBU R128 loudness normalization (single-pass, streaming-style -14 LUFS).
     afilter = ["-af", "loudnorm=I=-14:TP=-1.5:LRA=11"] if normalize else []
+    # Выход 16 бит? (FLAC/ALAC с bit_depth=16, WAV — всегда pcm_s16le, если не
+    # выбрали 24/32.) Тогда из более глубокого источника понижаем С дизерингом.
+    out16 = ((fmt in ("flac", "alac") and bit_depth == "16")
+             or (fmt == "wav" and enc[:2] == ["-c:a", "pcm_s16le"]))
     ffprobe = _ffprobe_for(ffmpeg)
     out_dir_p = Path(out_dir)
     out_dir_p.mkdir(parents=True, exist_ok=True)
@@ -274,7 +314,32 @@ def convert_tracks(files: list[str], out_dir: str, fmt: str = "mp3",
                     "-disposition:v:0", "attached_pic"]
         else:
             cmd += ["-map", "0:a"]
-        cmd += ["-map_metadata", "0", *afilter, *enc, *resample, str(out)]
+        # loudnorm внутри работает на 192 кГц и БЕЗ явного -ar отдаёт файл на
+        # 192 кГц: FLAC 44.1 кГц после «нормализации» раздувался вчетверо и
+        # переставал быть тем, чем был (19.09.2026, воспроизведено на ffmpeg 8).
+        # Если пользователь частоту не выбирал — возвращаем ИСХОДНУЮ этого файла.
+        file_resample = list(resample)
+        _pi = _probe(ffprobe, p) if (out16 or (normalize and not sample_rate)) else {}
+        _sr = sample_rate
+        if normalize and not sample_rate:
+            _sr = _pi.get("sample_rate", "")
+            if _sr:
+                file_resample += ["-ar", _sr]
+        file_filter = list(afilter)
+        # 24→16 без дизеринга = усечение (19.09.2026). Дизерим, когда в 16 бит
+        # сводится то, что глубже 16: 24/32-битный или float-источник, а также
+        # любой 16-битный, который прошёл loudnorm или смену частоты (после них
+        # сэмплы уже не целые 16-битные). Чистый 16→16 не трогаем — шум ради
+        # ничего, и так он остаётся бит-в-бит. Фильтр ОДИН: цепочка через запятую.
+        if out16:
+            _bits = int(_pi.get("bits") or 0)
+            _src_sr = _pi.get("sample_rate", "")
+            if (_bits > 16 or normalize
+                    or (sample_rate and _src_sr and sample_rate != _src_sr)):
+                _dith = _dither_to_16(fmt, _sr)
+                file_filter = (["-af", afilter[1] + "," + _dith] if afilter
+                               else ["-af", _dith])
+        cmd += ["-map_metadata", "0", *file_filter, *enc, *file_resample, str(out)]
         try:
             cp = subprocess.run(cmd, capture_output=True, timeout=1800,
                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -600,11 +665,39 @@ def split_cue(cue_path: str, out_dir: str, fmt: str = "source",
 
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
+    # Резка по СЭМПЛАМ, а не копированием пакетов. `-ss/-t` + `-c:a copy`
+    # режет по границам пакетов: FLAC 2 с, разрезанный на 1.0 с, давал части
+    # 46080 + 46728 = 92808 сэмплов против 88200 — на стыке ~104 мс звучали
+    # дважды. Для lossless-источника декодируем и кодируем обратно тем же
+    # lossless-кодеком: сэмплы те же, границы точные. Lossy (mp3/aac/opus…)
+    # по-прежнему копируется — перекодировать его значило бы терять качество.
+    exact_sr = 0
+    split_af: list = []    # WAV-цель = 16 бит: глубокий источник понижаем с дизерингом
     if fmt == "source" or fmt not in _CONVERT:
         ext, enc = audio.suffix, ["-c:a", "copy"]
+        _pi = _probe(_ffprobe_for(ffmpeg), audio)
+        _codec = (_pi.get("codec") or "").lower()
+        _lossless = {"flac": (".flac", ["-c:a", "flac", "-compression_level", "8"]),
+                     "alac": (".m4a", ["-c:a", "alac"]),
+                     "wavpack": (".wv", ["-c:a", "wavpack"]),
+                     "ape": (".flac", ["-c:a", "flac", "-compression_level", "8"]),
+                     "tta": (".flac", ["-c:a", "flac", "-compression_level", "8"])}
+        if _codec in _lossless:
+            ext, enc = _lossless[_codec]
+        elif _codec.startswith("pcm_"):
+            ext, enc = audio.suffix, ["-c:a", _codec]
+        if enc != ["-c:a", "copy"]:
+            try:
+                exact_sr = int(_pi.get("sample_rate") or 0)
+            except (TypeError, ValueError):
+                exact_sr = 0
+            if not exact_sr:                       # частоту не узнали — точно не порежем
+                ext, enc = audio.suffix, ["-c:a", "copy"]
     else:
         e, _cc, enc_t = _CONVERT[fmt]
         ext, enc = e, [a.replace("{br}", bitrate) for a in enc_t]
+        if fmt == "wav" and int(_probe(_ffprobe_for(ffmpeg), audio).get("bits") or 0) > 16:
+            split_af = ["-af", _dither_to_16("wav")]
 
     total = len(tracks)
     done = fail = 0
@@ -617,11 +710,25 @@ def split_cue(cue_path: str, out_dir: str, fmt: str = "source",
         num = t["num"] or (i + 1)
         stem = _sanitize(f"{num:02d} - {t['artist']} - {t['title']}".strip(" -")) or f"{num:02d}"
         of = out / (stem + ext)
-        # -ss before -i = fast seek; -t (duration) avoids the -to-after-seek gotcha.
-        cmd = [ffmpeg, "-y", "-hide_banner", "-ss", f"{start:.3f}"]
-        if dur is not None and dur > 0:
-            cmd += ["-t", f"{dur:.3f}"]
-        cmd += ["-i", str(audio), "-map", "0:a", *enc,
+        if exact_sr:
+            # Грубый переход — на ЦЕЛУЮ секунду раньше: при декодировании ffmpeg
+            # отбрасывает сэмплы точно до этой метки, а целая секунда × частота —
+            # целое число, так что отсчёт внутри atrim не плывёт. Дальше границы
+            # в сэмплах от кадров CUE (1/75 с), без округления до миллисекунд.
+            seek = max(0, int(start) - 1)
+            s0 = round(start * exact_sr) - seek * exact_sr
+            trim = f"atrim=start_sample={s0}"
+            if dur is not None and dur > 0:
+                trim += f":end_sample={round((start + dur) * exact_sr) - seek * exact_sr}"
+            cmd = [ffmpeg, "-y", "-hide_banner", "-ss", str(seek), "-i", str(audio),
+                   "-map", "0:a", "-af", trim + ",asetpts=PTS-STARTPTS", *enc]
+        else:
+            # -ss before -i = fast seek; -t (duration) avoids the -to-after-seek gotcha.
+            cmd = [ffmpeg, "-y", "-hide_banner", "-ss", f"{start:.3f}"]
+            if dur is not None and dur > 0:
+                cmd += ["-t", f"{dur:.3f}"]
+            cmd += ["-i", str(audio), "-map", "0:a", *split_af, *enc]
+        cmd += [
                 "-metadata", f"title={t['title']}",
                 "-metadata", f"artist={t['artist']}",
                 "-metadata", f"album={info['album']}",

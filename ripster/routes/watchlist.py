@@ -114,6 +114,9 @@ def install(app, ctx) -> None:
         # обложки: обогащение метаданными вызывается в маршруте добавления, а
         # вишлист кладёт задачу в очередь напрямую, мимо него.
         "enrich_meta":    getattr(ctx, "enrich_meta", None),
+        # Enqueue dedupe: an NZ-Friday pass must not re-queue what is already
+        # downloaded (see _enqueue).
+        "history":        getattr(ctx, "download_history", None),
     })
     app.include_router(router)
 
@@ -735,11 +738,37 @@ async def _apple_latest_album(client, artist_id: str, storefront: str = "us",
 # happened to land. Aligning one check to the Auckland Friday means the moment
 # a release exists anywhere, we look.
 #
-# Computed by hand rather than via zoneinfo: on Windows zoneinfo needs the
-# `tzdata` package, and adding a dependency to this interpreter is exactly what
-# ripster-dependency-versions says not to do casually. NZ's rule is simple and
-# stable: UTC+13 from the last Sunday of September to the first Sunday of April,
-# UTC+12 otherwise.
+# OPT-IN since 2026-09-19 (`watchlist-nz-early`, default OFF): the owner wants
+# it, but as the user's choice. OFF = plain interval checks, exactly as before
+# the alignment existed. ON = one extra pass at Friday 00:05 Auckland, and new
+# releases found by that pass are fetched through NZ-region accounts first
+# (see nz_accounts / _pick_download_url). WHETHER to download stays the
+# per-entry `auto_download` switch — NZ-early only changes WHEN and WHERE FROM.
+#
+# zoneinfo("Pacific/Auckland") when the interpreter has tz data; on Windows that
+# needs the `tzdata` package, which the bundled interpreters do NOT have (checked
+# 2026-09-19: both .venv and C:\Python314 raise ZoneInfoNotFoundError). Adding a
+# dependency casually is what ripster-dependency-versions forbids, so a hand rule
+# stays as the fallback: UTC+13 from the last Sunday of September 02:00 NZST to
+# the first Sunday of April 03:00 NZDT, UTC+12 otherwise. Both transitions are
+# Saturday 14:00 UTC — the old code compared LOCAL transition times against a UTC
+# clock and was ~12h off around each switch.
+
+from datetime import timezone as _tz
+
+
+def _utcnow() -> "datetime":
+    """Naive UTC (the convention of every helper below)."""
+    return datetime.now(_tz.utc).replace(tzinfo=None)
+
+
+def _nz_zone():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("Pacific/Auckland")
+    except Exception:                                               # noqa: BLE001
+        return None
+
 
 def _last_sunday(year: int, month: int) -> "datetime":
     from calendar import monthrange
@@ -753,40 +782,72 @@ def _first_sunday(year: int, month: int) -> "datetime":
 
 
 def _nz_offset(utc_dt: "datetime") -> int:
-    """Hours NZ is ahead of UTC at this instant (12 or 13)."""
+    """Hours NZ is ahead of UTC at this instant (12 or 13). `utc_dt` naive UTC."""
+    z = _nz_zone()
+    if z is not None:
+        off = utc_dt.replace(tzinfo=_tz.utc).astimezone(z).utcoffset()
+        return int(off.total_seconds() // 3600)
     y = utc_dt.year
-    dst_start = _last_sunday(y, 9).replace(hour=2)    # NZDT begins
-    dst_end   = _first_sunday(y, 4).replace(hour=3)   # NZDT ends
+    # Transitions are defined in LOCAL time; convert them to UTC before comparing.
+    dst_start = _last_sunday(y, 9).replace(hour=2) - timedelta(hours=12)   # NZDT begins
+    dst_end   = _first_sunday(y, 4).replace(hour=3) - timedelta(hours=13)  # NZDT ends
     # Southern hemisphere: DST spans the new year, so it is the GAP that is
     # standard time, not the span.
     return 12 if (dst_end <= utc_dt < dst_start) else 13
 
 
 def nz_now(utc_dt: "datetime | None" = None) -> "datetime":
-    utc_dt = utc_dt or datetime.utcnow()
+    utc_dt = utc_dt or _utcnow()
     return utc_dt + timedelta(hours=_nz_offset(utc_dt))
+
+
+def nz_friday_target_utc(utc_dt: "datetime | None" = None,
+                         grace_min: int = 5) -> "datetime":
+    """Naive-UTC instant of the next Friday 00:<grace_min> in Auckland (strictly
+    after `utc_dt`). The offset is taken AT THE TARGET, not now — a DST switch
+    between now and Friday would otherwise put the wake-up an hour off."""
+    utc_dt = utc_dt or _utcnow()
+    nz = nz_now(utc_dt)
+    local = (nz.replace(hour=0, minute=grace_min, second=0, microsecond=0)
+             + timedelta(days=(4 - nz.weekday()) % 7))
+    if local <= nz:
+        local += timedelta(days=7)
+    z = _nz_zone()
+    if z is not None:
+        return local.replace(tzinfo=z).astimezone(_tz.utc).replace(tzinfo=None)
+    # Friday 00:05 is never inside a DST gap (switches happen on Sundays), so two
+    # rounds of "guess the offset, re-check at the guess" always settle.
+    off = _nz_offset(local - timedelta(hours=12))
+    utc = local - timedelta(hours=off)
+    off2 = _nz_offset(utc)
+    return local - timedelta(hours=off2) if off2 != off else utc
 
 
 def seconds_to_nz_friday(utc_dt: "datetime | None" = None,
                          grace_min: int = 5) -> float:
     """Seconds until the next Friday 00:05 in Auckland."""
-    utc_dt = utc_dt or datetime.utcnow()
-    nz = nz_now(utc_dt)
-    target = (nz.replace(hour=0, minute=grace_min, second=0, microsecond=0)
-              + timedelta(days=(4 - nz.weekday()) % 7))
-    if target <= nz:
-        target += timedelta(days=7)
-    return (target - nz).total_seconds()
+    utc_dt = utc_dt or _utcnow()
+    return (nz_friday_target_utc(utc_dt, grace_min) - utc_dt).total_seconds()
+
+
+def nz_early_enabled(cfg: dict | None = None) -> bool:
+    """`watchlist-nz-early` — opt-in, default OFF."""
+    cfg = cfg if cfg is not None else (_s.get("config") or {})
+    v = (cfg or {}).get("watchlist-nz-early", False)
+    if isinstance(v, str):
+        return v.strip().lower() in ("1", "true", "yes", "on")
+    return v is True
 
 
 def next_check_delay(cfg: dict | None = None, base: float = 6 * 3600) -> float:
     """How long the background loop should sleep before the next check.
 
-    Normally the plain interval; but if the Auckland Friday lands sooner, wake
-    then instead so a Friday release is seen at the first minute it exists.
+    The plain interval; with `watchlist-nz-early` ON, wake at the Auckland
+    Friday instead when that comes first. (Kept for callers/tests — the live
+    loop is run_loop(), which also persists its plan on disk.)
     """
     cfg = cfg if cfg is not None else (_s.get("config") or {})
-    if cfg.get("watchlist-nz-window", True) is False:
+    if not nz_early_enabled(cfg):
         return base
     return max(60.0, min(base, seconds_to_nz_friday()))
 
@@ -833,6 +894,296 @@ def initial_check_delay(cfg: dict | None = None, base: float = 6 * 3600,
     if since is None:
         return grace                      # fresh list — check shortly after boot
     return max(grace, min(interval, interval - since))
+
+
+# ── Persisted schedule ────────────────────────────────────────────────────────
+# The plan (next regular pass, next NZ pass) lives in watchlist_schedule.json so
+# a restart RESUMES it instead of re-deriving it. Deriving from `last_check`
+# covers the regular clock, but not the NZ slot: an app restarted at 00:03 NZ
+# Friday used to compute "next Friday" from scratch and never missed anything
+# only by luck. With the file, a due-but-not-run NZ pass stays due.
+#
+# The loop wakes at most every _TICK seconds and re-plans, so flipping the
+# toggle takes effect within minutes, not after a 6h sleep.
+
+_BASE_INTERVAL = 6 * 3600.0
+_BOOT_GRACE    = 120.0
+_TICK          = 300.0
+_NZ_STALE      = 24 * 3600.0     # a missed NZ slot older than this is skipped, not run
+_SCHED: dict = {}                # in-memory copy; disk is the durable one
+_SCHED_LOADED = False
+
+
+def _sched_file() -> Path:
+    base = _s.get("base_dir") or Path(__file__).resolve().parent.parent.parent
+    return Path(base) / "watchlist_schedule.json"
+
+
+def _iso(dt: "datetime | None") -> "str | None":
+    return dt.replace(microsecond=0).isoformat() + "Z" if dt else None
+
+
+def _parse_utc(raw) -> "datetime | None":
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).rstrip("Z"))
+    except ValueError:
+        return None
+
+
+def _load_sched() -> dict:
+    global _SCHED_LOADED
+    if not _SCHED_LOADED:
+        _SCHED_LOADED = True
+        try:
+            d = json.loads(_sched_file().read_text(encoding="utf-8"))
+            if isinstance(d, dict):
+                _SCHED.update(d)
+        except Exception:                                           # noqa: BLE001
+            pass
+    return _SCHED
+
+
+def _save_sched(st: dict) -> None:
+    if st is not _SCHED:
+        _SCHED.clear()
+        _SCHED.update(st)
+    try:
+        p = _sched_file()
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(_SCHED, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(p)
+    except Exception as e:                                          # noqa: BLE001
+        # Memory copy still holds the plan — the loop must not spin on a disk error.
+        print(f"[watchlist] schedule not saved: {e}", flush=True)
+
+
+def plan_next_check(cfg: dict | None = None, now: "datetime | None" = None,
+                    state: "dict | None" = None, base: float = _BASE_INTERVAL,
+                    items: "list | None" = None) -> dict:
+    """What the loop should do next: {delay, reason, next_regular, next_nz}.
+
+    reason: "regular" | "nz". Pure given (cfg, now, state) — tests pass all three.
+    """
+    cfg = cfg if cfg is not None else (_s.get("config") or {})
+    now = now or _utcnow()
+    st = state if state is not None else _load_sched()
+    nr = _parse_utc(st.get("next_regular"))
+    if nr is None:
+        # No saved plan (first run after the upgrade): resume from last_check,
+        # the same rule initial_check_delay() introduced on 2026-08-09.
+        since = seconds_since_last_pass(items)
+        nr = now + timedelta(seconds=0 if since is None else max(0.0, base - since))
+    nz_at = None
+    if nz_early_enabled(cfg):
+        nz_at = _parse_utc(st.get("next_nz"))
+        if nz_at is None or (now - nz_at).total_seconds() > _NZ_STALE:
+            nz_at = nz_friday_target_utc(now)
+    if nz_at is not None and nz_at <= nr:
+        when, reason = nz_at, "nz"
+    else:
+        when, reason = nr, "regular"
+    return {"delay": max(0.0, (when - now).total_seconds()), "reason": reason,
+            "next_regular": nr, "next_nz": nz_at}
+
+
+def mark_pass_done(cfg: dict | None = None, reason: str = "regular",
+                   now: "datetime | None" = None, state: "dict | None" = None,
+                   base: float = _BASE_INTERVAL) -> dict:
+    """Record a finished pass and persist the next plan."""
+    cfg = cfg if cfg is not None else (_s.get("config") or {})
+    now = now or _utcnow()
+    st = dict(state if state is not None else _load_sched())
+    st["next_regular"] = _iso(now + timedelta(seconds=base))
+    st["last_pass"] = _iso(now)
+    st["last_reason"] = reason
+    if nz_early_enabled(cfg):
+        cur = _parse_utc(st.get("next_nz"))
+        if reason == "nz" or cur is None or cur <= now:
+            st["next_nz"] = _iso(nz_friday_target_utc(now + timedelta(minutes=1)))
+        if reason == "nz":
+            st["last_nz_pass"] = _iso(now)
+    else:
+        st.pop("next_nz", None)
+    if state is None:
+        _save_sched(st)
+    return st
+
+
+async def run_loop(cfg: dict, get_items, tick: float = _TICK,
+                   grace: float = _BOOT_GRACE) -> None:
+    """The background watchlist loop (app.py only starts it)."""
+    import time as _time
+    booted = _time.monotonic()
+    while True:
+        live_cfg = _s.get("config") or cfg
+        try:
+            plan = plan_next_check(live_cfg)
+        except Exception as e:                                      # noqa: BLE001
+            print(f"[watchlist] schedule plan failed: {e}", flush=True)
+            plan = {"delay": _BASE_INTERVAL, "reason": "regular"}
+        delay = plan["delay"]
+        left_grace = grace - (_time.monotonic() - booted)
+        if left_grace > 0:
+            delay = max(delay, left_grace)       # never fire into the middle of boot
+        if delay > 0:
+            await asyncio.sleep(min(delay, tick))
+            continue
+        reason = plan["reason"]
+        if reason == "nz":
+            print("[watchlist] NZ Friday pass (watchlist-nz-early ON)", flush=True)
+        if get_items():
+            # One bad pass must not take the loop down with it.
+            try:
+                await _check_watchlist(reason=reason)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:                                  # noqa: BLE001
+                print(f"[watchlist] проверка упала: {e}", flush=True)
+        try:
+            mark_pass_done(live_cfg, reason)
+        except Exception as e:                                      # noqa: BLE001
+            print(f"[watchlist] schedule not advanced: {e}", flush=True)
+            await asyncio.sleep(tick)
+
+
+# ── NZ-region accounts ────────────────────────────────────────────────────────
+# Which services can fetch AS NEW ZEALAND right now. Read from what is already
+# known — the primary account's measured country (`<svc>-country`, written by
+# the credential probe) and `country` on pool entries — never a hardcoded list:
+# on 2026-09-19 the Qobuz primary measured NZ while the Qobuz/Deezer pools had
+# no NZ entry at all.
+#
+# Apple: the public AMD wrapper already rotates regions with `nz` first
+# (apple_router `amd-region-preference`). It counts ONLY when the owner chose
+# `apple-wrapper: public` by hand — the public wrapper is never picked for them
+# (feedback_apple_public_wrapper_manual_only). The local wrapper fetches in the
+# account's own storefront, so it counts only if that storefront is NZ.
+
+_NZ_SERVICES = ("tidal", "qobuz", "deezer", "apple")
+_NZ_CRED_KEY = {"tidal": "tidal-token", "qobuz": "qobuz-auth-token",
+                "deezer": "deezer-arl"}
+
+
+def nz_accounts(cfg: dict | None = None) -> list[dict]:
+    """[{service, account, via}] ordered by availability-preference."""
+    cfg = cfg if cfg is not None else (_s.get("config") or {})
+
+    def cc(v) -> str:
+        return str(v or "").strip().upper()
+
+    out: list[dict] = []
+    for svc in ("tidal", "qobuz", "deezer"):
+        if str(cfg.get(_NZ_CRED_KEY[svc]) or "").strip() and cc(cfg.get(f"{svc}-country")) == "NZ":
+            out.append({"service": svc, "account": "primary", "via": "account"})
+            continue
+        for a in (cfg.get(f"{svc}-accounts") or []):
+            if not isinstance(a, dict) or a.get("enabled", True) is False:
+                continue
+            if cc(a.get("country") or a.get(f"{svc}-country")) == "NZ":
+                out.append({"service": svc, "account": str(a.get("label") or "pool"),
+                            "via": "pool"})
+                break
+    wrapper = str(cfg.get("apple-wrapper") or "").strip().lower()
+    if wrapper == "public":
+        out.append({"service": "apple", "account": "amd", "via": "amd-region-rotation"})
+    elif cc(cfg.get("apple-country")) == "NZ" or cc(cfg.get("storefront")) == "NZ":
+        out.append({"service": "apple", "account": "primary", "via": "account"})
+    pref = [str(x) for x in (cfg.get("availability-preference")
+                             or ["apple", "qobuz", "deezer", "tidal", "beatport"])]
+    out.sort(key=lambda r: pref.index(r["service"]) if r["service"] in pref else 99)
+    return out
+
+
+def _nz_route(cfg: dict) -> list[str]:
+    """Services to try FIRST — only inside an NZ pass with the option ON."""
+    if not (_s.get("nz_pass") and nz_early_enabled(cfg)):
+        return []
+    return [r["service"] for r in nz_accounts(cfg)]
+
+
+@router.get("/api/watchlist/nz-status")
+async def api_watchlist_nz_status():
+    """For the settings hint: which services have an NZ account, and when."""
+    cfg = _s.get("config") or {}
+    have = nz_accounts(cfg)
+    have_svcs = {r["service"] for r in have}
+    st = _load_sched()
+    plan = plan_next_check(cfg)
+    return {
+        "enabled":  nz_early_enabled(cfg),
+        "accounts": have,
+        "missing":  [s for s in _NZ_SERVICES if s not in have_svcs],
+        "next_nz":  _iso(plan.get("next_nz")) if nz_early_enabled(cfg) else None,
+        "next_regular": _iso(plan.get("next_regular")),
+        "last_nz_pass": st.get("last_nz_pass"),
+        "zoneinfo": _nz_zone() is not None,
+    }
+
+
+# ── Enqueue with dedupe ───────────────────────────────────────────────────────
+# NZ Friday means many releases in one pass, often the same record reached twice
+# (artist + label subscription, early storefront + Apple). The queue itself keeps
+# its lane limits; what it cannot know is that a URL from Tidal and one from
+# Apple are the same album. So: skip if the same URL (by service + id) is already
+# queued/running or was downloaded, and skip a second (artist, title) in one pass.
+
+_QUEUE_DEAD = ("error", "failed", "cancelled", "canceled", "skipped")
+
+
+def _url_key(u) -> str:
+    s = str(u or "").strip().lower()
+    m_i = re.search(r"[?&]i=(\d+)", s)
+    s = s.split("#", 1)[0].split("?", 1)[0].rstrip("/")
+    m = re.search(r"(apple|deezer|qobuz|tidal|soundcloud|spotify|beatport)\.[a-z.]+/.*?(\d{5,})$", s)
+    if m:
+        return f"{m.group(1)}:{m.group(2)}" + (f":i{m_i.group(1)}" if m_i else "")
+    return s
+
+
+def _rel_ident(artist: str, title: str) -> "tuple | None":
+    from ripster.artist_xref import norm
+    a, t = norm(artist or ""), _rel_key(title or "")
+    return (a, t) if a and t else None
+
+
+def _already_have(task: dict, artist: str, title: str, also=()) -> str:
+    """Why this task is a duplicate, or '' if it is not. `also` — other URLs of
+    the same release (the one it was FOUND at, when routing picked another
+    service), so a queued Apple copy still blocks a Tidal re-route."""
+    uks = {k for k in [_url_key(task.get("url"))] + [_url_key(x) for x in also if x] if k}
+    ident = _rel_ident(artist, title)
+    if ident and ident in (_s.get("pass_keys") or set()):
+        return "same release already queued in this pass"
+    for q in list(_s.get("queue") or []):
+        if str(q.get("status") or "") in _QUEUE_DEAD:
+            continue
+        if _url_key(q.get("url")) in uks:
+            return "already in queue"
+        if ident and _rel_ident(q.get("artist", ""), q.get("album") or q.get("title", "")) == ident:
+            return "already in queue"
+    for h in list(_s.get("history") or [])[-400:]:
+        if str(h.get("status") or "") != "done":
+            continue
+        if _url_key(h.get("url")) in uks:
+            return "already downloaded"
+        if ident and _rel_ident(h.get("artist", ""), h.get("album") or h.get("title", "")) == ident:
+            return "already downloaded"
+    return ""
+
+
+def _enqueue(task: dict, artist: str = "", title: str = "", also=()) -> bool:
+    """queue.append with dedupe. True if the task was actually queued."""
+    why = _already_have(task, artist, title, also)
+    if why:
+        print(f"[watchlist] skip '{title or task.get('url')}' — {why}", flush=True)
+        return False
+    _s["queue"].append(task)
+    ident = _rel_ident(artist, title)
+    if ident:
+        _s.setdefault("pass_keys", set()).add(ident)
+    return True
 
 
 def _notify_release(artist: str, release: str, compilation: bool, queued: bool,
@@ -914,9 +1265,10 @@ async def _check_soundcloud_targets(items: list, broadcast, save, cfg, queue, sn
             if entry.get("auto_download"):
                 task = _make_task(track_url, entry.get("quality", ""), cfg,
                                   "watchlist")
-                _enrich_soon(task)
-                queue.append(task)
-                await broadcast({"type": "queue_update", "queue": snapshot()})
+                if _enqueue(task, entry.get("name") or permalink,
+                            str(latest.get("title") or "")):
+                    _enrich_soon(task)
+                    await broadcast({"type": "queue_update", "queue": snapshot()})
     return new_found
 
 
@@ -1022,9 +1374,9 @@ async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> 
                     continue
                 _t = _make_task(url, entry.get("quality", ""), cfg,
                                 "watchlist-label")
-                queue.append(_t)
-                _enrich_soon(_t)
-                await broadcast({"type": "queue_update", "queue": snapshot()})
+                if _enqueue(_t, rel.get("artist", ""), title, (rel.get("url"),)):
+                    _enrich_soon(_t)
+                    await broadcast({"type": "queue_update", "queue": snapshot()})
         except Exception as e:
             print(f"[watchlist] label {name}: {e}", flush=True)
     save(items)
@@ -1049,8 +1401,15 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
     if want_svc in ("", "auto", None):
         want_svc = _avail[0] if _avail else "apple"
 
+    # NZ-проход (`watchlist-nz-early` ВКЛ): сначала сервисы с новозеландской
+    # учёткой — там пятничный релиз уже отдаётся. Вне NZ-прохода список пуст и
+    # всё идёт ровно как раньше.
+    nz = _nz_route(cfg)
+    if nz and rel.get("url") and (rel.get("service") or "") in nz:
+        return rel.get("url", "")          # найден прямо в NZ-витрине
+
     # Уже в нужном сервисе — ничего выяснять не надо.
-    if (rel.get("service") or "") == want_svc and rel.get("url"):
+    if not nz and (rel.get("service") or "") == want_svc and rel.get("url"):
         return rel.get("url", "")
 
     upc = ""
@@ -1063,6 +1422,8 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
         pref = [want_svc] + [x for x in (cfg.get("availability-preference")
                                          or ["apple", "qobuz", "deezer", "tidal", "beatport"])
                              if x != want_svc]
+        if nz:
+            pref = nz + [x for x in pref if x not in nz]
         m = await _av.matrix(upc=upc, title=title, artist=rel.get("artist", ""))
         best = _av.pick_source(m["services"], pref)
         if best:
@@ -1077,12 +1438,19 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
         return ""
 
     # Штрихкода нет — старый путь: поиск в целевом сервисе по названию.
-    try:
-        mm = await _disc._match_seeds_in_service([rel], want_svc, label, 1,
-                                                 cfg.get("storefront", "us"))
-        u = (mm[0].get("url") if mm else "") or ""
-    except Exception:
-        u = ""
+    # В NZ-проходе сперва — в сервисах с NZ-учёткой.
+    u = ""
+    for _svc in [x for x in nz if x != want_svc] + [want_svc]:
+        try:
+            mm = await _disc._match_seeds_in_service([rel], _svc, label, 1,
+                                                     cfg.get("storefront", "us"))
+            u = (mm[0].get("url") if mm else "") or ""
+        except Exception:
+            u = ""
+        if u:
+            if _svc != want_svc:
+                print(f"[watchlist] '{title}': NZ pass, taking from {_svc}", flush=True)
+            break
     if not u:
         print(f"[watchlist] '{title}' not found in {want_svc} (no barcode) - skipping",
               flush=True)
@@ -1281,9 +1649,10 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
                             continue
                         _tsk = _make_task(_u, entry.get("quality", ""), cfg,
                                           "watchlist-early")
-                        _enrich_soon(_tsk)
-                        queue.append(_tsk)
                         _pending_drop(entry, p.get("key", ""))
+                        if not _enqueue(_tsk, nm, _ttl, (_rel.get("url"),)):
+                            continue
+                        _enrich_soon(_tsk)
                         await broadcast({"type": "queue_update", "queue": snapshot()})
                         print(f"[watchlist] ⤵ добрал '{_ttl}' ({nm}) — "
                               f"появился там, где можно взять", flush=True)
@@ -1320,9 +1689,9 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
                         continue
                     task = _make_task(dl_url, entry.get("quality", ""), cfg,
                                       "watchlist-early")
-                    _enrich_soon(task)
-                    queue.append(task)
-                    await broadcast({"type": "queue_update", "queue": snapshot()})
+                    if _enqueue(task, nm, title, (r.get("url"),)):
+                        _enrich_soon(task)
+                        await broadcast({"type": "queue_update", "queue": snapshot()})
 
     # Сохраняем всегда: baseline первого прохода тоже надо пережить перезапуск,
     # иначе следующий запуск снова примет весь бэк-каталог за новинки.
@@ -1330,7 +1699,19 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
     return found
 
 
-async def _check_watchlist():
+async def _check_watchlist(reason: str = "manual"):
+    """One pass. `reason` — "regular" | "nz" | "manual"; only an "nz" pass with
+    `watchlist-nz-early` ON routes downloads through NZ accounts first."""
+    _s["nz_pass"] = (reason == "nz" and nz_early_enabled(_s.get("config") or {}))
+    _s["pass_keys"] = set()
+    try:
+        await _check_watchlist_pass()
+    finally:
+        _s["nz_pass"] = False
+        _s["pass_keys"] = set()
+
+
+async def _check_watchlist_pass():
     items      = _s["items"]
     broadcast  = _s["broadcast"]
     save       = _s["save"]
@@ -1443,9 +1824,10 @@ async def _check_watchlist():
                         ) or release_url
                         task = _make_task(dl_url, entry.get("quality", ""),
                                           cfg, "watchlist")
-                        _enrich_soon(task)
-                        queue.append(task)
-                        await broadcast({"type": "queue_update", "queue": snapshot()})
+                        if _enqueue(task, entry.get("name", ""), release_name,
+                                    (release_url,)):
+                            _enrich_soon(task)
+                            await broadcast({"type": "queue_update", "queue": snapshot()})
             except Exception as e:
                 print(f"[watchlist] {entry['name']}: {e}", flush=True)
 

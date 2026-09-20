@@ -63,6 +63,7 @@ _SECRET_KEYS = {
     "qobuz-password", "qobuz-auth-token", "qobuz-secrets", "qobuz-secret",
     "tidal-token", "tidal-refresh",
     "spotify-client-secret", "spotify-sp-dc",
+    "spotify-radar-client-secret", "spotify-radar-sp-dc",   # dedicated radar account
     "soundcloud-oauth-token",
     "beatport-password",
     "wrapper-password", "wrapper-apple-id",
@@ -132,7 +133,7 @@ _EXPORT_ACCOUNT_LIST_KEYS = {
 _EXPORT_IDENTITY_KEYS = {
     "qobuz-user-id", "qobuz-email", "qobuz-app-id",
     "tidal-user-id", "beatport-username",
-    "spotify-client-id",
+    "spotify-client-id", "spotify-radar-client-id",
 }
 _EXPORT_EXCLUDE_KEYS = _SECRET_KEYS | _EXPORT_ACCOUNT_LIST_KEYS | _EXPORT_IDENTITY_KEYS
 
@@ -213,8 +214,20 @@ async def post_config_reload(request: Request):
     запись из памяти вернула бы старое, и починка выглядела бы сделанной,
     молча откатываясь (поймано 12.09.2026 на автозамене учётки Tidal).
     """
+    # loopback ОДИН не доказывает «свой»: за туннелем внешний клиент тоже приходит
+    # как 127.0.0.1 (uvicorn без proxy_headers) — тот же обход, что закрыли в
+    # pairing 18.09.2026. Доверяем НЕПОДДЕЛЫВАЕМОЙ owner-cookie; голый loopback —
+    # только когда туннеля нет (remote-enabled off). Свой сторож здоровья
+    # (credential_health._notify_app_config_changed) теперь шлёт эту cookie, так
+    # что автоперечитывание конфига не ломается.
+    from ripster.auth import verify_session_cookie as _vsc
     host = (request.client.host if request.client else "") or ""
-    if host not in ("127.0.0.1", "::1", "localhost"):
+    _local = host in ("127.0.0.1", "::1", "localhost")
+    _owner = _vsc(request.cookies.get("ripster-session", "")) or (_local and not _cfg.get("remote-enabled", False))
+    if not _owner:
+        # Лог, чтобы «тихий откат» (сторож не смог перечитать → починка молча
+        # вернулась) был ВИДЕН, а не выглядел сделанным. См. docstring выше.
+        print(f"[config] reload отклонён: не владелец (host={host}, remote={_cfg.get('remote-enabled', False)})", flush=True)
         raise HTTPException(403, imsg("err.loopback_only", "только с этой машины"))
     # Пути считаем от этого файла: корень установки известен всегда, а
     # `sys.argv[0]` зависит от того, чем запущен процесс — на этом уже
@@ -565,6 +578,16 @@ async def get_qualities_ep(service: str = ""):
     if service and service != "apple":
         try:
             return _get_engine(service).qualities()
+        except (KeyError, Exception):
+            pass
+        # A SERVICE key whose engine has a different name (jiosaavn →
+        # orpheus_jiosaavn, beatport → orpheus_beatport): without this the URL
+        # bar fell through to the Apple codec list for those services.
+        try:
+            from ripster.service_layer import engine_for_svc as _efs
+            _en = _efs(service)
+            if _en and _en != service:
+                return _get_engine(_en).qualities()
         except (KeyError, Exception):
             pass
     eng = _cfg.get("engine", "zhaarey")

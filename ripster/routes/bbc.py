@@ -10,13 +10,13 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import shutil
-import sys
+import subprocess
 from asyncio.subprocess import PIPE
 from pathlib import Path
 
 import httpx
 from ripster import http_client as _HTTP
+from ripster.py_runtime import app_python
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel
@@ -25,8 +25,9 @@ from ripster.metadata.mixesdb import fetch_mix_detail, search_mixesdb
 
 router = APIRouter(prefix="/api/bbc")
 
-_config:    dict = {}
-_broadcast       = None
+_config:       dict = {}
+_broadcast     = None
+_queue_snapshot = None
 
 _RMS      = "https://rms.api.bbc.co.uk/v2"
 _PROG_API = "https://www.bbc.co.uk/programmes"
@@ -64,9 +65,10 @@ BRANDS = [
 
 
 def install(app, ctx) -> None:
-    global _config, _broadcast
-    _config    = ctx.config
-    _broadcast = ctx.broadcast
+    global _config, _broadcast, _queue_snapshot
+    _config         = ctx.config
+    _broadcast      = ctx.broadcast
+    _queue_snapshot = ctx.queue_snapshot
     app.include_router(router)
 
 
@@ -75,25 +77,15 @@ def _img(template: str, sz: int = 320) -> str:
     return template.replace("{recipe}", f"{sz}x{sz}") if template else ""
 
 
-def _ydl() -> str:
-    return str(Path(sys.executable).parent / "yt-dlp.exe")
-
-
-def _find_yt_dlp() -> str | None:
-    found = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
-    if found:
-        return found
-    for base in [Path(sys.executable).parent, Path(sys.executable).parent / "Scripts"]:
-        for name in ("yt-dlp.exe", "yt-dlp"):
-            p = base / name
-            if p.exists():
-                return str(p)
-    # Try alongside other Python installs in AppData
-    import glob
-    for p in glob.glob(str(Path.home() / "AppData/Local/Programs/Python/*/Scripts/yt-dlp.exe")):
-        if Path(p).exists():
-            return p
-    return None
+def yt_dlp_cmd() -> list[str]:
+    # НЕ Scripts\yt-dlp.exe и не shutil.which(): console-script shim под
+    # изолированным embeddable-питоном молча выходит с кодом 1
+    # (preflight Gate 0.5). Запуск — тем же интерпретатором, `-m yt_dlp`.
+    py = app_python()
+    probe = subprocess.run([py, "-c", "import yt_dlp"], capture_output=True)
+    if probe.returncode != 0:
+        raise RuntimeError("yt-dlp не установлен в рабочий питон-окружение Ripster")
+    return [py, "-m", "yt_dlp"]
 
 
 _TC_RE = re.compile(
@@ -139,6 +131,11 @@ def _parse_ep(ep: dict) -> dict:
     vpid = ep.get("id", "")
     urn  = ep.get("urn", "")
     pid  = urn.split(":")[-1] if urn else vpid
+    # Отложенная запись эфира (ripster/bbc_schedule.py): RMS отдаёт сеть канала
+    # и точное время доступности — availability.from для будущей передачи и есть
+    # начало эфира, release.date слишком грубое (до дней).
+    from ripster import bbc_live_channels as _chl
+    channel = (ep.get("network") or {}).get("id") or ""
     return {
         "pid":      pid,
         "vpid":     vpid,
@@ -148,6 +145,9 @@ def _parse_ep(ep: dict) -> dict:
         "date":     (ep.get("release") or {}).get("date", ""),
         "duration": _parse_dur(ep.get("duration")),
         "image":    _img(img_url),
+        "channel":      channel,
+        "avail_from":   (ep.get("availability") or {}).get("from") or "",
+        "schedulable":  _chl.known(channel),
     }
 
 
@@ -210,6 +210,64 @@ async def search_bbc(q: str = Query(..., min_length=1)):
     return {"items": items}
 
 
+# ── Отложенная запись эфира ───────────────────────────────────────────────────
+
+class ScheduleReq(BaseModel):
+    channel:   str
+    start_utc: str          # ISO (с смещением или Z) — храним в UTC
+    duration:  int          # секунд
+    title:     str = ""
+    subtitle:  str = ""
+    cover:     str = ""
+
+
+@router.get("/schedule")
+async def list_scheduled():
+    """Все планы (pending + история fired) — фронт подсвечивает карточки
+    уже запланированных эфиров."""
+    from ripster import bbc_schedule as _bs
+    try:
+        return {"items": _bs.get_store().all()}
+    except RuntimeError:
+        return {"items": []}
+
+
+@router.post("/schedule")
+async def schedule_live(req: ScheduleReq, request: Request):
+    """Запланировать запись будущего эфира: план в bbc_scheduled.json +
+    карточка «scheduled» в очереди (её ведёт ripster/bbc_schedule.py)."""
+    if _is_guest(request):
+        raise HTTPException(403, "guests cannot schedule recordings")
+    from ripster import bbc_schedule as _bs
+    from ripster import bbc_live_channels as _chl
+    if not _chl.known(req.channel):
+        raise HTTPException(400, f"Неизвестный канал эфира: {req.channel}")
+    try:
+        start = _bs.parse_utc(req.start_utc)
+        row = _bs.schedule_recording(channel=req.channel, start_utc=start,
+                                     duration=req.duration,
+                                     title=req.title, subtitle=req.subtitle,
+                                     cover=req.cover)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if _broadcast and _queue_snapshot:
+        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+    return {"ok": True, "row": row}
+
+
+@router.delete("/schedule/{sid}")
+async def cancel_scheduled(sid: str, request: Request):
+    if _is_guest(request):
+        raise HTTPException(403, "guests cannot cancel recordings")
+    from ripster import bbc_schedule as _bs
+    ok = _bs.cancel_recording(sid)
+    if not ok:
+        raise HTTPException(404, "план не найден")
+    if _broadcast and _queue_snapshot:
+        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+    return {"ok": True}
+
+
 # ── VPID + stream URL helpers ─────────────────────────────────────────────────
 
 async def _get_vpid(pid: str, client: httpx.AsyncClient) -> str:
@@ -256,6 +314,15 @@ async def get_stream(request: Request, pid: str = Query(...), vpid: str = Query(
         if not vpid:
             vpid = await _get_vpid(pid, c)
         url = await _get_hls_url(vpid, c)
+    try:
+        from ripster import stats_collector as _sc
+        from ripster.guest_manager import get_manager as _gm
+        sid = _gm().get_session_id_from_request(request) or ""
+        ip  = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or \
+              (request.client.host if request.client else "")
+        _sc.record_stream("bbc", name or pid, url, session_id=sid, client_ip=ip)
+    except Exception:
+        pass
     return {"url": url, "vpid": vpid}
 
 
@@ -284,7 +351,13 @@ def _ep_dir(artist: str, title: str, pid: str) -> Path:
 
 
 @router.post("/download")
-async def download_episode(req: DownloadReq):
+async def download_episode(req: DownloadReq, request: Request):
+    # BBC downloads run outside the task queue (no task_id to key ownership
+    # off), so we stamp the guest session id directly on the progress events
+    # instead — "" means owner-triggered, matching the queue's own convention.
+    from ripster.guest_manager import get_manager as _gm_fn
+    sid = _gm_fn().get_session_id_from_request(request) or ""
+
     ep_dir = _ep_dir(req.artist, req.title, req.pid)
     title  = _safe(req.title or req.pid)
     out    = str(ep_dir / f"{title}.mp3")
@@ -294,8 +367,12 @@ async def download_episode(req: DownloadReq):
         vpid = req.vpid or await _get_vpid(req.pid, c)
         hls  = await _get_hls_url(vpid, c)
 
+    try:
+        ytdlp = yt_dlp_cmd()
+    except RuntimeError as e:
+        raise HTTPException(status_code=503, detail=str(e))
     cmd = [
-        _ydl(),
+        *ytdlp,
         "--quiet",
         "--downloader", "ffmpeg",
         "--hls-use-mpegts",
@@ -321,16 +398,16 @@ async def download_episode(req: DownloadReq):
             BBC_DURATION_MAP[req.pid] = int(dur_raw)
 
     asyncio.create_task(_bg_download(cmd, req.pid, req.title, req.artist,
-                                     req.image_url, ep_dir, req.cover_url))
+                                     req.image_url, ep_dir, req.cover_url, sid))
     return {"status": "started", "pid": req.pid, "dir": str(ep_dir)}
 
 
 async def _bg_download(cmd: list, pid: str, title: str, artist: str,
-                       image_url: str, ep_dir: Path, cover_url: str = ""):
+                       image_url: str, ep_dir: Path, cover_url: str = "", sid: str = ""):
     async def _bcast(msg: dict):
         if _broadcast:
             try:
-                await _broadcast(msg)
+                await _broadcast({**msg, "session_id": sid})
             except Exception:
                 pass
 
@@ -417,9 +494,23 @@ async def _save_cover(image_url: str, ep_dir: Path, stem: str,
     return ""
 
 
+async def _cue_tracks(pid: str, title: str, artist: str,
+                      net_1001: bool = True) -> list[dict]:
+    """Timed rows for a CUE sheet from the best source (BBC → 1001TL → MixesDB),
+    in the `offset` shape _build_cue expects. Untimed lists make a CUE of
+    00:00 markers — useless, so they yield nothing."""
+    art = "" if artist in ("", "BBC Radio") else artist
+    ttl = "" if title in ("", "BBC Mix") else title
+    best = await best_tracklist(pid, ttl, art, net_1001=net_1001)
+    if not (best.get("found") and best.get("timed")):
+        return []
+    return [{"offset": int(t["seconds"]), "title": t["title"], "artist": t["artist"]}
+            for t in best["tracks"] if t.get("seconds") is not None and not t.get("is_with")]
+
+
 async def _try_write_cue(pid: str, title: str, artist: str, ep_dir: Path):
     try:
-        tracks = await _fetch_tracklist(pid)
+        tracks = await _cue_tracks(pid, title, artist)
         if not tracks:
             return
         stem = _safe(title or pid)
@@ -447,12 +538,228 @@ async def _fetch_tracklist(pid: str) -> list[dict]:
     tracks = []
     for ev in r.json().get("segment_events", []):
         seg    = ev.get("segment", {})
-        offset = ev.get("version_offset", ev.get("offset", 0)) or 0
+        raw    = ev.get("version_offset", ev.get("offset"))
+        offset = raw or 0
         title  = seg.get("title", "")
-        artist = (seg.get("primary_contributor") or {}).get("name", "")
+        artist = (seg.get("primary_contributor") or {}).get("name", "") or seg.get("artist", "")
         if title:
-            tracks.append({"offset": int(offset), "title": title, "artist": artist})
+            # `timed` = BBC gave a real position in the episode; old archive
+            # episodes list names only (version_offset null) — those still
+            # identify the set but can't drive chapters/CUE.
+            tracks.append({"offset": int(offset), "title": title, "artist": artist,
+                           "timed": raw is not None})
     return tracks
+
+
+# ── Best tracklist for an episode: BBC → 1001Tracklists → MixesDB ────────────
+
+def _ts_to_sec(ts: str):
+    try:
+        p = [int(x) for x in str(ts).strip().split(":")]
+    except ValueError:
+        return None
+    if len(p) == 3:
+        return p[0] * 3600 + p[1] * 60 + p[2]
+    if len(p) == 2:
+        return p[0] * 60 + p[1]
+    return None
+
+
+def _norm_rows(rows: list[dict]) -> list[dict]:
+    """One row shape for every source: {n, artist, title, seconds, timestamp}."""
+    out = []
+    for i, t in enumerate(rows, 1):
+        sec = t.get("seconds")
+        if sec is None and t.get("timestamp"):
+            sec = _ts_to_sec(t["timestamp"])
+        out.append({"n": str(t.get("n") or i), "artist": t.get("artist", "") or "",
+                    "title": t.get("title", "") or "",
+                    "seconds": sec, "timestamp": _sec_to_ts(sec) if sec is not None else "",
+                    "is_with": bool(t.get("is_with"))})
+    return out
+
+
+def _is_timed(rows: list[dict]) -> bool:
+    secs = {t["seconds"] for t in rows if t.get("seconds") is not None}
+    return len(secs) >= 3
+
+
+async def _episode_meta(pid: str) -> dict:
+    """Title / DJ / air date / length from the programmes API (short timeout)."""
+    try:
+        async with httpx.AsyncClient(timeout=6.0, follow_redirects=True) as c:
+            r = await c.get(f"{_PROG_API}/{pid}.json")
+        if r.status_code != 200:
+            return {}
+        p = r.json().get("programme") or {}
+        brand = ((p.get("parent") or {}).get("programme") or {}).get("title", "")
+        vers = p.get("versions") or []
+        return {"title": brand or p.get("title", ""), "artist": p.get("title", ""),
+                "date": str(p.get("first_broadcast_date") or "")[:10],
+                "duration": int((vers[0].get("duration") if vers else 0) or 0)}
+    except Exception:
+        return {}
+
+
+_TL_REFETCHED: set[str] = set()
+
+
+def _tl1001_reject_reason(res: dict, bbc: list[dict], date: str,
+                          years: set | None = None) -> str:
+    """Hard gates on top of 1001TL's weighted score ('' = accept). For a BBC
+    episode we KNOW the broadcast date and often BBC's own track names, so a
+    page aired on another day, or whose tracks disagree with BBC's names, is
+    another set however well the title matched. ("The Essential Mix 30", 2020,
+    got Bontan's 2024-11-30 list: its only identity token "30" sat in the other
+    page's date.) Recomputed from the result itself, not its stored checks, so
+    a disk-cached entry found by an older/looser rule is re-judged on read."""
+    if not res.get("ok") or (res.get("match") or {}).get("tier") == "definitive":
+        return ""
+    from ripster import tracklist_match as TM
+    ov = TM.check_name_overlap({"tracklist": bbc}, {"tracks": res.get("tracks") or []})
+    if ov["applicable"]:
+        # BBC listed the set: agreement on names is the proof (Classic Essential
+        # Mix re-airs carry the ORIGINAL date on the page, so date can't be).
+        return "" if ov["score"] >= 0.4 else "names disagree with BBC " + ov["detail"]
+    page = TM._dates(str(res.get("url") or ""))
+    if years and page and not ({str(d.year) for d in page} & set(years)):
+        # "Danny Howells 2002" must not get his 2007 set.
+        return f"set year {sorted(years)} vs page {page[0]}"
+    air = TM._dates(date)
+    if not air:
+        return ""
+    if not page:
+        return "no air date on the page to confirm"
+    gap = min(abs((air[0] - d).days) for d in page)
+    return "" if gap <= 3 else f"aired {air[0]}, page {page[0]}"
+
+
+def _is_guest(request: Request | None) -> bool:
+    """A guest session (tunnel link) — they may read BBC data, but must not make
+    the owner's machine scrape 1001Tracklists (GUEST_BLOCKED_PATHS blocks the
+    direct route for the same reason)."""
+    if request is None:
+        return False
+    try:
+        from ripster import auth as _auth
+        fn = getattr(_auth, "_guest_session_fn", None)
+        return bool(fn and fn(request))
+    except Exception:
+        return False
+
+
+async def best_tracklist(pid: str, title: str = "", artist: str = "",
+                         dur: int = 0, force: bool = False,
+                         net_1001: bool = True) -> dict:
+    """Timed tracklist for a BBC episode, sources in order of trust:
+      1. BBC's own segments (only when they carry positions),
+      2. 1001Tracklists — verified with DJ + air date (+ BBC's names when BBC
+         listed the set untimed, + the Sounds URL as a backlink),
+      3. BBC's own names without times (right set, no chapters),
+      4. MixesDB — relevance-scored, DJ-checked, air-date-checked.
+    A wrong tracklist is worse than none: every foreign source is gated, and
+    any failure (captcha, timeout, cooldown) just falls to the next source.
+    Returns {found, source, tracks, timed, url?, match?, tried}."""
+    tried: list[str] = []
+    try:
+        bbc_rows = await _fetch_tracklist(pid)
+    except Exception:
+        bbc_rows = []
+    tried.append("bbc")
+    bbc = _norm_rows([{**t, "seconds": t["offset"] if t.get("timed") else None}
+                      for t in bbc_rows])
+    if len(bbc) >= 3 and _is_timed(bbc):
+        return {"found": True, "source": "bbc", "tracks": bbc, "timed": True,
+                "url": f"https://www.bbc.co.uk/programmes/{pid}", "tried": tried}
+
+    meta = await _episode_meta(pid)
+    title = title or meta.get("title", "")
+    artist = artist or meta.get("artist", "")
+    dur = int(dur or meta.get("duration") or 0)
+    date = meta.get("date", "")
+    # Classic Essential Mix = a re-air ("deadmau5 2008" broadcast 2026-09-13):
+    # the programmes date is the repeat, the set's own pages carry the original
+    # year. A year in the title that isn't the air year → the date proves nothing.
+    _yrs = set(re.findall(r"\b((?:19|20)\d{2})\b", f"{title} {artist}"))
+    if date and _yrs and date[:4] not in _yrs:
+        date = ""
+
+    if title or artist:
+        tried.append("1001tracklists")
+        from fastapi.concurrency import run_in_threadpool
+        from ripster import tl1001
+        ref = [{"artist": t["artist"], "title": t["title"]} for t in bbc]
+
+        async def _lookup(frc: bool) -> dict:
+            try:
+                return await run_in_threadpool(
+                    tl1001.tracklist_for, title or artist, artist if title else "", dur,
+                    ref, [f"https://www.bbc.co.uk/sounds/play/{pid}"], "bbc_" + pid,
+                    frc, date)
+            except Exception as e:
+                print(f"[bbc] 1001TL lookup failed for {pid}: {e}", flush=True)
+                return {}
+
+        if net_1001:
+            res = await _lookup(force)
+        else:
+            # Cache only (guests): an already-verified list is free to show.
+            hit = tl1001._disk_get("id:bbc_" + pid) or {}
+            res = ({**hit, "cached": True}
+                   if hit.get("ok") and tl1001._cached_identity_ok(hit, artist, title) else {})
+        why = _tl1001_reject_reason(res, bbc, date, _yrs)
+        if why and net_1001 and res.get("cached") and pid not in _TL_REFETCHED:
+            # Self-heal: the cached page is someone else's set — look again once
+            # per process (not on every play) instead of hiding the right list
+            # behind the wrong one for the cache's 10 days.
+            _TL_REFETCHED.add(pid)
+            print(f"[bbc] 1001TL cache for {pid} rejected ({why}) — re-searching", flush=True)
+            res = await _lookup(True)
+            why = _tl1001_reject_reason(res, bbc, date, _yrs)
+        if why:
+            print(f"[bbc] 1001TL {res.get('url')} rejected for {pid}: {why}", flush=True)
+            res = {}
+        if res.get("ok") and res.get("tracks"):
+            rows = _norm_rows(res["tracks"])
+            if _is_timed(rows) or not bbc:
+                return {"found": True, "source": "1001tracklists", "tracks": rows,
+                        "timed": _is_timed(rows), "url": res.get("url"),
+                        "match": {k: (res.get("match") or {}).get(k)
+                                  for k in ("score", "tier", "reason")},
+                        "cached": bool(res.get("cached")), "tried": tried}
+
+    if len(bbc) >= 3:
+        return {"found": True, "source": "bbc", "tracks": bbc, "timed": False,
+                "url": f"https://www.bbc.co.uk/programmes/{pid}", "tried": tried}
+
+    tried.append("mixesdb")
+    # MixesDB search is plain full-text: "Radio 1's Classic … 2008" drowns it,
+    # "<DJ> Essential Mix" finds the page. Clean both halves; the year (classic
+    # re-airs) or the exact air date then picks the right edition.
+    mdb_show = re.sub(r"(?i)\b(bbc|radio\s*1'?s?|classic)\b", " ", title)
+    mdb_show = re.sub(r"\s+", " ", mdb_show).strip() or title
+    mdb_dj = re.sub(r"\b(?:19|20)\d{2}\b", " ", re.sub(r"(?i)^with\s+", "", artist))
+    mdb_dj = re.sub(r"\s+", " ", mdb_dj.split(" @ ")[0]).strip() or artist
+    mdb_date = date or (next(iter(_yrs)) if len(_yrs) == 1 else "")
+    try:
+        m = await mixesdb_match(title=mdb_show, artist=mdb_dj, brand="", date=mdb_date)
+    except Exception as e:
+        print(f"[bbc] MixesDB lookup failed for {pid}: {e}", flush=True)
+        m = {}
+    rows = _norm_rows(m.get("tracklist") or []) if m.get("found") else []
+    if len(rows) >= 3:
+        return {"found": True, "source": "mixesdb", "tracks": rows,
+                "timed": _is_timed(rows), "url": m.get("url"),
+                "match": {"score": m.get("score"), "tier": "scored"}, "tried": tried}
+    return {"found": False, "source": "", "tracks": [], "timed": False, "tried": tried}
+
+
+@router.get("/tracklist-best")
+async def tracklist_best(pid: str = Query(..., pattern=r"^[a-z0-9]{6,12}$"),
+                         title: str = Query(""), artist: str = Query(""),
+                         dur: int = Query(0, ge=0), *, request: Request):
+    return await best_tracklist(pid, title.strip(), artist.strip(), dur,
+                                net_1001=not _is_guest(request))
 
 
 # ── MixesDB search / detail ──────────────────────────────────────────────────
@@ -502,6 +809,12 @@ def _score_mixesdb_hit(q_title: str, q_artist: str, hit: dict) -> float:
         return 0.0
     cand = f"{hit.get('artist','')} {hit.get('show','')}"
     c_tokens = _match_toks(cand)
+    # Identity veto: the DJ must be in the hit. "Radio 1's Essential Mix" alone
+    # matches every episode of the show (HAAi got Hot Since 82's list, 19.09.2026).
+    from ripster.tracklist_match import identity_tokens as _ident, _tokens as _tmt
+    ident = _ident(q_artist, q_title)
+    if ident and not (ident & _tmt(cand)):
+        return 0.0
     overlap = len(q_tokens & c_tokens) / len(q_tokens)
 
     q_nums = _match_nums(q_title)
@@ -518,7 +831,8 @@ def _score_mixesdb_hit(q_title: str, q_artist: str, hit: dict) -> float:
 
 
 @router.get("/mixesdb/match")
-async def mixesdb_match(title: str = Query(""), artist: str = Query(""), brand: str = Query("")):
+async def mixesdb_match(title: str = Query(""), artist: str = Query(""), brand: str = Query(""),
+                        date: str = Query("")):
     """Auto-match a BBC episode / SoundCloud mix to a MixesDB entry.
 
     Scores every search hit for relevance (token overlap + episode-number gating)
@@ -540,9 +854,19 @@ async def mixesdb_match(title: str = Query(""), artist: str = Query(""), brand: 
               flush=True)
         # Need a confident lead; below threshold we'd rather show nothing.
         _MIN_SCORE = 0.5
+        from ripster.tracklist_match import _dates as _tmd
+        air = _tmd(str(date or "")[:10])
+        year = str(date or "") if re.fullmatch(r"(?:19|20)\d{2}", str(date or "")) else ""
         for score, hit in scored:
             if score < _MIN_SCORE:
                 break
+            if year and not str(hit.get("date") or "").startswith(year):
+                continue
+            # Same DJ on the same show years apart (HAAi 2018 vs 2026): when the
+            # air date is known, a hit dated more than 3 days away is another set.
+            hd = _tmd(str(hit.get("date") or "")[:10])
+            if air and hd and abs((air[0] - hd[0]).days) > 3:
+                continue
             detail = await fetch_mix_detail(hit["page_title"])
             if detail and (detail.get("tracklist") or detail.get("artworkUrl")):
                 return {
@@ -580,11 +904,8 @@ async def youtube_timecodes(q: str = Query(..., min_length=1), dur: int = Query(
     Picks among several candidates by duration closeness (a 90-min mix matches a
     ~90-min upload, not a 3-min clip) + title overlap, and prefers a video that
     actually HAS timecodes — instead of blindly taking the first search result."""
-    yt = _find_yt_dlp()
-    if not yt:
-        return {"found": False, "error": "yt-dlp not found"}
-    cmd = [yt, "--dump-json", "--no-playlist", "--quiet", f"ytsearch5:{q}"]
     try:
+        cmd = [*yt_dlp_cmd(), "--dump-json", "--no-playlist", "--quiet", f"ytsearch5:{q}"]
         proc = await asyncio.create_subprocess_exec(*cmd, stdout=PIPE, stderr=PIPE)
         stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=25)
     except asyncio.TimeoutError:
@@ -679,8 +1000,10 @@ async def download_cue(
     pid:    str = Query(...),
     title:  str = Query("BBC Mix"),
     artist: str = Query("BBC Radio"),
+    *,
+    request: Request,
 ):
-    tracks = await _fetch_tracklist(pid)
+    tracks = await _cue_tracks(pid, title, artist, net_1001=not _is_guest(request))
     if not tracks:
         raise HTTPException(404, "No tracklist found for this episode")
     safe = re.sub(r'[\\/:*?"<>|]', '_', title)

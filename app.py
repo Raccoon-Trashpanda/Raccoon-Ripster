@@ -287,7 +287,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "3.6.5"
+RELEASE_VERSION = "3.7.0"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -310,6 +310,11 @@ from ripster.persistence import (
 )
 
 config           = ConfigService(_load_config(CONFIG_FILE, TOKENS_DIR))
+# ffmpeg/ffprobe в PATH ПРОЦЕССА — до того, как их позовёт хоть один роут или
+# движок. Иначе всё зависит от того, КТО запустил app (лончер/PowerShell/nohup),
+# и спектрограммы/Coder/транскод плавающе падают «ffmpeg не найден» (18.09.2026).
+from ripster.ffmpeg_path import ensure_ffmpeg_on_path as _ensure_ffmpeg
+_ensure_ffmpeg(config)
 download_history = load_history(HISTORY_FILE)
 watchlist        = load_watchlist(WATCHLIST_FILE)
 
@@ -407,7 +412,7 @@ _LOG_HISTORY: "_collections.deque[tuple[float, str, str]]" = _collections.deque(
 _SVC_RE = _re.compile(r'^\s*\[([a-z][a-z0-9:_-]+)\]', _re.IGNORECASE)
 _KNOWN_SERVICES = (
     "apple", "qobuz", "tidal", "deezer", "spotify", "soundcloud",
-    "bbc", "lucida", "orpheus", "amd", "gamdl", "zhaarey", "beatport",
+    "bbc", "lucida", "orpheus", "amd", "gamdl", "zhaarey", "beatport", "jiosaavn",
     "wrapper", "watchlist", "release", "guest", "stats", "tunnel",
     "ngrok", "tokens", "startup", "queue", "meta", "isrc", "csrf",
 )
@@ -774,6 +779,17 @@ async def lifespan(app: FastAPI):
             _qs.start()
             asyncio.create_task(process_queue())
 
+    # Отложенные записи BBC: у каждого живого плана обязана быть карточка в
+    # очереди (файл планов переживает и перезапуск, и чистку очереди), и должен
+    # жить цикл, который переводит наступившие планы в queued.
+    try:
+        _n_sched = _bbc_sched.restore()
+        if _n_sched:
+            print(f"[bbc-schedule] restored {_n_sched} scheduled recording(s)", flush=True)
+        asyncio.create_task(_bbc_sched.run_loop())
+    except Exception as _e:
+        print(f"[bbc-schedule] wiring error: {type(_e).__name__}: {_e}", flush=True)
+
     asyncio.create_task(_startup_sync_orpheus())
     asyncio.create_task(_apple_bearer_keeper())
     asyncio.create_task(_soundcloud_routes._prewarm_client_id())
@@ -1132,6 +1148,20 @@ _redact_config = _core_routes._redact_config
 _queue_routes.install(app, _ctx)
 _apple_auth.install(app, _ctx)
 _bbc.install(app, _ctx)
+# Отложенная запись BBC-эфиров: хранилище планов + цикл, который поднимает
+# наступившие. Планировщик кладёт в общую очередь карточку «запланировано на …»
+# и в момент эфира переводит её в queued — дальше задачу ведёт обычный
+# process_queue, поэтому история, манифест и доставка ничем не отличаются.
+from ripster import bbc_schedule as _bbc_sched
+from ripster.bbc_schedule import ScheduledStore as _ScheduledStore
+from ripster.routes import queue as _queue_mod
+BBC_SCHEDULE_FILE = BASE_DIR / "bbc_scheduled.json"
+_bbc_sched.install(
+    store=_ScheduledStore(BBC_SCHEDULE_FILE),
+    queue=queue, qs=_qs, config=config, broadcast=broadcast,
+    process_queue=process_queue, queue_snapshot=queue_snapshot,
+    make_task=lambda *a, **k: _queue_mod._make_task(*a, **k),
+)
 _spectrogram.install(app)
 _isrc.install(app, _ctx)
 _stations_routes.install(app, _ctx)
@@ -1142,6 +1172,10 @@ _stats_routes.install(app, config, ws_clients_ref=ws_clients)
 _soundcloud_routes.install(app, _ctx)
 _library_routes.install(app, _ctx)
 _admin_routes.install(app, _ctx)
+# События прослушивания станций (скипы/дослушивания/лайки/скачивания) — на них
+# станция подстраивается под вкус. Своя база stations.db, наружу ничего не шлёт.
+from ripster.routes import station_events as _station_event_routes
+_station_event_routes.install(app, _ctx)
 _coder_routes.install(app, _ctx)
 _tagger_routes.install(app, _ctx)
 _telemetry_routes.install(app, _ctx)
@@ -1320,6 +1354,7 @@ async def services_status(request: Request):
         "soundcloud": _has("soundcloud-oauth-token"),
         "yandex":     _has("yandex-token"),
         "bbc":        True,   # BBC Sounds public API — no credentials needed
+        "jiosaavn":   True,   # JioSaavn public web API — no login at all
     }
 
 
@@ -1327,25 +1362,11 @@ async def services_status(request: Request):
 _watchlist_check_task = None
 
 async def _watchlist_loop():
-    # The first sleep resumes the clock from the last real pass instead of
-    # restarting it — otherwise a restart every few minutes means the 6h timer
-    # never runs out and the watchlist is never checked at all.
-    first = True
-    while True:
-        # Usually the plain 6h interval, but wake earlier when the Auckland
-        # Friday comes first — see watchlist.next_check_delay().
-        await asyncio.sleep(_watchlist.initial_check_delay(config) if first
-                            else _watchlist.next_check_delay(config))
-        first = False
-        if watchlist:
-            # One bad pass must not take the loop down with it: without this the
-            # task dies silently and the watchlist stops until the next restart.
-            try:
-                await _watchlist._check_watchlist()
-            except asyncio.CancelledError:
-                raise
-            except Exception as e:                                  # noqa: BLE001
-                print(f"[watchlist] проверка упала: {e}", flush=True)
+    # Schedule, persistence (watchlist_schedule.json) and the opt-in NZ-Friday
+    # pass (`watchlist-nz-early`) live in watchlist.run_loop(). The first pass
+    # still resumes the clock from the last real pass instead of restarting it —
+    # otherwise a restart every few minutes means the watchlist is never checked.
+    await _watchlist.run_loop(config, lambda: watchlist)
 
 
 # ── WebSocket ──────────────────────────────────────────────────────────────────

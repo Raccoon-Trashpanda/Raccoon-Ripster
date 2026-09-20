@@ -14,7 +14,7 @@
             </button>
             <button id="wb-btn-pull" onclick="wrapperPull()"
               style="background:rgba(10,132,255,.12);border:1px solid rgba(10,132,255,.25);border-radius:7px;padding:5px 11px;font-size:11px;font-weight:600;color:var(--blue);cursor:pointer;font-family:var(--font);white-space:nowrap">
-              ⬇ Pull
+              <span data-i18n="q.pull">⬇ Pull</span>
             </button>
             <button onclick="switchToAAC()"
               style="background:rgba(239,159,39,.1);border:1px solid rgba(239,159,39,.22);border-radius:7px;padding:5px 10px;font-size:10px;font-weight:600;color:var(--orange);cursor:pointer;font-family:var(--font);white-space:nowrap">
@@ -87,6 +87,5 @@
         <button class="btn-ghost btn-sm" onclick="clearDone()" data-i18n="q.clear_done" data-i18n-title="q.clear_done_title" title="Убрать готовые">Убрать готовые</button>
         <div class="transport-prog">
           <div class="tp-label" id="tp-label">Queue: 0 items</div>
-          <div class="tp-track"><div class="tp-bar" id="tp-bar" style="width:0%"></div></div>
         </div>
       </div>

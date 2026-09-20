@@ -850,6 +850,28 @@ button:focus-visible{ outline: 2px solid rgba(192,132,160,.55); outline-offset: 
 .qi-log-toggle{font-size:9px;color:var(--muted);cursor:pointer;padding:2px 6px;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:transparent;user-select:none;transition:color .15s;flex-shrink:0;font-family:var(--mono)}
 .qi-log-toggle:hover{color:var(--text)}
 .qi-log-panel{display:none;margin-top:5px;padding:6px 8px;background:var(--console-bg);border-radius:6px;border:1px solid var(--border);max-height:140px;overflow-y:auto;font-family:var(--mono);font-size:9.5px;line-height:1.5;color:var(--text);width:100%}
+/* Дерево треков внутри задачи (queue_tree.js). Полоски узкие — 3px, как в
+   Ripster Mobile: это подробность под рукой, а не второй главный прогресс. */
+.qi-tree-toggle{font-size:11px;line-height:1;color:var(--muted);cursor:pointer;padding:2px 7px;border-radius:5px;border:1px solid rgba(255,255,255,.08);background:transparent;flex-shrink:0}
+.qi-tree-toggle:hover{color:var(--text)}
+.qi-tree-toggle:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+.qi-tree{margin-top:6px;padding:4px 0 2px 2px;border-left:1px solid var(--border);width:100%;max-height:320px;overflow-y:auto}
+.qi-tree[hidden]{display:none}
+.qt-row{display:grid;grid-template-columns:22px minmax(0,1fr) 14px;column-gap:6px;align-items:center;padding:3px 8px 4px 8px}
+.qt-n{font-size:10px;color:var(--muted);font-family:var(--mono);text-align:right;font-variant-numeric:tabular-nums}
+.qt-name{font-size:11px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qt-art{color:var(--muted)}
+.qt-mark{font-size:10px;text-align:center;color:var(--muted)}
+.qt-done .qt-mark{color:var(--green)}
+.qt-err .qt-mark{color:var(--red)}
+.qt-wait .qt-name,.qt-miss .qt-name{color:var(--muted)}
+.qt-track{grid-column:2 / 4;height:3px;margin-top:3px;background:rgba(255,255,255,.07);border-radius:2px;overflow:hidden}
+.qt-bar{height:100%;border-radius:2px;transition:width .4s ease}
+.qt-done .qt-bar{opacity:.55}
+.qt-bar.qt-indet{width:35%!important;animation:qtIndet 1.3s ease-in-out infinite}
+@keyframes qtIndet{0%{transform:translateX(-100%)}100%{transform:translateX(290%)}}
+@media (prefers-reduced-motion:reduce){.qt-bar.qt-indet{animation:none;width:100%!important;opacity:.4}}
+.qt-note{font-size:10px;color:var(--muted);padding:2px 8px 4px}
 .qi-log-panel .ll-error{color:var(--danger)}
 .qi-log-panel .ll-warn{color:var(--orange)}
 .qi-log-panel .ll-success{color:var(--green)}
@@ -2639,6 +2661,69 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 .card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--card-min,185px),1fr));gap:12px;align-items:stretch}
 @media(max-width:699px){.card-grid{--card-min:160px}}
 
+/* ── РАДАР: ОДНА СПЛОШНАЯ СЕТКА, ДАТА ВНЕ Ё ──────────────────────
+   Разделитель рвал ряд: полноширинная шапка дня (бывш. grid-column:1/-1)
+   начинала новую строку сетки, и день из одного-двух релизов лежал влево с
+   пустым полем до края экрана. Теперь шапок в сетке НЕТ вовсе: карточки
+   заполняют ряд до конца, день меняется посреди ряда. Принадлежность
+   карточки дню/букве живёт в её data-gkey/data-letter, а липкая метка
+   .rel-group-float читает их с первой видимой карточки (sc_tab.js,
+   _relFloatSync) и показывает два уровня: «16 дек · B» + счётчик «N рел.».
+
+   Фон метки обязан быть непрозрачным: она стоит поверх уезжающих под неё
+   карточек, и сквозь прозрачный фон они проступали бы прямо по тексту. */
+/* height:0 — метка не занимает места в потоке; сама шапка absolute, и ленту
+   не сдвигает, когда появляется. pointer-events:none — не перехватывает
+   клики по карточкам под ней. Отступ живёт ВНУТРИ шапки (её padding-top):
+   метка сменяется ровно в тот пиксель, в котором её покидает предыдущая. */
+.rel-group-float{position:sticky;top:0;z-index:6;height:0;pointer-events:none}
+.rel-group-float > .rel-group-head{position:absolute;left:0;right:0;top:0;display:none}
+.rel-group-float.on > .rel-group-head{display:flex}
+.rel-group-head{
+  display:flex;align-items:baseline;gap:8px;
+  margin:0;padding:11px 2px 5px;
+  border-bottom:1px solid var(--border);background:var(--bg);
+}
+.rel-group-title{font-size:13px;font-weight:800;color:var(--text)}
+.rel-group-count{font-size:10px;color:var(--muted2);font-family:var(--mono)}
+/* Буква дня — вторым элементом метки, крупнее даты и своим цветом: она
+   работает указателем места внутри дня, а не подписью к ряду. */
+.rel-float-letter{
+  font-family:var(--display);font-size:16px;font-weight:800;line-height:1.1;
+  letter-spacing:-.5px;color:var(--red);
+}
+.rel-float-letter::before{content:'·';margin-right:.4em;font-weight:400;color:var(--muted2)}
+/* Буквенный режим: буква — ЗАГОЛОВОК ленты, крупнее всех элементов метки. */
+.rel-by-alpha .rel-group-title{
+  font-family:var(--display);font-size:20px;line-height:1.1;
+  letter-spacing:-.5px;min-width:1.1em;color:var(--red);
+}
+
+/* Полоса-оглавление сама прилипает ВЫШЕ шапок, поэтому копия шапки отступает
+   на её высоту. Высота задана здесь и постоянна: строка не переносится
+   (кириллица + латиница + «#» — это под шестьдесят кнопок), длинный алфавит
+   прокручивается вбок. Переносился бы — отступ пришлось бы угадывать. */
+.rel-alpha-index{
+  position:sticky;top:0;z-index:7;
+  display:flex;align-items:center;gap:2px;
+  height:30px;box-sizing:border-box;
+  overflow-x:auto;overflow-y:hidden;white-space:nowrap;
+  background:var(--bg);border-bottom:1px solid var(--border);
+  scrollbar-width:none;
+}
+.rel-alpha-index::-webkit-scrollbar{display:none}
+.rel-alpha-index button{
+  flex:0 0 auto;min-width:20px;padding:2px 5px;line-height:1;
+  background:transparent;border:none;border-radius:5px;
+  font-family:var(--mono);font-size:11px;font-weight:700;color:var(--muted);
+  cursor:pointer;
+}
+.rel-alpha-index button:hover{background:var(--surface2);color:var(--text)}
+/* Отступ прилипшей копии ровно на высоту полосы — и ТОЛЬКО когда полоса на
+   экране есть. Безусловное `top:29px` оставляло бы щель в одну строку, когда
+   буква в ленте одна и оглавление не рисуется. */
+.rel-alpha-index ~ .rel-group-float{top:29px}
+
 /* Ряд действий на карточке релиза — СЕТКА РАВНЫХ колонок, не flex-wrap.
    Было display:flex;flex-wrap:wrap — и пятая кнопка («открыть релиз») уезжала на
    вторую строку всякий раз, когда не хватало ширины. Поднять ширину карточки —
@@ -2850,6 +2935,7 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   .wl-kind-tab.active{background:var(--surface2);border-color:var(--red)}
 }
 
+
 /* ══ СТАНЦИИ ══════════════════════════════════════════════════════════════
    Все цвета — из переменных темы: вкладка обязана жить и в светлой, и в
    тёмной, а вшитый цвет ломает ровно одну из них и замечается не сразу. */
@@ -2957,3 +3043,317 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 .st-note { font-size:11px; color:var(--muted2); width:100%; margin-top:6px; line-height:1.5; }
 .st-foot { margin-top:26px; padding-top:12px; border-top:1px solid var(--border); }
 .st-err { color:var(--red, #e0567a); }
+
+
+/* ══ СКИНЫ (data-skin на <html>, рядом с data-theme) ════════════════════
+   Скин — это НЕ цвет: радиус, плотность, характер поверхности, типографика,
+   свечение. Палитру по-прежнему целиком ведёт data-theme, поэтому каждый
+   скин спроектирован сразу на все темы, включая светлые.
+   Значения токенов взяты из утверждённого прототипа
+   ripster-concepts/skins.html (блоки neon / console / oled).
+
+   ГЛАВНОЕ: классика (значение по умолчанию, ui-skin: classic) не получает
+   ЗДЕСЬ НИ ОДНОГО оформляющего правила. Ниже объявляются только токены --k-*
+   (сами по себе они ничего не рисуют) и правила, помеченные
+   html[data-skin="neon|console|oled"]. Для classic эти селекторы не
+   совпадают никогда, поэтому вид по умолчанию остаётся ровно тем, что был
+   до этого слоя.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* --k-* = производные токены скина, по умолчанию равные сегодняшним значениям
+   темы. Селектор — атрибутивный, а не :root: любая точка с data-skin
+   переустанавливает базу заново, иначе вложенное превью в настройках
+   унаследовало бы скин, выбранный для всего экрана. */
+[data-skin]{
+  --k-page:var(--bg);
+  --k-card:var(--surface);
+  --k-ink:var(--text);
+  --k-ink2:var(--muted);
+  --k-ink3:var(--muted2);
+  --k-line:var(--border);
+  --k-line2:var(--border2);
+  --k-accent:var(--red);
+  --k-display:var(--display);
+  --k-radius:var(--radius);
+  --k-radius-sm:var(--radius-sm);
+  --k-cover-r:var(--radius-sm);
+  --k-grid-min:185px;
+  --k-gap:12px;
+  --k-pad:10px;
+  --k-fs:1;
+  --k-shadow:0 1px 3px rgba(0,0,0,.22), 0 3px 10px rgba(0,0,0,.14), inset 0 1px 0 rgba(255,255,255,.04);
+  --k-glow:none;
+  --k-blur:0px;
+}
+/* Контраст: метаданные новых скинов приподняты над базовым --muted2 смесью к
+   --text — на подкрашенном странице фоне подписи иначе теряются. Статусные
+   цвета (--green/--orange/--danger) не затронуты ни в одном скине. */
+[data-skin="neon"],[data-skin="console"],[data-skin="oled"]{
+  --k-ink3:color-mix(in srgb, var(--muted2) 58%, var(--text));
+}
+
+/* ─── Neon — маджента, стекло, r20, glow ─── */
+[data-skin="neon"]{
+  --k-accent:#ff4d8f;
+  --k-page:color-mix(in srgb, var(--bg) 90%, #ff4d8f);
+  --k-card:color-mix(in srgb, var(--surface) 74%, transparent);
+  --k-line:color-mix(in srgb, #ff4d8f 20%, var(--border));
+  --k-line2:color-mix(in srgb, #ff4d8f 38%, var(--border));
+  --k-radius:20px; --k-radius-sm:16px; --k-cover-r:14px;
+  --k-grid-min:205px; --k-gap:16px;
+  --k-fs:1.05;
+  --k-shadow:none;
+  --k-glow:0 0 0 1px color-mix(in srgb,#ff4d8f 30%,transparent),
+           0 14px 38px color-mix(in srgb,#ff4d8f 18%,transparent);
+  --k-blur:blur(16px) saturate(1.5);
+}
+/* Светлые темы: та же неоновая ДНК, но акцент темнее — на маджента-тинте
+   страницы светлый --k-accent не читается как текст. */
+html[data-skin="neon"][data-theme="light"], html[data-skin="neon"][data-theme="sepia"],
+html[data-theme="light"] [data-skin="neon"], html[data-theme="sepia"] [data-skin="neon"]{
+  --k-accent:#b52459;
+  --k-card:color-mix(in srgb, #ffffff 62%, transparent);
+  --k-line:color-mix(in srgb, #b52459 22%, var(--border));
+  --k-line2:color-mix(in srgb, #b52459 40%, var(--border));
+  --k-glow:0 0 0 1px color-mix(in srgb,#b52459 26%,transparent),
+           0 12px 30px color-mix(in srgb,#b52459 14%,transparent);
+}
+
+/* ─── Console / workstation — r6, mono, плотность++, плоская поверхность ─── */
+[data-skin="console"]{
+  --k-accent:color-mix(in srgb, var(--red) 52%, var(--muted));
+  --k-radius:6px; --k-radius-sm:4px; --k-cover-r:4px;
+  --k-grid-min:152px; --k-gap:8px; --k-pad:8px;
+  --k-fs:.86;
+  --k-shadow:none;
+  --k-glow:none;
+  --k-display:var(--font);
+}
+/* Тёмные темы: machine-сталь — страница и поверхность тонированы в чёрный. */
+html[data-skin="console"]:not([data-theme="light"]):not([data-theme="sepia"]),
+html[data-theme="midnight"] [data-skin="console"],
+html[data-theme="ember"] [data-skin="console"],
+html[data-theme="dark"] [data-skin="console"],
+html[data-theme="neon"] [data-skin="console"]{
+  --k-page:color-mix(in srgb, var(--bg) 62%, #000);
+  --k-card:color-mix(in srgb, var(--surface) 82%, #000);
+}
+
+/* ─── OLED Noir — #000 / белая бумага, хайрлайны, ни теней, ни glow ─── */
+[data-skin="oled"]{
+  --k-radius:14px; --k-radius-sm:12px; --k-cover-r:10px;
+  --k-grid-min:190px; --k-gap:14px;
+  --k-fs:.97;
+  --k-shadow:none; --k-glow:none;
+  --k-blur:0px;
+}
+html[data-skin="oled"]:not([data-theme="light"]):not([data-theme="sepia"]),
+html[data-theme="midnight"] [data-skin="oled"],
+html[data-theme="ember"] [data-skin="oled"],
+html[data-theme="dark"] [data-skin="oled"],
+html[data-theme="neon"] [data-skin="oled"]{
+  --k-page:#000; --k-card:#07070a;
+  --k-line:rgba(255,255,255,.08); --k-line2:rgba(255,255,255,.14);
+  --k-accent:color-mix(in srgb, var(--red) 66%, var(--muted2));
+}
+html[data-skin="oled"][data-theme="light"], html[data-skin="oled"][data-theme="sepia"],
+html[data-theme="light"] [data-skin="oled"], html[data-theme="sepia"] [data-skin="oled"]{
+  --k-page:#ffffff; --k-card:#fbfbfd;
+  --k-line:rgba(0,0,0,.07); --k-line2:rgba(0,0,0,.12);
+  --k-accent:color-mix(in srgb, var(--red) 80%, #000);
+}
+
+/* ── Куда токены попадают в живом интерфейсе ──────────────────────────────
+   Карточки радара собраны в sc_tab.js инлайновыми style="…" (фон, рамка,
+   радиус прописаны прямо в разметке), поэтому переключить их можно только
+   через !important — иначе инлайн бьёт класс. Ни одно правило этого блока не
+   действует на классический скин: селектор требует html[data-skin=…]. */
+html[data-skin="neon"] body,
+html[data-skin="console"] body,
+html[data-skin="oled"] body,
+html[data-skin="neon"] .main,
+html[data-skin="console"] .main,
+html[data-skin="oled"] .main,
+html[data-skin="neon"] .topbar,
+html[data-skin="console"] .topbar,
+html[data-skin="oled"] .topbar,
+html[data-skin="neon"] .sidebar,
+html[data-skin="console"] .sidebar,
+html[data-skin="oled"] .sidebar{background:var(--k-page)}
+/* Прилипшая шапка группы обязана оставаться НЕПРОЗРАЧНОЙ (под неё уезжают
+   карточки) и совпадать по тону со страницей, иначе под текстом буквы
+   проступают чужие обложки. */
+html[data-skin="neon"] .rel-group-head,
+html[data-skin="console"] .rel-group-head,
+html[data-skin="oled"] .rel-group-head,
+html[data-skin="neon"] .rel-alpha-index,
+html[data-skin="console"] .rel-alpha-index,
+html[data-skin="oled"] .rel-alpha-index{
+  background:var(--k-page);border-bottom-color:var(--k-line);
+}
+/* Плотность витрины: ширина карточки и зазор — из токенов скина. */
+html[data-skin="neon"] .card-grid,
+html[data-skin="console"] .card-grid,
+html[data-skin="oled"] .card-grid{
+  --card-min:var(--k-grid-min);gap:var(--k-gap);
+}
+/* На телефоне плотность не меняем: там и так одна-две колонки, а прежнему
+   минимуму в 160px соответствует значение базового скина. */
+@media(max-width:699px){
+  html[data-skin="neon"] .card-grid,
+  html[data-skin="console"] .card-grid,
+  html[data-skin="oled"] .card-grid{--card-min:160px}
+}
+html[data-skin="neon"] .rel-card,
+html[data-skin="console"] .rel-card,
+html[data-skin="oled"] .rel-card{
+  background:var(--k-card)!important;
+  border-color:var(--k-line)!important;
+  border-radius:var(--k-radius)!important;
+}
+/* Тень карточки НЕ перекрывается: на ней держатся и «это новинка»
+   (.rel-card-new), и цвет обложки (.rel-card.tinted) — скины их не отменяют. */
+html[data-skin="neon"] .rel-card,
+html[data-skin="neon"] .block,
+html[data-skin="neon"] .qi{
+  backdrop-filter:var(--k-blur);-webkit-backdrop-filter:var(--k-blur);
+}
+html[data-skin="neon"] .rel-card:hover{border-color:var(--k-line2)!important}
+html[data-skin="neon"] .rel-dl-btn{box-shadow:0 4px 18px color-mix(in srgb, var(--k-accent) 45%, transparent)}
+html[data-skin="neon"] .block-title{color:var(--k-accent)}
+html[data-skin="neon"] .view-title{letter-spacing:-.3px}
+
+html[data-skin="console"] .rel-card{border-color:var(--k-line2)!important}
+html[data-skin="console"] .rel-dl-btn{
+  font-family:var(--mono);text-transform:uppercase;letter-spacing:.5px;
+}
+html[data-skin="console"] .block-title,
+html[data-skin="console"] .rel-group-count,
+html[data-skin="console"] .qi-badge{font-family:var(--mono);letter-spacing:.6px}
+html[data-skin="console"] .view-title,
+html[data-skin="console"] .qi-title,
+html[data-skin="console"] .rel-group-title{font-family:var(--font);letter-spacing:.1px}
+
+html[data-skin="oled"] .qi,
+html[data-skin="oled"] .block,
+html[data-skin="oled"] .card{
+  background:var(--k-card);border-color:var(--k-line);
+  border-radius:calc(var(--k-radius)* .8);box-shadow:none;
+}
+html[data-skin="oled"] .qi-title{font-weight:500}
+html[data-skin="oled"] .qi-badge,
+html[data-skin="oled"] .rc-badges{opacity:.85}
+html[data-skin="oled"] .rel-group-title{font-weight:600}
+
+/* Общая часть: радиус малых контролов и строка действий карточки. */
+html[data-skin="neon"] .rel-dl-btn,
+html[data-skin="console"] .rel-dl-btn,
+html[data-skin="oled"] .rel-dl-btn,
+html[data-skin="neon"] .rel-act-row > *,
+html[data-skin="console"] .rel-act-row > *,
+html[data-skin="oled"] .rel-act-row > *{
+  border-radius:calc(var(--k-radius-sm)* .7)!important;
+}
+html[data-skin="neon"] .qi,
+html[data-skin="console"] .qi,
+html[data-skin="oled"] .qi{
+  background:var(--k-card);border-color:var(--k-line);
+  border-radius:calc(var(--k-radius)* .7);
+}
+html[data-skin="neon"] .qi:hover,
+html[data-skin="console"] .qi:hover,
+html[data-skin="oled"] .qi:hover{border-color:var(--k-line2)}
+html[data-skin="neon"] .qi{box-shadow:none}
+html[data-skin="console"] .qi{box-shadow:none;border-color:var(--k-line2)}
+html[data-skin="neon"] .block,
+html[data-skin="console"] .block,
+html[data-skin="oled"] .block,
+html[data-skin="neon"] .card,
+html[data-skin="console"] .card{border-color:var(--k-line)}
+html[data-skin="console"] .block,
+html[data-skin="console"] .card{border-color:var(--k-line2);box-shadow:none}
+html[data-skin="neon"] .block{box-shadow:none}
+html[data-skin="neon"] .block:hover{box-shadow:var(--k-glow)}
+
+/* ── Переключатель скинов в настройках: ЖИВЫЕ мини-карточки ───────────────
+   Превью — не картинка и не iframe: это настоящая мини-карточка, у которой
+   свой data-skin. Токены наследуются вниз по DOM, поэтому все пять окошек
+   показывают свои скины одновременно, каким бы скином ни был открыт сам
+   Рипстер. Свои классы (sk-*), а не .rel-card: иначе правила выбранного для
+   экрана скина перекрывали бы !important'ом превью соседа. */
+.sk-sw{display:flex;gap:10px;flex-wrap:wrap}
+/* align-items и text-align ЯВНО: общее правило для <button> (main.css:635)
+   центрирует содержимое, и тогда блок превью — у него всё внутри позиционировано
+   абсолютно — схлопывается в НУЛЕВУЮ ширину: карточки рисуются, но их не видно,
+   а подпись вылезает за плитку (20.09.2026, замер в браузере: .sk-view w=0). */
+.sk-opt{position:relative;display:flex;flex-direction:column;align-items:stretch;
+  justify-content:flex-start;gap:6px;width:152px;
+  padding:8px;cursor:pointer;text-align:left;font-family:var(--font);
+  background:var(--surface2);border:1px solid var(--border);
+  border-radius:calc(var(--radius-sm)* .9);color:var(--text);
+  transition:border-color .15s, box-shadow .15s, transform .15s}
+.sk-opt:hover{border-color:var(--border2);transform:translateY(-1px)}
+.sk-opt:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+.sk-opt[aria-checked="true"]{border-color:var(--red);
+  box-shadow:0 0 0 2px color-mix(in srgb, var(--red) 45%, transparent)}
+.sk-opt[aria-checked="true"]::after{content:'✓';position:absolute;top:6px;right:7px;z-index:3;
+  width:16px;height:16px;border-radius:50%;background:var(--red);color:#fff;
+  font-size:10px;font-weight:900;display:grid;place-items:center;line-height:1}
+.sk-view{position:relative;width:100%;height:120px;overflow:hidden;
+  border-radius:calc(var(--k-cover-r)* .7);background:var(--k-page)}
+/* Уголки-подсказка: у неона маджента-свет, как на настоящих карточках. */
+[data-skin="neon"] .sk-view::before{content:'';position:absolute;inset:0;z-index:1;
+  background:radial-gradient(60% 55% at 25% 12%, color-mix(in srgb,#ff4d8f 34%,transparent), transparent 70%),
+             radial-gradient(55% 50% at 88% 92%, color-mix(in srgb,#ff4d8f 20%,transparent), transparent 72%)}
+.sk-stage{position:absolute;top:0;left:0;width:296px;transform:scale(.5);
+  transform-origin:top left;pointer-events:none;display:grid;gap:var(--k-gap);
+  grid-template-columns:repeat(2,minmax(0,1fr))}
+.sk-stage.sk-g4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.sk-card{display:flex;flex-direction:column;min-width:0;overflow:hidden;
+  background:var(--k-card);border:1px solid var(--k-line);
+  border-radius:var(--k-radius);padding:calc(var(--k-pad)* .9);
+  box-shadow:var(--k-shadow)}
+[data-skin="neon"] .sk-card{backdrop-filter:var(--k-blur);-webkit-backdrop-filter:var(--k-blur)}
+[data-skin="console"] .sk-card{border-color:var(--k-line2)}
+[data-skin="oled"] .sk-card{border-color:var(--k-line)}
+.sk-cover{display:block;width:100%;aspect-ratio:1;border-radius:var(--k-cover-r);
+  background:linear-gradient(150deg, color-mix(in srgb,var(--k-accent) 46%,var(--surface3)), var(--surface3) 78%)}
+.sk-body{display:flex;flex-direction:column;gap:calc(3px*var(--k-fs));padding:calc(6px*var(--k-fs)) 1px 1px}
+.sk-kicker{display:none;font-size:calc(9px*var(--k-fs));font-weight:700;letter-spacing:.7px;
+  text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--k-ink3)}
+[data-skin="neon"] .sk-kicker,[data-skin="console"] .sk-kicker,[data-skin="oled"] .sk-kicker{display:block}
+[data-skin="neon"] .sk-kicker{color:var(--k-accent);letter-spacing:-.1px}
+[data-skin="console"] .sk-kicker{font-family:var(--mono);letter-spacing:.6px}
+[data-skin="oled"] .sk-kicker{letter-spacing:.4px}
+.sk-title{font-family:var(--k-display);font-size:calc(13px*var(--k-fs));font-weight:600;
+  line-height:1.25;color:var(--k-ink);display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden}
+[data-skin="neon"] .sk-title{letter-spacing:-.3px}
+[data-skin="console"] .sk-title{letter-spacing:.1px}
+[data-skin="oled"] .sk-title{font-weight:500}
+.sk-artist{font-size:calc(11px*var(--k-fs));color:var(--k-ink2);white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.sk-meta{display:flex;align-items:center;gap:5px;font-size:calc(9.5px*var(--k-fs));
+  color:var(--k-ink3);font-family:var(--mono);white-space:nowrap;overflow:hidden}
+[data-skin="console"] .sk-artist{font-family:var(--mono)}
+.sk-btn{display:block;width:100%;box-sizing:border-box;margin-top:calc(6px*var(--k-fs));
+  padding:calc(6px*var(--k-fs)) 8px;font-size:calc(11px*var(--k-fs));font-weight:700;
+  font-family:var(--k-display);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  text-align:center;border-radius:calc(var(--k-radius-sm)* .8);
+  border:1px solid color-mix(in srgb, var(--k-accent) 55%, transparent);
+  background:color-mix(in srgb, var(--k-accent) 18%, var(--k-card));color:var(--k-ink)}
+[data-skin="console"] .sk-btn{font-family:var(--mono);text-transform:uppercase;letter-spacing:.5px}
+[data-skin="oled"] .sk-btn{background:transparent;border-color:var(--k-line2)}
+[data-skin="neon"] .sk-btn{box-shadow:0 4px 14px color-mix(in srgb, var(--k-accent) 40%, transparent)}
+/* Подписи стоят на фоне переключателя (--surface2 текущей темы), а не на
+   превью: иначе светлые чернила OLED-бумаги невидимы в тёмной теме. */
+/* Плитка скина — это <button>, а у кнопок в этом файле стоит white-space:nowrap
+   (main.css:638). Из-за него подпись «маджента · стекло · r20 · свечение» шла
+   одной строкой шириной 179px в плитке 152px и наезжала на соседнюю (20.09.2026).
+   Переносим явно и разрешаем перенос по разделителям. */
+.sk-cap{display:block;white-space:normal;overflow-wrap:anywhere;min-width:0}
+.sk-cap b{display:block;font-size:11.5px;font-weight:700;color:var(--text);
+  white-space:normal}
+.sk-cap span{display:block;font-size:9px;color:var(--muted);margin-top:2px;
+  line-height:1.35;font-family:var(--mono);white-space:normal;overflow-wrap:anywhere}
+@media (prefers-reduced-motion:reduce){.sk-opt,.sk-opt:hover{transition:none;transform:none}}

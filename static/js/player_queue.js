@@ -273,7 +273,14 @@ async function ppFollowCurrent() {
   const it = (typeof Preview !== 'undefined' && Preview.queue) ? Preview.queue[Preview.idx] : null;
   const name = it && it.artist;
   if (!name) { toast(t('pq.no_artist'), 'var(--muted)'); return; }
+  const wasOn = (typeof afIsFollowed === 'function') && afIsFollowed(name);
   if (typeof followArtist === 'function') await followArtist(name, document.getElementById('pp-fav-btn'));
+  // Сердце по треку СТАНЦИИ — тот самый «лайк» для подстройки вкуса. Шлём
+  // только на НОВОМ подписывании: повторное нажатие ничего не меняет.
+  if (!wasOn && typeof afIsFollowed === 'function' && afIsFollowed(name)
+      && typeof _stevLike === 'function') {
+    try { _stevLike(); } catch (_) {}
+  }
   _ppSyncFav();
 }
 

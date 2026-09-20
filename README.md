@@ -1,8 +1,8 @@
 # Ripster
 
 A self-hosted desktop app for downloading music from **Apple Music, Qobuz,
-Deezer, Tidal, Beatport, SoundCloud and Yandex Music**, plus **Spotify** link
-conversion (it finds the same release on a service you have access to and grabs
+Deezer, Tidal, Beatport, SoundCloud, Yandex Music and JioSaavn**, plus
+**Spotify** link conversion (it finds the same release on a service you have access to and grabs
 that). It runs entirely on your own machine and opens in its own window — there
 is no account with *us*, no cloud, and your files never leave your computer.
 
@@ -55,8 +55,31 @@ is no account with *us*, no cloud, and your files never leave your computer.
   that hands the device the file's own rate, with no Windows mixer in between,
   and reports what the device actually granted rather than what was asked for.
   A browser tab cannot do this.
-- 📻 **Stations** — genre radio built from the artists who actually make a
-  genre, drawn from your own history, downloads and subscriptions.
+- 📻 **Stations** — genre radio built from the artists who actually make that
+  genre (a track is only allowed in when its genre is confirmed, so a title
+  that merely contains the word "techno" never sneaks in), and it **learns from
+  how you listen**: a skip in the first seconds pushes an artist down, a track
+  you finish or download pushes them up, a disliked track never returns, and
+  nothing repeats for a week. All of it is computed and stored **on your own
+  machine** — your taste never leaves it, and guests listening through your
+  instance never shape it.
+- 🎨 **Skins** — `Neon`, `Console` (dense, sharp, built for thousands of cards)
+  and `OLED Noir`, on top of the five colour themes. They change radius,
+  density, surface and glow, not just the palette; the default look is
+  untouched.
+- 🗂 **Queue tree** — expand an album in the queue to see each track with its
+  own progress line.
+- 🇮🇳 **JioSaavn** — search, album and artist pages, downloads where the
+  service is licensed (audio is region-locked outside India; Ripster says so
+  honestly instead of saving a broken file).
+- 📅 **BBC Sounds tracklists** — timed tracklists for radio shows, verified
+  against the DJ and the broadcast date, so an Essential Mix never gets another
+  DJ's set.
+- 🎚 **DJ Coder, honest audio** — CUE splitting is sample-exact (no duplicated
+  overlap at the seams) and 24→16 bit conversion is dithered rather than
+  truncated.
+- 👥 **Multiple accounts per service** — drag them into the order you want, or
+  let Ripster pick the one that actually has the better plan.
 - 🌍 **5-language interface** — English, Russian, Hindi, Japanese, Chinese.
 - 🖥 Opens in a **real desktop window** (no browser tab needed).
 

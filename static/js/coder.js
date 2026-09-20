@@ -735,6 +735,8 @@ function updateQueueItem(task, el) {
     _setCnt('.dl-zip-btn', task._dl_zip||0);
     _setCnt('.dl-cloud-btn', task._dl_gofile||0);
   }
+  // Раскрытое дерево треков идёт за прогрессом (queue_tree.js).
+  if(typeof qtRefresh === 'function') qtRefresh(task, el);
 }
 
 function statusLabel(task) {

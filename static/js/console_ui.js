@@ -89,7 +89,7 @@ const _SVC_COLOR = {
   apple:'#ff453a', qobuz:'#1870f5', tidal:'#00d4b3', deezer:'#a238ff',
   spotify:'#1db954', soundcloud:'#ff5500', bbc:'#e4003b', yandex:'#ffcc00',
   lucida:'#ff7a33', orpheus:'#1db954', amd:'#ff453a', gamdl:'#ff453a',
-  zhaarey:'#ff453a', beatport:'#01f49c', wrapper:'#af52de',
+  zhaarey:'#ff453a', beatport:'#01f49c', jiosaavn:'#2bc5b4', wrapper:'#af52de',
   watchlist:'#ffd60a', release:'#1db954', guest:'#c084a0',
   stats:'#3ecfaa', tunnel:'#6a6a8a', ngrok:'#6a6a8a',
   tokens:'#c084a0', startup:'#c084a0', queue:'#c084a0',

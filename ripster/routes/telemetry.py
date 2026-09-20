@@ -60,10 +60,15 @@ def _rate_ok(ip: str) -> bool:
 @router.post("/api/telemetry/ingest")
 async def ingest(request: Request):
     """Public ingest for tester builds. Validated + token-gated inside the store."""
-    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or \
-         (request.client.host if request.client else "")
-    if not _rate_ok(ip):
+    # Лимит — по СЫРОМУ пиру, не по X-Forwarded-For: XFF задаёт клиент, и, крутя
+    # его, обходил лимит → заливка мегабайтных архивов = disk-fill DoS у владельца.
+    # За туннелем все внешние приходят как 127.0.0.1 (общий бакет) — для телеметрии
+    # (редкие батчи) это допустимо и закрывает DoS. XFF оставляем ТОЛЬКО как
+    # отображаемую атрибуцию, не как границу безопасности. Security-фикс 18.09.2026.
+    peer = (request.client.host if request.client else "")
+    if not _rate_ok(peer):
         return {"ok": False, "error": "rate"}
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or peer
     body = await request.body()
     if len(body) > _MAX_BODY:
         return {"ok": False, "error": "too big"}
@@ -85,10 +90,12 @@ async def report_ingest(request: Request):
     лимит и своё хранилище. Метаданные идут заголовками, тело — сам архив.
     """
     from ripster import diagnostics as _diag
-    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or \
-         (request.client.host if request.client else "")
-    if not _rate_ok(ip):
+    # Лимит по СЫРОМУ пиру (см. ingest выше): XFF подделывается → крутя его,
+    # атакующий обходил лимит и заливал 12-МБ архивы = disk-fill DoS. Security 18.09.
+    peer = (request.client.host if request.client else "")
+    if not _rate_ok(peer):
         return {"ok": False, "error": "rate"}
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or peer
     blob = await request.body()
     if len(blob) > _MAX_REPORT:
         return {"ok": False, "error": "too big"}

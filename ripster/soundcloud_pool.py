@@ -104,6 +104,29 @@ def pool_enabled(config: dict) -> bool:
     return len(_configured_accounts(config)) >= 2
 
 
+def active_token(config: dict) -> str:
+    """Токен учётки, которой пул отдаёт загрузки, — для отчётов и панелей.
+
+    Ростер годами указывал «активна» primary-строку конфига — при пуле это
+    ложь: движок подменяет токен выбором `acquire()` (ripster/runner.py), и
+    отчёт не совпадал с тем, чьим качеством реально едет задача. Здесь тот же
+    выбор — первый по порядку годный слот, — но без захвата слота. Пустая
+    строка: пула нет (одна учётка) или сломалось — вызывающий остаётся на
+    primary.
+    """
+    try:
+        accounts = _configured_accounts(config)
+        if len(accounts) < 2:
+            return ""
+        order = _afb.order_indices(accounts)
+        usable = [i for i in order if health_rank(accounts[i]["token"]) < 3]
+        for i in (usable or order):
+            return accounts[i]["token"]
+        return ""
+    except Exception:                     # noqa: BLE001
+        return ""
+
+
 class SoundcloudPool:
     def __init__(self, accounts: list[dict]):
         self.accounts = accounts
@@ -139,7 +162,7 @@ class SoundcloudPool:
                 "accounts": [
                     {"slot": i, "label": a["label"], "primary": i == 0, "busy": self._busy[i],
                      "enabled": a.get("enabled", True), "priority": a.get("priority", i),
-                     "order": _afb.order_indices(self.accounts).index(i),
+                     "order": _afb.order_pos(self.accounts, i),
                      **health_note(a["token"])}
                     for i, a in enumerate(self.accounts)
                 ],
@@ -184,7 +207,12 @@ def get_pool(config: dict) -> SoundcloudPool | None:
     if not pool_enabled(config):
         return None
     accounts = _configured_accounts(config)
-    fp = tuple(a["token"] for a in accounts)
+    # В отпечаток ОБЯЗАТЕЛЬНО входят `enabled` и `priority`: без них смена
+    # этих полей (кнопка вкл/выкл, перетаскивание порядка) не пересобирала
+    # закэшированный пул, и панель отдавала СТАРОЕ состояние до перезапуска —
+    # выглядело как «нажал, ничего не произошло». 18.09.2026.
+    fp = tuple((a["token"], a.get("enabled", True), a.get("priority"))
+               for a in accounts)
     if _pool_instance is None or fp != _pool_fingerprint:
         _pool_instance = SoundcloudPool(accounts)
         _pool_fingerprint = fp
@@ -199,7 +227,7 @@ def live_status(config: dict) -> dict:
         return {"pool_enabled": False, "accounts": [
             {"slot": i, "label": a["label"], "primary": i == 0, "busy": False,
              "enabled": a.get("enabled", True), "priority": a.get("priority", i),
-             "order": _afb.order_indices(accounts).index(i),
+             "order": _afb.order_pos(accounts, i),
              **health_note(a["token"])}
             for i, a in enumerate(accounts)
         ]}

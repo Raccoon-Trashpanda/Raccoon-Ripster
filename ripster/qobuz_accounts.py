@@ -60,8 +60,17 @@ def _cache_save(k: str, info: dict) -> None:
 def account_secret(acct: dict) -> str:
     """Строка, по которой учётка опознаётся: токен, а при входе по паролю —
     почта. Именно она попадает в реестр снятых и в ключ кэша."""
-    return ((acct.get("qobuz-auth-token") or "").strip()
-            or (acct.get("qobuz-email") or "").strip())
+    # ВАЖНО: форм записи ДВЕ. В config.yaml учётка лежит полями верхнего уровня
+    # (`qobuz-auth-token`, `qobuz-email`), а запись ПУЛА (`qobuz-accounts[i]`) —
+    # короткими ключами (`auth_token`, `email`). Раньше здесь читались только
+    # конфиг-имена, и для КАЖДОЙ пуловой учётки функция возвращала ПУСТУЮ
+    # строку: все они получали один и тот же (пустой) идентификатор, поэтому
+    # здоровье, маска и счётчик неудач по пулу считались в одну кучу, а статус
+    # слотов не показывался. `retired_credentials._qobuz_secret` всё это время
+    # читал обе формы — и его докстринг «совпадает с account_secret» был
+    # неправдой. Теперь совпадает. 18.09.2026.
+    return ((acct.get("qobuz-auth-token") or acct.get("auth_token") or "").strip()
+            or (acct.get("qobuz-email") or acct.get("email") or "").strip())
 
 
 def _read_user(user: dict) -> dict:

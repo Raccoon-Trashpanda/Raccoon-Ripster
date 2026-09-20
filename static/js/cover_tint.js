@@ -111,7 +111,12 @@ function _ctReadable(t) {
 }
 
 // Цвет обложки. Всегда промис; null — цвета нет и красить нечем.
-function coverTint(url) {
+//
+// `url` — КЛЮЧ словаря (адрес обложки как он есть), `measureUrl` — то, что
+// реально качаем ради замера. Разделены намеренно: замер идёт по канве 24×24,
+// ему хватает миниатюры, а ключ должен остаться прежним, иначе весь уже
+// накопленный словарь цветов обнулится при первом же открытии.
+function coverTint(url, measureUrl) {
   if (!url) return Promise.resolve(null);
   if (_ctMem.has(url)) return Promise.resolve(_ctMem.get(url));
   const disk = _ctLoad();
@@ -135,12 +140,77 @@ function coverTint(url) {
       done(t ? _ctReadable(t) : null);
     };
     img.onerror = () => done(null);   // нет CORS/картинки — карточка остаётся обычной
-    img.src = url;
+    img.src = measureUrl || url;
   });
 }
 
-// Покрасить карточки, которые этого ещё не получили. Идёт по видимым — цвет
-// нужен там, куда человек смотрит, а не во всей ленте из сотен карточек.
+// ──────────────────────────────────────────────────────────────────────
+// ПОЧЕМУ ЗДЕСЬ НАБЛЮДАТЕЛЬ И ОЧЕРЕДЬ, А НЕ ПРОСТОЙ ЦИКЛ.
+//
+// Функция называлась «покрасить ВИДИМЫЕ», а брала `.rel-card:not([data-tinted])`
+// по всему документу — то есть всю отрисованную страницу радара целиком (120
+// карточек за раз, а после «показать ещё» — 240, 360…). На каждую заводился
+// ВТОРОЙ `new Image()` с `crossOrigin='anonymous'` и адресом `lightboxSrc`,
+// то есть ОРИГИНАЛОМ обложки (640×640 у Spotify).
+//
+// Цена была двойная и обе половины били ровно туда, на что жаловался владелец:
+//   • CORS-запрос — отдельная запись в кэше браузера: тот же файл качался ВТОРОЙ
+//     раз, мимо кэша видимой <img>;
+//   • на хост живёт ~6 одновременных соединений. 120 запросов по 640×640
+//     занимали их все, и настоящие обложки карточек вставали в хвост очереди.
+//     Отсюда «обложки грузятся медленно, а иногда не грузятся вовсе»: когда
+//     человек пролистывал дальше, соединения всё ещё были заняты замерами
+//     карточек, которые он давно проскроллил.
+//
+// Теперь: замер начинается только когда карточка подошла к экрану, качается
+// МИНИАТЮРА (relCover(...,96) — 64×64 у Spotify, ~2 КБ вместо ~40 КБ) и не
+// более трёх штук одновременно, чтобы соединения оставались настоящим обложкам.
+// ──────────────────────────────────────────────────────────────────────
+const _CT_PARALLEL = 3;
+const _ctQueue   = [];
+let   _ctRunning = 0;
+
+function _ctSmall(src) {
+  // relCover живёт в sc_tab.js, который грузится ПОЗЖЕ этого файла. Вызов
+  // происходит в рантайме, когда всё уже на месте, но проверка обязательна:
+  // публичная сборка может не содержать модуля вовсе.
+  try { if (typeof relCover === 'function') return relCover(src, 96); } catch (e) {}
+  return src;
+}
+
+function _ctPump() {
+  while (_ctRunning < _CT_PARALLEL && _ctQueue.length) {
+    const card = _ctQueue.shift();
+    if (!card.isConnected) continue;
+    const src = card.dataset.tintSrc;
+    if (!src) continue;
+    _ctRunning++;
+    coverTint(src, _ctSmall(src)).then(col => {
+      _ctRunning--;
+      if (col && card.isConnected) {
+        card.style.setProperty('--tint', col);
+        card.classList.add('tinted');
+      }
+      _ctPump();
+    });
+  }
+}
+
+const _ctIO = ('IntersectionObserver' in window)
+  ? new IntersectionObserver(entries => {
+      let queued = false;
+      for (const e of entries) {
+        if (!e.isIntersecting) continue;
+        _ctIO.unobserve(e.target);
+        _ctQueue.push(e.target);
+        queued = true;
+      }
+      if (queued) _ctPump();
+    }, { rootMargin: '250px 0px' })   // чуть раньше экрана, чтобы цвет успел
+  : null;
+
+// Поставить некрашеные карточки под наблюдение. Сам замер откладывается до
+// момента, когда карточка подошла к экрану.
 function tintVisibleCards(root) {
   const scope = root || document;
   const cards = scope.querySelectorAll('.rel-card:not([data-tinted])');
@@ -149,12 +219,19 @@ function tintVisibleCards(root) {
     const img = card.querySelector('img');
     const src = img && (img.dataset.lightboxSrc || img.src);
     if (!src) { card.dataset.tinted = 'no'; return; }
-    card.dataset.tinted = '1';
-    coverTint(src).then(col => {
-      if (!col) return;
-      card.style.setProperty('--tint', col);
-      card.classList.add('tinted');
-    });
+    card.dataset.tinted  = '1';
+    card.dataset.tintSrc = src;
+    // Цвет уже посчитан раньше — красим сразу: сети здесь не будет вовсе,
+    // откладывать до появления на экране нечего.
+    const disk = _ctLoad();
+    const cached = _ctMem.has(src) ? _ctMem.get(src)
+                 : (Object.prototype.hasOwnProperty.call(disk, src) ? disk[src] : undefined);
+    if (cached !== undefined) {
+      if (cached) { card.style.setProperty('--tint', cached); card.classList.add('tinted'); }
+      return;
+    }
+    if (_ctIO) _ctIO.observe(card);
+    else { _ctQueue.push(card); _ctPump(); }
   });
 }
 

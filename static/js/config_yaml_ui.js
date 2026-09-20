@@ -11,10 +11,10 @@ function renderConfig() {
   const yaml = `# Apple Music Downloader — config.yaml
 # Quality: ${q.label||''} (${q.sub||''})  flag: ${q.flag||'(default)'}
 
-media-user-token: "${c['media-user-token']||''}"
+media-user-token: "${escapeHtml(c['media-user-token']||'')}"
 authorization-token: ""  # auto-fetched from browser
-storefront: "${c['storefront']||'us'}"
-language: "${c['language']||''}"
+storefront: "${escapeHtml(c['storefront']||'us')}"
+language: "${escapeHtml(c['language']||'')}"
 
 embed-cover: ${c['embed-cover']!==false}
 cover-size: ${c['cover-size']==='original'?'0':c['cover-size']||'3000x3000'}
@@ -24,15 +24,15 @@ save-animated-artwork: false
 
 embed-lrc: ${c['embed-lrc']!==false}
 save-lrc-file: ${!!c['save-lrc-file']}
-lrc-type: "${c['lrc-type']||'lyrics'}"
-lrc-format: "${c['lrc-format']||'lrc'}"
+lrc-type: "${escapeHtml(c['lrc-type']||'lyrics')}"
+lrc-format: "${escapeHtml(c['lrc-format']||'lrc')}"
 
-alac-save-folder: "${c['save-path']||'downloads'}"
-atmos-save-folder: "${c['save-path']||'downloads'}/Atmos"
-aac-save-folder: "${c['save-path']||'downloads'}/AAC"
+alac-save-folder: "${escapeHtml(c['save-path']||'downloads')}"
+atmos-save-folder: "${escapeHtml(c['save-path']||'downloads')}/Atmos"
+aac-save-folder: "${escapeHtml(c['save-path']||'downloads')}/AAC"
 
-decrypt-m3u8-port: "${c['decrypt-port']||'127.0.0.1:10020'}"
-get-m3u8-port: "${c['m3u8-port']||'127.0.0.1:20020'}"
+decrypt-m3u8-port: "${escapeHtml(c['decrypt-port']||'127.0.0.1:10020')}"
+get-m3u8-port: "${escapeHtml(c['m3u8-port']||'127.0.0.1:20020')}"
 max-memory-limit: ${c['max-memory']||256}
 atmos-max: ${c['atmos-max']||2448}`;
 
@@ -51,7 +51,7 @@ atmos-max: ${c['atmos-max']||2448}`;
       cmdsEl.innerHTML = S.queue.map(t=>{
         const q2 = QUALITIES.find(x=>x.id===t.quality)||QUALITIES[0]||{flag:''};
         const flag = q2.flag?q2.flag+' ':'';
-        return `<div class="code-block" style="font-size:10.5px;padding:8px 12px">go run main.go ${flag}"${t.url}"</div>`;
+        return `<div class="code-block" style="font-size:10.5px;padding:8px 12px">go run main.go ${flag}"${escapeHtml(t.url)}"</div>`;
       }).join('');
     }
   }
@@ -65,6 +65,4 @@ function copyConfig() {
   toast('config.yaml copied!');
 }
 function refreshConfig(){ renderConfig(); toast('Refreshed'); }
-
-// CONSOLE (log console view: render, copy, download, fix-deps) → moved to its own module file (see index.html).
 

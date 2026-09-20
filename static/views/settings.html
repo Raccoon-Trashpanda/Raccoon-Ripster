@@ -12,6 +12,7 @@
           <button class="stab svc-tab" data-stab="spotify"     onclick="showStab('spotify',this)"><svg class="svc-ico" width="15" height="15" viewBox="0 0 24 24" style="fill:#1db954"><path d="M12 0C5.4 0 0 5.4 0 12s5.4 12 12 12 12-5.4 12-12S18.66 0 12 0zm5.521 17.34c-.24.359-.66.48-1.021.24-2.82-1.74-6.36-2.101-10.561-1.141-.418.122-.779-.179-.899-.539-.12-.421.18-.78.54-.9 4.56-1.021 8.52-.6 11.64 1.32.42.18.479.659.301 1.02zm1.44-3.3c-.301.42-.841.6-1.262.3-3.239-1.98-8.159-2.58-11.939-1.38-.479.12-1.02-.12-1.14-.6-.12-.48.12-1.021.6-1.141C9.6 9.9 15 10.561 18.72 12.84c.361.181.54.78.241 1.2zm.12-3.36C15.24 8.4 8.82 8.16 5.16 9.301c-.6.179-1.2-.181-1.38-.721-.18-.601.18-1.2.72-1.381 4.26-1.26 11.28-1.02 15.721 1.621.539.3.719 1.02.419 1.56-.299.421-1.02.599-1.559.3z"/></svg>Spotify</button>
           <button class="stab svc-tab" data-stab="soundcloud" onclick="showStab('soundcloud',this)"><svg class="svc-ico" width="15" height="15" viewBox="0 0 24 24" style="fill:#ff5500"><path d="M23.999 14.165c-.052 1.796-1.612 3.169-3.4 3.169h-8.18a.68.68 0 0 1-.675-.683V7.862a.747.747 0 0 1 .452-.724s.75-.513 2.333-.513a5.364 5.364 0 0 1 2.763.755 5.433 5.433 0 0 1 2.57 3.54c.282-.08.574-.121.868-.12.884 0 1.73.358 2.347.992s.948 1.49.922 2.373ZM10.721 8.421c.247 2.98.427 5.697 0 8.672a.264.264 0 0 1-.53 0c-.395-2.946-.22-5.718 0-8.672a.264.264 0 0 1 .53 0ZM9.072 9.448c.285 2.659.37 4.986-.006 7.655a.277.277 0 0 1-.55 0c-.331-2.63-.256-5.02 0-7.655a.277.277 0 0 1 .556 0Zm-1.663-.257c.27 2.726.39 5.171 0 7.904a.266.266 0 0 1-.532 0c-.38-2.69-.257-5.21 0-7.904a.266.266 0 0 1 .532 0Zm-1.647.77a26.108 26.108 0 0 1-.008 7.147.272.272 0 0 1-.542 0 27.955 27.955 0 0 1 0-7.147.275.275 0 0 1 .55 0Zm-1.67 1.769c.421 1.865.228 3.5-.029 5.388a.257.257 0 0 1-.514 0c-.21-1.858-.398-3.549 0-5.389a.272.272 0 0 1 .543 0Zm-1.655-.273c.388 1.897.26 3.508-.01 5.412-.026.28-.514.283-.54 0-.244-1.878-.347-3.54-.01-5.412a.283.283 0 0 1 .56 0Zm-1.668.911c.4 1.268.257 2.292-.026 3.572a.257.257 0 0 1-.514 0c-.241-1.262-.354-2.312-.023-3.572a.283.283 0 0 1 .563 0Z"/></svg>SoundCloud</button>
           <button class="stab owner-only" data-stab="beatport"   onclick="showStab('beatport',this)"  style="color:#01f49c">Beatport</button>
+          <button class="stab svc-tab" data-stab="jiosaavn" onclick="showStab('jiosaavn',this)" style="color:#2bc5b4">🇮🇳 JioSaavn</button>
           <button class="stab svc-tab" data-stab="yandex"   onclick="showStab('yandex',this)" style="color:#ffcc00" data-i18n="st.yandex">Яндекс</button>
           <button class="stab svc-tab" data-stab="amazon"   onclick="showStab('amazon',this)" style="color:#25d1da">🅰️ Amazon</button>
           <button class="stab" data-stab="digs" onclick="showStab('digs',this)" style="color:#c084a0" data-i18n="st.digs">&#9935; &#1056;&#1072;&#1089;&#1082;&#1086;&#1087;&#1082;&#1080;</button>
@@ -77,6 +78,19 @@
               </select>
             </div>
           </div>
+
+          <!-- ── СКИН ──
+               Рядом с выбором темы, не вместо него: тема красит, скин формирует.
+               Переключатель собирается из JS (renderSkinPicker) — превью должны
+               быть настоящими карточками на токенах своего скина, а не картинками.
+               Выбор уезжает на сервер ключом ui-skin, как и остальной конфиг. -->
+          <div class="field-group mt8">
+            <label class="lbl" data-i18n="s.skin">Форма</label>
+            <div class="toggle-sub" data-i18n="s.skin_sub" style="margin-bottom:8px">Меняет характер интерфейса — скругления, свечение, плотность. Цвета остаются за темой выше.</div>
+            <div id="skin-picker"></div>
+            <div class="toggle-sub" data-i18n="s.skin_keys" style="margin-top:6px">←/→ — выбрать, Enter — закрепить</div>
+          </div>
+          <script>try{renderSkinPicker('skin-picker');}catch(e){}</script>
         </div>
 
         <!-- ── Круг загрузки в левой панели ── -->
@@ -134,6 +148,15 @@
           </div>
           <div class="toggle-row">
             <div class="toggle-info">
+              <div class="toggle-label" data-i18n="s.wl_nz_label">🥝 Ловить пятничные релизы по Новой Зеландии</div>
+              <div class="toggle-sub" data-i18n="s.wl_nz_sub">Выкл — вишлист проверяется как обычно, раз в 6 часов. Вкл — ещё одна проверка в 00:05 пятницы по Окленду, и найденное ею качается сперва через учётки с регионом NZ. Качать ли вообще — по-прежнему решает «Авто-скачать» у артиста.</div>
+              <div class="toggle-sub" id="s-wl-nz-status" style="margin-top:4px"></div>
+            </div>
+            <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-watchlist-nz-early"
+              onchange="saveSetting('watchlist-nz-early',this.checked);setTimeout(loadWlNzStatus,400)"><div class="toggle-slider"></div></label>
+          </div>
+          <div class="toggle-row">
+            <div class="toggle-info">
               <div class="toggle-label" data-i18n="s.nudges_label">💡 Подсказки в простое</div>
               <div class="toggle-sub" data-i18n="s.nudges_hint">Когда ничего не играет и ты не за Ripster, он изредка предложит забытого артиста или релиз в твоих жанрах. Чем реже пригождается — тем реже появляется.</div>
             </div>
@@ -142,8 +165,9 @@
           </div>
           <div class="field-group mt8">
             <label class="lbl" data-i18n="s.default_search_svc_label">Сервис поиска по умолчанию</label>
-            <div class="toggle-sub" data-i18n="s.default_search_svc_sub" style="margin-bottom:6px">Открывается при первом заходе на вкладку «Поиск» (и в подсказках-нуджах). После первого поиска вручную вкладка запоминает выбранный сервис сама — этот пункт нужен только для самого первого раза.</div>
-            <select id="s-default-search-svc" onchange="saveSetting('default-search-service',this.value)" style="width:auto">
+            <div class="toggle-sub" data-i18n="s.default_search_svc_sub" style="margin-bottom:6px">С него открывается «Поиск» при каждом запуске Ripster и кнопка «Открыть дискографию» в подсказках. Выбор в самой вкладке действует до перезапуска. «Авто» — первый подключённый сервис с мгновенным превью: Deezer, Spotify или Qobuz.</div>
+            <select id="s-default-search-svc" onchange="saveSetting('default-search-service',this.value);if(typeof _searchSvcApplyDefault==='function')_searchSvcApplyDefault()" style="width:auto">
+              <option value="" data-i18n="s.default_search_auto">Авто (Deezer / Spotify / Qobuz)</option>
               <option value="apple">🍎 Apple Music</option>
               <option value="deezer">🎵 Deezer</option>
               <option value="qobuz">🎼 Qobuz</option>
@@ -1717,11 +1741,13 @@
                   </div>
                 </div>
 
-                <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
-                  <button class="btn-sm" onclick="testAuth('spotify')" style="padding:5px 11px;background:rgba(29,185,84,.18);color:#1db954;border:1px solid rgba(29,185,84,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.check_token">🔑 Проверить токен</button>
-              <button class="btn-sm" onclick="logoutService('spotify',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
-                  <div id="test-auth-spotify" class="test-auth-out" data-svc="spotify" style="font-size:11px;color:var(--muted);flex:1;min-width:160px"></div>
-                </div>
+                <!-- Дубли «🔑 Проверить токен» и «🚪 Выйти» (logoutService) убраны
+                     18.09.2026: ровно те же обработчики уже стоят в нижней единой
+                     строке вкладки, и результат пробы testAuth пишется во ВСЕ
+                     .test-auth-out[data-svc=spotify] — второй вывод здесь был лишним
+                     экраном. Кнопка «Выйти» рядом с «Подключить» выше — другая
+                     (spotifyLogout → /api/spotify/logout, только OAuth-сессия),
+                     её не трогать: logoutService чистит sp_dc и блоб, а не её. -->
 
                 <div style="font-size:10px;color:var(--muted);line-height:1.6;background:rgba(0,0,0,.2);border-radius:7px;padding:8px 10px" data-i18n-html="sp.redirect_note">
                   Redirect URI: <code style="color:var(--text)">http://127.0.0.1:7799/spotify/callback</code> —
@@ -1731,6 +1757,47 @@
               </div>
             </details>
             </details><!-- /Ручные токены -->
+
+            <!-- Учётка радара релизов: отдельная от учётки загрузок, чтобы скан
+                 подписок не жёг лимиты/не палил основной аккаунт. Пусто = радар
+                 работает на общей учётке, как раньше. -->
+            <details style="margin-top:8px">
+              <summary style="cursor:pointer;font-size:11px;color:var(--muted);user-select:none;list-style:none;display:flex;align-items:center;gap:6px">
+                <span style="font-size:10px">▶</span>
+                <span data-i18n="sp.radar_summary">Отдельная учётка для радара релизов</span>
+              </summary>
+              <div style="margin-top:10px;padding:12px;background:rgba(0,0,0,.15);border:1px solid var(--border);border-radius:9px">
+                <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
+                  <div id="sp-radar-status" style="flex:1;min-width:180px;font-size:11px;color:var(--muted)">…</div>
+                  <button onclick="openAuthPage('/spotify/login?radar=1','Spotify radar')"
+                    style="padding:5px 12px;background:rgba(29,185,84,.2);border:1px solid rgba(29,185,84,.3);border-radius:7px;font-size:11px;font-weight:700;color:#1db954;cursor:pointer;font-family:var(--font)">
+                    <span data-i18n="sp.radar_connect">Подключить учётку радара</span>
+                  </button>
+                  <button onclick="spotifyRadarLogout()" id="sp-radar-logout" style="display:none;padding:5px 9px;background:transparent;border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--muted);cursor:pointer;font-family:var(--font)">
+                    <span data-i18n="s.sp_logout_btn">Выйти</span>
+                  </button>
+                </div>
+                <div class="field-group" style="margin-bottom:8px">
+                  <label class="lbl">sp_dc <span style="font-size:10px;font-weight:400;color:var(--muted)" data-i18n="sp.radar_spdc_hint">куки второй учётки — хватает одного его</span></label>
+                  <input id="s-sp-radar-dc" type="password" placeholder="AQD3x…"
+                    style="font-family:var(--mono);font-size:11px"
+                    onchange="saveSetting('spotify-radar-sp-dc',this.value).then(loadSpotifyRadarStatus)"/>
+                </div>
+                <div class="settings-grid">
+                  <div class="field-group">
+                    <label class="lbl">Client ID <span style="font-size:10px;font-weight:400;color:var(--muted)" data-i18n="sp.optional">(необязательно)</span></label>
+                    <input id="s-sp-radar-cid" style="font-family:var(--mono);font-size:11px"
+                      onchange="saveSetting('spotify-radar-client-id',this.value).then(loadSpotifyRadarStatus)"/>
+                  </div>
+                  <div class="field-group">
+                    <label class="lbl">Client Secret</label>
+                    <input id="s-sp-radar-csecret" type="password" placeholder="••••••••"
+                      style="font-family:var(--mono);font-size:11px"
+                      onchange="saveSetting('spotify-radar-client-secret',this.value).then(loadSpotifyRadarStatus)"/>
+                  </div>
+                </div>
+              </div>
+            </details>
 
             <!-- Saved conversion target — это настоящая настройка человека,
                  а не служебный токен, поэтому осталась на виду. -->
@@ -1759,36 +1826,14 @@
               OrpheusDL — PKCE OAuth (Apple ID, Google, обычный аккаунт). OGG ~320 kbps, нужен Spotify Premium.
             </div>
 
-            <!-- Web-токен СВЁРНУТ. Он требовал «F12 → Network → фильтр api-partner
-                 → Request Headers → скопируй блок» — на виду это делало вкладку
-                 нечитаемой для обычного человека. И главное: вручную он больше не
-                 нужен, кипер сам минтит его из постоянной сессии librespot каждые
-                 ~45 минут. Оставлен как аварийный путь, если сессии нет. -->
-            <details style="margin-bottom:12px">
-              <summary style="cursor:pointer;font-size:11px;color:var(--muted);user-select:none;list-style:none;display:flex;align-items:center;gap:6px">
-                <span style="font-size:10px">▶</span>
-                <span data-i18n="sp.webtoken_summary">Web-токен вручную — обычно не нужен, обновляется сам</span>
-              </summary>
-            <div style="margin-top:10px;padding:10px 12px;background:rgba(29,185,84,.06);border:1px solid rgba(29,185,84,.2);border-radius:8px">
-              <div style="font-size:11px;font-weight:700;color:#1db954;margin-bottom:6px" data-i18n="sp.webtoken_title">🔑 Web-токен (нативный OGG)</div>
-              <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5" data-i18n-html="sp.webtoken_desc">
-                Spotify убрал токен с embed-страницы. open.spotify.com → F12 → Network → фильтр
-                <code>api-partner</code> → клик по запросу → Headers → <b>Request Headers</b> → скопируй весь блок
-                (там <code>authorization: Bearer…</code> и <code>client-token:…</code>) и вставь сюда. Bearer живёт ~1 час.
-              </div>
-              <textarea id="s-sp-token-blob" data-i18n-ph="sp.token_blob_ph" placeholder="Вставь блок Request Headers сюда…"
-                style="width:100%;height:66px;font-family:var(--mono);font-size:10px;resize:vertical;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:6px"></textarea>
-              <div style="display:flex;gap:8px;margin-top:8px;align-items:center">
-                <button class="btn-sm" onclick="saveSpotifyToken()" style="padding:6px 12px;background:rgba(29,185,84,.18);color:#1db954;border:1px solid rgba(29,185,84,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="sp.refresh_token">💾 Обновить токен</button>
-                <span id="sp-token-status" style="font-size:11px;color:var(--muted)"></span>
-              </div>
-
-              <!-- Extension auto-sync push-log removed: it required a browser
-                   extension most users never install and only showed a confusing
-                   "token expired N min ago / no pushes yet" line. The manual
-                   web-token paste above is the primary path. -->
-            </div>
-            </details><!-- /Web-токен вручную -->
+            <!-- Ручной «Web-токен (Request Headers)» УБРАН ИЗ UI 18.09.2026.
+                 Он сам себя описывал как «обычно не нужен, обновляется сам»: кипер
+                 минтит bearer из постоянной сессии librespot каждые ~45 минут, а
+                 инструкция «F12 → Network → фильтр api-partner → Request Headers»
+                 занимала пол-вкладки ради аварийного пути, которым никто не ходит.
+                 Убрана ТОЛЬКО разметка: функция saveSpotifyToken() (orpheus_ui.js)
+                 и роут POST /api/admin/spotify-token живы — через них токен по-
+                 прежнему можно залить (бот/API), и оба null-safe без этих полей. -->
 
             <!-- Auth status bar -->
             <div id="orp-auth-bar" style="display:none;align-items:center;gap:10px;margin-bottom:12px;padding:10px 12px;background:rgba(62,207,170,.07);border:1px solid rgba(62,207,170,.2);border-radius:8px">
@@ -1849,10 +1894,15 @@
             </div>
           </div>
 
-          <!-- ── Unified save row (matches Apple/Qobuz/Deezer/Tidal/SC/BP layout) ── -->
+          <!-- ── Unified action row ──
+               Кнопки «💾 Сохранить» (saveServiceTab('spotify')) здесь НЕТ с
+               18.09.2026: каждое поле вкладки уже сохраняется само —
+               s-sp-dc / s-sp-cid / s-sp-csecret через oninput="saveSetting(...)",
+               s-orp-quality / s-orp-mp3 / s-orp-mode через onchange. Ровно эти
+               четыре ключа и слал saveServiceTab, то есть кнопка ничего не
+               добавляла, зато замаскированный секрет мог уехать в конфиг как есть. -->
           <div class="block mt12">
             <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
-              <button class="btn-sm" onclick="saveServiceTab('spotify')" style="padding:6px 12px;background:rgba(29,185,84,.18);color:#1db954;border:1px solid rgba(29,185,84,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.save_btn">💾 Сохранить</button>
               <button class="btn-sm" onclick="testAuth('spotify')" style="padding:6px 12px;background:rgba(29,185,84,.08);color:#1db954;border:1px solid rgba(29,185,84,.25);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)" data-i18n="s.check">🔑 Проверить</button>
               <button class="btn-sm" onclick="logoutService('spotify',this)" data-i18n="s.logout" title="" style="padding:6px 12px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">🚪 Выйти</button>
               <div class="test-auth-out" data-svc="spotify" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
@@ -2077,6 +2127,40 @@
 
         </div>
         </div><!-- end stab-beatport -->
+
+        <!-- ══════════ JIOSAAVN TAB (OrpheusDL module, no login) ══════════ -->
+        <div class="stab-panel" id="stab-jiosaavn">
+        <div class="block mt12">
+          <div class="block-title" style="color:#2bc5b4">🇮🇳 JioSaavn</div>
+          <div style="font-size:11px;color:var(--muted);margin-bottom:10px;line-height:1.6" data-i18n="js.note">
+            Скачивание через OrpheusDL (модуль orpheusdl-jiosaavn). Вход не нужен. Все уровни — AAC: lossless у JioSaavn нет.
+          </div>
+          <div style="font-size:11px;color:var(--orange);margin-bottom:12px;line-height:1.6;padding:8px 12px;background:rgba(255,159,10,.07);border:1px solid rgba(255,159,10,.2);border-radius:8px" data-i18n="js.geo_note">
+            JioSaavn лицензирован для Индии: поиск и карточки работают отовсюду, но вне Индии аудио-CDN отвечает 403 — нужен индийский IP/прокси.
+          </div>
+
+          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:10px 14px;background:rgba(43,197,180,.06);border:1px solid rgba(43,197,180,.2);border-radius:9px">
+            <div style="flex:1;min-width:0;font-size:12px;font-weight:700;color:var(--muted)" id="js-install-label">…</div>
+            <button id="btn-js-install" onclick="installJiosaavnModule()"
+              style="padding:6px 14px;background:rgba(43,197,180,.18);color:#2bc5b4;border:1px solid rgba(43,197,180,.4);border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font)" data-i18n="js.install">⬇ Установить модуль</button>
+          </div>
+
+          <div class="field-group mt8">
+            <label class="lbl"><span data-i18n="s.def_quality">Качество по умолчанию</span></label>
+            <select id="s-js-quality" onchange="saveSetting('jiosaavn-quality',this.value)"
+              style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:7px 10px;font-size:12px;font-family:var(--font);cursor:pointer">
+              <option value="high">AAC 320 kbps</option>
+              <option value="medium">AAC 160 kbps</option>
+              <option value="low">AAC 96 kbps</option>
+            </select>
+          </div>
+
+          <div class="field-group mt8">
+            <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
+            <input id="s-js-path" type="text" placeholder="по умолчанию (общая папка)" data-i18n-ph="s.default_folder_ph" oninput="saveSetting('jiosaavn-save-path',this.value)"/>
+          </div>
+        </div>
+        </div><!-- end stab-jiosaavn -->
 
         <!-- ══════════ YANDEX TAB ══════════ -->
         <div class="stab-panel" id="stab-yandex">

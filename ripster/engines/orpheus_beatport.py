@@ -1,6 +1,10 @@
 """OrpheusDL-Beatport engine — downloads Beatport URLs via OrpheusDL + orpheusdl-beatport.
 
-Authentication: username + password stored in orpheus/config/settings.json
+Authentication: username + password stored in the engine's own OrpheusDL config
+corridor (orpheus/config/beatport/settings.json, seeded from the shared
+orpheus/config/settings.json); the Beatport SESSION stays shared in
+orpheus/config/loginstorage.bin — its refresh token rotates, so a second copy
+would spend an already-revoked token.
 Quality tiers:
   hifi/lossless  → FLAC 16-bit (requires Beatport Professional subscription)
   high           → AAC 256 kbps (requires Beatport Professional)
@@ -13,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import sys
 from pathlib import Path
 
@@ -78,7 +83,7 @@ def _tier_cache_write(tier: str) -> None:
 
 
 def _tier_cache_read() -> str:
-    """Свежий known-good тариф или '' — если кэша нет / он протух."""
+    """Свежий known-good тариф или '' — если кэша нет / он устарел."""
     try:
         import time
         d = json.loads(_TIER_CACHE.read_text(encoding="utf-8"))
@@ -103,7 +108,15 @@ def _tier_now() -> str:
     """
     import httpx
 
-    def _fail() -> str:
+    # ПОЧЕМУ не узнали — важнее самого «не узнали». 19.09.2026 10:43 TLS-рукопожатие
+    # с api.beatport.com висело, тариф стал «неизвестен», проверка подписки
+    # выключилась, строки «subscription detected» не было — и первый же голый
+    # 401/403 в логе превращался в «неверный логин/пароль» гостю при живом
+    # аккаунте. Причину отдаём движку через _TIER_STATE["fail"].
+    _TIER_STATE["fail"] = ""
+
+    def _fail(kind: str = "other") -> str:
+        _TIER_STATE["fail"] = kind
         return _tier_cache_read()
 
     sess = _read_bp_session() or {}
@@ -112,19 +125,30 @@ def _tier_now() -> str:
     for attempt in ("stored", "refreshed"):
         if attempt == "refreshed":
             if not rt:
-                return _fail()
+                return _fail("auth")
             try:
                 r = httpx.post("https://api.beatport.com/v4/auth/o/token/",
                                data={"client_id": _BP_CLIENT_ID, "refresh_token": rt,
                                      "grant_type": "refresh_token"}, timeout=10)
-                at = r.json()["access_token"] if r.status_code == 200 else ""
+                if r.status_code == 200:
+                    j = r.json()
+                    at = j["access_token"]
+                    _persist_refreshed_session(rt, j)
+                else:
+                    at = ""
+            except (httpx.TransportError, OSError):
+                return _fail("network")
             except Exception:
                 return _fail()
+            if not at:
+                return _fail("auth")          # refresh отклонён — это про токен, не про сеть
         if not at:
             continue
         try:
             r = httpx.get("https://api.beatport.com/v4/auth/o/introspect/",
                           headers={"Authorization": f"Bearer {at}"}, timeout=10)
+        except (httpx.TransportError, OSError):
+            return _fail("network")
         except Exception:
             return _fail()
         if r.status_code == 200:
@@ -136,17 +160,117 @@ def _tier_now() -> str:
                 return _fail()
         if r.status_code != 401:
             return _fail()
-    return _fail()
+    return _fail("auth")
 
+
+def _main_config_dir() -> Path:
+    """Каталог конфига OrpheusDL по умолчанию. CWD прогона = orpheus/, поэтому без
+    ORPHEUS_CONFIG_DIR core.py резолвит именно `orpheus/config`."""
+    return _orpheus_dir() / "config"
+
+def _corridor_config_dir(engine: str) -> Path:
+    return _main_config_dir() / engine
+
+def _corridor_settings(engine: str) -> Path:
+    """settings.json КОНКРЕТНОГО движка Orpheus — копия общего конфига.
+
+    Качество и путь пишутся перед каждым прогоном, а полосы параллельности у
+    очереди раздельные (ripster/runner.py::_lock_key: 'beatport' и 'jiosaavn' —
+    РАЗНЫЕ ключи, то есть два прогона идут ОДНОВРЕМЕННО). Один общий файл
+    означал, что второй прогон перезапишет качество и папку первого — а сам
+    первый ещё и перечитает этот файл на старте. Принцип тот же, что у
+    коридоров spotify_pool/tidal_pool.
+    """
+    sp = _corridor_config_dir(engine) / "settings.json"
+    base = _main_config_dir() / "settings.json"
+    try:
+        if base.is_file() and (not sp.is_file()
+                               or base.stat().st_mtime > sp.stat().st_mtime):
+            sp.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(base, sp)
+    except OSError:
+        pass
+    return sp
 
 def _settings_path() -> Path:
-    return _orpheus_dir() / "config" / "settings.json"
+    return _corridor_settings("beatport")
 
 def _module_path() -> Path:
     return _orpheus_dir() / "modules" / "beatport"
 
 def _session_path() -> Path:
-    return _orpheus_dir() / "config" / "loginstorage.bin"
+    """Сессия Beatport — ОДНА на всех, вне коридора: refresh-токен ротируется,
+    и вторая копия означала бы повторный спуск уже погашенного токена (см.
+    `_persist_refreshed_session`)."""
+    return _main_config_dir() / "loginstorage.bin"
+
+
+def orpheus_cmd(config_dir: Path, url: str, save_path: str = "",
+                session_file: Path | None = None) -> list[str]:
+    """Команда запуска OrpheusDL для одного прогона.
+
+    The bundled embeddable Python runs ISOLATED (sys.flags.isolated==1, a side
+    effect of the ._pth) → it does NOT add the script's directory to sys.path AND
+    ignores PYTHONPATH. So a plain `python orpheus.py` dies with
+    "ModuleNotFoundError: No module named 'orpheus.core'" even though the inner
+    orpheus/ package sits right next to orpheus.py (proven on a bundled install;
+    the dev .venv is non-isolated so it never reproduced). Bootstrap via -c: put
+    the OrpheusDL dir on sys.path, restore argv, then run orpheus.py as __main__.
+
+    Каталог конфига коридора сообщается ТЕМ же бутстрапом, а не окружением
+    процесса app.py: все движки живут в одном интерпретаторе, и os.environ у них
+    общий — выставив его здесь, мы бы заразили параллельный прогон.
+    """
+    orph_dir   = str(_orpheus_dir())
+    orpheus_py = str(_orpheus_dir() / "orpheus.py")
+    _env = f"os.environ['ORPHEUS_CONFIG_DIR'] = {str(config_dir)!r}; "
+    if session_file is not None:
+        _env += f"os.environ['ORPHEUS_SESSION_STORAGE'] = {str(session_file)!r}; "
+    _boot = (
+        "import os, sys, runpy; "
+        + _env +
+        f"sys.path.insert(0, {orph_dir!r}); "
+        f"sys.argv = [{orpheus_py!r}] + sys.argv[1:]; "
+        f"runpy.run_path({orpheus_py!r}, run_name='__main__')"
+    )
+    cmd = [_orpheus_python(), "-c", _boot]
+    if save_path:
+        cmd += ["-o", save_path.rstrip("/\\")]
+    cmd.append(url)
+    return cmd
+
+
+#: Как резолвит каталог конфига ЧИСТЫЙ upstream OrpheusDL — жёстко относительно CWD.
+_ORPH_CORE_CONFIG_SHARED = (
+    "        self.data_folder_base = 'config'\n"
+    "        self.settings_location = os.path.join(self.data_folder_base, 'settings.json')\n"
+    "        self.session_storage_location = os.path.join(self.data_folder_base, 'loginstorage.bin')\n"
+    "\n"
+    "        os.makedirs('config', exist_ok=True)\n")
+
+#: ... и как его оставляет `orpheus_cmd`, чтобы каждый движок читал свой каталог.
+_ORPH_CORE_CONFIG_CORRIDOR = (
+    "        self.data_folder_base = (os.environ.get('ORPHEUS_CONFIG_DIR') or '').strip() or 'config'\n"
+    "        self.settings_location = os.path.join(self.data_folder_base, 'settings.json')\n"
+    "        self.session_storage_location = (os.environ.get('ORPHEUS_SESSION_STORAGE') or '').strip() or os.path.join(self.data_folder_base, 'loginstorage.bin')\n"
+    "\n"
+    "        os.makedirs(self.data_folder_base, exist_ok=True)\n")
+
+
+def orpheus_core_corridor_patch(src: str) -> str:
+    """Научить вендоренный core.py брать каталог конфига из окружения.
+
+    Нужен именно патч, а не только наша правка в `orpheus/`: публичная сборка
+    ставит OrpheusDL СВЕЖИМ клоном с GitHub, и без патча прогон просто не увидел
+    бы ORPHEUS_CONFIG_DIR — то есть писал бы качество в файл, который не читает,
+    и молча качал бы чужое качество из общего. Идемпотентен; если upstream
+    переписал эти строки, возвращает текст без изменений (тогда коридор не
+    работает, и установка честно об этом сообщает).
+    """
+    if "ORPHEUS_CONFIG_DIR" in src:
+        return src
+    return src.replace(_ORPH_CORE_CONFIG_SHARED, _ORPH_CORE_CONFIG_CORRIDOR, 1)
+
 
 
 # ── live access token from OrpheusDL's saved Beatport session ─────────────────
@@ -168,6 +292,100 @@ def _read_bp_session() -> dict | None:
         return blob["modules"]["beatport"]["sessions"]["default"]["custom_data"]
     except Exception:
         return None
+
+
+#: Итог последней проверки тарифа (_tier_now): "" — тариф получен живьём;
+#: "network" — api.beatport.com не ответил (таймаут/TLS/DNS); "auth" — токен
+#: отклонён; "other" — прочее. Движок читает это в build_cmd.
+_TIER_STATE: dict = {"fail": ""}
+
+import threading as _threading
+_BP_SESSION_LOCK = _threading.Lock()
+
+
+def _write_bp_session(mutate) -> bool:
+    """Перечитать loginstorage.bin, дать `mutate(custom_data)` поправить сессию
+    Beatport (вернуть False — отказаться от записи) и атомарно записать обратно:
+    временный файл рядом + os.replace, чтобы OrpheusDL никогда не прочёл
+    полузаписанный pickle. Формат тот же, что пишет сам OrpheusDL (core.py:
+    pickle.dump({'advancedmode', 'modules'})); читаем через safe_pickle."""
+    import os
+    import pickle
+    from ripster.safe_pickle import safe_loads
+    path = _session_path()
+    with _BP_SESSION_LOCK:
+        try:
+            blob = safe_loads(path.read_bytes())
+            cd = blob["modules"]["beatport"]["sessions"]["default"]["custom_data"]
+        except Exception:
+            return False
+        if mutate(cd) is False:
+            return False
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+        try:
+            tmp.write_bytes(pickle.dumps(blob))
+            os.replace(tmp, path)
+            return True
+        except Exception as e:  # noqa: BLE001
+            print(f"[beatport] не удалось сохранить сессию в {path.name}: "
+                  f"{type(e).__name__}", flush=True)
+            try:
+                tmp.unlink()
+            except Exception:  # noqa: BLE001
+                pass
+            return False
+
+
+def _persist_refreshed_session(used_rt: str, j: dict) -> bool:
+    """Сохранить результат НАШЕГО refresh в loginstorage.bin.
+
+    Beatport при refresh РОТИРУЕТ refresh_token. Раньше новый оставался только в
+    памяти, а OrpheusDL на следующем запуске шёл со СТАРЫМ из файла → повторное
+    использование уже погашенного refresh_token → Beatport отзывает всю цепочку
+    (в том числе только что выданный access) → «Authentication credentials were
+    not provided» (19.09.2026). Поэтому новую пару пишем туда, откуда её читает
+    OrpheusDL. Если в файле уже ДРУГОЙ refresh_token, чем тот, которым рефрешили
+    мы, — OrpheusDL успел обновиться сам, его пара новее: не перезаписываем."""
+    from datetime import datetime, timedelta
+    new_at = (j or {}).get("access_token") or ""
+    if not new_at or not used_rt:
+        return False
+
+    def _m(cd: dict):
+        if (cd.get("refresh_token") or "") != used_rt:
+            print("[beatport] refresh_token в сессии уже обновлён OrpheusDL — "
+                  "свою пару не записываю", flush=True)
+            return False
+        cd["access_token"] = new_at
+        if j.get("refresh_token"):
+            cd["refresh_token"] = j["refresh_token"]
+        try:
+            ttl = int(j.get("expires_in", 3600))
+        except (TypeError, ValueError):
+            ttl = 3600
+        cd["expires"] = datetime.now() + timedelta(seconds=ttl)
+        return True
+
+    return _write_bp_session(_m)
+
+
+def _invalidate_bp_session() -> bool:
+    """Сбросить сохранённую сессию, которую Beatport отклонил («Authentication
+    credentials were not provided» — цепочка токенов отозвана). С refresh_token
+    = None OrpheusDL на следующем старте сам входит логином и паролем
+    (interface.py: `if session["refresh_token"] is None: self.login(...)`), без
+    обращения к refresh — то есть без риска ещё раз погасить цепочку."""
+    _BP_AT_CACHE["token"], _BP_AT_CACHE["exp"] = "", 0.0
+
+    def _m(cd: dict):
+        if not cd.get("refresh_token") and not cd.get("access_token"):
+            return False                     # уже сброшена
+        cd["access_token"] = None
+        cd["refresh_token"] = None
+        return True
+
+    return _write_bp_session(_m)
+
 
 async def _beatport_access_token() -> str:
     """Return a valid Beatport access_token, or '' if no session. Refreshes via
@@ -208,6 +426,7 @@ async def _beatport_access_token() -> str:
                                    "grant_type": "refresh_token"})
         if r.status_code == 200:
             j = r.json()
+            _persist_refreshed_session(rt, j)   # иначе OrpheusDL придёт со старым rt → отзыв
             _BP_AT_CACHE["token"] = j["access_token"]
             _BP_AT_CACHE["exp"]   = now + max(60, int(j.get("expires_in", 3600)) - 120)
             return _BP_AT_CACHE["token"]
@@ -230,6 +449,30 @@ _RE_SKIP         = re.compile(r'skip|already exist|ignore', re.I)
 _RE_PROGRESS     = re.compile(r'(\d+)\s*/\s*(\d+)')
 _RE_AUTH_FAIL    = re.compile(r'invalid.*creden|wrong.*password|login.*fail|auth.*fail|401|403', re.I)
 _RE_SUBSCRIPTION = re.compile(r'subscription|professional|upgrade.*plan|higher.*tier', re.I)
+# Явное «логин/пароль неверны» — единственное, что вправе стать BEATPORT_NOT_AUTHED
+# без доказанного входа. Проверяется РАНЬШЕ сети: модуль заворачивает HTTP-отказ
+# входа в `ConnectionError(<тело ответа>)`, и сетевой шаблон иначе съел бы его.
+_RE_BAD_CREDS    = re.compile(r'invalid[^\n]*creden|wrong[^\n]*password|incorrect[^\n]*(?:password|creden)|'
+                              r'unable to log in|invalid_grant[^\n]*password|'
+                              r'password[^\n]*(?:invalid|incorrect|wrong)', re.I)
+# Цепочка токенов отозвана / сессионный токен отклонён — это НЕ неверный пароль.
+_RE_TOKEN_REJECTED = re.compile(r'credentials were not provided|token_not_valid|'
+                                r'Given token not valid', re.I)
+# Транспорт: сеть/TLS/DNS/таймаут. Такой сбой — повод повторить, а не «проверь пароль».
+_RE_NET          = re.compile(r'ConnectTimeout|ReadTimeout|ConnectError|ConnectionError|'
+                              r'handshake operation timed out|timed\s+out|\btimeout\b|'
+                              r'Max retries exceeded|getaddrinfo|SSLError|NameResolution|'
+                              r'Temporary failure in name resolution|RemoteDisconnected|'
+                              r'Connection (?:aborted|reset|refused)|ProxyError', re.I)
+# Голый код/фраза без пояснений. Коды — только отдельным словом: иначе «401»
+# внутри ID релиза (…/track/x/19401…) тоже считался отказом входа.
+_RE_AUTH_BARE    = re.compile(r'login.*fail|auth.*fail|\b401\b|\b403\b', re.I)
+
+_NET_VERDICT = ("Beatport: сеть недоступна (таймаут соединения с api.beatport.com) — "
+                "повторю. Логин и пароль тут ни при чём.")
+_TOKEN_VERDICT = ("BEATPORT_SESSION_REJECTED: Beatport отклонил сохранённый токен сессии "
+                  "(Authentication credentials were not provided) — сессия сброшена, при "
+                  "повторе вход выполнится заново логином и паролем автоматически.")
 
 
 _QUALITIES = [
@@ -372,6 +615,19 @@ class OrpheusBeatportEngine(EngineBase):
         self._perm_fails = 0
         self._attempts = 0
         self._tier_note = ""
+        # True, как только OrpheusDL напечатал тариф аккаунта
+        # («… subscription detected …») — это доказывает, что ВХОД УДАЛСЯ.
+        # После этого 401/403 — права/регион на конкретный релиз, а НЕ «неверный
+        # логин»: иначе региональный отказ на треке рушился в BEATPORT_NOT_AUTHED
+        # и пугал владельца «акк отвалился» при живом аккаунте (гость, «Yonder»,
+        # 18.09.2026: 15:02:28 «Professional subscription detected» → 15:02:31
+        # ложный BEATPORT_NOT_AUTHED; тот же аккаунт качал в 16:25).
+        self._logged_in = False
+        # Почему не узнали тариф в build_cmd ("" / network / auth / other). Если
+        # из-за сети — проверка подписки выключена, строки «subscription detected»
+        # не будет в принципе, и голый 401/403 не доказывает неверный пароль.
+        self._tier_fail = ""
+        self._net_seen = False
 
     def qualities(self) -> list[dict]:
         return list(_QUALITIES)
@@ -394,28 +650,14 @@ class OrpheusBeatportEngine(EngineBase):
 
         save_path = config.get("beatport-save-path") or config.get("save-path") or ""
         orpheus_quality = _QUALITY_ORPHEUS.get(quality, "hifi")
+        _TIER_STATE["fail"] = ""
         self._tier_note = _update_orpheus_settings(orpheus_quality, save_path, config)
+        self._tier_fail = _TIER_STATE.get("fail", "")
 
-        # The bundled embeddable Python runs ISOLATED (sys.flags.isolated==1, a side
-        # effect of the ._pth) → it does NOT add the script's directory to sys.path AND
-        # ignores PYTHONPATH. So a plain `python orpheus.py` dies with
-        # "ModuleNotFoundError: No module named 'orpheus.core'" even though the inner
-        # orpheus/ package sits right next to orpheus.py (proven on a bundled install;
-        # the dev .venv is non-isolated so it never reproduced). Bootstrap via -c: put
-        # the OrpheusDL dir on sys.path, restore argv, then run orpheus.py as __main__.
-        orph_dir   = str(_orpheus_dir())
-        orpheus_py = str(_orpheus_dir() / "orpheus.py")
-        _boot = (
-            "import sys, runpy; "
-            f"sys.path.insert(0, {orph_dir!r}); "
-            f"sys.argv = [{orpheus_py!r}] + sys.argv[1:]; "
-            f"runpy.run_path({orpheus_py!r}, run_name='__main__')"
-        )
-        cmd = [_orpheus_python(), "-c", _boot]
-        if save_path:
-            cmd += ["-o", save_path.rstrip("/\\")]
-        cmd.append(url)
-        return cmd
+        # Свой каталог настроек (см. `_corridor_settings`), но ОБЩАЯ сессия:
+        # loginstorage.bin остаётся один файл на весь аккаунт Beatport.
+        return orpheus_cmd(_corridor_config_dir("beatport"), url, save_path,
+                           session_file=_session_path())
 
     def iter_events(self, line: str, *, progress: tuple[int, int]):
         clean = _strip_ansi(line).strip()
@@ -452,7 +694,28 @@ class OrpheusBeatportEngine(EngineBase):
                     f"вне прав аккаунта. Дальше пробовать бессмысленно."
                 )
 
-        if "BEATPORT_NOT_AUTHED" in clean or _RE_AUTH_FAIL.search(clean):
+        # Строка тарифа («… subscription detected …») = успешный вход. С этого
+        # момента любой 401/403 — это права/регион на конкретный релиз, а НЕ логин.
+        if re.search(r'subscription\s+detected', clean, re.I):
+            self._logged_in = True
+
+        # Литеральный BEATPORT_NOT_AUTHED — собственный сигнал OrpheusDL о том, что
+        # войти НЕ удалось (появляется только ДО входа). Голый 401/403 считаем
+        # авторизацией лишь пока не вошли; после входа его разбирает is_finished
+        # (Territory-first + «нет прав»), не рвём поток здесь ложным FATAL.
+        #
+        # 19.09.2026: сетевой сбой (TLS-таймаут до api.beatport.com) НИКОГДА не
+        # auth — ни сам, ни через голый 401/403, пока сеть в этом прогоне уже
+        # сбоила или тариф не узнали из-за сети/прочего. Отозванный токен
+        # («credentials were not provided») — тоже не пароль: вердикт даёт
+        # is_finished, прогон не рвём, чтобы раннер мог повторить.
+        if _RE_NET.search(clean) and not _RE_BAD_CREDS.search(clean):
+            self._net_seen = True
+        _bare_is_auth = (_RE_AUTH_BARE.search(clean) and not self._logged_in
+                         and not self._net_seen
+                         and self._tier_fail not in ("network", "other")
+                         and not _RE_TOKEN_REJECTED.search(clean))
+        if "BEATPORT_NOT_AUTHED" in clean or _RE_BAD_CREDS.search(clean) or _bare_is_auth:
             yield Event(
                 kind=EventKind.FATAL,
                 message="BEATPORT_NOT_AUTHED: неверный логин/пароль Beatport — проверь Settings",
@@ -487,7 +750,28 @@ class OrpheusBeatportEngine(EngineBase):
             return EngineResult(False, error="Beatport: трек недоступен в регионе твоего аккаунта "
                                              "(Territory Restricted) — нужен Beatport-аккаунт/прокси в "
                                              "разрешённой стране. Скачать нельзя.")
-        if "BEATPORT_NOT_AUTHED" in log_text or _RE_AUTH_FAIL.search(log_text):
+        # Голый 401/403 = «неверный логин» ТОЛЬКО если вход не удался. Если тариф
+        # уже определился («… subscription detected …»), вход прошёл — тогда 403
+        # падает НИЖЕ, в ветку прав/региона (иначе она недостижима: _RE_AUTH_FAIL
+        # ловит «403» раньше неё). Литеральный BEATPORT_NOT_AUTHED — всегда auth.
+        _login_ok = self._logged_in or bool(re.search(r'subscription\s+detected', log_text, re.I))
+        # Порядок (19.09.2026): явный отказ по логину/паролю → отозванный токен →
+        # сеть → и только потом голый 401/403, да и то лишь когда тариф был
+        # проверен (иначе «subscription detected» не могло появиться, и отсутствие
+        # этой строки ничего не доказывает).
+        if "BEATPORT_NOT_AUTHED" in log_text or _RE_BAD_CREDS.search(log_text):
+            return EngineResult(False, error="BEATPORT_NOT_AUTHED: неверный логин/пароль Beatport")
+        if _RE_TOKEN_REJECTED.search(log_text):
+            # Цепочка отозвана — пароль верный, мёртв токен. Сбрасываем сессию,
+            # чтобы следующий запуск вошёл заново логином и паролем.
+            _invalidate_bp_session()
+            return EngineResult(False, error=_TOKEN_VERDICT)
+        _net = bool(_RE_NET.search(log_text)) or self._net_seen
+        _downloads = len(re.findall(r'Downloading track file|Saving\s*:', log_text, re.I))
+        if _net and _downloads == 0:
+            return EngineResult(False, error=_NET_VERDICT)
+        if (_RE_AUTH_BARE.search(log_text) and not _login_ok and not _net
+                and self._tier_fail not in ("network", "other")):
             return EngineResult(False, error="BEATPORT_NOT_AUTHED: неверный логин/пароль Beatport")
 
         # Beatport's download-URL request can 403 with a permission error that

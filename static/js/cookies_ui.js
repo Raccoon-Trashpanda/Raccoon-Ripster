@@ -161,6 +161,7 @@ const _SEARCH_SVCS = [
   {value: 'spotify',  label: '🟢 Spotify',       key: 'spotify'},
   {value: 'soundcloud', label: '☁️ SoundCloud',  key: 'soundcloud'},
   {value: 'beatport', label: '🎧 Beatport',      key: 'beatport'},
+  {value: 'jiosaavn', label: '🇮🇳 JioSaavn',      key: 'jiosaavn'},
   // Геттер, а не строка: t() должен вызваться В МОМЕНТ отрисовки списка, иначе
   // (модульный const вычисляется при загрузке) в англ. интерфейсе навсегда
   // осталось бы русское «Яндекс.Музыка».
@@ -169,23 +170,53 @@ const _SEARCH_SVCS = [
 
 // Первый показ вкладки за эту загрузку страницы стартовал ВСЕГДА с Apple —
 // select собран статикой без selected, а браузер берёт первый <option>. Теперь
-// первый раз подставляем запомненный сервис (_last_svc, пишется из doSearch)
-// или дефолт из настроек (default-search-service); дальше select уже живёт
-// своей жизнью в DOM и cur ниже просто сохраняет то, что там реально стоит.
+// первый раз подставляем дефолт из настроек (default-search-service); дальше
+// select уже живёт своей жизнью в DOM и cur ниже сохраняет то, что там стоит.
+//
+// 19.09.2026: порядок изменён. Серверный `_last_svc` (последний ручной выбор)
+// стоял ВПЕРЕДИ настройки — и один поиск в Apple навсегда уводил туда и кнопку
+// «Открыть дискографию» в подсказках, где Apple ничего не проигрывает. Теперь
+// при загрузке страницы побеждает настройка; не задана («Авто») — первый
+// подключённый сервис с мгновенным превью (Deezer → Spotify → Qobuz). Выбор,
+// сделанный в самой вкладке, живёт до перезагрузки: select его просто держит.
 let _searchSvcInitialized = false;
+// Промис последнего обновления списка: подсказка ждёт его, прежде чем искать,
+// иначе поиск уходил в первый <option> статичной разметки (Apple).
+let _searchSvcReady = Promise.resolve();
 
-async function _refreshSearchSvcSelect() {
+function _searchSvcInitial(avail) {
+  const cfg = String((S.config && S.config['default-search-service']) || '').trim();
+  if (cfg && avail.includes(cfg)) return cfg;
+  for (const s of ['deezer', 'spotify', 'qobuz']) if (avail.includes(s)) return s;
+  return avail[0] || '';
+}
+
+// Сменили дефолт в Настройках — применяем сразу, без ручного выбора во вкладке.
+function _searchSvcApplyDefault() {
+  _searchSvcInitialized = false;
+  return _refreshSearchSvcSelect();
+}
+
+function _refreshSearchSvcSelect() {
+  _searchSvcReady = _refreshSearchSvcSelectRun();
+  return _searchSvcReady;
+}
+
+async function _refreshSearchSvcSelectRun() {
   const sel = document.getElementById('search-svc');
+  // Пикер в Настройках показывает то, что реально сохранено ("" = «Авто»).
+  const pick = document.getElementById('s-default-search-svc');
+  if (pick && S.config) pick.value = String(S.config['default-search-service'] || '');
   if (!sel) return;
   try {
     const status = await fetch('/api/services/status').then(r => r.json());
-    let cur = sel.value;
-    if (!_searchSvcInitialized) {
-      cur = (S.config && (S.config['_last_svc'] || S.config['default-search-service'])) || cur;
-      _searchSvcInitialized = true;
-    }
     const opts = _SEARCH_SVCS.filter(o => status[o.key] !== false && status[o.key]);
     if (!opts.length) return;
+    let cur = sel.value;
+    if (!_searchSvcInitialized && S.config) {
+      cur = _searchSvcInitial(opts.map(o => o.value)) || cur;
+      _searchSvcInitialized = true;
+    }
     sel.innerHTML = opts.map(o => `<option value="${o.value}">${o.label}</option>`).join('');
     if ([...sel.options].some(o => o.value === cur)) sel.value = cur;
     onSearchSvcChange();
@@ -386,6 +417,7 @@ function _qualityTags(item) {
   if (svc === 'tidal')       return hr ? ['HI-RES', 'FLAC', 'AAC'] : ['FLAC', 'AAC'];
   if (svc === 'deezer')      return ['FLAC', 'MP3'];
   if (svc === 'beatport')    return ['FLAC', 'AAC'];
+  if (svc === 'jiosaavn')    return ['AAC'];
   if (svc === 'yandex')      return ['FLAC', 'AAC'];
   if (svc === 'soundcloud')  return ['AAC'];
   if (svc === 'spotify')     return ['320'];

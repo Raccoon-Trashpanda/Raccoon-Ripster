@@ -222,6 +222,9 @@ def _key(item: dict) -> str:
 # Живёт на диске: иначе он не переживает перезапуск, и каждое утро всё
 # спрашивается заново — у MusicBrainz это прямой путь в ограничитель.
 _ARTIST_TTL = 14 * 24 * 3600
+# Версия состава в кэше. Меняеться, когда меняется САМ ОТОРБОР: списки,
+# собранные старым правилом, новый отбор должен пересчитать, а не раздавать.
+_ARTIST_CACHE_V = 2
 _artist_cache: dict = {}
 _artist_loaded = False
 
@@ -246,7 +249,7 @@ def _artist_cache_load() -> None:
 def _artist_cache_get(genre: str):
     _artist_cache_load()
     rec = _artist_cache.get(norm(genre))
-    if not isinstance(rec, dict):
+    if not isinstance(rec, dict) or rec.get("v") != _ARTIST_CACHE_V:
         return None
     if time.time() - float(rec.get("ts") or 0) > _ARTIST_TTL:
         return None
@@ -257,7 +260,7 @@ def _artist_cache_get(genre: str):
 def _artist_cache_put(genre: str, names: list) -> None:
     import json
     _artist_cache_load()
-    _artist_cache[norm(genre)] = {"ts": time.time(), "names": names}
+    _artist_cache[norm(genre)] = {"v": _ARTIST_CACHE_V, "ts": time.time(), "names": names}
     try:
         _artist_cache_file().write_text(json.dumps(_artist_cache, ensure_ascii=False),
                                         encoding="utf-8")
@@ -336,8 +339,39 @@ def preview_of(station_id: str) -> dict:
     return rec
 
 
+def _primary_genre_ok(tag_rows: list, genre: str) -> Optional[bool]:
+    """Основной ли это у артиста жанр по его собственным тегам.
+
+    None — данных нет: жанрового тега в списке не видно, судить не о чем.
+    Это НЕ «нет»: артист найден этим тегом, просто вес сюда не доехал.
+
+    Только «верхних 2–3 по позиции» мало — замер 20.09.2026 на живой сборке:
+    у Scooter techno ВТОРОЙ (rave=6, techno=4), у Moby ТРЕТИЙ вровень с
+    downtempo (electronic=13, ambient=9, techno=6) — и оба играли станцию,
+    будучи евродэнсом и эмбиент-рокером. Поэтому besides позиции требуем и
+    magnitude: вес жанра не меньше ¾ самого тяжёлого тега. На тех же данных
+    Underworld (techno 9 при top 11) и Jeff Mills (2 при 2) остаются, а
+    Scooter (4 при 6), Moby, Kraftwerk (5 при 18), The Prodigy, deadmau5 —
+    падают.
+    """
+    from ripster import genre_sources as _gs
+    want = norm(genre)
+    if not want:
+        return None
+    rows = sorted(((c, n) for c, n in tag_rows
+                   if c > 0 and _gs.looks_like_genre(n)), reverse=True)
+    if not rows:
+        return None
+    hit = next(((c, n) for c, n in rows if norm(n) == want), None)
+    if hit is None:
+        return None
+    weight = hit[0]
+    heavier = sum(1 for c, _n in rows if c > weight)
+    return heavier <= 2 and weight >= 0.75 * rows[0][0]
+
+
 async def artists_for_genre(genre: str, limit: int = 14) -> list[str]:
-    """Кто ИГРАЕТ этот жанр — по весу тега в MusicBrainz.
+    """Кто ИГРАЕТ этот жанр — по ОСНОВНОМУ тегу артиста в MusicBrainz.
 
     Это главный слой станции, а не украшение. Текстовый поиск по слову жанра
     находит вещи со словом В НАЗВАНИИ: замер 06.09.2026 на ПК по «techno» дал
@@ -351,7 +385,10 @@ async def artists_for_genre(genre: str, limit: int = 14) -> list[str]:
     Берём ВЕС ТЕГА, а не `score` выдачи: score — это релевантность строки
     запросу, по нему в «melodic techno» лезла Лана Дель Рей. Порог веса
     отсекает случайных: на замере Кайли Миноуг и Nine Inch Nails висели в
-    «techno» ровно с весом 1.
+    «techno» ровно с весом 1. Весом 2–3 уже не отсекались (замер 20.09.2026):
+    Moby и Scooter дали станцию не своей музыки — поэтому добавлена сверка
+    с тегами САМОГО артиста, см. [_primary_genre_ok]. Теги едут в том же
+    ответе поиска, лишних запросов к ограничителю это не просит.
 
     Пустой список — честный ответ «не знаю»: MusicBrainz мог не ответить, и
     выдумывать имена вместо него нельзя.
@@ -377,11 +414,28 @@ async def artists_for_genre(genre: str, limit: int = 14) -> list[str]:
         # Пустое НЕ кэшируем: «не ответили» и «артистов нет» — разные вещи, и
         # запомнить первое как второе значит убить жанр на неделю.
         return []
-    strong = [n for w, n in rows if w >= 2]
+
+    def confirmed(min_w: int, max_w: int) -> list:
+        out = []
+        for w, n, tags in rows:
+            if not (min_w <= w <= max_w):
+                continue
+            # «Не знаю» не выбраковываем (правило 3): отбрасываем только
+            # доказанно второстепенный жанр.
+            if _primary_genre_ok(tags, g) is not False:
+                out.append(n)
+        return out
+
+    strong = confirmed(2, 10 ** 9)
     # Порог мягкий: если сильных мало, добираем весом 1 — лучше короткий
     # честный список, чем пустой, но и мусор наверх не пускаем.
     if len(strong) < 4:
-        strong += [n for w, n in rows if w == 1][: 6 - len(strong)]
+        strong += confirmed(1, 1)[: 6 - len(strong)]
+    dropped = sum(1 for w, n, t in rows if w >= 1
+                  and _primary_genre_ok(t, g) is False)
+    print(f"[station] MB «{g}»: кандидатов {sum(1 for w, _n, _t in rows if w >= 1)},"
+          f" жанр подтверждён у {len(strong)}, отвергнут как второстепенный у {dropped}",
+          flush=True)
     _artist_cache_put(g, strong)
     return strong[:limit]
 
@@ -413,20 +467,100 @@ def credited_is(credited: str, artist: str) -> bool:
     return any(norm(p) == want for p in parts if p.strip())
 
 
+def credited_confirmed(credited: str, artist: str, credited_id: str = "",
+                       known_ids=()) -> bool:
+    """Тот же вопрос, что [credited_is], но спорные имена решает по id сервиса.
+
+    Строкой дуэт от совместной вещи не отличить — это знал и записывался в
+    честное ограничение тест: «Calyx & Teebee» для TeeBee брать НАДО,
+    «Alex & Sierra» для ALEX — НЕ надо, а устроены строки одинаково.
+    Различает их идентификатор, и замер 20.09.2026 показал, где его взять:
+    ищет программа артиста у того же сервиса — и если под этим именем там
+    НЕСКОЛЬКО разных артистов (Deezer на «ALEX» знает и «Alex», и «A L E X»),
+    имя само по себе ничего не доказывает: тогда просим либо id из known_ids,
+    либо полное совпадение строки исполнителя. Когда артист с таким именем
+    у сервиса один («TeeBee» → 434024), частичное совпадение остаётся
+    достаточным — совместный трек никуда не девается.
+
+    Пустой known_ids — сервис айди не отдаёт или не ответил: не ужесточаем,
+    «не знаю» не бывает отказом.
+    """
+    if not credited_is(credited, artist):
+        return False
+    if len(known_ids) > 1 and norm(credited) != norm(artist):
+        return bool(credited_id) and str(credited_id) in known_ids
+    return True
+
+
+# Айди артиста у сервиса. Справочник стабильнее выдачи поиска: держим в
+# процессе, сеть — ровно один запрос на пару (сервис, имя) за сборку.
+_artist_ids_cache: dict = {}
+
+
+async def _service_artist_ids(service: str, artist: str) -> set:
+    """Идентификаторы, которыми ЭТОТ сервис знает артистов ровно с таким именем.
+
+    Больше одного — имя многозначно, и для станции оно само по себе ничего не
+    доказывает (см. [credited_confirmed]). Пусто — сервис айди не отдаёт или
+    промолчал: сверку не ужесточаем.
+    """
+    key = (service, norm(artist))
+    hit = _artist_ids_cache.get(key)
+    if hit is not None:
+        return hit
+    from ripster.routes import discovery as _d
+    ids: set = set()
+    try:
+        if service == "deezer":
+            res = await _d._search_deezer(artist, "artist", 10)
+        elif service == "qobuz":
+            res = await _d._search_qobuz(artist, "artist", 10)
+        elif service == "tidal":
+            res = await _d._search_tidal(artist, "artist", 10)
+        elif service == "yandex":
+            res = await _d._search_yandex(artist, "artist", 10)
+        elif service == "apple":
+            res = await _d._search_apple(artist, "artist", 10, "")
+        else:
+            res = None
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[station] {service}: поиск артиста «{artist}» не удался "
+              f"({type(e).__name__}: {e})", flush=True)
+        return set()                                           # провал не кэшируем
+    for it in (res or {}).get("results") or []:
+        if norm(str(it.get("artist") or it.get("title") or "")) == norm(artist):
+            iid = str(it.get("id") or "")
+            if iid:
+                ids.add(iid)
+    _artist_ids_cache[key] = ids
+    return ids
+
+
 async def _artist_tracks(service: str, artist: str, limit: int = 4) -> list[dict]:
     """Треки конкретного артиста у одного сервиса, со СТРОГОЙ сверкой имени.
 
     Без сверки поиск по имени возвращает «похожее»: у сервисов свои правила
-    расширения запроса, и в станцию заезжают чужие исполнители.
+    расширения запроса, и в станцию заезжают чужие исполнители. Имя, под
+    которым сервис знает несколько разных артистов, доказательством не
+    считается — там решает идентификатор, см. [credited_confirmed].
     """
     items = await _service_search(service, artist, limit * 3)
+    ids = await _service_artist_ids(service, artist)
     out = []
+    rejected = 0
     for it in items:
         if credited_is(it.get("artist", ""), artist):
-            it["from_artist"] = True
-            out.append(it)
+            if credited_confirmed(it.get("artist", ""), artist,
+                                  it.get("artist_id", ""), ids):
+                it["from_artist"] = True
+                out.append(it)
+            else:
+                rejected += 1
         if len(out) >= limit:
             break
+    if rejected:
+        print(f"[station] {service}: «{artist}» — совпадение по имени без "
+              f"подтверждения айди: {rejected} трек(а) не взято", flush=True)
     return out
 
 
@@ -438,6 +572,8 @@ async def _sc_chart(slug: str, limit: int) -> list[dict]:
     from ripster import http_client as _HTTP
     cid = await _sc._get_client_id()
     if not cid:
+        print("[station] soundcloud:chart: client_id не добыт — чарта не будет",
+              flush=True)
         return []
     out: list[dict] = []
     async with _HTTP.ashared() as c:
@@ -447,8 +583,20 @@ async def _sc_chart(slug: str, limit: int) -> list[dict]:
                 "client_id": cid, "limit": limit,
             })
             if r.status_code != 200:
+                # 404 на ВСЕХ валидных по форме жанрах (замер 20.09.2026:
+                # techno/electronic/rock/allmusic — везде 404, страница
+                # soundcloud.com/charts тоже мертва) — это чарт снят у сервиса,
+                # а не наши параметры. Молча возвращать [] нельзя: источник
+                # выглядит мёртвым по вине кода, когда он мёртв по вине сети.
+                print(f"[station] soundcloud:chart: kind={kind} "
+                      f"genre=soundcloud:genres:{slug}: ответ {r.status_code} "
+                      f"— endpoint недоступен", flush=True)
                 continue
-            for row in (r.json() or {}).get("collection") or []:
+            collection = (r.json() or {}).get("collection") or []
+            if not collection:
+                print(f"[station] soundcloud:chart: kind={kind} «{slug}»: "
+                      f"200, но чарт пуст", flush=True)
+            for row in collection:
                 t = row.get("track") or {}
                 if not t.get("id"):
                     continue
@@ -461,6 +609,36 @@ async def _sc_chart(slug: str, limit: int) -> list[dict]:
             if out:
                 break
     return out
+
+
+# У сервисов доступ к сети настраивает app.py, когда ставит роуты. Станцию
+# же зовут и мимо него — из теста, скрипта, фоновой догревки, — и там
+# _config пуст: qobuz на пустом app_id отдаёт track/search total=0, tidal —
+# «токен не настроен». Замер 20.09.2026: оба источника молча ноль в сборку,
+# хотя учётки в tokens/*.yaml живые и с токеном оба отдают по 5+ треков.
+# Читаем те же файлы, что читает приложение. config.yaml при этом только
+# читается — не пишется.
+_cfg_ensured = False
+
+
+def _ensure_config() -> None:
+    global _cfg_ensured
+    if _cfg_ensured:
+        return
+    _cfg_ensured = True
+    from ripster.routes import discovery as _d
+    if _d._config:
+        return
+    from pathlib import Path
+    from ripster import config_service as _cs
+    try:
+        base = Path(__file__).resolve().parent.parent
+        cfg = _cs.load_config(base / "config.yaml", base / "tokens")
+        if cfg:
+            _d._config.update(cfg)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[station] конфиг сервисов не поднят ({type(e).__name__}): "
+              f"qobuz/tidal могут молчать", flush=True)
 
 
 async def _service_search(service: str, query: str, limit: int) -> list[dict]:
@@ -482,6 +660,10 @@ async def _service_search(service: str, query: str, limit: int) -> list[dict]:
     except Exception as e:                                     # noqa: BLE001
         print(f"[station] {service}: {type(e).__name__}: {e}", flush=True)
         return []
+    if (res or {}).get("error"):
+        # Сервис ответил ПУСТО, но объяснил почему («токен не настроен»,
+        # «истёк») — без этой строки ноль неотличим от «нет такой музыки».
+        print(f"[station] {service}: {res['error']}", flush=True)
     items = (res or {}).get("results") or []
     for it in items:
         it.setdefault("service", service)
@@ -501,6 +683,7 @@ async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) ->
         return {"ok": False, "id": station_id, "tracks": [],
                 "reason": f"нет такой станции: {station_id}"}
     _id, sc_slug, query, title = st
+    _ensure_config()
 
     started = time.time()
 
@@ -524,17 +707,33 @@ async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) ->
     sources: dict[str, int] = {}
     pool: list[dict] = []
     for name, res in zip(names, got):
-        if isinstance(res, Exception) or not res:
-            sources[name] = 0
+        # Имя у источника треков артиста НЕ уникально: ten artists × три
+        # сервиса дают десять «artist:deezer» подряд. Раньше каждое следующее
+        # перезаписывало предыдущее, и расклад по источникам врал: в
+        # diagnostics оставался только последний артист.
+        sources.setdefault(name, 0)
+        if isinstance(res, Exception):
+            print(f"[station] {name}: {type(res).__name__}: {res}", flush=True)
+            continue
+        if not res:
             continue
         kept = []
         for it in res:
             if not it.get("curated"):
-                # Поиск обязан пройти сверку жанра; «не знаю» пропускаем.
-                if genre_matches(_id, it.get("genre") or "") is False:
+                gm = genre_matches(_id, it.get("genre") or "")
+                if it.get("from_artist"):
+                    # Трек артиста жанра: выкидываем только явное несовпадение.
+                    if gm is False:
+                        continue
+                elif gm is not True:
+                    # Находка ПО СЛОВУ жанра обязана жанр ДОКАЗАТЬ. Раньше «не знаю»
+                    # пропускалось, а у выдачи поиска жанр почти всегда пустой —
+                    # и в «Techno» ехали «Techno & Tequila», «TECHNO TAVERNE» и
+                    # детский «Toddler Techno» (замер 20.09.2026): слово в названии,
+                    # жанр неизвестен.
                     continue
             kept.append(it)
-        sources[name] = len(kept)
+        sources[name] += len(kept)
         pool.extend(kept)
 
     if not pool:
@@ -555,6 +754,50 @@ async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) ->
     # Взвешенный отбор без повторов. Зерно на вызов: перерисовка не дёргает
     # список, а следующее нажатие даёт другой эфир.
     rnd = random.Random(seed if seed is not None else int(time.time() * 1000))
+
+    # ЧТО ЧЕЛОВЕК УЖЕ СКАЗАЛ СТАНЦИЯМ (station_events.py). Ровно этого не хватало,
+    # чтобы станция перестала быть «случайной выборкой по жанру»: скип на пятой
+    # секунде и дослушанный трек — противоположные сигналы, и оба у нас теперь
+    # записаны. Всё локальное, наружу ничего не уходит.
+    #
+    # Сбой базы НЕ должен ронять станцию: нет истории — работаем как раньше.
+    banned: set = set()
+    recent: set = set()
+    artist_bias: dict = {}
+    try:
+        from ripster import station_events as _se
+        if _se._DB is not None:
+            banned = _se.banned_track_keys()
+            recent = _se.recent_track_keys(7)
+            for name, st_ in _se.artist_stats(90).items():
+                b = 1.0
+                if st_.get("skip_rate") is not None:
+                    # 0 скипов → ×1.3, сплошные скипы → ×0.35.
+                    b *= 1.3 - 0.95 * float(st_["skip_rate"])
+                b *= 1.0 + 0.25 * min(3, st_.get("downloads", 0))   # скачал — сильный плюс
+                b *= 1.0 + 0.15 * min(3, st_.get("likes", 0))
+                if st_.get("dislikes"):
+                    b *= 0.5
+                artist_bias[norm(name)] = max(0.2, min(2.5, b))
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[station] история прослушиваний недоступна ({type(e).__name__}) — "
+              f"эфир без подстройки", flush=True)
+
+    def _ev_key(it: dict) -> str:
+        isrc = norm((it.get("isrc") or "")).upper()
+        if isrc:
+            return f"isrc:{isrc}"
+        return f"name:{(it.get('artist') or '').strip().lower()}|{(it.get('title') or '').strip().lower()}"
+
+    # Забаненное выбрасываем всегда; «звучало на неделе» — только если после
+    # этого эфир не схлопнется (правило «лучше повтор, чем пустая плитка»).
+    if banned:
+        items = [it for it in items if _ev_key(it) not in banned] or items
+    if recent:
+        fresh = [it for it in items if _ev_key(it) not in recent]
+        if len(fresh) >= limit:
+            items = fresh
+
     weights = []
     for it in items:
         w = popularity_weight(it)
@@ -565,6 +808,7 @@ async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) ->
             # Это не «чуть лучше»: без перевеса поиск по слову забивает эфир
             # своим объёмом.
             w *= 3.0
+        w *= artist_bias.get(norm(it.get("artist", "")), 1.0)
         weights.append(w)
 
     order: list[dict] = []

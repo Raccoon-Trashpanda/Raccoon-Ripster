@@ -16,6 +16,7 @@ Install: queue.install(app, ctx)
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import datetime
 
@@ -109,6 +110,53 @@ async def get_queue(request: Request):
     return _queue_snapshot()
 
 
+# Треклист задачи для раскрытия карточки деревом. Отдельной ручкой и отдельным
+# кэшем, а НЕ полем задачи: задача целиком летит в каждый queue_update по WS, и
+# сотня названий на каждом тике прогресса была бы чистым балластом. Запрашивается
+# только когда человек раскрыл карточку. Пустой список — честное «не знаю
+# треков» (Spotify/SoundCloud/BBC, сеть): фронт тогда рисует пронумерованные строки.
+_TRACKLIST_CACHE: dict[str, list] = {}
+
+
+@router.get("/api/queue/{task_id}/tracks")
+async def queue_task_tracks(task_id: str, request: Request):
+    task = next((t for t in _queue if t.get("id") == task_id), None)
+    if task is None:
+        raise HTTPException(404, imsg("err.task_not_found", "Задача не найдена"))
+    sid = _guest_session_id(request)
+    if sid and task.get("session_id") != sid:
+        raise HTTPException(403, imsg("err.forbidden", "Нет доступа"))
+    if task_id in _TRACKLIST_CACHE:
+        return {"ok": True, "tracks": _TRACKLIST_CACHE[task_id]}
+    url = task.get("url") or ""
+    tracks: list = []
+    try:
+        m_bp = re.search(r"beatport\.com/(?:[a-z]{2}/)?release/[^/]+/(\d+)", url)
+        if m_bp:
+            from ripster.routes.beatport import beatport_release
+            rel = await asyncio.wait_for(beatport_release(int(m_bp.group(1))), 15)
+            tracks = [{"title": (x.get("title") or "") + (f" ({x['mix']})" if x.get("mix") else ""),
+                       "artist": x.get("artist") or ""}
+                      for x in (rel.get("tracks") or [])]
+        else:
+            from ripster import resolver as _resolver
+            if not _resolver._cfg:
+                _resolver.install(_cfg)
+            got = await asyncio.wait_for(_resolver.resolve(url), 15)
+            if len(got) > 1:
+                tracks = [{"title": x.get("title") or "", "artist": x.get("artist") or ""}
+                          for x in got]
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[queue] треклист {task_id} не получен: {type(e).__name__}: {e}", flush=True)
+        return {"ok": True, "tracks": []}                      # без кэша — повторит при следующем раскрытии
+    _TRACKLIST_CACHE[task_id] = tracks
+    if len(_TRACKLIST_CACHE) > 500:                            # задачи уходят из очереди — кэш не копим
+        live = {t.get("id") for t in _queue}
+        for k in [k for k in _TRACKLIST_CACHE if k not in live]:
+            _TRACKLIST_CACHE.pop(k, None)
+    return {"ok": True, "tracks": tracks}
+
+
 @router.post("/api/queue/delivered/{task_id}")
 async def mark_task_delivered(task_id: str):
     """Bot acks that it has uploaded EVERY file of a task to the chat. Stamps the
@@ -132,7 +180,8 @@ async def add_to_queue(body: dict, request: Request):
     if _validate_url and not _validate_url(url):
         raise HTTPException(400,
             "URL not from a supported service. Supported: Apple Music, "
-            "Deezer, Qobuz, Tidal, Spotify, SoundCloud, Beatport, Yandex Music, BBC Sounds")
+            "Deezer, Qobuz, Tidal, Spotify, SoundCloud, Beatport, Yandex Music, BBC Sounds, "
+            "JioSaavn")
 
     svc     = _detect_service(url) if _detect_service else "apple"
 
@@ -214,6 +263,13 @@ async def add_to_queue(body: dict, request: Request):
     _BEATPORT_QUALS = {"hifi", "high", "minimum", "lossless"}
     if svc == "beatport" and (quality or "").lower() not in _BEATPORT_QUALS:
         quality = (_default_quality(svc) if _default_quality else "hifi")
+
+    # JioSaavn has only AAC tiers (high/medium/low). A foreign id (hifi, 320,
+    # flac from a bot list…) is folded to the nearest real tier, so the save
+    # folder names what actually lands on disk.
+    if svc == "jiosaavn":
+        from ripster.engines.orpheus_jiosaavn import normalize_quality as _js_q
+        quality = _js_q(quality)
 
     # Smart Apple routing: pick the engine + wrapper that can actually deliver
     # the requested quality right now — video→gamdl (cookies+bundled CDM),
@@ -377,6 +433,13 @@ async def remove_task(task_id: str, request: Request):
             from fastapi.responses import JSONResponse
             return JSONResponse({"error": "forbidden"}, status_code=403)
     _queue[:] = [t for t in _queue if t["id"] != task_id]
+    # Убрали карточку отложенной записи — снимаем и план, иначе планировщик
+    # всё равно пришлёт за ней в момент эфира (человек этого уже не хочет).
+    try:
+        from ripster import bbc_schedule as _bs
+        _bs.cancel_recording(task_id)
+    except Exception:
+        pass
     if _broadcast:
         await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
     return {"ok": True}

@@ -80,11 +80,12 @@ function resolveQuality(service) {
   const svcKey = {
     deezer: 'deezer-quality', qobuz: 'qobuz-quality', tidal: 'tidal-quality',
     beatport: 'beatport-quality', yandex: 'yandex-quality', amazon: 'amazon-quality',
+    jiosaavn: 'jiosaavn-quality',
   };
   const k = svcKey[service];
   if (k) return c[k] || {
     deezer: 'flac', qobuz: '27', tidal: 'lossless',
-    beatport: 'hifi', yandex: 'flac', amazon: 'High',
+    beatport: 'hifi', yandex: 'flac', amazon: 'High', jiosaavn: 'high',
   }[service];
   // Services that simply do not have an Apple-style quality ladder. Falling
   // through to the global (Apple) default made a BBC card claim 'alac' before

@@ -352,6 +352,19 @@ async def content_id(url: str) -> str:
         return ""
     if api_type not in ("songs", "albums"):
         return ""
+    # Альбом без UPC (каталог молчит / недоступен) → строгий матч в Deezer по
+    # имени+артисту+числу треков+году, результат навсегда в дисковой карте.
+    if api_type == "albums":
+        known = _upc_map_get(api_id)
+        if known:
+            return f"upc:{known}"
+    cid = await _content_id_catalog(sf, api_type, api_id)
+    if cid or api_type != "albums":
+        return cid
+    return await _album_upc_by_name(sf, api_id)
+
+
+async def _content_id_catalog(sf: str, api_type: str, api_id: str) -> str:
     bearer = (_cfg.get("authorization-token") or "").strip()
     mut    = (_cfg.get("media-user-token") or "").strip()
     if not bearer:
@@ -384,5 +397,158 @@ async def content_id(url: str) -> str:
     if api_type == "songs" and a.get("isrc"):
         return f"isrc:{a['isrc']}"
     if api_type == "albums" and a.get("upc"):
+        _upc_map_put(api_id, str(a["upc"]), "apple")
         return f"upc:{a['upc']}"
+    return ""
+
+
+# ── Apple album-id → UPC: disk map + strict Deezer name match ────────────────
+# Каталог Apple иногда не отдаёт `upc` (или сам недоступен: протух bearer,
+# даун), и тогда альбом уходил в `url:`-ключ — кэш бота не скрещивал его с тем
+# же релизом из Deezer/Qobuz. Запасной путь: публичный iTunes Lookup (без
+# авторизации) даёт имя/артиста/число треков/дату → публичный поиск Deezer →
+# принимаем ТОЛЬКО строгое совпадение (нормализованные артист и название равны,
+# число треков равно, год равен, если известен; несколько разных UPC = отказ).
+# Неверный UPC хуже его отсутствия: бот отдал бы ЧУЖОЙ релиз из кэша.
+# Найденное пишется на диск: альбом стоит один поиск за всю жизнь. Промах тоже
+# пишется, но с TTL — релиз может появиться в Deezer позже.
+_UPC_MAP: dict | None = None
+_UPC_MISS_TTL = 7 * 86400
+
+
+def _upc_map_path():
+    import os
+    from pathlib import Path as _P
+    base = _P(os.environ.get("RIPSTER_BASE_DIR") or _P(__file__).resolve().parent.parent.parent)
+    return base / "dist" / "apple_upc_map.json"
+
+
+def _upc_map() -> dict:
+    global _UPC_MAP
+    if _UPC_MAP is None:
+        try:
+            import json as _j
+            d = _j.loads(_upc_map_path().read_text(encoding="utf-8"))
+            _UPC_MAP = d if isinstance(d, dict) else {}
+        except Exception:
+            _UPC_MAP = {}
+    return _UPC_MAP
+
+
+def _upc_map_save() -> None:
+    try:
+        import json as _j
+        p = _upc_map_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(_j.dumps(_upc_map(), ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)
+    except Exception as e:                       # noqa: BLE001
+        _safe_print(f"[apple-upc] map not saved: {e!r}")
+
+
+def _upc_map_get(api_id: str) -> str:
+    e = _upc_map().get(str(api_id)) or {}
+    return str(e.get("upc") or "")
+
+
+def _upc_map_miss_fresh(api_id: str) -> bool:
+    import time as _t
+    e = _upc_map().get(str(api_id)) or {}
+    return (not e.get("upc")) and (_t.time() - float(e.get("ts") or 0)) < _UPC_MISS_TTL
+
+
+def _upc_map_put(api_id: str, upc: str, src: str) -> None:
+    import time as _t
+    m = _upc_map()
+    cur = m.get(str(api_id)) or {}
+    if upc and cur.get("upc") == upc:
+        return
+    m[str(api_id)] = {"upc": upc, "src": src, "ts": _t.time()}
+    _upc_map_save()
+
+
+_APPLE_SUFFIX_RE = re.compile(r"\s+-\s+(single|ep)\s*$", re.I)
+
+
+def _norm_name(s: str) -> str:
+    import unicodedata
+    s = _APPLE_SUFFIX_RE.sub("", s or "")
+    s = unicodedata.normalize("NFKD", s).casefold()
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = s.replace("&", " and ")
+    return re.sub(r"[^\w]+", "", s)
+
+
+def _artist_set(s: str) -> frozenset:
+    parts = re.split(r"\s*(?:,|&|\band\b|\bfeat\.?|\bft\.?|\bx\b)\s*", s or "", flags=re.I)
+    return frozenset(n for n in (_norm_name(p) for p in parts) if n)
+
+
+def strict_album_match(want: dict, cand: dict) -> bool:
+    """Pure predicate (unit-testable). want/cand: {title, artists:[...]|artist,
+    tracks:int, year:str}. Title and artist set must be equal after
+    normalization, track count equal, year equal when both are known."""
+    if not want.get("title") or _norm_name(want["title"]) != _norm_name(cand.get("title", "")):
+        return False
+    wa = _artist_set(want.get("artist", ""))
+    ca = frozenset(n for n in (_norm_name(x) for x in (cand.get("artists") or [])) if n) \
+        or _artist_set(cand.get("artist", ""))
+    if not wa or wa != ca:
+        return False
+    wt, ct = int(want.get("tracks") or 0), int(cand.get("tracks") or 0)
+    if not wt or wt != ct:
+        return False
+    wy, cy = str(want.get("year") or "")[:4], str(cand.get("year") or "")[:4]
+    if wy and cy and wy != cy:
+        return False
+    return True
+
+
+async def _album_upc_by_name(sf: str, api_id: str) -> str:
+    if _upc_map_miss_fresh(api_id):
+        return ""
+    item = await _itunes_lookup(api_id, sf)
+    if not item or item.get("wrapperType") not in (None, "collection"):
+        return ""          # lookup failed → не пишем промах, попробуем в следующий раз
+    want = {"title": item.get("collectionName") or "",
+            "artist": item.get("artistName") or "",
+            "tracks": item.get("trackCount") or 0,
+            "year": (item.get("releaseDate") or "")[:4]}
+    if not (want["title"] and want["artist"] and want["tracks"]):
+        return ""
+    bare = _APPLE_SUFFIX_RE.sub("", want["title"]).strip()
+    found: set[str] = set()
+    try:
+        async with _HTTP.ashared() as c:
+            r = await c.get("https://api.deezer.com/search/album",
+                            params={"q": f'artist:"{want["artist"]}" album:"{bare}"', "limit": 10})
+            hits = (r.json() or {}).get("data") or [] if r.status_code == 200 else []
+            if not hits:
+                r = await c.get("https://api.deezer.com/search/album",
+                                params={"q": f"{want['artist']} {bare}", "limit": 10})
+                hits = (r.json() or {}).get("data") or [] if r.status_code == 200 else []
+            for h in hits:
+                if _norm_name(h.get("title", "")) != _norm_name(bare):
+                    continue
+                if int(h.get("nb_tracks") or 0) != int(want["tracks"]):
+                    continue
+                d = (await c.get(f"https://api.deezer.com/album/{h['id']}")).json() or {}
+                if d.get("error") or not d.get("upc"):
+                    continue
+                arts = [x.get("name", "") for x in (d.get("contributors") or [])
+                        if (x.get("role") or "Main") == "Main"] or [(d.get("artist") or {}).get("name", "")]
+                cand = {"title": d.get("title", ""), "artists": arts,
+                        "tracks": d.get("nb_tracks") or 0, "year": (d.get("release_date") or "")[:4]}
+                if strict_album_match(want, cand):
+                    found.add(str(d["upc"]).lstrip("0").zfill(13))
+    except Exception as e:                       # noqa: BLE001
+        _safe_print(f"[apple-upc] deezer match failed for {api_id}: {e!r}")
+        return ""
+    if len(found) == 1:
+        upc = found.pop()
+        _upc_map_put(api_id, upc, "deezer-match")
+        _safe_print(f"[apple-upc] {api_id} -> {upc} (strict Deezer match)")
+        return f"upc:{upc}"
+    _upc_map_put(api_id, "", "ambiguous" if found else "no-match")
     return ""

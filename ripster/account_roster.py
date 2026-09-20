@@ -191,7 +191,11 @@ def roster_cards(cfg: dict) -> dict:
     # ── SoundCloud ───────────────────────────────────────────────────────────
     try:
         from . import soundcloud_accounts as sa
-        active = (cfg.get("soundcloud-oauth-token") or "").strip()
+        from . import soundcloud_pool as _scp
+        # При пуле активна не primary-строка конфига, а учётка, которую пул
+        # отдаёт загрузкам (тот же выбор, что `acquire()`).
+        active = (_scp.active_token(cfg)
+                  or (cfg.get("soundcloud-oauth-token") or "").strip())
         cards = []
         for a in sa.configured_accounts(cfg) or []:
             info = _run(sa.account_info(a["token"], fresh=False))

@@ -9,6 +9,139 @@ const Preview = { queue: [], idx: -1, _bound: false, mode: 'spotify' };
 // _Pre.idx is the queue index whose URL is ready in _Pre.url.
 const _Pre = { idx: -1, url: '', resolving: false };
 
+// ── События прослушивания СТАНЦИЙ (серверная база stations.db) ──────────────
+// Шлются ТОЛЬКО пока играет станция: станция помечает свой массив очереди в
+// _StEv.queue, любая другая очередь означает «станцию заглушили другим
+// запуском» — сессия закрывается. Секунды играют берутся из живых аудио-часов
+// (currentTime / _waCurrentTime), а длительность — только из карточки того же
+// трека (_stevLen), не из того, что сейчас стоит в <audio>; не из таймера.
+// Событие — на момент
+// (старт/конец/скип/лайк/остановка), не на каждый кадр. Отправка
+// «выстрелил и забыл»: статистика не смеет тормозить или ломать игру.
+const _StEv = { session: '', source: '', queue: null };
+
+function _stevUuid() {
+  try { if (crypto.randomUUID) return crypto.randomUUID(); } catch (_) {}
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 3) | 8).toString(16);
+  });
+}
+
+/** Позиция воспроизведения в секундах с того движка, что сейчас играет. */
+function _stevPos() {
+  try {
+    if (_WA.curSource) return Math.max(0, _waCurrentTime());
+    const el = Preview._fpsEl || document.getElementById('pp-audio');
+    if (el && !Number.isNaN(el.currentTime)) return el.currentTime;
+  } catch (_) {}
+  return null;
+}
+
+/** Длительность ИМЕННО того трека, к которому относится событие. Достоверны
+ *  ровно два источника: метаданные карточки очереди (item.duration — станции
+ *  несут её с сервера) и показания движка, который прямо сейчас играет ЭТОТ
+ *  же item. Длительность из <audio> без такой привязки — это молчание о
+ *  вчерашнем треке: Frankie Bones стартанул с длиной Pete Namlook
+ *  (замер 20.09.2026). Не знаем — поля не шлём, «не знаю» честнее вранья. */
+function _stevLen(item) {
+  if (!item) return null;
+  const meta = Number(item.duration);
+  if (isFinite(meta) && meta > 0) return meta;
+  try {
+    if (_WA.curItem === item && _WA.curBuffer) {
+      const b = _WA.curBuffer.duration;
+      if (isFinite(b) && b > 0) return b;
+    }
+    const el = Preview._fpsEl || document.getElementById('pp-audio');
+    if (el && el._stevItem === item && isFinite(el.duration) && el.duration > 0) {
+      return el.duration;
+    }
+  } catch (_) {}
+  return null;
+}
+
+function _stevMeta(item) {
+  return { service: (item && item.service) || '', service_id: String((item && item.id) || ''),
+           artist: (item && item.artist) || '', title: (item && item.title) || '' };
+}
+
+function _stevActive() {
+  return !!_StEv.session && Preview.queue === _StEv.queue && !!Preview.queue[Preview.idx];
+}
+
+function _stevSend(ev) {
+  try {
+    fetch('/api/stations/event', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+      body: JSON.stringify(Object.assign({ session_id: _StEv.session, source: _StEv.source }, ev)),
+    }).catch(() => {});
+  } catch (_) {}
+}
+
+/** Запуск станции — общую точку зовёт stations.js::stQueue. */
+function _stevStationStart(source) {
+  if (_StEv.session) _stevSend({ event: 'station_stopped', extra: { reason: 'replaced' } });
+  _StEv.session = _stevUuid();
+  _StEv.source = String(source || '');
+  _StEv.queue = Preview.queue;
+  _stevSend({ event: 'station_started' });
+}
+
+function _stevStationStop() {
+  if (!_StEv.session) return;
+  const item = _StEv.queue === Preview.queue ? Preview.queue[Preview.idx] : null;
+  _stevSend(Object.assign({ event: 'station_stopped' }, _stevMeta(item)));
+  _StEv.session = ''; _StEv.queue = null;
+}
+
+function _stevTrackStarted(item) {
+  // length_s: null → JSON.stringify выкинет ключ: поля нет вовсе, если длительность неизвестна.
+  _stevSend(Object.assign({ event: 'track_started', played_s: 0,
+                            length_s: _stevLen(item) }, _stevMeta(item)));
+}
+
+/** Естественный конец трека. gapless=true — бесшовный стык: буфер доигран
+ *  ровно до границы, поэтому played берём из длины, а не из часовых показаний. */
+function _stevEnded(gapless) {
+  if (Preview._suppressEnded) return;        // фантомный «end» при смене источника
+  if (!_stevActive()) return;
+  const item = Preview.queue[Preview.idx];
+  const pos = _stevPos();
+  const len = _stevLen(item);
+  _stevSend(Object.assign({ event: 'track_finished',
+                            played_s: gapless ? len : pos, length_s: len,
+                            extra: { end_reason: 'natural' } }, _stevMeta(item)));
+}
+
+/** Ручной переход вперёд/назад. Авто-переход после «end» сюда не попадает —
+ *  его вызовы помечены параметром auto в previewNext. */
+function _stevSkip(dir) {
+  if (!_stevActive()) return;
+  const item = Preview.queue[Preview.idx];
+  _stevSend(Object.assign({ event: 'skip', played_s: _stevPos(), length_s: _stevLen(item),
+                            extra: { end_reason: dir } }, _stevMeta(item)));
+}
+
+/** «В любимые» из плеера по треку станции — это плюс (кнопка dislike есть,
+ *  поэтому минусов не шлём). */
+function _stevLike() {
+  if (!_stevActive()) return;
+  _stevSend(Object.assign({ event: 'like' }, _stevMeta(Preview.queue[Preview.idx])));
+}
+
+// Новый трек станции стартует через ту же разметку, что и подсветка очереди:
+// _playPreviewAt и бесшовный стык уже шлют ripster:track-start.
+document.addEventListener('ripster:track-start', (e) => {
+  if (!_StEv.session) return;
+  if (Preview.queue !== _StEv.queue) {           // чужая очередь — станцию сменили
+    _stevSend({ event: 'station_stopped', extra: { reason: 'queue_change' } });
+    _StEv.session = ''; _StEv.queue = null;
+    return;
+  }
+  _stevTrackStarted((e.detail && e.detail.item) || Preview.queue[Preview.idx]);
+});
+
 // Spotify items carry _streamService/_streamId — the ISRC-matched Deezer/Qobuz
 // copy the backend resolved, since Spotify has no /api/stream proxy of its own.
 // ALL stream-URL construction must go through these two, never item.service/
@@ -383,9 +516,10 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
       if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
     });
     fpsEl.addEventListener('ended', () => {
+      try { _stevEnded(); } catch (_) {}     // трек станции доигран — до сброса элемента
       Preview._fpsEl = null;
       if (!Preview._suppressEnded) {
-        if (Preview.idx >= 0 && Preview.idx < Preview.queue.length - 1) previewNext();
+        if (Preview.idx >= 0 && Preview.idx < Preview.queue.length - 1) previewNext(1);
         else closePreview?.();
       }
     }, { once: true });
@@ -1227,6 +1361,7 @@ function _ppSyncNowPlaying(item, idx) {
 // The scheduled source is already audible by the time this runs — this only
 // moves the bookkeeping and UI onto it.
 function _waPromoteScheduled() {
+  try { _stevEnded(true); } catch (_) {}     // предыдущий трек станции доигран до границы стыка
   const src = _WA.schedSource, buf = _WA.schedBuffer;
   const item = _WA.schedItem, idx = _WA.schedIdx, startT = _WA.schedStartT;
   _WA.schedSource = null; _WA.schedBuffer = null; _WA.schedItem = null; _WA.schedIdx = -1;
@@ -1265,7 +1400,10 @@ function _waAttachEnded(src, idx) {
     // Browsers fire onended on .stop() too — ignore if we replaced manually.
     if (_WA.curSource !== src) return;
     if (_WA.schedSource) { _waPromoteScheduled(); return; }
-    if (idx + 1 < Preview.queue.length) _waPlay(idx + 1, 0);
+    if (idx + 1 < Preview.queue.length) {
+      try { _stevEnded(); } catch (_) {}     // трек станции доиграл; дальше — обычный добор
+      _waPlay(idx + 1, 0);
+    }
     else _WA.curSource = null;
   };
 }
@@ -1775,7 +1913,7 @@ function _mixPosGet(key) {
 function _ppArtistSub(item) {
   const SRC = {qobuz:'Qobuz',apple:'Apple Music',deezer:'Deezer',tidal:'Tidal',
     soundcloud:'SoundCloud',spotify:'Spotify',bbc:'BBC',yandex:'Яндекс.Музыка',
-    amazon:'Amazon Music',beatport:'Beatport'};
+    amazon:'Amazon Music',beatport:'Beatport',jiosaavn:'JioSaavn'};
   const src = SRC[item.service] || (item.service ? item.service.charAt(0).toUpperCase()+item.service.slice(1) : '');
   if (item.artist) {
     return item.full ? item.artist + (src ? ' · ' + src : '')
@@ -1995,6 +2133,7 @@ function _setupAudioEvents() {
           audio.currentTime >= audio.duration - 5)) {
       return;
     }
+    try { _stevEnded(); } catch (_) {}       // трек станции доигран до конца
     // Sleep timer "end of track" mode — pause and stop
     if (_FP && _FP.sleepEndOfTrack) {
       _FP.sleepEndOfTrack = false;
@@ -2003,7 +2142,7 @@ function _setupAudioEvents() {
       toast(t('p.sleep'), 'var(--muted)');
       return;   // don't auto-advance
     }
-    if (Preview.idx >= 0 && Preview.idx < Preview.queue.length - 1) previewNext();
+    if (Preview.idx >= 0 && Preview.idx < Preview.queue.length - 1) previewNext(1);
     else closePreview();
   });
   audio.addEventListener('error', () => {
@@ -2251,6 +2390,7 @@ async function _playPreviewAt(idx) {
     await _playPlainHls(audio, item, playBtn, playBtnB);
   } else {
     audio.src = _proxyAudioUrl(item.url);
+    audio._stevItem = item;   // метка «в элементе загружен ЭТОТ трек» — для _stevLen
     // Auto-resume from a saved position ONLY for long mixes (>10 min). Clicking a
     // normal track always starts from 0 — otherwise it'd silently jump to wherever
     // you last scrolled it, which feels like a bug. (Resume of any track after a
@@ -2470,9 +2610,10 @@ function previewToggle() {
   setTimeout(() => _syncAlbumPlayBtns?.(), 50);
 }
 
-function previewNext() {
+function previewNext(auto) {
   if (Preview.mode === 'bbc') return;
   if (Preview.idx < Preview.queue.length - 1) {
+    if (!auto) { try { _stevSkip('skip_forward'); } catch (_) {} }
     Preview.idx++;
     _playPreviewAt(Preview.idx);
   }
@@ -2487,6 +2628,7 @@ function previewPrev() {
     return;
   }
   if (Preview.idx > 0) {
+    try { _stevSkip('skip_back'); } catch (_) {}
     Preview.idx--;
     _playPreviewAt(Preview.idx);
   }
@@ -3447,6 +3589,8 @@ window.addEventListener('load', () => {
 });
 
 function closePreview() {
+  // Станция кончилась вместе с плеером — закрываем сессию ДО сброса очереди.
+  try { _stevStationStop(); } catch (_) {}
   // Invalidate any in-flight _playPreviewAt (a stream URL still resolving) so it
   // can't start playback after we've closed — the "closed but still playing" bug.
   Preview._playGen = (Preview._playGen || 0) + 1;

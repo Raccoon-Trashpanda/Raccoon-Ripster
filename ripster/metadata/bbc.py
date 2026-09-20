@@ -8,7 +8,10 @@ import re
 
 import httpx
 
-_RE_PID = re.compile(r'/sounds/play/([a-zA-Z0-9]+)')
+# Тот же провод, что в runner._RE_BBC_PID: принимается и /sounds/play/<pid>, и
+# /programmes/<pid> (одна передача, один pid). Иначе карта очереди для ссылок из
+# радара остаётся пустой (fetch_meta_bbc вернёт None), хотя качается потом успешно.
+_RE_PID = re.compile(r'/(?:sounds/play|programmes|iplayer)/([a-zA-Z0-9]+)')
 
 
 async def fetch_meta_bbc(url: str) -> dict | None:

@@ -84,7 +84,11 @@ _RE_NO_RETRY = _re.compile(
     # — 12 минут и 240 строк ошибок ради того же «недоступно». Сообщение само
     # говорит «перелогин не поможет»; якорь — по строке `result.error` из
     # engines/orpheus_spotify.py.
-    r'недоступно\s+для\s+этой\s+учётной\s+записи',
+    r'недоступно\s+для\s+этой\s+учётной\s+записи|'
+    # JioSaavn: релиз по ссылке пуст (удалён/битая ссылка) — детерминировано;
+    # якорь по строке result.error из engines/orpheus_jiosaavn.py. Гео-блок
+    # JioSaavn ловится выше по «недоступен в регионе».
+    r'JioSaavn:\s+релиз\s+не\s+найден',
     _re.I,
 )
 _MAX_AUTO_RETRIES = 3
@@ -232,8 +236,15 @@ _PARTIAL_REASON_PATTERNS = [
                                r"токен\s+недействител\w*|неверный\s+ARL|"
                                r"ARL\s+не\s+задан",
                                _re.I)),
+    # Русские вердикты движков (Deezer 19.09.2026: «закрыт для страны аккаунта … гео-блок»)
+    # и фраза deemix «can't stream the track from your current country» раньше сюда не
+    # попадали → причина уходила в no-flac/postprocess, и пул НЕ пробовал учётку из
+    # другой страны. Только точные формулировки: голое «регион» встречается в логах
+    # Apple про витрины и дало бы ложный region.
     ("region",     _re.compile(r"not available in your country|region|"
-                               r"unavailable in|geo|Territory\s+Restricted", _re.I)),
+                               r"unavailable in|geo|Territory\s+Restricted|"
+                               r"from your current country|гео-?блок|"
+                               r"закрыт\w*\s+для\s+страны", _re.I)),
     ("no-flac",    _re.compile(r"desired bitrate|no\s+FLAC|not.*available.*bitrate", _re.I)),
     ("removed",    _re.compile(r"Resource not found|no longer available|"
                                r"removed|gone|404", _re.I)),
@@ -637,6 +648,17 @@ def _transcode_dir(save_dir: str, target: str = "mp3") -> int:
         for f in _P(save_dir).rglob("*"):
             if not f.is_file() or f.suffix.lower() not in _TRANSCODE_SRC_EXTS:
                 continue
+            # Lossy → FLAC/ALAC — это ФАЛЬШИВЫЙ lossless: те же потери в большом
+            # контейнере, который выдаёт себя за оригинал. А при выключенном
+            # transcode-keep-original исходник ещё и удалялся. Такие файлы
+            # оставляем как есть и честно пишем почему. 19.09.2026.
+            if codec in ("flac", "alac"):
+                _sfx = f.suffix.lower()
+                if (_sfx in (".mp3", ".ogg", ".opus", ".aac")
+                        or (_sfx == ".m4a" and _probe_acodec(fp, f) == "aac")):
+                    print(f"[transcode] пропуск {f.name}: источник с потерями — "
+                          f"в {target} получился бы фальшивый lossless", flush=True)
+                    continue
             # Already in the target codec? Extension is decisive except for .m4a,
             # which may hold either AAC or ALAC — probe to tell them apart.
             if f.suffix.lower() == out_ext:
@@ -1454,7 +1476,12 @@ async def _soundcloud_preflight(task: dict) -> bool:
     return True
 
 
-_RE_BBC_PID = _re.compile(r'/sounds/play/([a-zA-Z0-9]+)')
+# Принимает ОБА ходовых формата BBC-ссылки на передачу: /sounds/play/<pid> и
+# /programmes/<pid> (это одна и та же передача, один pid; /programmes/ — как раз
+# форму выдаёт наш же релиз-радар routes/radar.py и browse routes/bbc.py).
+# Раньше стоял только /sounds/play/, поэтому ссылки из радара падали с
+# console.bbc_bad_pid. Проверено боем 19.09.2026: m00315gq → HLS → MP3 320.
+_RE_BBC_PID = _re.compile(r'/(?:sounds/play|programmes|iplayer)/([a-zA-Z0-9]+)')
 
 
 async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
@@ -1752,6 +1779,13 @@ def _attempt_succeeded(task: dict) -> bool:
 async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str) -> None:
     """Run task via a registered engine plugin (ProcessRunner)."""
     tid = task.get("id", "")
+    # Прогон начинается — значит задача RUNNING. Лестница Apple (своя витрина →
+    # другие слоты) после проваленной ступени зовёт _revive_task (ERROR→QUEUED)
+    # и сразу следующую ступень, НЕ переводя её в RUNNING. Успех такой ступени
+    # упирался в QUEUED→DONE: переход запрещён, try_advance молча возвращал
+    # False, и скачанный альбом оставался висеть «в очереди» (19.09.2026).
+    if _task_state(task) is TaskStatus.QUEUED:
+        _try_advance_task(task, TaskStatus.RUNNING)
     try:
         eng = get_engine(engine_name)
     except KeyError:
@@ -1822,6 +1856,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
     # simpler (no subprocess env override needed).
     _qz_pool = None
     _qz_slot = None
+    # Spotify multi-account pool — КОРИДОРЫ: у каждой учётки свой config/
+    # (свои settings.json, loginstorage.bin и .librespot_cache/blob), поэтому
+    # учётки изолированы и могут качать параллельно (ripster/spotify_pool.py).
+    _sp_slot = None
+    _sp_corridor = None      # запись выбранного слота: {cwd, config_dir, ...}
     # SoundCloud / Yandex pools — token-as-CLI-arg, simplest of all.
     _sc_pool = None
     _sc_slot = None
@@ -1870,8 +1909,41 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             _cfg_view["_bbc_artist"]   = task.get("_bbc_artist", "")
             _cfg_view["_bbc_pid"]      = task.get("_bbc_pid", "")
             _cfg_view["_bbc_duration"] = task.get("_bbc_duration", 0)
+        # Отложенная запись эфира: канал и длительность приходят из плана
+        # (ripster/bbc_schedule.py), движок по ним строит адрес live-потока.
+        if engine_name == "bbc_live":
+            _m = task.get("meta") or {}
+            _cfg_view["_bbc_live_channel"] = _m.get("channel") or ""
+            _cfg_view["_bbc_duration"]     = int(_m.get("duration") or 0)
+            _cfg_view["_bbc_title"]        = _m.get("title") or ""
         # Per-release lyrics checkbox override (None = use global config).
         _cfg_view["_lyrics_override"] = task.get("lyrics")
+        # Spotify multi-account pool: РОТАЦИЯ аккаунтов (фейловер), не параллель —
+        # OrpheusDL читает durable-blob по ФИКСИРОВАННОМУ пути, поэтому acquire()
+        # ставит blob выбранного слота и ДЕРЖИТ лок до release() в finally.
+        # Любая ошибка здесь → пул просто не используется, и прогон идёт на
+        # основном (живом) blob ровно как до появления пула.
+        if engine_name == "orpheus_spotify":
+            try:
+                from ripster import spotify_pool as _spp
+                if _spp.pool_enabled(_config):
+                    from ripster import account_fallback as _afb
+                    _sp_acct = await asyncio.to_thread(
+                        _spp.acquire, _config,
+                        tuple(_afb.tried_slots(task, "spotify")))
+                    if _sp_acct:
+                        _sp_slot = _sp_acct["slot"]
+                        _sp_corridor = _sp_acct
+                        _afb.mark_tried(task, "spotify", _sp_slot)
+                        task["log"].append(
+                            f"🟢 spotify-pool: слот {_sp_slot} "
+                            f"({_sp_acct.get('label', '')})")
+                    else:
+                        task["log"].append(
+                            "🟢 spotify-pool: свободных аккаунтов нет — качаю основным")
+            except Exception as e:                       # noqa: BLE001
+                print(f"[spotify-pool] пропускаю пул: {e!r}", flush=True)
+                _sp_slot = None
         # Deezer multi-account pool: route this task to a free ARL slot with
         # its own isolated deemix config dir. ANY failure here → _cfg_view
         # simply never gets deezer-arl/_deezer_cfg_dir overridden, so build_cmd
@@ -2102,7 +2174,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             line_timeout = 1200.0
         elif engine_name == "soundcloud":
             line_timeout = 1200.0   # 20 min — heartbeats every 30 s anyway
-        elif engine_name in ("tidal", "orpheus_spotify", "orpheus_beatport"):
+        elif engine_name in ("tidal", "orpheus_spotify", "orpheus_beatport", "orpheus_jiosaavn"):
             # OrpheusDL streams a tqdm progress bar via \r (NO \n) for the whole
             # duration of a track's DASH/segment download. readline() blocks on a
             # newline, so the runner sees zero output for that entire window — and
@@ -2117,6 +2189,12 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # \n) for the ENTIRE download — a 2-hour Essential Mix can run silent
             # (by readline()'s definition) well past 300s. Give it the same
             # headroom as Tidal/SC; a real hang still fails eventually.
+            line_timeout = 1200.0
+        elif engine_name == "bbc_live":
+            # ffmpeg here is silent for the whole recording by design (progress
+            # goes to -progress pipe:2 as key=value lines, one \n per update),
+            # and the segments arrive every ~6 s — 20 min of headroom only
+            # catches a genuinely dead stream.
             line_timeout = 1200.0
         else:
             line_timeout = 300.0
@@ -2133,6 +2211,15 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             }
         elif engine_name == "orpheus_spotify":
             extra_env = {"PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python", "PYTHONIOENCODING": "utf-8"}
+            # Коридор учётки. Нужны ОБА: CWD даёт слоту свои settings.json и
+            # loginstorage.bin (core.py резолвит 'config' относительно CWD), а
+            # ORPHEUS_CONFIG_DIR — свой .librespot_cache/blob (модуль Spotify
+            # резолвит его относительно ФАЙЛА МОДУЛЯ, см. «ПАТЧ RIPSTER» в
+            # spotify_api.py/spotify_embed_api.py). Без любого из двух мультиакк
+            # молча качал бы под ОДНОЙ учёткой.
+            if _sp_corridor:
+                extra_env["ORPHEUS_CONFIG_DIR"] = str(_sp_corridor["config_dir"])
+                _task_cwd = str(_sp_corridor["cwd"])
         else:
             extra_env = {"PYTHONIOENCODING": "utf-8"}
         # Движки Orpheus (beatport/spotify/tidal) не должны видеть user-site
@@ -2141,7 +2228,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         # (11.08.2026, 12 прогонов). _orpheus_python() уже прибит к .venv — это
         # вторая линия: даже системный python не подтянет чужие пакеты.
         # AMD намеренно НЕ трогаем: его зависимости могут стоять как раз в user-site.
-        if engine_name in ("orpheus_beatport", "orpheus_spotify", "tidal"):
+        if engine_name in ("orpheus_beatport", "orpheus_spotify", "tidal", "orpheus_jiosaavn"):
             extra_env["PYTHONNOUSERSITE"] = "1"
         if engine_name == "deezer" and _cfg_view.get("_deezer_cfg_dir"):
             # Multi-account pool slot (>0): point the deemix SUBPROCESS itself
@@ -2295,6 +2382,18 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
 
         if fatal_hit:
             if _fatal_amd_hint and (_amd_mod.get_amd_dir() / "main.py").exists():
+                # Это ХЕНДОФФ в лестницу витрин/слотов/AMD, а НЕ терминальный
+                # отказ. Движок честно отдал FATAL (напр. «✗ Apple не выдал ключ
+                # (Invalid CKC), сессия ЖИВА → нет прав в регионе»), а раннер
+                # превращает его в _NeedAMDFallback, чтобы перебрать свои витрины
+                # и учётки. Без метки `_in_retry` finally у `_run_engine_task`
+                # видел бы «running» и на КАЖДОМ таком хендоффе жёг SAFETY NET:
+                # гнал живую задачу в ERROR и клал раннюю запись в историю — из-за
+                # чего сеть безопасности стала НОРМОЙ, а не последним рубежом
+                # (Apple Invalid CKC ×N, 11–17.09.2026). Терминал и историю
+                # гарантирует обработчик _NeedAMDFallback в run_task (см. ниже).
+                # Тот же идиом уже стоит у _NeedRetry ниже. 18.09.2026.
+                task["_in_retry"] = True
                 raise _NeedAMDFallback()
             # Вердикт движка ОБЯЗАН дойти до задачи, а не только до консоли.
             #
@@ -2324,7 +2423,10 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             await _broadcast(_i18n.log_event("console.timeout", level="error", task_id=tid))
             return
 
-        result = eng.is_finished(log_text, rc=rc)
+        # В потоке, а не в цикле событий: is_finished у Deezer ходит в сеть (тариф ARL,
+        # страны трека — до ~15 с), у Beatport пишет файл сессии. Синхронный вызов
+        # здесь замораживал ВСЁ приложение — WS, очередь, ответы гостям (19.09.2026).
+        result = await asyncio.to_thread(eng.is_finished, log_text, rc=rc)
         if result.quality_actual:
             task["quality"] = result.quality_actual
 
@@ -2446,6 +2548,9 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             and not (result.error or "").startswith("wrapper-manager unreachable")
             and _RE_AMD_CODEC_ERR.search(log_text)
         ):
+            # Хендофф на zhaarey — не терминал; finally пропустит SAFETY NET,
+            # финальную запись в историю сделает переигранный прогон. 18.09.2026.
+            task["_in_retry"] = True
             raise _NeedZhaareyFallback("aac")
 
         # gamdl на ЛОССИ-пути упал разбором манифеста → добираем через wrapper.
@@ -2470,6 +2575,8 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         ):
             from ripster.apple_router import local_wrapper_session_alive as _lw_alive
             if _lw_alive(_config):
+                # Хендофф на zhaarey ALAC — не терминал (см. выше). 18.09.2026.
+                task["_in_retry"] = True
                 raise _NeedZhaareyFallback("alac")
 
         # Сервер декрипта ЛЁГ, и не скачалось ВООБЩЕ ничего. Ветка «частичной»
@@ -2842,6 +2949,9 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 await _broadcast({"type": "orpheus_not_authed"})
             elif "-1002" in msg and engine_name in ("gamdl", "zhaarey"):
                 if (_amd_mod.get_amd_dir() / "main.py").exists():
+                    # Хендофф в AMD-фолбэк — не терминал; finally пропустит
+                    # SAFETY NET, судьбу решит обработчик в run_task. 18.09.2026.
+                    task["_in_retry"] = True
                     raise _NeedAMDFallback()
             elif "New settings detected" in msg or "обнаружены новые настройки" in msg:
                 # Задача не завершена — её перезапустит run_task. Без метки finally
@@ -3056,6 +3166,14 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 await _broadcast({"type": "deezer_pool_update", "pool": _dzp_rel.live_status(_config)})
             except Exception:
                 pass
+        # Spotify: пул держит ЛОК на всё время прогона — освободить обязательно,
+        # иначе следующая загрузка Spotify встанет навсегда.
+        if _sp_slot is not None:
+            try:
+                from ripster import spotify_pool as _spp_rel
+                _spp_rel.release()
+            except Exception:
+                pass
         if _qz_pool is not None and _qz_slot is not None:
             try:
                 _qz_pool.release(_qz_slot)
@@ -3106,7 +3224,16 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 # обходом, который сам же модуль и запрещает.
                 _try_advance_task(task, TaskStatus.ERROR)
                 if not task.get("error"):
-                    task["error"] = (
+                    # Движок мог напечатать НАСТОЯЩИЙ приговор («✗ Apple не выдал
+                    # ключ (Invalid CKC)…») и всё равно завершить генератор без
+                    # терминального error-события — тогда SAFETY NET ловит
+                    # «running», а генерик «повтори загрузку» и врёт (Invalid CKC
+                    # повтором не лечится), и прячет причину. Сначала честно берём
+                    # вердикт из лога; общий текст — только если приговора реально
+                    # нет. Так весь класс runner-stuck становится честным разом.
+                    # 18.09.2026 (Apple Invalid CKC ×N, spotify, wl_*).
+                    _verdict = _verdict_from_log(task)
+                    task["error"] = _verdict or (
                         f"Задача завершилась без результата (внутреннее состояние "
                         f"«{_cur}»). Так быть не должно — повтори загрузку; если "
                         f"повторяется, пришли ссылку владельцу.")
@@ -3137,9 +3264,11 @@ _ENGINE_SERVICES: dict[str, frozenset] = {
     "zotify":           frozenset({"spotify"}),
     "spotiflac":        frozenset({"spotify"}),
     "orpheus_beatport": frozenset({"beatport"}),
+    "orpheus_jiosaavn": frozenset({"jiosaavn"}),
     "yandex":           frozenset({"yandex"}),
     "amazon":           frozenset({"amazon"}),
     "bbc":              frozenset({"bbc"}),
+    "bbc_live":         frozenset({"bbc"}),
 }
 
 
@@ -3517,6 +3646,20 @@ async def run_task(task: dict) -> None:
                             "─── все свои Apple-аккаунты перебраны, ключ не выдан; "
                             "публичный wrapper отключён (включается вручную в Настройках) ───")
                         _try_advance_task(task, TaskStatus.ERROR)
+                        # История больше НЕ пишется в _run_engine_task.finally:
+                        # каждая CKC-ступень помечена `_in_retry`, и finally её
+                        # пропускает (иначе SAFETY NET был бы нормой). Значит
+                        # ФИНАЛЬНУЮ терминальную запись обязан сделать этот
+                        # обработчик — иначе задача, перебравшая все свои учётки,
+                        # осталась бы без строки в истории. Вердикт берём из лога
+                        # движка (его «✗ …»), как это делает SAFETY NET. Дедуп по
+                        # id (history + stats) делает повтор записи безопасным.
+                        # 18.09.2026.
+                        if not task.get("error"):
+                            task["error"] = _verdict_from_log(task) or (
+                                "Apple: ключ не выдан ни одной вашей учёткой "
+                                "(нет прав в регионе); публичный wrapper отключён.")
+                        _add_to_history(task)
                 else:
                     await _broadcast(_i18n.log_event(
                         "console.wrapper_local_region_fail" if _sess_alive
@@ -3524,6 +3667,13 @@ async def run_task(task: dict) -> None:
                         level="error", task_id=task.get("id", "")))
                     task["log"].append("─── local-only: AMD-фолбэк подавлен ───")
                     _try_advance_task(task, TaskStatus.ERROR)
+                    # Как и выше: CKC-ступень помечена `_in_retry`, историю
+                    # пишет этот финальный обработчик, а не finally. 18.09.2026.
+                    if not task.get("error"):
+                        task["error"] = _verdict_from_log(task) or (
+                            "Apple: локальный wrapper не выдал ключ; AMD-фолбэк "
+                            "подавлен (публичный wrapper включается вручную).")
+                    _add_to_history(task)
             else:
                 await _broadcast(_i18n.log_event("console.drm_retry_amd", level="warn"))
                 task["log"].append("─── AMD auto-fallback ───")
@@ -3587,6 +3737,12 @@ def _lock_key(task: dict) -> str | None:
         return None                      # public wrapper → parallel-safe
     if eng == "zhaarey":
         return "apple-local"             # local wrapper → fixed ports, one at a time
+    if eng == "bbc_live":
+        # Живой эфир пишется с одной машины и ловит только то, что звучит
+        # СЕЙЧАС: две параллельные записи одного канала дали бы два одинаковых
+        # файла, а разные каналы делят один аплинк. Своя дорожка, чтобы плановая
+        # запись не спорила за место с обычным on-demand BBC-прогоном.
+        return "bbc-live"
     return svc or eng or "default"       # deemix/streamrip/etc → serialize per service
 
 
@@ -3774,7 +3930,13 @@ async def process_queue() -> None:
             _qs.active_tasks.clear()
             _qs.active_tasks.update(active)
 
-            if not active and not [t for t in _queue if t["status"] == "queued"]:
+            # Оставаться должен и ради отложенных записей: их карточка висит в
+            # очереди со статусом «scheduled», планировщик переведёт её в queued
+            # в момент эфира — а разгребать её будет этот же цикл. Выйти сейчас
+            # значило бы оставить запись без исполнителя до следующего старта.
+            if (not active
+                    and not [t for t in _queue if t["status"] == "queued"]
+                    and not [t for t in _queue if t["status"] == "scheduled"]):
                 break
 
             await asyncio.sleep(0.2)

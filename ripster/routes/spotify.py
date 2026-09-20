@@ -86,21 +86,43 @@ _SP_WEB_UA = (
     "Chrome/124.0.0.0 Safari/537.36"
 )
 
+# ── Dedicated RADAR account (2026-09-19) ─────────────────────────────────────
+# The release radar can run on its OWN Spotify account so its 429s / bans never
+# touch the accounts we download with or the main dev-app used by tagger/metadata.
+# Config keys (all optional, whitelisted in ripster/security.py):
+#   spotify-radar-sp-dc          → radar web-player token (api-partner crawl + What's New)
+#   spotify-radar-client-id/-secret → radar Developer App; user OAuth via
+#                                  /spotify/login?radar=1 → spotify_radar_token.json
+# Each key EMPTY → the radar falls back to exactly the old credentials. A key SET
+# but not working does NOT fall back to the download/main credentials — that
+# would silently re-couple the radar to them, which is the whole thing this avoids.
+_sp_dc_web_radar: dict = {}              # separate cache — never shares _sp_dc_web
+_radar_token_file: Path = None           # spotify_radar_token.json
+_sp_radar_token: dict = {}
+_radar_creds_sig: str = ""               # last logged credential set (names only)
+_radar_oauth_nonces: dict = {}           # state nonce -> issued ts (radar OAuth CSRF)
+
 
 _save_config_fn = None   # set by install()
 
 
 def install(app, ctx) -> None:
     global _cfg, _broadcast, _token_file, _sp_cache_file, _save_config_fn, _sp_state_file
+    global _radar_token_file
     _cfg             = ctx.config
     _broadcast       = ctx.broadcast
     _token_file      = ctx.base_dir / "spotify_token.json"
+    _radar_token_file = ctx.base_dir / "spotify_radar_token.json"
     _sp_cache_file   = ctx.base_dir / "spotify_releases_cache.json"
     _sp_state_file   = ctx.base_dir / "spotify_artist_state.json"
     _save_config_fn  = ctx.save_config
     _load_disk_cache()
     _load_artist_state()
     _reconcile_from_cache()
+    try:
+        _radar_log_creds()
+    except Exception as e:
+        print(f"[spotify] radar creds log: {e}", flush=True)
     app.include_router(router)
 
 
@@ -407,8 +429,21 @@ def _sp_httpx_kwargs() -> dict:
     return {"proxy": px} if px else {}
 
 
-def _load_sp() -> dict:
-    global _sp_token
+def _load_sp(radar: bool = False) -> dict:
+    """OAuth token. radar=True → the dedicated radar token (spotify_radar_token.json),
+    kept in its own cache so the two never overwrite each other."""
+    global _sp_token, _sp_radar_token
+    if radar:
+        if _sp_radar_token:
+            return _sp_radar_token
+        if _radar_token_file and _radar_token_file.exists():
+            try:
+                _sp_radar_token = json.loads(_radar_token_file.read_text())
+                return _sp_radar_token
+            except Exception as e:
+                print(f"[spotify] radar token file unreadable ({_radar_token_file}): {e}",
+                      flush=True)
+        return {}
     if _sp_token:
         return _sp_token
     if _token_file and _token_file.exists():
@@ -421,16 +456,93 @@ def _load_sp() -> dict:
     return {}
 
 
-def _save_sp(t: dict) -> None:
-    global _sp_token
+def _save_sp(t: dict, radar: bool = False) -> None:
+    global _sp_token, _sp_radar_token
+    if radar:
+        _sp_radar_token = t
+        if _radar_token_file:
+            _radar_token_file.write_text(json.dumps(t, indent=2))
+        return
     _sp_token = t
     if _token_file:
         _token_file.write_text(json.dumps(t, indent=2))
 
 
-async def _sp_refresh(t: dict) -> dict | None:
-    cid = _cfg.get("spotify-client-id", "").strip()
-    cs  = _cfg.get("spotify-client-secret", "").strip()
+def _radar_sp_dc() -> str:
+    return (_cfg.get("spotify-radar-sp-dc") or "").strip()
+
+
+def _radar_app() -> tuple[str, str]:
+    return ((_cfg.get("spotify-radar-client-id") or "").strip(),
+            (_cfg.get("spotify-radar-client-secret") or "").strip())
+
+
+def _radar_own_oauth() -> bool:
+    """True when the radar has its own Developer App configured (id AND secret)."""
+    cid, cs = _radar_app()
+    return bool(cid and cs)
+
+
+def _radar_log_creds(force: bool = False) -> None:
+    """Log WHICH credential set the radar uses — key names only, never values.
+    Prints on first call and again whenever the set changes."""
+    global _radar_creds_sig
+    if _radar_sp_dc():
+        web = "spotify-radar-sp-dc (dedicated radar account)"
+    elif (_cfg.get("spotify-sp-dc") or "").strip():
+        web = "spotify-sp-dc, else keeper-bearer (shared - no spotify-radar-sp-dc)"
+    else:
+        web = "keeper-bearer from the download blob (shared - no spotify-radar-sp-dc)"
+    if _radar_own_oauth():
+        oauth = ("spotify-radar-client-id/secret -> spotify_radar_token.json"
+                 + ("" if _load_sp(radar=True).get("access_token")
+                    else " (NOT authorized yet: /spotify/login?radar=1)"))
+    else:
+        oauth = "spotify-client-id/secret -> spotify_token.json (shared - no radar app)"
+    sig = f"{web}|{oauth}"
+    if force or sig != _radar_creds_sig:
+        _radar_creds_sig = sig
+        print(f"[spotify] radar credentials: web-player={web}; /v1 OAuth={oauth}", flush=True)
+
+
+async def _radar_oauth_token() -> dict:
+    """OAuth token the RADAR uses for api.spotify.com/v1 (/me, /me/following).
+    Radar app configured → ONLY the radar token (refreshed with the radar app);
+    no radar app → the shared main token, exactly as before."""
+    radar = _radar_own_oauth()
+    t = _load_sp(radar=radar)
+    if t.get("access_token") and t.get("expires_at", 0) < datetime.now().timestamp() + 60:
+        t = await _sp_refresh(t, radar=radar) or t
+    return t
+
+
+async def _radar_web_token() -> tuple[str | None, str]:
+    """Web-player bearer for the radar crawl → (token, source label).
+    spotify-radar-sp-dc set → only that account (no fallback onto the download
+    account's keeper-bearer). Unset → the old chain: sp_dc, then keeper-bearer."""
+    if _radar_sp_dc():
+        return await _sp_dc_get_token(radar=True), "radar-sp_dc"
+    tok = await _sp_dc_get_token()
+    if tok:
+        return tok, "sp_dc"
+    return _sp_minted_bearer(), "keeper-bearer"
+
+
+async def _radar_fresh_bearer() -> str | None:
+    """Re-mint the radar's bearer after a 401 mid-crawl. Without a radar cookie this
+    is the old behaviour (re-read the keeper-bearer file)."""
+    if _radar_sp_dc():
+        _sp_dc_web_radar.clear()
+        return await _sp_dc_get_token(radar=True)
+    return _sp_minted_bearer()
+
+
+async def _sp_refresh(t: dict, radar: bool = False) -> dict | None:
+    if radar:
+        cid, cs = _radar_app()
+    else:
+        cid = _cfg.get("spotify-client-id", "").strip()
+        cs  = _cfg.get("spotify-client-secret", "").strip()
     if not (cid and cs and t.get("refresh_token")):
         return None
     creds = base64.b64encode(f"{cid}:{cs}".encode()).decode()
@@ -448,10 +560,10 @@ async def _sp_refresh(t: dict) -> dict | None:
                 if "refresh_token" in new:
                     t["refresh_token"] = new["refresh_token"]
                 t["expires_at"] = datetime.now().timestamp() + new.get("expires_in", 3600)
-                _save_sp(t)
+                _save_sp(t, radar=radar)
                 return t
     except Exception as e:
-        print(f"[spotify] refresh: {e}", flush=True)
+        print(f"[spotify] refresh{' (radar)' if radar else ''}: {e}", flush=True)
     return None
 
 
@@ -505,19 +617,40 @@ async def get_access_token() -> str | None:
     return t.get("access_token") or None
 
 
-async def _sp_dc_get_token() -> str | None:
+async def _sp_dc_get_token(radar: bool = False) -> str | None:
     """Fetch a web-player access token from the sp_dc cookie.
 
     The web-player client is not rate-limited like the developer Web API, so
     using it for the releases scan avoids 429 / temporary bans.
     Returns None if sp_dc is not configured or the fetch fails.
+
+    radar=True → the dedicated radar cookie (spotify-radar-sp-dc) with its own
+    cache (_sp_dc_web_radar); if that key is empty, behaves exactly like the
+    default call. Default (radar=False) is unchanged for every other caller.
     """
     global _sp_dc_web
-    sp_dc = _cfg.get("spotify-sp-dc", "").strip()
+    tag = ""
+    if radar and _radar_sp_dc():
+        import hashlib
+        sp_dc = _radar_sp_dc()
+        # Keyed on the cookie so a changed spotify-radar-sp-dc takes effect at once
+        # instead of serving the old account's token until it expires.
+        fp = hashlib.sha256(sp_dc.encode()).hexdigest()[:16]
+        if _sp_dc_web_radar.get("fp") != fp:
+            _sp_dc_web_radar.clear()
+            _sp_dc_web_radar["fp"] = fp
+        cache = _sp_dc_web_radar
+        tag = " (radar)"
+    else:
+        sp_dc = _cfg.get("spotify-sp-dc", "").strip()
+        cache = None
     if not sp_dc:
         return None
     now = datetime.now().timestamp()
-    if _sp_dc_web.get("access_token") and _sp_dc_web.get("expiry", 0) > now + 300:
+    if cache is not None:
+        if cache.get("access_token") and cache.get("expiry", 0) > now + 300:
+            return cache["access_token"]
+    elif _sp_dc_web.get("access_token") and _sp_dc_web.get("expiry", 0) > now + 300:
         return _sp_dc_web["access_token"]
     try:
         async with httpx.AsyncClient(timeout=10, headers={
@@ -533,16 +666,20 @@ async def _sp_dc_get_token() -> str | None:
                 data = r.json()
                 if not data.get("isAnonymous", True):
                     expiry_ms = data.get("accessTokenExpirationTimestampMs", 0)
-                    _sp_dc_web = {
-                        "access_token": data["accessToken"],
-                        "expiry": expiry_ms / 1000,
-                    }
+                    if cache is not None:
+                        cache["access_token"] = data["accessToken"]
+                        cache["expiry"] = expiry_ms / 1000
+                    else:
+                        _sp_dc_web = {
+                            "access_token": data["accessToken"],
+                            "expiry": expiry_ms / 1000,
+                        }
                     return data["accessToken"]
-                print("[spotify] sp_dc: anonymous token returned — cookie expired", flush=True)
+                print(f"[spotify] sp_dc{tag}: anonymous token returned — cookie expired", flush=True)
             else:
-                print(f"[spotify] sp_dc token fetch: HTTP {r.status_code} — cookie expired or blocked", flush=True)
+                print(f"[spotify] sp_dc{tag} token fetch: HTTP {r.status_code} — cookie expired or blocked", flush=True)
     except Exception as e:
-        print(f"[spotify] sp_dc token fetch error: {e}", flush=True)
+        print(f"[spotify] sp_dc{tag} token fetch error: {e}", flush=True)
     return None
 
 
@@ -866,7 +1003,7 @@ async def _gql_whatsnew(gc) -> list:
         print(f"[spotify] what's-new fetch error: {e}", flush=True)
         return []
     if r.status_code == 401:
-        fresh_b = _sp_minted_bearer()
+        fresh_b = await _radar_fresh_bearer()
         if fresh_b:
             gc.headers["Authorization"] = f"Bearer {fresh_b}"
         ct2 = await _sp_client_token()
@@ -961,8 +1098,118 @@ def _sp_minted_bearer() -> str | None:
 
 # ── OAuth routes ──────────────────────────────────────────────────────────
 
+def _owner_request(request: Request) -> bool:
+    """/spotify/* is a PUBLIC prefix (OAuth redirect target), so the global owner
+    gate never runs here. The radar login writes an owner credential file, so it
+    checks ownership itself: the forge-proof session cookie, or — only when no
+    tunnel exposes us — no password at all (same rule as pairing._owner_ok; raw
+    loopback alone is NOT proof, the tunnel arrives as 127.0.0.1)."""
+    try:
+        from ripster import auth as _auth
+        if _auth.verify_session_cookie(request.cookies.get("ripster-session", "")):
+            return True
+        if _auth.is_enabled():
+            return False
+    except Exception:
+        return False
+    return not bool(_cfg.get("remote-enabled", False))
+
+
+def _sp_html(title: str, body: str, color: str = "#fc3c44") -> HTMLResponse:
+    import html as _html
+    title, body = _html.escape(title), _html.escape(body)   # error= is attacker-controlled
+    return HTMLResponse(
+        f"""<html><head><meta charset="utf-8"></head>
+        <body style="font-family:sans-serif;padding:40px;background:#0a0a0c;color:#f0f0f4">
+        <h3 style="color:{color}">{title}</h3><p style="color:#888">{body}</p></body></html>""")
+
+
+def _sp_radar_login(request: Request):
+    """Start OAuth for the DEDICATED radar account (spotify-radar-client-id).
+    Same redirect URI as the main flow — add http://127.0.0.1:7799/spotify/callback
+    to the radar Developer App too. state=radar:<nonce> routes the callback."""
+    import secrets
+    import time as _t
+    if not _owner_request(request):
+        return _sp_html("Forbidden", "Owner session required / Нужен вход владельца.")
+    cid, cs = _radar_app()
+    if not (cid and cs):
+        return _sp_html("Radar Client ID / Secret not set",
+                        "Settings → Spotify → radar account: fill spotify-radar-client-id "
+                        "and spotify-radar-client-secret first.")
+    now = _t.time()
+    for k in [k for k, ts in _radar_oauth_nonces.items() if now - ts > 600]:
+        _radar_oauth_nonces.pop(k, None)
+    nonce = secrets.token_urlsafe(16)
+    _radar_oauth_nonces[nonce] = now
+    params = urllib.parse.urlencode({
+        "client_id":     cid,
+        "response_type": "code",
+        "redirect_uri":  REDIRECT_URI,
+        "scope":         SCOPES,
+        "state":         f"radar:{nonce}",
+        # ALWAYS show the dialog: the browser is usually logged into the MAIN
+        # account, and the whole point is to authorize a different one.
+        "show_dialog":   "true",
+    })
+    return RedirectResponse(f"https://accounts.spotify.com/authorize?{params}")
+
+
+async def _sp_radar_callback(code: str, error: str, state: str):
+    import time as _t
+    global _radar_creds_sig
+    nonce = state.split(":", 1)[1] if ":" in state else ""
+    issued = _radar_oauth_nonces.pop(nonce, None)
+    if not nonce or issued is None or _t.time() - issued > 600:
+        return _sp_html("Invalid or expired state",
+                        "Start the radar login again from Settings / Начни вход заново.")
+    if error:
+        return _sp_html(f"Error: {error}", "Close the tab and try again.")
+    if not code:
+        return _sp_html("No authorization code", "")
+    cid, cs = _radar_app()
+    if not (cid and cs):
+        return _sp_html("Radar Client ID / Secret not set", "")
+    creds = base64.b64encode(f"{cid}:{cs}".encode()).decode()
+    try:
+        async with httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(
+                "https://accounts.spotify.com/api/token",
+                data={"grant_type": "authorization_code", "code": code,
+                      "redirect_uri": REDIRECT_URI},
+                headers={"Authorization": f"Basic {creds}",
+                         "Content-Type": "application/x-www-form-urlencoded"},
+            )
+        if r.status_code != 200:
+            print(f"[spotify] radar OAuth exchange: HTTP {r.status_code}", flush=True)
+            return _sp_html(f"Error {r.status_code}",
+                            "Check radar Client ID, Secret and the Redirect URI "
+                            f"({REDIRECT_URI}) in the radar app's Spotify Dashboard.")
+        tok = r.json()
+    except Exception as e:
+        return _sp_html("Connection error", str(e)[:200])
+    tok["expires_at"] = datetime.now().timestamp() + tok.get("expires_in", 3600)
+    _save_sp(tok, radar=True)
+    _radar_creds_sig = ""          # re-log the (now authorized) credential set
+    _radar_log_creds()
+    if _broadcast:
+        await _broadcast({"type": "spotify_radar_authed"})
+    from ripster.routes.core import _return_url
+    _ret = _return_url()
+    return HTMLResponse(
+        f"""<html><head><meta charset="utf-8">
+        <meta http-equiv="refresh" content="2;url={_ret}"></head>
+        <body style="font-family:sans-serif;padding:40px;background:#0a0a0c;color:#f0f0f4">
+        <h2 style="color:#1db954">✓ Radar account connected / Учётка радара подключена</h2>
+        <p><a href="{_ret}" style="color:#1db954">Ripster</a></p>
+        <script>setTimeout(()=>{{try{{window.close()}}catch(e){{}}}},1200)</script></body></html>"""
+    )
+
+
 @router.get("/spotify/login")
-async def sp_login(request: Request):
+async def sp_login(request: Request, radar: int = 0):
+    if radar:
+        return _sp_radar_login(request)
     cid = _cfg.get("spotify-client-id", "").strip()
     if not cid:
         return HTMLResponse(
@@ -1000,7 +1247,9 @@ async def sp_login(request: Request):
 
 
 @router.get("/spotify/callback")
-async def sp_callback(code: str = "", error: str = ""):
+async def sp_callback(code: str = "", error: str = "", state: str = ""):
+    if state.startswith("radar:"):
+        return await _sp_radar_callback(code, error, state)
     if error:
         return HTMLResponse(
             f"""<html><body style="font-family:sans-serif;padding:40px;background:#0a0a0c;color:#f0f0f4">
@@ -1144,13 +1393,11 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
 
     _sp_403_error = ""
 
-    web_token = await _sp_dc_get_token()
-    _tok_src = "sp_dc"
-    if not web_token:
-        # Auto-inserted: the keeper's fresh web-player Bearer. This is what lets
-        # the radar keep scanning without a manual sp_dc cookie refresh.
-        web_token = _sp_minted_bearer()
-        _tok_src = "keeper-bearer"
+    # Radar credentials: the dedicated radar account when configured, otherwise
+    # the old chain (sp_dc → keeper's auto-minted Bearer, which lets the radar
+    # keep scanning without a manual sp_dc cookie refresh). See _radar_web_token.
+    _radar_log_creds()
+    web_token, _tok_src = await _radar_web_token()
 
     # `hdr` is used for api.spotify.com/**v1** only — /me and /me/following. The
     # api-partner crawl below builds its OWN headers from the web-player token
@@ -1166,14 +1413,13 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
     # empty and the radar had nothing to crawl. It was masked here only because
     # a 5.7k-artist follow cache from earlier passes kept serving it.
     # So: dev-OAuth FIRST for /v1, web token only as the fallback.
-    oauth_t = _load_sp()
-    if oauth_t.get("access_token"):
-        if oauth_t.get("expires_at", 0) < datetime.now().timestamp() + 60:
-            oauth_t = await _sp_refresh(oauth_t) or oauth_t
+    oauth_t = await _radar_oauth_token()
+    _radar_oauth = _radar_own_oauth()
     if oauth_t.get("access_token"):
         hdr = {"Authorization": f"Bearer {oauth_t['access_token']}"}
-        print("[spotify] scan: /v1 via dev-OAuth token (web-player token is 429 on /v1)",
-              flush=True)
+        print("[spotify] scan: /v1 via dev-OAuth token"
+              + (" (radar app)" if _radar_oauth else "")
+              + " (web-player token is 429 on /v1)", flush=True)
     elif web_token:
         hdr = {"Authorization": f"Bearer {web_token}"}
         print(f"[spotify] scan using web-player token ({_tok_src}) — "
@@ -1181,11 +1427,13 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
     else:
         # Neither credential exists — nothing to scan with.
         _sp_scan_running = False
-        sp_dc_set = bool((_cfg.get("spotify-sp-dc") or "").strip())
+        sp_dc_set = bool((_cfg.get("spotify-sp-dc") or "").strip() or _radar_sp_dc())
         minted_exists = bool(_sp_state_file and
                              (_sp_state_file.parent / "orpheus" / "config" / "spotify-token.txt").exists())
         print("[spotify] scan aborted: no web-player token and no OAuth token", flush=True)
-        err = ("sp_dc cookie протух — обнови в Settings → Spotify (bookmarklet)"
+        err = ("spotify-radar-sp-dc: radar sp_dc cookie expired — update it in Settings → Spotify"
+               if _radar_sp_dc() and not oauth_t.get("access_token")
+               else "sp_dc cookie протух — обнови в Settings → Spotify (bookmarklet)"
                if sp_dc_set or minted_exists
                else "Spotify не авторизован — подключи OAuth или sp_dc в Settings → Spotify")
         _sp_last_error = err
@@ -1211,7 +1459,10 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
                 # проба сервиса намеренно не ходит в /v1 (там вечный 429). Раз уж
                 # узнали — запоминаем, иначе обзор аккаунтов вечно пишет
                 # «страна не определена» у одного лишь Spotify.
-                if len(market) == 2 and _cfg.get("spotify-country") != market.upper():
+                # A dedicated radar account may live in another country — its
+                # market must not overwrite the download account's spotify-country.
+                if (not _radar_oauth and len(market) == 2
+                        and _cfg.get("spotify-country") != market.upper()):
                     _cfg["spotify-country"] = market.upper()
                     if _save_config_fn:
                         try:
@@ -1361,10 +1612,14 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
         step      = max(1, total // 40)
         now_ts    = datetime.now().timestamp()
 
-        gql_bearer = web_token or _sp_minted_bearer()
+        # Dedicated radar cookie → never fall back onto the download account's
+        # keeper-bearer (that would put radar load on it again).
+        gql_bearer = web_token if _radar_sp_dc() else (web_token or _sp_minted_bearer())
         gql_ct     = await _sp_client_token()
         gql_dead   = ""
-        if not gql_bearer:
+        if not gql_bearer and _radar_sp_dc():
+            gql_dead = "spotify-radar-sp-dc: radar sp_dc cookie expired / no web-player token"
+        elif not gql_bearer:
             gql_dead = "нет web-player токена (кипер не минтит?)"
         elif not gql_ct:
             gql_dead = "не удалось получить client-token"
@@ -1406,7 +1661,7 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             except Exception:
                 return None, 0
             if dr.status_code == 401 and _tries < 1:
-                fresh_b = _sp_minted_bearer()
+                fresh_b = await _radar_fresh_bearer()
                 if fresh_b:
                     gc.headers["Authorization"] = f"Bearer {fresh_b}"
                 ct2 = await _sp_client_token()
@@ -1679,7 +1934,8 @@ async def sp_releases(days: int = 30, types: str = "album,single", force: int = 
 
     t = _load_sp()
     sp_dc = _cfg.get("spotify-sp-dc", "").strip()
-    if not t.get("access_token") and not sp_dc and not _sp_minted_bearer():
+    if (not t.get("access_token") and not sp_dc and not _sp_minted_bearer()
+            and not _radar_sp_dc() and not _load_sp(radar=True).get("access_token")):
         # keeper-bearer достаточно: краул идёт через api-partner (2026-07-19)
         return {"ok": False, "error": "Not connected", "releases": []}
 
@@ -1765,7 +2021,8 @@ async def _sp_background_crawler() -> None:
             t = _load_sp()
             sp_dc = (_cfg.get("spotify-sp-dc") or "").strip()
             banned = datetime.now().timestamp() < _sp_banned_until
-            if (t.get("access_token") or sp_dc) and not banned and not _sp_scan_running:
+            radar_ok = bool(_radar_sp_dc() or _load_sp(radar=True).get("access_token"))
+            if (t.get("access_token") or sp_dc or radar_ok) and not banned and not _sp_scan_running:
                 _sp_scan_running = True
                 _sp_scan_started = datetime.now().timestamp()
                 # Real releases only (no appears_on) → 1 request/artist, half the
@@ -1795,7 +2052,13 @@ async def _sp_whatsnew_poller() -> None:
             return   # main crawler already flips _sp_crawler_started off; we just exit
         try:
             banned = datetime.now().timestamp() < _sp_banned_until
-            bearer = _sp_minted_bearer()
+            # Dedicated radar cookie → poll as the radar account; otherwise the
+            # keeper-bearer exactly as before.
+            if _radar_sp_dc():
+                _radar_log_creds()
+                bearer = await _sp_dc_get_token(radar=True)
+            else:
+                bearer = _sp_minted_bearer()
             if bearer and not banned and not _sp_scan_running:
                 ct = await _sp_client_token()
                 headers = {
@@ -2080,6 +2343,37 @@ async def sp_logout():
     _sp_token = {}
     if _token_file and _token_file.exists():
         _token_file.unlink()
+    return {"ok": True}
+
+
+@router.get("/api/spotify/radar/status")
+async def sp_radar_status():
+    """Which credentials the radar runs on — booleans and key NAMES only."""
+    own_web = bool(_radar_sp_dc())
+    own_app = _radar_own_oauth()
+    authorized = bool(_load_sp(radar=True).get("access_token"))
+    return {
+        "ok":               True,
+        "radar_sp_dc_set":  own_web,
+        "radar_app_set":    own_app,
+        "radar_authorized": authorized,
+        "web_source":  "spotify-radar-sp-dc" if own_web else "shared",
+        "oauth_source": ("spotify-radar-client-id" if own_app else "shared"),
+        "needs_login": own_app and not authorized,
+        "login_url":   "/spotify/login?radar=1",
+    }
+
+
+@router.post("/api/spotify/radar/logout")
+async def sp_radar_logout():
+    """Forget the radar OAuth token (the radar then has no /v1 token of its own)."""
+    global _sp_radar_token, _radar_creds_sig
+    _sp_radar_token = {}
+    _sp_dc_web_radar.clear()
+    if _radar_token_file and _radar_token_file.exists():
+        _radar_token_file.unlink()
+    _radar_creds_sig = ""
+    _radar_log_creds()
     return {"ok": True}
 
 

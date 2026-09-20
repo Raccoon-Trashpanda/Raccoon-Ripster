@@ -29,6 +29,7 @@ ALLOWED_HOSTS: frozenset[str] = frozenset({
     "spotify.com", "open.spotify.com",
     "soundcloud.com", "www.soundcloud.com", "m.soundcloud.com", "on.soundcloud.com",
     "beatport.com", "www.beatport.com",
+    "jiosaavn.com", "www.jiosaavn.com",
     "music.yandex.ru", "music.yandex.com", "music.yandex.kz", "music.yandex.by",
     "music.amazon.com", "music.amazon.co.uk", "music.amazon.de", "music.amazon.co.jp",
     "music.amazon.in", "music.amazon.fr", "music.amazon.es", "music.amazon.it",
@@ -84,6 +85,7 @@ def detect_service(url: str) -> str:
     if "spotify.com"     in u: return "spotify"
     if "soundcloud.com"  in u: return "soundcloud"
     if "beatport.com"    in u: return "beatport"
+    if "jiosaavn.com"    in u: return "jiosaavn"
     if "music.yandex."   in u: return "yandex"
     if "music.amazon."   in u: return "amazon"
     if "bbc.co.uk"       in u: return "bbc"
@@ -112,6 +114,7 @@ def default_quality(svc: str) -> str:
         "spotify":    _config.get("quality", "alac"),   # will be converted
         "soundcloud": sc_default,
         "beatport":   _config.get("beatport-quality", "hifi"),
+        "jiosaavn":   _config.get("jiosaavn-quality", "high"),
         "yandex":     _config.get("yandex-quality", "flac"),
         "amazon":     _config.get("amazon-quality", "High"),
         "bbc":        "mp3",
@@ -125,6 +128,8 @@ def engine_for_svc(svc: str) -> str:
             return "orpheus_spotify"
     if svc == "beatport":
         return "orpheus_beatport"
+    if svc == "jiosaavn":
+        return "orpheus_jiosaavn"
     if svc == "soundcloud":
         # Prefer the pywidevine engine when a device file is available — handles
         # DRM-protected tracks (now the majority of SC content) that Lucida

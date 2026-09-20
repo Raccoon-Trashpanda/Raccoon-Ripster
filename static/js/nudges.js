@@ -74,7 +74,11 @@ function ngOpenArtist(name) {
   // прямая страница артиста требует id, которого у подсказки нет.
   const nav = document.querySelector('.nav-item[data-view="search"]');
   if (typeof showView === 'function') showView('search', nav);
-  setTimeout(() => {
+  // Ждём, пока вкладка выставит сервис по умолчанию (список сервисов строится
+  // асинхронно): иначе поиск уходил в первый пункт разметки — Apple, который
+  // в выдаче ничего не проигрывает.
+  setTimeout(async () => {
+    try { if (typeof _searchSvcReady !== 'undefined') await _searchSvcReady; } catch (_) {}
     const q = document.getElementById('search-q');
     const ty = document.getElementById('search-type');
     if (q) q.value = name;

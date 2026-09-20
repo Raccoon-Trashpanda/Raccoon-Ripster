@@ -175,7 +175,7 @@ class QobuzPool:
                 "accounts": [
                     {"slot": i, "label": a["label"], "primary": i == 0, "busy": self._busy[i],
                      "enabled": a.get("enabled", True), "priority": a.get("priority", i),
-                     "order": _afb.order_indices(self.accounts).index(i),
+                     "order": _afb.order_pos(self.accounts, i),
                      **health_note(a)}
                     for i, a in enumerate(self.accounts)
                 ],
@@ -222,7 +222,12 @@ def get_pool(config: dict) -> QobuzPool | None:
     if not pool_enabled(config):
         return None
     accounts = _configured_accounts(config)
-    fp = tuple((a["qobuz-user-id"], a["qobuz-auth-token"], a["qobuz-email"]) for a in accounts)
+    # В отпечаток ОБЯЗАТЕЛЬНО входят `enabled` и `priority`: без них смена
+    # этих полей (кнопка вкл/выкл, перетаскивание порядка) не пересобирала
+    # закэшированный пул, и панель отдавала СТАРОЕ состояние до перезапуска —
+    # выглядело как «нажал, ничего не произошло». 18.09.2026.
+    fp = tuple((a["qobuz-user-id"], a["qobuz-auth-token"], a["qobuz-email"],
+                a.get("enabled", True), a.get("priority")) for a in accounts)
     if _pool_instance is None or fp != _pool_accounts_fingerprint:
         from pathlib import Path as _P
         base = _P(__file__).resolve().parent.parent / "dist" / "qobuz_pool"
@@ -239,7 +244,7 @@ def live_status(config: dict) -> dict:
         return {"pool_enabled": False, "accounts": [
             {"slot": i, "label": a["label"], "primary": i == 0, "busy": False,
              "enabled": a.get("enabled", True), "priority": a.get("priority", i),
-             "order": _afb.order_indices(accounts).index(i),
+             "order": _afb.order_pos(accounts, i),
              **health_note(a)}
             for i, a in enumerate(accounts)
         ]}

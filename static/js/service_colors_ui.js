@@ -5,7 +5,7 @@
 // ======================================================================
 
 // ── Settings → Цвета сервисов: per-service color picker ───────────────────
-const _SVC_PICKER_LIST = ['apple','qobuz','tidal','deezer','spotify','soundcloud','bbc','beatport'];
+const _SVC_PICKER_LIST = ['apple','qobuz','tidal','deezer','spotify','soundcloud','bbc','beatport','jiosaavn'];
 function renderSvcColorGrid() {
   const grid = document.getElementById('svc-color-grid');
   if (!grid) return;
@@ -201,6 +201,7 @@ function detectSvcFromUrl(url) {
   if(url.includes('soundcloud.com'))   return 'soundcloud';
   if(url.includes('spotify.com'))      return 'spotify';
   if(url.includes('beatport.com'))     return 'beatport';
+  if(url.includes('jiosaavn.com'))     return 'jiosaavn';
   if(url.includes('music.yandex.'))    return 'yandex';
   if(url.includes('music.amazon.'))    return 'amazon';
   return null;
@@ -218,6 +219,7 @@ function showUrlServiceModal(url, quality, detectedSvc) {
     tidal:    {label:'Tidal',       color:'#00d4b3', engines:['Tidal API']},
     spotify:  {label:'Spotify',     color:'#1db954', engines:['→ Apple Music','→ Deezer','→ Qobuz']},
     beatport: {label:'Beatport',    color:'#01f49c', engines:['OrpheusDL']},
+    jiosaavn: {label:'JioSaavn',    color:'#2bc5b4', engines:['OrpheusDL']},
   };
 
   const svcInfo = SVC_INFO[detectedSvc] || {label:detectedSvc,color:'var(--muted)',engines:[t('q.auto_word')]};
@@ -541,7 +543,20 @@ function _qiStatusChip(task) {
   if(task.status==='done')   return `<span class="qi-st st-done">✓ ${t('q.st_done')}</span>`;
   if(task.status==='error')  return `<span class="qi-st st-err">✗ ${t('q.st_err')}</span>`;
   if(task.status==='paused') return `<span class="qi-st">⏸ ${t('q.st_paused')}</span>`;
+  if(task.status==='scheduled') return `<span class="qi-st st-q">⏰ ${ti('q.st_scheduled',{time:_fmtSchedFor(task.scheduled_for)})}</span>`;
   return `<span class="qi-st st-q">${t('q.st_queued')}</span>`;
+}
+
+// «scheduled_for» планировщика — UTC ISO («2026-09-20T22:00:00Z»); человеку
+// показываем локальное время: сегодня — только часы, иначе и дату.
+function _fmtSchedFor(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso.endsWith('Z') || /[+T].*[+Z]\d{0,4}:?\d{2}$/.test(iso) ? iso : iso + 'Z');
+  if (isNaN(d)) return String(iso);
+  const hm = d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  const now = new Date();
+  const sameDay = d.toDateString() === now.toDateString();
+  return sameDay ? hm : `${String(d.getDate()).padStart(2,'0')}.${String(d.getMonth()+1).padStart(2,'0')} ${hm}`;
 }
 
 function buildQueueItem(task) {
@@ -601,7 +616,9 @@ function buildQueueItem(task) {
         ${_countTxt?`<span class="qi-count">${_countTxt}</span>`:''}
         ${_st}
         ${logLines.length?`<button class="qi-log-toggle" onclick="toggleTaskLog('${task.id}',this)" title="${t('q.show_log')}">▶${logLines.length}</button>`:''}
+        ${typeof qtToggleBtn === 'function' ? qtToggleBtn(task) : ''}
       </div>
+      ${typeof qtPanel === 'function' ? qtPanel(task) : ''}
       ${logLines.length?`<div class="qi-log-panel" id="qi-log-${task.id}">${logHtml}</div>`:''}
     </div>
     <!-- Кнопки действий вынесены из нижней строки вправо, к крестику: владелец

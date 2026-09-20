@@ -64,8 +64,15 @@ def _cache_save(k: str, info: dict) -> None:
 
 def account_secret(acct: dict) -> str:
     """Чем учётка опознаётся: refresh-токен, а при входе по паролю — почта."""
-    return ((acct.get("tidal-refresh") or "").strip()
-            or (acct.get("tidal-email") or "").strip())
+    # Форм записи ДВЕ (как у Qobuz): в config.yaml — поля верхнего уровня
+    # (`tidal-refresh`, `tidal-email`), а запись ПУЛА (`tidal-accounts[i]`) —
+    # короткие ключи (`refresh`, `email`). Читались только конфиг-имена, из-за
+    # чего КАЖДАЯ пуловая учётка получала ПУСТОЙ идентификатор: здоровье, маска
+    # и счётчик неудач всех слотов складывались в одну кучу, а статус не
+    # показывался. Проверено на живом конфиге — все 3 слота давали пусто.
+    # 18.09.2026.
+    return ((acct.get("tidal-refresh") or acct.get("refresh") or "").strip()
+            or (acct.get("tidal-email") or acct.get("email") or "").strip())
 
 
 def known(secret: str, max_age: float = 24 * 3600.0) -> dict | None:

@@ -375,6 +375,9 @@ DEFAULT_CONFIG: dict = {
     "beatport-password": "",
     "beatport-quality":  "hifi",
     "beatport-save-path": "",
+    # ── JioSaavn (OrpheusDL module, no login) ────────────────────────────────
+    "jiosaavn-quality":   "high",
+    "jiosaavn-save-path": "",
 }
 
 
@@ -490,6 +493,46 @@ def load_config(config_file: _Path, tokens_dir: _Path) -> dict:
     return merged
 
 
+_BACKUP_KEEP = 30
+
+
+def _backup_config(config_file: _Path) -> None:
+    """Копия config.yaml в backups/ ПЕРЕД перезаписью; хвост подрезается.
+
+    Зачем: сохранение переписывает файл ЦЕЛИКОМ, и любая логика, обнулившая
+    поля (снятие учётки реестром, сохранение вкладки с пустыми полями, чистка
+    токена), уносит их без следа — откатиться было не на что. Держим последние
+    `_BACKUP_KEEP` копий: хватает отмотать несколько шагов, и папка не растёт.
+    """
+    if not config_file.is_file():
+        return
+    import shutil as _sh
+    from datetime import datetime as _dt
+    dst_dir = config_file.parent / "backups"
+    dst_dir.mkdir(parents=True, exist_ok=True)
+    dst = dst_dir / f"config_{_dt.now():%Y%m%d_%H%M%S}.yaml"
+    if dst.exists():
+        return                      # та же секунда — копия уже сделана
+    # Копируем ТОЛЬКО при реальном изменении. Приложение сохраняет конфиг часто
+    # (пробы сервисов, обновление токенов), и без этой проверки 30 слотов
+    # истории вымывались за минуты — страховка стала бы бесполезной ровно тогда,
+    # когда нужна (инцидент замечают через часы). Сверяем с САМОЙ СВЕЖЕЙ копией.
+    made = sorted(dst_dir.glob("config_20*.yaml"))
+    if made:
+        try:
+            if made[-1].read_bytes() == config_file.read_bytes():
+                return              # ничего не изменилось — копия не нужна
+        except Exception:           # noqa: BLE001
+            pass
+    _sh.copy2(config_file, dst)
+    made = sorted(dst_dir.glob("config_20*.yaml"))
+    for p in made[:-_BACKUP_KEEP]:
+        try:
+            p.unlink()
+        except Exception:           # noqa: BLE001
+            pass
+
+
 def save_config(cfg: Any, config_file: _Path, tokens_dir: _Path) -> None:
     """Persist config to config.yaml and sync any token files."""
     raw = cfg._data if isinstance(cfg, ConfigService) else cfg
@@ -504,6 +547,16 @@ def save_config(cfg: Any, config_file: _Path, tokens_dir: _Path) -> None:
             print(f"[config] {_n}", flush=True)
     except Exception as _e:
         print(f"[config] реестр снятых учёток недоступен: {_e}",
+              file=_sys.stderr, flush=True)
+    # Страховка от массового затирания: перед КАЖДОЙ перезаписью кладём копию.
+    # 18.09.2026 владелец нажал «удалить токен Qobuz» и недосчитался почти всех
+    # токенов, а вернуть смог ровно один — потому что отката не существовало.
+    # Конфиг ~12 КБ, копия стоит копейки и превращает потерю данных в «откатил
+    # файл». Ошибка бэкапа НЕ должна мешать сохранению — только пишем в лог.
+    try:
+        _backup_config(config_file)
+    except Exception as _e:                                   # noqa: BLE001
+        print(f"[config] бэкап перед записью не удался: {_e}",
               file=_sys.stderr, flush=True)
     if not _atomic_write_yaml(config_file, raw):
         return

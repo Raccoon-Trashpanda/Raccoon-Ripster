@@ -42,6 +42,10 @@ CNW = 0x08000000  # CREATE_NO_WINDOW
 
 NO_BOT = "--no-bot" in sys.argv
 NO_FIX = "--no-fix" in sys.argv
+if NO_FIX:
+    # credential_health читает это сам: streak, снятие учёток и автозамена
+    # основной под --no-fix не происходят.
+    os.environ["RIPSTER_HEALTH_DRY_RUN"] = "1"
 # Dry/verification runs shouldn't pollute HANDOFF with entries that look exactly
 # like a real scheduled check (that happened on 2026-07-25).
 NO_LOG = "--no-log" in sys.argv
@@ -215,6 +219,80 @@ def _app_started_ts() -> float:
 
 
 _DETACHED = 0x00000008  # DETACHED_PROCESS
+DOCKER_DESKTOP_EXE = Path(r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
+
+# Containers Ripster needs up: Apple decrypt wrapper + local Bot API.
+REQUIRED_CONTAINERS = ("amd-wrapper", "tg-bot-api")
+BOT_PY = r"C:\Python314\python.exe"
+
+
+def docker_engine_up(timeout: float = 15) -> bool:
+    """Отвечает ли демон: `docker ps` — самый дешёвый честный тест."""
+    return _docker("ps", timeout=timeout)[0] == 0
+
+
+def ensure_docker_engine(notify=fixed, wait_iters: int = 24, delay: float = 5) -> bool:
+    """Поднять Docker Desktop, если демон лежит, и дождаться готовности движка.
+
+    После ребута движок не стартует сам, а на нём и wrapper, и tg-bot-api.
+    Вызывается и из `_heal_app_down`, и из лончера (Ripster.exe) при старте —
+    вторая реализация той же логики означала бы два разных поведения таймаута."""
+    if docker_engine_up():
+        return True
+    if not DOCKER_DESKTOP_EXE.exists():
+        warn(f"Нет Docker Desktop по пути {DOCKER_DESKTOP_EXE} — контейнеры не поднимутся")
+        return False
+    try:
+        subprocess.Popen([str(DOCKER_DESKTOP_EXE)], creationflags=CNW | _DETACHED)
+    except Exception as e:
+        warn(f"Не смог запустить Docker Desktop: {str(e)[:60]}")
+        return False
+    for _ in range(wait_iters):  # up to ~2 мин на движок
+        time.sleep(delay)
+        if docker_engine_up(timeout=10):
+            notify("Docker Desktop запущен (лежал после ребута)")
+            return True
+    warn("Docker-движок не ответил за ~2 мин — контейнеры недоступны")
+    return False
+
+
+def running_container_names() -> set:
+    rc, out = _docker("ps", "--format", "{{.Names}}")
+    return set(out.split()) if rc == 0 else set()
+
+
+def ensure_container(name: str, notify=fixed) -> bool:
+    """Поднять контейнер по имени: `--restart unless-stopped` оживает сам, но
+    только если движок был готов раньше него — после ребута порядок обратный."""
+    if name in running_container_names():
+        return True
+    rc, out = _docker("start", name)
+    if rc == 0 and name in running_container_names():
+        notify(f"Контейнер {name} поднят")
+        return True
+    return False
+
+
+def bot_process_count() -> int:
+    return _ps_proc_count(r"bot\.py")
+
+
+def start_bot_process(notify=fixed):
+    """Единственный способ поднять tgbot/bot.py — тот же интерпретатор и cwd,
+    что у `check_bot`. Лончер берёт его отсюда, чтобы интерпретатор не
+    разъезжался с тем, что сторож считает «живым ботом»; handle возвращается,
+    чтобы лончер мог следить за процессом, а не только считать его по имени."""
+    try:
+        proc = subprocess.Popen([BOT_PY, "bot.py"], cwd=str(ROOT / "tgbot"),
+                                creationflags=CNW | _DETACHED)
+    except Exception as e:
+        warn(f"Не смог запустить bot.py: {str(e)[:60]}")
+        return None
+    time.sleep(4)
+    if bot_process_count() > 0:
+        notify("Бот (bot.py) перезапущен")
+        return proc
+    return None
 
 
 def _heal_app_down() -> bool:
@@ -222,17 +300,7 @@ def _heal_app_down() -> bool:
     RipsterLauncher.exe can hang without spawning the backend (seen 2026-07-18).
     Fix: bring Docker up, kill hung launchers, start app.py directly via venv."""
     # 1. Docker engine (wrapper + tg-bot-api live there; restart-policy revives them)
-    if _docker("ps", timeout=15)[0] != 0:
-        dd = Path(r"C:\Program Files\Docker\Docker\Docker Desktop.exe")
-        if dd.exists():
-            try:
-                subprocess.Popen([str(dd)], creationflags=CNW | _DETACHED)
-                for _ in range(24):  # up to ~2 мин на движок
-                    time.sleep(5)
-                    if _docker("ps", timeout=10)[0] == 0:
-                        fixed("Docker Desktop запущен (лежал после ребута)"); break
-            except Exception as e:
-                warn(f"Не смог запустить Docker Desktop: {str(e)[:60]}")
+    ensure_docker_engine()
     # 2. Backend already starting? Then only wait, no duplicate spawn.
     #    ВАЖНО: app.py спавнит дочерний python-воркер, который наследует сокет 7799 —
     #    убивать «лишние» app.py по netstat-владельцу нельзя, роняет весь сервис.
@@ -270,6 +338,25 @@ def _heal_app_down() -> bool:
         if _app_alive(timeout=4):
             fixed(f"App поднят {how or 'ожиданием уже стартующего процесса'}")
             return True
+    # 4. Лаунчер завис, так и не запустив app.py (19.09.2026 после ребута: exe жил
+    #    7 мин, в launcher.log ни строки). Запасной путь — прямой .venv app.py;
+    #    лаунчер при следующем открытии сам подцепится к живому 7799.
+    py = ROOT / ".venv" / "Scripts" / "python.exe"
+    if how.startswith("перезапуском") and py.exists() and _ps_proc_count(r"app\.py") == 0:
+        try:
+            subprocess.run(["taskkill", "/F", "/IM", "RipsterLauncher.exe"],
+                           capture_output=True, timeout=15, creationflags=CNW)
+            logf = open(ROOT / "logs" / "app_heal.log", "ab")
+            subprocess.Popen([str(py), "app.py"], cwd=str(ROOT),
+                             stdout=logf, stderr=subprocess.STDOUT,
+                             creationflags=CNW | _DETACHED)
+            for _ in range(60):
+                time.sleep(3)
+                if _app_alive(timeout=4):
+                    fixed("App поднят прямым запуском .venv app.py (лаунчер завис без бэкенда)")
+                    return True
+        except Exception as e:
+            warn(f"Запасной запуск app.py не удался: {str(e)[:60]}")
     warn("App не поднялся за 4 мин — нужен ручной разбор (логи logs/)")
     return False
 
@@ -529,7 +616,7 @@ def check_account_duplicates():
     import asyncio
     for service in ("deezer", "qobuz", "soundcloud"):
         try:
-            lines = asyncio.run(dd.apply(cfg, service, confirm=True))
+            lines = asyncio.run(dd.apply(cfg, service, confirm=not NO_FIX))
         except Exception as e:
             warn(f"{service}: разбор дублей не прошёл ({type(e).__name__})")
             continue
@@ -710,12 +797,30 @@ def _heal_wrapper():
 
 
 def check_tokens():
+    """Есть ли у сервиса ДОЛГОЖИВУЩИЙ ключ — а не лежит ли в конфиге кэш.
+
+    ПОЧЕМУ КОРТЕЖ, А НЕ ОДИН КЛЮЧ. 12.09.2026 сводка сказала «Токены
+    отсутствуют: Tidal — вставь через бот /set», хотя вставлять было нечего:
+    `tidal-token` это access-токен на 4 часа (в тот раз выписан 20:01:02,
+    годен до 00:01:02), он пуст всегда, кроме как сразу после обновления.
+    Долгоживёт `tidal-refresh` (без exp) — он и лежал на месте, и через
+    несколько секунд ТОТ ЖЕ пробег сам выписал по нему свежий access
+    (`check_engine_probe` дёргает живое приложение, оно рефрешит сессию).
+    То есть проверка ругалась на кэш и просила владельца руками починить то,
+    что чинится само. Правило: сторож смотрит на то, ЧЕГО НЕЛЬЗЯ ПОЛУЧИТЬ
+    ЗАНОВО. Сервис считается заряженным, если есть ХОТЬ ОДИН ключ из кортежа.
+    """
     checks = {
-        "qobuz-auth-token": "Qobuz", "deezer-arl": "Deezer",
-        "tidal-token": "Tidal", "spotify-sp-dc": "Spotify",
-        "soundcloud-oauth-token": "SoundCloud", "yandex-token": "Yandex",
+        ("qobuz-auth-token",): "Qobuz",
+        ("deezer-arl",): "Deezer",
+        # refresh — долгоживущий, tidal-accounts — пул; access-токен НЕ считаем
+        ("tidal-refresh", "tidal-accounts", "tidal-token"): "Tidal",
+        ("spotify-sp-dc",): "Spotify",
+        ("soundcloud-oauth-token",): "SoundCloud",
+        ("yandex-token",): "Yandex",
     }
-    missing = [name for key, name in checks.items() if not _cfg_get(key)]
+    missing = [name for keys, name in checks.items()
+               if not any(_cfg_get(k) for k in keys)]
     if missing:
         warn(f"Токены отсутствуют: {', '.join(missing)} — вставь через бот /set")
     else:
@@ -964,6 +1069,13 @@ def _tunnel_restart_window() -> str:
     for line in reversed(tail):
         if "listen port 80" not in line and "tunnel down" not in line:
             continue
+        # 14.09.2026. «tunnel down → respawning (попытка 5…)» — это сторож,
+        # который уже час долбится в лежащий serveo, а не пересборка после
+        # старта приложения. Сводка назвала часовую аварию «окном перезапуска»
+        # только потому, что пятая попытка пришлась на те же 5 минут.
+        m = re.search(r"попытка (\d+)", line)
+        if m and int(m.group(1)) >= 2:
+            return ""
         try:
             t = datetime.strptime(line[:8], "%H:%M:%S").replace(
                 year=now.year, month=now.month, day=now.day)
@@ -1013,7 +1125,7 @@ def check_tunnel():
         if local_ok:
             warn(f"Туннель отдаёт {he.code}, хотя app (7799) отвечает — лежит не "
                  f"наш сервер, а связь с ним: у края serveo нет апстрима "
-                 f"(ssh-сессия не держится).{note}{tail}")
+                 f"(ssh-сессия не держится).{note or _serveo_sshd_note()}{tail}")
         else:
             bad(f"Туннель отдаёт {he.code} И app (7799) не отвечает — лежит сам "
                 f"сервер, туннелю нечего отдавать.{tail}")
@@ -1088,29 +1200,124 @@ def check_queue():
 
 
 def check_bot():
-    rc, out = _docker("ps", "--filter", "name=tg-bot-api", "--format", "{{.Names}}")
-    api_up = "tg-bot-api" in out
-    if api_up:
+    if "tg-bot-api" in running_container_names():
         ok("TG Bot API контейнер (tg-bot-api) работает")
     else:
         warn("TG Bot API контейнер не найден — доставки в бот могут не идти (docker start tg-bot-api)")
         if not NO_FIX:
-            _docker("start", "tg-bot-api")
+            if not ensure_container("tg-bot-api", notify=lambda m: None):
+                warn("Не смог поднять tg-bot-api")
     # bot.py process (реальная проверка по командной строке)
-    if _ps_proc_count(r"bot\.py") > 0:
+    if bot_process_count() > 0:
         ok("Бот (bot.py) запущен")
     else:
         warn("Бот (bot.py) не запущен")
         if not NO_FIX:
+            start_bot_process()
+
+
+def check_pool_identities():
+    """ИНВАРИАНТ, а не каталог прошлых аварий: у КАЖДОЙ учётки пула обязан быть
+    непустой идентификатор.
+
+    18.09.2026 это нарушалось молча и месяцами. `account_secret()` у Qobuz и
+    Tidal читал только КОНФИГ-имена (`qobuz-auth-token`, `tidal-refresh`), а
+    записи ПУЛА лежат с короткими ключами (`auth_token`, `refresh`) — и каждая
+    пуловая учётка получала ПУСТУЮ строку как идентификатор: здоровье, маска и
+    счётчик неудач всех слотов складывались в одну кучу, статус слота не
+    показывался, снятие по такой учётке не срабатывало.
+
+    Ни одна из существующих проверок этого не видела — все они описывают
+    ИЗВЕСТНЫЕ поломки, а значит по определению не находят новый класс. Эта
+    описывает СВОЙСТВО, которое обязано выполняться всегда, поэтому поймает и
+    следующий сервис, у которого появится пул.
+    """
+    try:
+        import yaml
+        cfg = yaml.safe_load(CONFIG.read_text(encoding="utf-8-sig")) or {}
+    except Exception as e:                                    # noqa: BLE001
+        warn(f"Идентичность пулов: не смог прочитать конфиг ({str(e)[:50]})")
+        return
+    import sys as _s
+    if str(ROOT) not in _s.path:
+        _s.path.insert(0, str(ROOT))
+    probes = [("Qobuz",  "qobuz-accounts",  "ripster.qobuz_accounts"),
+              ("Tidal",  "tidal-accounts",  "ripster.tidal_accounts"),
+              ("Yandex", "yandex-accounts", "ripster.yandex_accounts")]
+    bad, total = [], 0
+    for name, key, mod in probes:
+        pool = cfg.get(key)
+        if not isinstance(pool, list) or not pool:
+            continue
+        try:
+            m = __import__(mod, fromlist=["account_secret"])
+            fn = getattr(m, "account_secret", None)
+        except Exception:                                     # noqa: BLE001
+            continue
+        if fn is None:
+            continue
+        for i, a in enumerate(pool):
+            total += 1
             try:
-                subprocess.Popen([r"C:\Python314\python.exe", "bot.py"],
-                                 cwd=str(ROOT / "tgbot"),
-                                 creationflags=CNW | _DETACHED)
-                time.sleep(4)
-                if _ps_proc_count(r"bot\.py") > 0:
-                    fixed("Бот (bot.py) перезапущен")
-            except Exception as e:
-                warn(f"Не смог запустить bot.py: {str(e)[:60]}")
+                s = (fn(a) or "").strip()
+            except Exception:                                 # noqa: BLE001
+                s = ""
+            if not s:
+                bad.append(f"{name}[{i}] {((a or {}).get('label') or '?')}")
+    if not total:
+        return
+    if bad:
+        warn(f"Идентичность пулов НАРУШЕНА: {len(bad)} из {total} учёток без "
+             f"идентификатора ({', '.join(bad[:6])}) — здоровье, маска и снятие "
+             f"по ним работают вслепую. Чинить в account_secret() модуля: он "
+             f"обязан читать И конфиг-имена, И короткие ключи записи пула.")
+    else:
+        ok(f"Идентичность пулов: все {total} учёток пула опознаются")
+
+
+def check_bot_delivery():
+    """Механический бэкстоп на инцидент 18.09.2026 («гость завис на 95%»): трекер
+    бота застрял в 'running'/'queued', но задачи НЕТ ни в очереди app, ни в
+    манифесте → это потерянный призрак, который блокирует порядковую выдачу чата.
+
+    Живьём это чинит `_delivery_watchdog` в боте (~3 мин). Проверка — страховка:
+    если призраки ВСЁ РАВНО висят здесь, значит бот на старом коде (сторож не
+    вооружён) или сам сторож сломан. Только диагноз, без автофикса: рестарт
+    ЖИВОГО бота отсюда оборвал бы активные загрузки — это делает человек.
+    Ложных тревог избегаем: если очередь app не прочиталась — проверку
+    пропускаем (иначе всё выглядело бы призраком)."""
+    trk = ROOT / "tgbot" / "trackers.json"
+    try:
+        saved = json.loads(trk.read_text(encoding="utf-8-sig"))
+    except FileNotFoundError:
+        return                      # нет бота на этой машине — не наша забота
+    except Exception as e:
+        warn(f"Бот-доставка: не смог прочитать trackers.json ({str(e)[:50]})")
+        return
+    live = [t for t in (saved or []) if t.get("status") in ("queued", "running")]
+    if not live:
+        ok(f"Бот-доставка здорова (трекеров: {len(saved or [])}, зависших нет)")
+        return
+    st, data = _api("/api/queue")
+    if not (st == 200 and isinstance(data, list)):
+        warn("Бот-доставка: не смог прочитать очередь app — проверка пропущена")
+        return
+    q_ids = {t.get("id") for t in data}
+    try:
+        man = json.loads((ROOT / "downloads_manifest.json").read_text(encoding="utf-8"))
+    except Exception:
+        man = {}
+    ghosts = [t for t in live
+              if t.get("task_id") not in q_ids and t.get("task_id") not in man]
+    if ghosts:
+        who = ", ".join(f"{(t.get('req_name') or '?')}:{str(t.get('task_id'))[:8]}"
+                        for t in ghosts[:5])
+        warn(f"Бот-доставка ЗАВИСЛА: {len(ghosts)} трекер(ов) в running/queued, "
+             f"но их нет ни в очереди app, ни в манифесте — очередь чата "
+             f"заблокирована ({who}). Сторож бота должен был добить; проверь, что "
+             f"бот на свежем коде, иначе перезапусти bot.py.")
+    else:
+        ok(f"Бот-доставка здорова ({len(live)} активных, все живы в app/манифесте)")
 
 
 def check_watchlist():
@@ -1213,6 +1420,55 @@ def check_watchlist():
         fixed(msg)
     else:
         warn(f"Авто-починка вишлиста не удалась: {str(res)[:80]}")
+
+
+def check_bbc_radar_urls():
+    """ИНВАРИАНТ: каждая ссылка BBC-райдара обязана разбираться регуляркой загрузчика.
+
+    ЗАЧЕМ. 19.09.2026 радар выдавал эпизоды ссылками вида /programmes/<pid>
+    (их строит routes/radar.py), а runner._RE_BBC_PID узнавал только
+    /sounds/play/<pid> — в результате КАЖДАЯ загрузка с радара падала с
+    «could not parse the id from the link» (console.bbc_bad_pid), хотя сами
+    эпизоды существовали и качались бы. Регулярку расширили обоими форматами,
+    но договорённость «формат ссылки радара ↔ разбор загрузчика» не записана
+    нигде, и следующая правка формата (свой домен, новый префикс, пустой pid)
+    разойдётся с ней снова. Проверка сравнивает ЖИВЫЕ ссылки с той же
+    регуляркой, что стоит в runner.py, — импортом, не копией: копия протухает
+    в тот день, когда правят оригинал (этот класс лжи уже проходили на
+    мёртвых детекторах отсечек).
+
+    Авто-починки нет и быть не может: лечится только правкой кода (radar.py
+    или runner.py), а это решает человек."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from ripster.runner import _RE_BBC_PID as pid_re
+    except Exception:
+        try:  # runner тянет за собой половину пакета; запасной провод — тот же regex в metadata
+            from ripster.metadata.bbc import _RE_PID as pid_re
+        except Exception as e:
+            warn(f"BBC-радар: не смог импортировать регулярку загрузчика ({str(e)[:60]}) "
+                 f"— инвариант не проверен")
+            return
+    st, data = _api("/api/releases/bbc", timeout=60)
+    if st != 200 or not isinstance(data, dict) or not isinstance(data.get("releases"), list):
+        warn(f"BBC-радар: /api/releases/bbc не ответил (HTTP {st}, {str(data)[:60]}) — "
+             f"ссылки нечем проверить")
+        return
+    urls = [str(r.get("url") or "") for r in data["releases"] if isinstance(r, dict)]
+    if not urls:
+        # Пустая лента = проверка прошла бы вхолостую. За 90 дней по 11 передачам
+        # она обязана быть непустой; пустая — это сдохший источник, а не «всё хорошо».
+        warn("BBC-радар: лента релизов ПУСТА — нечего проверять (11 передач за 90 дней "
+             "не могут дать ноль эпизодов; источник мёртв?)")
+        return
+    unparsed = [u for u in urls if not pid_re.search(u)]
+    if unparsed:
+        warn(f"BBC-радар: {len(unparsed)} из {len(urls)} ссылок НЕ разбираются регуляркой "
+             f"загрузчика (runner._RE_BBC_PID), например {unparsed[0] or '(пустая)'} — "
+             f"такие загрузки упадут с «could not parse the id from the link». "
+             f"Синхронизировать формат в routes/radar.py и разбор в runner.py")
+    else:
+        ok(f"BBC-радар: все {len(urls)} ссылок разбираются регуляркой загрузчика")
 
 
 def check_external_apis():
@@ -1391,6 +1647,23 @@ _ERR_BUCKETS = [
     ("spotify-unavailable", ("cannot get alternative track", "is unavailable on spotify",
                              "spotifytrackunavailableerror", "attribute 'download_type'",
                              "extended metadata request failed")),
+    # ДЕРЖАТЬ ПЕРЕД spotify-auth. Бакет авторизации ловит голую подстроку
+    # "spotify", а у Spotify хост САМ содержит это слово — поэтому
+    # «HTTPSConnectionPool(host='apresolve.spotify.com'): Max retries exceeded»
+    # (отказ СЕТИ, авторизация в нём не участвует) приходил как spotify-auth.
+    # 12.09.2026 сводка показала владельцу spotify-auth×40 первым бакетом при
+    # полностью живой авторизации: 26 строк были этим коннектом, ещё 12 —
+    # сторожем, сдавшимся из-за него же, и лишь 2 имели отношение к Spotify.
+    # Настоящая причина (DNS лежал 06:45–15:26) стояла ОТДЕЛЬНО в network×37 и
+    # выглядела второстепенной. Имя бакета уводило от причины — ровно тот же
+    # дефект, что уже чинили для spotify-lyrics и spotify-unavailable.
+    # Ключи нарочно транспортные: 401/OAuth-формы сюда не подходят.
+    ("network",             ("httpsconnectionpool", "max retries exceeded",
+                             "getaddrinfo")),
+    # Кипер сдался после N попыток — ЭТО настоящий сигнал «нужно вмешательство»,
+    # и он обязан называться собой, а не «авторизацией»: 12.09 он сработал из-за
+    # обрыва сети, а не из-за токена, и починился сам, когда сеть вернулась.
+    ("spotify-keeper-giveup", ("попытки подряд не помогли",)),
     ("spotify-auth",        ("orpheus_not_authed", "gettrack", "401", "spotify")),
     ("qobuz-sub",           ("нет активной подписки", "ineligible")),
     # Beatport отвечает 403 «You do not have permission to perform this action» на
@@ -1543,6 +1816,42 @@ def check_retry_storms():
         )
         zero_old = len(_zero_all) - zero_retry
 
+        # ТРЕТЬЯ форма, мимо обоих счётчиков выше: обычный повтор после ошибки
+        # (`console.error_retry`: «⚠ Ошибка: … — повтор n/m через Nс…»). Вердикта
+        # «прогон прерван» нет, «Частично» нет — а повтор вхолостую есть.
+        # 13.09.2026: Spotify «недоступно для этой учётной записи» прошло 3/3 по
+        # 15/45/120 с, и сводка в 20:01 написала «Повторов вхолостую нет». Симптом:
+        # повтор n≥2 с ТЕМ ЖЕ текстом ошибки, что и попытка n-1, — детерминированный
+        # отказ, который отсечка не узнала.
+        # Тот же текст на ДРУГОЙ учётке — не холостой повтор, а перебор пула.
+        # 18.09.2026: Deezer «нет FLAC/320» прошёл 3/3 по слотам 0→2→3 (US→US→BR)
+        # и был засчитан как «вхолостую», хотя каждый заход спрашивал другой
+        # аккаунт/регион — ровно то, ради чего повтор и нужен.
+        _prev_err: dict = {}
+        _prev_slot: dict = {}
+        cur_slot = None
+        same_err = same_err_old = 0
+        for ln in fresh:
+            ms = _re.search(r"\[deezer-pool\] ARL слота (\d+)", ln)
+            if ms:
+                cur_slot = ms.group(1)
+                continue
+            m = _re.search(r"⚠ Ошибка: (.+) — повтор (\d+)/\d+", ln)
+            if not m:
+                continue
+            txt, n = m.group(1), int(m.group(2))
+            _slot, cur_slot = cur_slot, None
+            rotated = (n >= 2 and _slot is not None
+                       and _prev_slot.get(n - 1) is not None
+                       and _prev_slot.get(n - 1) != _slot)
+            _prev_slot[n] = _slot
+            if n >= 2 and _prev_err.get(n - 1) == txt and not rotated:
+                if not app_ts or not _ts(ln) or _ts(ln) >= app_ts:
+                    same_err += 1
+                else:
+                    same_err_old += 1
+            _prev_err[n] = txt
+
         storms = live = 0
         for i, ln in enumerate(fresh):
             if "Прогон прерван" not in ln:
@@ -1578,16 +1887,55 @@ def check_retry_storms():
                  f"детерминированный KeyError gamdl на экспериментальном кодеке). Повтор "
                  f"осмыслен, только если второй проход что-то добирает: grep «Частично: 0 "
                  f"скачано» в logs/console.log и посмотри причину выше по логу")
-        elif live or zero_retry:
+        elif same_err >= 2:
+            warn(f"Повторы вхолостую: {same_err} раз за сутки авто-повтор вернул ТУ ЖЕ ошибку "
+                 f"слово в слово — отказ детерминированный, а `_RE_NO_RETRY` его не узнал. "
+                 f"grep «— повтор» в logs/console.log и заякорь текст ошибки в ripster/runner.py")
+        elif live or zero_retry or same_err:
             _z = f", из них без вердикта движка: {zero_retry}" if zero_retry else ""
-            ok(f"Повторы вхолостую: {live + zero_retry} — единичные, отсечка в целом держит{_z}")
-        elif storms or zero_old:
-            ok(f"Повторы вхолостую: {storms + zero_old} за сутки, но все ДО перезапуска "
+            ok(f"Повторы вхолостую: {live + zero_retry + same_err} — единичные, отсечка в целом держит{_z}")
+        elif storms or zero_old or same_err_old:
+            ok(f"Повторы вхолостую: {storms + zero_old + same_err_old} за сутки, но все ДО перезапуска "
                f"app.py — под текущим кодом ни одного, окно дочистится само")
         else:
             ok("Повторов вхолостую нет — отсечка безнадёжных прогонов работает")
     except Exception as e:
         _report.append(f"↻ Повторы вхолостую: не смог посчитать ({str(e)[:50]})")
+
+
+def check_code_newer_than_app():
+    """Фикс лежит на диске, а живой app.py его ещё не видел.
+
+    15.09.2026: сводка написала «Повторы вхолостую: 8» по Deezer «ни один трек не
+    скачался» — хотя разворот коротких ссылок `link.deezer.com/s/…` уже лежал в
+    ripster/engines/deezer.py с 14.09 20:04. app.py стартовал 14.09 03:15, так что
+    обе ссылки гостя в 23:22 прогнали старым кодом по 3 повтора. Диагноз «отсечка
+    не узнала отказ» вёл бы чинить уже починенное. Это не поломка, а подсказка:
+    ℹ️ без счёта проблем. Правки моложе 15 мин не считаем — это ещё идёт работа.
+    """
+    try:
+        app_ts = _app_started_ts()
+        if not app_ts:
+            return
+        fresh_edge = datetime.now().timestamp() - 15 * 60
+        newer = []
+        for p in [ROOT / "app.py", *(ROOT / "ripster").rglob("*.py")]:
+            try:
+                mt = p.stat().st_mtime
+            except OSError:
+                continue
+            if app_ts < mt < fresh_edge:
+                newer.append((mt, p.relative_to(ROOT).as_posix()))
+        if not newer:
+            return
+        newer.sort(reverse=True)
+        names = ", ".join(n for _, n in newer[:4]) + (f" и ещё {len(newer) - 4}" if len(newer) > 4 else "")
+        since = datetime.fromtimestamp(app_ts).strftime("%d.%m %H:%M")
+        _report.append(_esc(
+            f"ℹ️ Код новее запущенного app.py (старт {since}): {names} — правки не действуют "
+            f"до перезапуска; повторяющиеся ошибки ниже могут быть уже починены"))
+    except Exception as e:
+        _report.append(f"↻ Свежесть кода: не смог проверить ({_esc(str(e)[:50])})")
 
 
 def check_errors_24h():
@@ -1782,6 +2130,7 @@ def main():
         check_tidal_accounts()
         check_yandex_tokens()
         check_account_duplicates()
+        check_pool_identities()
         check_gamdl_cookies()
         check_tokens()
         check_token_files()
@@ -1790,10 +2139,13 @@ def main():
         check_tunnel()
         check_queue()
         check_watchlist()
+        check_bbc_radar_urls()
         check_bot()
+        check_bot_delivery()
         check_botapi_responsive()
         check_external_apis()
         check_disk()
+        check_code_newer_than_app()
         check_retry_storms()
         check_errors_24h()
     status = "🟢 ВСЁ ЗДОРОВО" if _issues == 0 else f"🟠 НАЙДЕНО ПРОБЛЕМ: {_issues}"

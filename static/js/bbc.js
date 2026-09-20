@@ -59,6 +59,7 @@ const BBC = {
 async function bbcInit() {
   if (BBC.inited) return;
   BBC.inited = true;
+  await _bbcLoadSched();   // какие эфиры уже запланированы — чтобы карточка это знала
   await bbcLoadBrands();
   bbcLoadEpisodes(true);
 }
@@ -118,6 +119,7 @@ async function bbcLoadEpisodes(reset) {
     if (grid) grid.innerHTML += data.items.map(bbcCard).join('');
     if (more) more.style.display = BBC.offset < BBC.total ? '' : 'none';
     _bbcEnrichGrid();
+    _bbcApplySchedBtns();
   } catch(e) {
     // surface the REAL cause (HTTP 401 = session not carried, 502 = BBC upstream)
     if (status) { status.textContent = t('b.load_err_c') + (e && e.message || e); status.style.display = ''; }
@@ -146,6 +148,7 @@ async function bbcSearch() {
       if (status) { status.textContent = t('b.nothing'); status.style.display = ''; }
     }
     _bbcEnrichGrid();
+    _bbcApplySchedBtns();
   } catch(e) {
     if (status) { status.textContent = t('b.search_err'); status.style.display = ''; }
   }
@@ -173,15 +176,18 @@ function bbcCard(ep) {
   const vpid  = ep.vpid || '';
   const brandLabel = (BBC.brands.find(b => b.id === BBC.activeBrand) || {}).label || '';
   const imgAttr = img ? `src="${esc(img)}"` : '';
+  // Будущий эфир записывается с LIVE-потока канала (планировщик — bbc_schedule).
+  const start = _bbcLiveFuture(ep);
+  const keyAttr = start ? `data-key="${esc((ep.channel||'')+'|'+start)}"` : '';
   return `
-  <div id="bbccard-${pid}" data-bbc-pid="${pid}" data-bbc-title="${_esc(title)}" data-bbc-artist="${_esc(sub)}" data-bbc-img="${_esc(img)}" data-bbc-vpid="${_esc(vpid)}" data-bbc-brand="${_esc(brandLabel)}"
+  <div id="bbccard-${pid}" data-bbc-pid="${pid}" data-bbc-title="${_esc(title)}" data-bbc-artist="${_esc(sub)}" data-bbc-img="${_esc(img)}" data-bbc-vpid="${_esc(vpid)}" data-bbc-brand="${_esc(brandLabel)}" data-bbc-date="${_esc(date)}"
     style="background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:border-color .15s"
     onmouseenter="this.style.borderColor='var(--border2)'" onmouseleave="this.style.borderColor='var(--border)'">
     <div style="position:relative;cursor:pointer" onclick="_bbcOpenMix('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}',${ep.duration||0},'${_esc(date)}')" title="${t('b.open_mix')}">
       <img id="bbccard-img-${pid}" ${imgAttr} loading="lazy"
         style="width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--surface2)"
         onerror="this.removeAttribute('src')"/>
-      <div onclick="event.stopPropagation();bbcPlay('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}')" title="${t('btn.play')}" style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer">▶</div>
+      ${start ? '' : `<div onclick="event.stopPropagation();bbcPlay('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}')" title="${t('btn.play')}" style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer">▶</div>`}
       ${dur ? `<div style="position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,.72);border-radius:4px;font-size:10px;color:#fff;padding:2px 5px;font-family:var(--mono)">${dur}</div>` : ''}
       <div id="bbcmdb-badge-${pid}" style="display:none;position:absolute;top:6px;left:6px;background:rgba(175,82,222,.88);color:#fff;font-size:9px;padding:2px 7px;border-radius:4px;font-weight:700;backdrop-filter:blur(4px);cursor:pointer;user-select:none"
         onclick="event.stopPropagation();_bbcMdbTracklist('${pid}')" title="${t('b.tl_mdb')}">🗄 MixesDB</div>
@@ -191,6 +197,11 @@ function bbcCard(ep) {
       ${sub ? `<div style="font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px">${esc(sub)}</div>` : ''}
       ${date ? `<div style="font-size:10px;color:var(--muted2);margin-top:3px">${esc(date)}</div>` : ''}
       <div id="bbcmdb-tl-${pid}" style="display:none;margin-top:6px;max-height:120px;overflow-y:auto;font-size:10px;color:var(--muted);line-height:1.5;border-top:1px solid var(--border);padding-top:5px"></div>
+      ${start ? `
+      <div style="display:flex;gap:5px;margin-top:7px">
+        <button class="bbc-sched-btn" ${keyAttr} onclick="event.stopPropagation();bbcScheduleToggle(this,'${_esc(ep.channel||'')}','${_esc(start)}',${ep.duration||0},'${_esc(title)}','${_esc(sub)}','${_esc(img)}')"
+          style="flex:1;padding:5px 0;border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"></button>
+      </div>` : `
       <div style="display:flex;gap:5px;margin-top:7px">
         <button onclick="bbcDownloadSmart('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}')"
           style="flex:1;padding:5px 0;background:rgba(192,132,160,.12);border:1px solid rgba(192,132,160,.22);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;color:var(--red);font-family:var(--font)">
@@ -200,7 +211,7 @@ function bbcCard(ep) {
           style="padding:5px 9px;background:var(--surface2);border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)">
           CUE
         </button>
-      </div>
+      </div>`}
     </div>
   </div>`;
 }
@@ -215,9 +226,14 @@ function _bbcEnrichGrid() {
     const title  = card.dataset.bbcTitle  || '';
     const artist = card.dataset.bbcArtist || '';
     const brand  = card.dataset.bbcBrand  || '';
+    // Air date keeps "same DJ, another year" out; a Classic re-air names the
+    // set's own year in the title — then that year is the one to match.
+    const aired  = (card.dataset.bbcDate || '').slice(0, 10);
+    const yrs    = (title + ' ' + artist).match(/\b(?:19|20)\d{2}\b/g) || [];
+    const when   = (yrs.length === 1 && !aired.startsWith(yrs[0])) ? yrs[0] : aired;
     if (!pid || _bbcMdb.has(pid)) continue;
     // Background fetch — don't await
-    fetch(`/api/bbc/mixesdb/match?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}&brand=${encodeURIComponent(brand)}`)
+    fetch(`/api/bbc/mixesdb/match?title=${encodeURIComponent(title)}&artist=${encodeURIComponent(artist)}&brand=${encodeURIComponent(brand)}&date=${encodeURIComponent(when)}`)
       .then(r => r.json())
       .then(d => {
         _bbcMdb.set(pid, d);
@@ -469,20 +485,21 @@ function _bbcFetch1001(pid, title, artist, dur, cb) {
   };
   const cached = _bbc1001.get(pid);
   if (cached) { applyChapters(cached); cb?.(cached); return; }
-  fetch('/api/soundcloud/tracklist-1001', {
-    method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title: title || '', artist: artist || '',
-                           dur: Math.round(dur || 0), id: 'bbc_' + pid }),
-  })
+  // Server picks the source: BBC's own timed list → 1001Tracklists (DJ + air
+  // date verified) → BBC names → MixesDB. Nothing confident → found:false.
+  const qs = `pid=${encodeURIComponent(pid)}&title=${encodeURIComponent(title || '')}`
+    + `&artist=${encodeURIComponent(artist || '')}&dur=${Math.round(dur || 0)}`;
+  fetch('/api/bbc/tracklist-best?' + qs)
     .then(r => r.json())
     .then(res => {
       const tracks = (res && res.found ? res.tracks : []) || [];
       const chapters = tracks
-        .filter(t => t.seconds != null)
+        .filter(t => t.seconds != null && !t.is_with)
         .map(t => ({ seconds: t.seconds,
                      label: (t.artist ? t.artist + ' — ' : '') + (t.title || '') }))
         .filter(c => c.label);
-      const r = { found: !!(res && res.found), tracks, chapters, url: res?.url };
+      const r = { found: !!(res && res.found), tracks, chapters, url: res?.url,
+                  source: res?.source || '' };
       _bbc1001.set(pid, r);
       applyChapters(r);
       cb?.(r);
@@ -507,12 +524,13 @@ function _bbcRenderTL(tl, tracks, creditLabel) {
 // 1001Tracklists takes priority when found — same source logic as SoundCloud.
 function _bbcLoadTracklistInto(pid, title, artist, dur, tl) {
   if (!tl) return;
-  const mdb = (_bbcMdb.get(pid) || {}).tracklist || [];
-  if (mdb.length) _bbcRenderTL(tl, mdb, '🗄 MixesDB');
-  else tl.innerHTML = `<div style="font-size:11px;color:var(--muted2)">⏱ ${t('b.tl_searching')}</div>`;
+  // No unverified MixesDB preview any more: the server's chain already falls
+  // back to MixesDB (date-checked) — a wrong list flashing first is worse than a spinner.
+  tl.innerHTML = `<div style="font-size:11px;color:var(--muted2)">⏱ ${t('b.tl_searching')}</div>`;
+  const LBL = { bbc: '📻 BBC', '1001tracklists': '🎚 1001Tracklists', mixesdb: '🗄 MixesDB' };
   _bbcFetch1001(pid, title, artist, dur, (r) => {
-    if (r.found && r.tracks.length) _bbcRenderTL(tl, r.tracks, '🎚 1001Tracklists');
-    else if (!mdb.length) tl.innerHTML = `<div style="font-size:11px;color:var(--muted2)">${t('b.tl_none')}</div>`;
+    if (r.found && r.tracks.length) _bbcRenderTL(tl, r.tracks, LBL[r.source] || r.source || '');
+    else tl.innerHTML = `<div style="font-size:11px;color:var(--muted2)">${t('b.tl_none')}</div>`;
   });
 }
 
@@ -643,6 +661,71 @@ async function bbcGetCue(pid, title, artist) {
   } catch(e) {
     toast(t('b.cue_err') + e.message);
   }
+}
+
+// ── Запись будущих эфиров (планировщик — ripster/bbc_schedule.py) ───────────
+// Кнопка есть только на карточках, у которых будущий старт (availability.from)
+// и канал из каталога живых потоков. Повторный клик по запланированной карточке
+// отменяет план; удаление карточки из очереди отменяет его на сервере тоже.
+const _bbcSched = new Map();   // "channel|start_utc" → id плана
+
+function _bbcNormIso(iso) {
+  const d = new Date(iso);
+  return isNaN(d) ? '' : d.toISOString().replace(/\.\d{3}Z$/, 'Z');
+}
+
+function _bbcLiveFuture(ep) {
+  if (!ep || !ep.schedulable || !ep.avail_from) return '';
+  const s = _bbcNormIso(ep.avail_from);
+  return (s && new Date(s).getTime() > Date.now()) ? s : '';
+}
+
+async function _bbcLoadSched() {
+  try {
+    const d = await api('GET', '/api/bbc/schedule');
+    _bbcSched.clear();
+    (d.items || []).forEach(r => {
+      if (r.status === 'pending') _bbcSched.set(r.channel + '|' + _bbcNormIso(r.start_utc), r.id);
+    });
+  } catch(_) {}
+}
+
+async function bbcScheduleToggle(btn, channel, start, dur, title, sub, img) {
+  const key = channel + '|' + start;
+  const sid = _bbcSched.get(key);
+  if (sid) {
+    try { await api('DELETE', '/api/bbc/schedule/' + sid); _bbcSched.delete(key); toast(t('b.sched_cancelled')); }
+    catch(e) { toast(t('b.sched_err') + e.message, 'var(--red)'); return; }
+  } else {
+    if (!dur) { toast(t('b.sched_no_dur'), 'var(--red)'); return; }
+    try {
+      const r = await api('POST', '/api/bbc/schedule',
+        { channel, start_utc: start, duration: dur, title: sub || title, subtitle: sub || '', cover: img || '' });
+      if (r && r.ok && r.row) { _bbcSched.set(key, r.row.id); toast(ti('b.sched_set', { time: (typeof _fmtSchedFor==='function'?_fmtSchedFor(start):start) })); }
+      else toast(((r && (r.detail || r.error)) || t('b.sched_err')), 'var(--red)');
+    } catch(e) { toast(t('b.sched_err') + e.message, 'var(--red)'); }
+  }
+  _bbcApplySchedBtns();
+}
+
+// Перекрашивает ВСЕ кнопки планирования (карточки BBC и радарные — общие):
+// одна и та же передача может висеть в двух вкладках, состояние синхронно.
+// Сначала сверяется с сервером — план могли снять и без клика по кнопке
+// (крестик в очереди), а карта _bbcSched локальна.
+function _bbcApplySchedBtns() {
+  _bbcApplySchedLabels();
+  _bbcLoadSched().then(_bbcApplySchedLabels);
+}
+
+function _bbcApplySchedLabels() {
+  document.querySelectorAll('.bbc-sched-btn').forEach(b => {
+    const on = _bbcSched.has(b.dataset.key || '');
+    b.textContent   = on ? t('b.sched_on') : t('b.sched_rec');
+    b.style.color        = on ? 'var(--muted)' : '#e4003b';
+    b.style.borderColor  = on ? 'var(--border)' : 'rgba(228,0,59,.45)';
+    b.style.background   = on ? 'var(--surface2)' : 'rgba(228,0,59,.12)';
+    b.title              = on ? t('b.sched_on_hint') : t('b.sched_rec_hint');
+  });
 }
 
 // ── Load app info

@@ -9,6 +9,7 @@ _SVC_PATH_KEYS: dict[str, str] = {
     "tidal":      "tidal-save-path",
     "soundcloud": "soundcloud-save-path",
     "beatport":   "beatport-save-path",
+    "jiosaavn":   "jiosaavn-save-path",
     "orpheus":    "orpheus-save-path",
     "spotify":    "orpheus-save-path",  # OrpheusDL is the only Spotify downloader
     "yandex":     "yandex-save-path",
@@ -58,6 +59,9 @@ def _quality_folder_name(service: str, quality: str) -> str:
     """Return the normalized folder name for a quality+service combination."""
     svc = (service or "apple").lower()
     qid = (quality or "").lower()
+    # JioSaavn: every tier is AAC-LC (high 320 / medium 160 / low 96), no lossless.
+    if svc == "jiosaavn":
+        return {"medium": "AAC 160", "low": "AAC 96"}.get(qid, "AAC 320")
     # "high" means different things per service
     if qid == "high":
         if svc == "tidal":       return "AAC 320"

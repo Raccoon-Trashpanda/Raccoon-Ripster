@@ -139,7 +139,8 @@ async function showGuestServiceInfo() {
   let status = {};
   try { status = await (await fetch('/api/services/status')).json(); } catch(e){}
   const names = {apple:'Apple Music',qobuz:'Qobuz',deezer:'Deezer',tidal:'Tidal',
-                 spotify:'Spotify',soundcloud:'SoundCloud',beatport:'Beatport',yandex:t('svc.yandex')};
+                 spotify:'Spotify',soundcloud:'SoundCloud',beatport:'Beatport',yandex:t('svc.yandex'),
+                 jiosaavn:'JioSaavn'};
   const avail = Object.keys(names).filter(k => status[k]);
   const q = ((S.config && S.config.quality) || '—');
   const badges = avail.map(k => `<span style="font-size:11px;padding:3px 9px;border-radius:20px;background:${_svcColor(k)}22;color:${_svcColor(k)};border:1px solid ${_svcColor(k)}55">${esc(names[k])}</span>`).join(' ');
@@ -316,8 +317,14 @@ async function saveServiceTab(service) {
   let cfg = {};
   if(service === 'qobuz') {
     cfg = {'qobuz-user-id':g('s-qobuz-userid'),'qobuz-email':g('s-qobuz-email'),
-           'qobuz-app-id':g('s-qobuz-appid'),'qobuz-secrets':g('s-qobuz-secrets'),
+           'qobuz-app-id':g('s-qobuz-appid'),
            'qobuz-quality':g('s-qobuz-qual')};
+    // `qobuz-secrets` — СЕКРЕТ: сервер отдаёт его замаскированным, и поле
+    // рисуется ПУСТЫМ (см. tokens_ui.js — маску в input принципиально не
+    // echo-им). Через g() это пустое значение затирало настоящий секрет при
+    // ЛЮБОМ «Сохранить», молча. Шлём только если владелец реально ввёл —
+    // ровно как токен и пароль ниже. 18.09.2026.
+    const sec = gs('s-qobuz-secrets'); if(sec !== undefined) cfg['qobuz-secrets'] = sec;
     const tok = gs('s-qobuz-authtok'); if(tok !== undefined) cfg['qobuz-auth-token'] = tok;
     const pw  = gs('s-qobuz-pass');   if(pw  !== undefined) cfg['qobuz-password']    = pw;
   } else if(service === 'deezer') {
@@ -515,6 +522,29 @@ async function spotifyLogout() {
   toast(t('sp.disconnected'));
 }
 
+// Отдельная учётка радара релизов: сервер отдаёт только флаги и ИМЕНА ключей,
+// сами секреты сюда не приходят (в поля они попадают замаскированными через _setSecret).
+async function loadSpotifyRadarStatus() {
+  const el = document.getElementById('sp-radar-status');
+  if(!el) return;
+  let r;
+  try { r = await api('GET','/api/spotify/radar/status'); } catch { return; }
+  const own = r.radar_sp_dc_set || r.radar_app_set;
+  el.textContent = !own ? t('sp.radar_shared')
+    : r.needs_login ? t('sp.radar_needs_login')
+    : r.radar_authorized ? t('sp.radar_ok_oauth')
+    : t('sp.radar_ok_web');
+  el.style.color = !own ? 'var(--muted)' : r.needs_login ? 'var(--orange,#ff9f0a)' : '#1db954';
+  const out = document.getElementById('sp-radar-logout');
+  if(out) out.style.display = r.radar_authorized ? '' : 'none';
+}
+
+async function spotifyRadarLogout() {
+  await api('POST','/api/spotify/radar/logout');
+  loadSpotifyRadarStatus();
+  toast(t('sp.disconnected'));
+}
+
 async function autoExtractSpDc() {
   const btn    = document.getElementById('sp-dc-auto-btn');
   const status = document.getElementById('sp-dc-auto-status');
@@ -553,13 +583,15 @@ async function loadDeezerAccounts() {
     const r = await api('GET', '/api/deezer/accounts');
     const accs = r.accounts || [];
     if(!accs.length) { list.innerHTML = ''; return; }
-    list.innerHTML = accs.map(a => `
-      <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+    list.innerHTML = _acctSorted(accs).map(a => `
+      <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
         <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
         ${acctPrefCtl('deezer', a)}
         ${a.primary ? '' : `<button onclick="removeDeezerAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
+    acctDndWire('deezer', list);
   } catch(e) { list.innerHTML = ''; }
 }
 
@@ -567,7 +599,7 @@ async function loadDeezerAccounts() {
 function _tidalRenderRows(list, accs, probe) {
   const byslot = {};
   (probe || []).forEach(p => { byslot[p.slot] = p; });
-  list.innerHTML = accs.map(a => {
+  list.innerHTML = _acctSorted(accs).map(a => {
     const p = byslot[a.slot];
     // Точка статуса единообразно с Deezer/Qobuz, но по ЗДОРОВЬЮ: зелёная —
     // жив и отдаёт lossless; оранжевая — жив, но без lossless; красная —
@@ -580,12 +612,15 @@ function _tidalRenderRows(list, accs, probe) {
     const cc = ((p && p.country) || a.country || '').trim().toUpperCase();
     const plan = (p && (p.plan || p.quality)) || '';
     const meta = [cc, plan].filter(Boolean).join(' · ');
-    return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+    return `<div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+      ${acctDragHandle()}
       <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}"></span>
       <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${meta?` <span style="color:var(--muted)">· ${escapeHtml(meta)}</span>`:''}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
+      ${acctPrefCtl('tidal', a)}
       ${a.primary ? '' : `<button onclick="removeTidalAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
     </div>`;
   }).join('');
+  acctDndWire('tidal', list);
 }
 
 async function loadTidalAccounts() {
@@ -689,16 +724,162 @@ async function setAcctPref(svc, slot, field, value) {
   item[field] = (field === 'priority') ? Number(value) : value;
   // У Apple свой маршрут: там слот это контейнер, и приоритет действует внутри
   // витрины, а не поверх неё.
-  const path = (svc === 'apple') ? '/api/wrapper/accounts/prefs'
-                                 : `/api/${svc}/accounts/prefs`;
+  const path = _acctPrefsPath(svc);
   try {
     const r = await api('POST', path, {slots: [item]});
     if (!r || r.ok === false) { toast(t('t.error'), 'var(--red)'); return; }
     toast(ti('acc.pref_saved', {n: r.changed}), 'var(--green)');
   } catch (e) { toast(t('t.error'), 'var(--red)'); return; }
-  const reload = {qobuz: 'loadQobuzAccounts', deezer: 'loadDeezerAccounts',
-                  soundcloud: 'loadSoundcloudAccounts'}[svc];
+  const reload = _ACCT_RELOAD[svc];
   if (reload && typeof window[reload] === 'function') window[reload]();
+}
+
+// ── Порядок учёток перетаскиванием ──────────────────────────────────────────
+// Перетаскивание не заводит своей ручки: на сброс пишем в тот же
+// `/api/<svc>/accounts/prefs` приоритет = новая позиция строки (0 — первая),
+// для ВСЕХ строк сразу. Поэтому поле с числом остаётся рабочим и после
+// перетаскивания показывает 0..n-1 — это одна и та же настройка, два способа.
+//
+// Сервисы из `_PREFS_POOLS` (setup.py) + Apple со своей prefs-ручкой; с 19.09.2026
+// GET-список Apple тоже отдаёт priority/enabled, без них строки после сброса
+// «прыгали» бы назад.
+const _ACCT_RELOAD = {qobuz: 'loadQobuzAccounts', deezer: 'loadDeezerAccounts',
+                      soundcloud: 'loadSoundcloudAccounts', yandex: 'loadYandexAccounts',
+                      tidal: 'loadTidalAccounts', apple: 'loadAppleAccounts'};
+
+// У Apple свой маршрут: там слот это контейнер, и приоритет действует внутри
+// витрины, а не поверх неё. Сами записи и контейнеры НЕ переставляются —
+// меняется только очередь опроса, поэтому перелогина перетаскивание не вызывает.
+function _acctPrefsPath(svc) {
+  return (svc === 'apple') ? '/api/wrapper/accounts/prefs' : `/api/${svc}/accounts/prefs`;
+}
+
+// Сортировка по приоритету, а не по `order`: для включённых это одно и то же
+// (order_indices сортирует по тому же ключу), но `order` отправляет ВЫКЛЮЧЕННЫЕ
+// в хвост — и выключенная строка, перетащенная наверх, отскакивала бы обратно.
+function _acctSorted(accs) {
+  const pr = a => { const v = Number(a.priority); return Number.isFinite(v) ? v : a.slot; };
+  return accs.slice().sort((a, b) => (pr(a) - pr(b)) || (a.slot - b.slot));
+}
+
+function acctDragHandle() {
+  return `<span class="acct-drag" tabindex="0" role="button" draggable="false"
+      title="${escapeHtml(t('acc.drag_hint'))}" aria-label="${escapeHtml(t('acc.drag_hint'))}"
+      style="cursor:grab;color:var(--muted);font-size:13px;line-height:1;padding:0 2px;user-select:none;touch-action:none;flex-shrink:0">⋮⋮</span>`;
+}
+
+function _acctRowSlots(list) {
+  return [...list.querySelectorAll(':scope > [data-acct-slot]')].map(el => Number(el.dataset.acctSlot));
+}
+
+async function _acctCommitOrder(svc, list, before, focusSlot) {
+  const after = _acctRowSlots(list);
+  if (after.join(',') === before.join(',')) return;
+  try {
+    const r = await api('POST', _acctPrefsPath(svc),
+                        {slots: after.map((slot, i) => ({slot, priority: i}))});
+    if (!r || r.ok === false) throw new Error((r && r.msg) || 'prefs');
+    toast(t('acc.order_saved'), 'var(--green)');
+  } catch (e) {
+    toast(t('acc.order_failed'), 'var(--red)');
+  }
+  const reload = _ACCT_RELOAD[svc];
+  if (reload && typeof window[reload] === 'function') await window[reload]();
+  if (focusSlot !== undefined) {
+    list.querySelector(`[data-acct-slot="${focusSlot}"] .acct-drag`)?.focus();
+  }
+}
+
+// Куда вставить перетаскиваемую строку при курсоре на высоте y.
+function _acctRowAfter(list, y, dragging) {
+  const rows = [...list.querySelectorAll(':scope > [data-acct-slot]')].filter(el => el !== dragging);
+  for (const el of rows) {
+    const b = el.getBoundingClientRect();
+    if (y < b.top + b.height / 2) return el;
+  }
+  return null;
+}
+
+// Вешается ОДИН раз на контейнер списка (делегирование): innerHTML
+// перерисовывает строки, а сам контейнер остаётся.
+function acctDndWire(svc, list) {
+  if (!list || list.dataset.dndWired) return;
+  list.dataset.dndWired = '1';
+  let dragging = null, before = null;
+
+  const start = row => {
+    dragging = row; before = _acctRowSlots(list);
+    row.style.opacity = '0.45';
+  };
+  const finish = () => {
+    if (!dragging) return;
+    const row = dragging, snap = before;
+    dragging = null; before = null;
+    row.style.opacity = '';
+    row.draggable = false;
+    _acctCommitOrder(svc, list, snap);
+  };
+  const moveTo = y => {
+    const next = _acctRowAfter(list, y, dragging);
+    if (next !== dragging.nextElementSibling || !next) list.insertBefore(dragging, next);
+  };
+
+  // Мышь — родной HTML5 DnD. Строка становится draggable только пока зажата
+  // ручка: иначе поле приоритета внутри строки нельзя было бы выделить мышью.
+  list.addEventListener('mousedown', e => {
+    const h = e.target.closest('.acct-drag');
+    if (h) h.closest('[data-acct-slot]').draggable = true;
+  });
+  list.addEventListener('mouseup', e => {
+    const row = e.target.closest('[data-acct-slot]');
+    if (row && !dragging) row.draggable = false;
+  });
+  list.addEventListener('dragstart', e => {
+    const row = e.target.closest && e.target.closest('[data-acct-slot]');
+    if (!row || !row.draggable) return;
+    start(row);
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', row.dataset.acctSlot); } catch (_) {}
+  });
+  list.addEventListener('dragover', e => {
+    if (!dragging) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    moveTo(e.clientY);
+  });
+  list.addEventListener('drop', e => { if (dragging) e.preventDefault(); });
+  list.addEventListener('dragend', finish);
+
+  // Палец/перо — pointer-события: HTML5 DnD на тач-экранах не срабатывает.
+  list.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse') return;
+    const h = e.target.closest('.acct-drag');
+    if (!h) return;
+    e.preventDefault();
+    start(h.closest('[data-acct-slot]'));
+    try { h.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  list.addEventListener('pointermove', e => {
+    if (!dragging || e.pointerType === 'mouse') return;
+    e.preventDefault();
+    moveTo(e.clientY);
+  });
+  list.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') finish(); });
+  list.addEventListener('pointercancel', e => { if (e.pointerType !== 'mouse') finish(); });
+
+  // Клавиатура: фокус на ручке, Alt+↑/↓ двигает строку.
+  list.addEventListener('keydown', e => {
+    const h = e.target.closest && e.target.closest('.acct-drag');
+    if (!h || !e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    e.preventDefault();
+    const row = h.closest('[data-acct-slot]');
+    const snap = _acctRowSlots(list);
+    if (e.key === 'ArrowUp' && row.previousElementSibling) list.insertBefore(row, row.previousElementSibling);
+    else if (e.key === 'ArrowDown' && row.nextElementSibling) list.insertBefore(row.nextElementSibling, row);
+    else return;
+    h.focus();
+    _acctCommitOrder(svc, list, snap, Number(row.dataset.acctSlot));
+  });
 }
 
 async function loadQobuzAccounts() {
@@ -708,13 +889,15 @@ async function loadQobuzAccounts() {
     const r = await api('GET', '/api/qobuz/accounts');
     const accs = r.accounts || [];
     if(!accs.length) { list.innerHTML = ''; return; }
-    list.innerHTML = accs.map(a => `
-      <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+    list.innerHTML = _acctSorted(accs).map(a => `
+      <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
         <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
         ${acctPrefCtl('qobuz', a)}
         ${a.primary ? '' : `<button onclick="removeQobuzAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
+    acctDndWire('qobuz', list);
   } catch(e) { list.innerHTML = ''; }
 }
 
@@ -759,17 +942,20 @@ async function loadAppleAccounts() {
     const r = await api('GET', '/api/wrapper/accounts');
     const accs = r.accounts || [];
     if(!accs.length) { list.innerHTML = ''; return; }
-    list.innerHTML = accs.map(a => {
+    list.innerHTML = _acctSorted(accs).map(a => {
       const dot = a.busy ? 'var(--orange)' : (a.running ? 'var(--green)' : 'var(--muted)');
       const state = a.busy ? 'занят' : (a.running ? 'готов' : 'не запущен');
       return `
-      <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+      <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}" title="${state}"></span>
         <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
         <span style="color:var(--muted);font-size:10px">${state}</span>
+        ${acctPrefCtl('apple', a)}
         ${a.primary ? '' : `<button onclick="removeAppleAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`;
     }).join('');
+    acctDndWire('apple', list);
   } catch(e) { list.innerHTML = ''; }
 }
 
@@ -810,13 +996,15 @@ async function loadSoundcloudAccounts() {
     const r = await api('GET', '/api/soundcloud/accounts');
     const accs = r.accounts || [];
     if(!accs.length) { list.innerHTML = ''; return; }
-    list.innerHTML = accs.map(a => `
-      <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+    list.innerHTML = _acctSorted(accs).map(a => `
+      <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
         <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
         ${acctPrefCtl('soundcloud', a)}
         ${a.primary ? '' : `<button onclick="removeSoundcloudAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
+    acctDndWire('soundcloud', list);
   } catch(e) { list.innerHTML = ''; }
 }
 
@@ -855,12 +1043,15 @@ async function loadYandexAccounts() {
     const r = await api('GET', '/api/yandex/accounts');
     const accs = r.accounts || [];
     if(!accs.length) { list.innerHTML = ''; return; }
-    list.innerHTML = accs.map(a => `
-      <div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+    list.innerHTML = _acctSorted(accs).map(a => `
+      <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
         <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        ${acctPrefCtl('yandex', a)}
         ${a.primary ? '' : `<button onclick="removeYandexAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
+    acctDndWire('yandex', list);
   } catch(e) { list.innerHTML = ''; }
 }
 
@@ -1006,62 +1197,52 @@ async function renderAccountsOverview() {
     const st = a.configured
       ? `<span style="color:var(--green);font-size:11px">✓</span>`
       : `<span style="color:var(--red);font-size:11px">✗</span>`;
-    return `<div style="display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px">
-      ${st}
+    // Дерево ПО КАЖДОМУ аккаунту: клик по строке сервиса разворачивает его слоты
+    // ПРЯМО на месте (владелец 18.09: «по нажатию на акк вижу развёртывание, дерево
+    // у каждого аккаунта», а не отдельной секцией снизу). Слоты уже приходят в
+    // a.slots из /api/accounts/overview — второй запрос не нужен.
+    const slots = Array.isArray(a.slots) ? a.slots : [];
+    const hasTree = slots.length > 0;
+    const tree = slots.map(s => {
+      const bits = [s.plan, s.sub_end ? t('s.slot_until') + ' ' + s.sub_end : '',
+                    (s.lossless ? 'lossless' : '')].filter(Boolean).join(' · ');
+      const alive = s.alive === false
+        ? `<span style="color:var(--muted2);font-size:10px">${esc(t('s.slot_retired'))}</span>`
+        : (s.alive === true ? `<span style="color:var(--green);font-size:10px">✅</span>` : '');
+      const meta = ((s.country ? s.country + ' · ' : '') + bits) || '—';
+      return `<div style="display:flex;align-items:center;gap:8px;padding:5px 10px 5px 30px;font-size:11px">
+        <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+          <span style="color:var(--text);font-weight:600">${esc(s.label || '—')}</span>
+          <span style="color:var(--muted2);margin-left:4px">${esc(meta)}</span>
+        </div>${alive}
+      </div>`;
+    }).join('');
+    const caret = hasTree
+      ? `<span class="acc-caret" style="display:inline-block;width:11px;color:var(--muted2);text-align:center">▸</span>`
+      : `<span style="display:inline-block;width:11px"></span>`;
+    const headInner =
+      `${st}
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;font-weight:600;color:var(--text)">${esc(a.label)}${acc}</div>
         <div style="font-size:11px;margin-top:1px">${geo}${sub}</div>
       </div>
-      ${badge}
-    </div>`;
+      ${badge}${caret}`;
+    const rowCss = 'display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px';
+    if (!hasTree) {
+      return `<div style="${rowCss};margin-bottom:5px">${headInner}</div>`;
+    }
+    return `<details class="acc-node" style="margin-bottom:5px" ` +
+      `ontoggle="var c=this.querySelector('.acc-caret');if(c)c.textContent=this.open?'▾':'▸';">` +
+      `<summary style="${rowCss};list-style:none;cursor:pointer;user-select:none">${headInner}</summary>` +
+      `<div style="background:rgba(255,255,255,.02);border:1px solid var(--border);border-top:none;` +
+        `border-radius:0 0 8px 8px;margin-top:-3px;padding-top:4px;padding-bottom:2px">${tree}</div>` +
+    `</details>`;
   }).join('');
+  // Слоты каждого сервиса разворачиваются ВНУТРИ его строки (дерево выше) —
+  // отдельной секции снизу больше нет.
   box.innerHTML = hint + rows +
-    `<div style="font-size:10px;color:var(--muted2);margin-top:4px">${esc(t('s.acc_note'))}</div>` +
-    `<div id="accounts-slots"></div>`;
-  renderAccountSlots();
+    `<div style="font-size:10px;color:var(--muted2);margin-top:4px">${esc(t('s.acc_note'))}</div>`;
 }
 
-// ── По-слотовый мультиаккаунт: КАЖДАЯ учётка по сервису отдельной карточкой ──
-// Панель выше по-сервисная (одна строка + счётчик), из-за чего «мультиаки не
-// видно» (владелец 13.09.2026). Здесь — каждый слот: флаг · страна · тариф ·
-// срок · статус (активна / запас / снята), плюс пометка «активна без премиума».
-async function renderAccountSlots() {
-  const box = document.getElementById('accounts-slots');
-  if (!box) return;
-  let d;
-  try {
-    d = await (await fetch('/api/accounts/roster')).json();
-  } catch (e) { return; }
-  if (!d || !d.ok || !d.services) return;
-  const SVC = {
-    tidal: '🌊 Tidal', qobuz: '🟦 Qobuz', deezer: '🎧 Deezer',
-    yandex: '🟡 Yandex', soundcloud: '🟠 SoundCloud', beatport: '🟢 Beatport',
-  };
-  const badge = (c) => {
-    const st = c.status;
-    const col = st === 'active' ? (c.degraded ? 'var(--orange)' : 'var(--green)')
-              : st === 'bench' ? 'var(--muted)' : 'var(--muted2)';
-    const label = st === 'active' ? (c.degraded ? t('s.slot_active') + ' ⚠️' : t('s.slot_active'))
-                : st === 'bench' ? t('s.slot_bench') : t('s.slot_retired');
-    const dot = st === 'active' ? (c.degraded ? '⚠️' : '✅') : st === 'bench' ? '🟢' : '⚪';
-    return `<span style="color:${col};font-size:10px;white-space:nowrap">${dot} ${esc(label)}</span>`;
-  };
-  let html = `<div style="font-size:11px;color:var(--muted);margin:10px 0 6px">${esc(t('s.slots_title'))}</div>`;
-  for (const [svc, cards] of Object.entries(d.services)) {
-    if (!Array.isArray(cards) || !cards.length) continue;
-    html += `<div style="font-size:11px;font-weight:600;color:var(--text);margin:8px 0 3px">${esc(SVC[svc] || svc)}</div>`;
-    for (const c of cards) {
-      const bits = [c.plan, c.expiry ? t('s.slot_until') + ' ' + c.expiry : '']
-        .filter(Boolean).join(' · ');
-      html += `<div style="display:flex;align-items:center;gap:8px;padding:5px 9px;background:var(--surface);border:1px solid var(--border);border-radius:7px;margin-bottom:4px">
-        <span style="font-size:14px">${c.flag || '🏳'}</span>
-        <div style="flex:1;min-width:0">
-          <div style="font-size:12px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.label || c.country || '—')}</div>
-          <div style="font-size:10px;color:var(--muted)">${esc((c.country ? c.country + ' · ' : '') + bits)}</div>
-        </div>
-        ${badge(c)}
-      </div>`;
-    }
-  }
-  box.innerHTML = html;
-}
+// (renderAccountSlots убрана 18.09.2026: слоты теперь разворачиваются деревом
+// внутри каждой строки в renderAccountsOverview — отдельной секции снизу нет.)

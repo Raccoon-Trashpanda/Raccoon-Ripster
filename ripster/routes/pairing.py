@@ -285,6 +285,32 @@ def _is_loopback(request: Request) -> bool:
     return host in ("127.0.0.1", "::1", "localhost")
 
 
+def _owner_ok(request: Request) -> bool:
+    """Owner-authenticated for OWNER-ONLY pairing actions (start/share/status/
+    revoke-all/mode). `_is_loopback` ALONE is NOT owner-proof: with
+    `remote-enabled` on, the serveo/cloudflared tunnel forwards to 127.0.0.1 and
+    uvicorn runs WITHOUT proxy_headers, so EVERY request off the public tunnel also
+    satisfies `_is_loopback`. That let anyone with the (guest-shared) tunnel URL
+    mint a pairing code → claim a device token → pull the owner's streaming
+    credentials, with no cookie at all — the `/api/pair/` subtree is a public
+    prefix, so the global owner-auth gate never runs (SECURITY FIX 18.09.2026,
+    same trap auth.py documents for the login limiter / open-url).
+
+    So: trust the forge-proof owner SESSION COOKIE (a tunnel attacker cannot mint
+    it without `session-secret`); fall back to raw loopback ONLY when no tunnel is
+    exposing us (`remote-enabled` off) — that keeps a purely-local, no-password box
+    working. When remote is on and a password is set, the local UI carries the
+    cookie, so the real pairing flow is unaffected."""
+    try:
+        from ripster import auth as _auth
+        if _auth.verify_session_cookie(request.cookies.get("ripster-session", "")):
+            return True
+    except Exception:
+        pass
+    remote = bool((_s.get("config") or {}).get("remote-enabled", False))
+    return _is_loopback(request) and not remote
+
+
 def _bearer(request: Request) -> str:
     h = request.headers.get("authorization", "")
     return h[7:].strip() if h.lower().startswith("bearer ") else ""
@@ -639,8 +665,8 @@ def _config_mtime_ms() -> int:
 
 @router.post("/api/pair/start")
 async def pair_start(request: Request):
-    if not _is_loopback(request):
-        return JSONResponse({"error": "forbidden", "detail": "loopback only"}, status_code=403)
+    if not _owner_ok(request):
+        return JSONResponse({"error": "forbidden", "detail": "owner only"}, status_code=403)
     now = time.time()
     _prune_pending()
     # 8 цифр (≈100 млн вариантов) + тормоз перебора ниже — код в открытом
@@ -728,7 +754,7 @@ async def pair_mode(body: dict, request: Request):
     """Режим fan-out по /ws на всю пару: mirror | initiator | isolation.
     Меняется с любой стороны (bearer телефона ИЛИ loopback ПК), применяется к
     обоим — рассылаем `pair_mode`."""
-    if not (_is_loopback(request) or _token_valid(_bearer(request))):
+    if not (_owner_ok(request) or _token_valid(_bearer(request))):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     mode = str((body or {}).get("mode", "")).strip().lower()
     if mode not in _FANOUT_MODES:
@@ -761,7 +787,7 @@ async def pair_unpair(request: Request):
 async def pair_revoke_all(request: Request):
     """Владелец с самого ПК (loopback) сбрасывает ВСЕ спаренные устройства —
     после этого ни один старый токен телефона не действует."""
-    if not _is_loopback(request):
+    if not _owner_ok(request):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     n = len(_state.get("tokens", []))
     _state["tokens"] = []
@@ -917,15 +943,15 @@ async def pair_label(request: Request, name: str = "", limit: int = 60):
 @router.get("/api/pair/activity")
 async def pair_activity_view(request: Request):
     """Что натворил телефон — для истории/аналитики ПК-версии."""
-    if not _token_valid(_bearer(request)) and not _is_loopback(request):
+    if not _token_valid(_bearer(request)) and not _owner_ok(request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     return {"phone_plays": _state.get("phone_plays", [])[:200]}
 
 
 @router.post("/api/pair/share")
 async def pair_share(body: dict, request: Request):
-    if not _is_loopback(request):
-        return JSONResponse({"error": "forbidden", "detail": "loopback only"}, status_code=403)
+    if not _owner_ok(request):
+        return JSONResponse({"error": "forbidden", "detail": "owner only"}, status_code=403)
     _state["share_credentials"] = bool((body or {}).get("enabled", True))
     _save_state()
     return {"ok": True, "share_credentials": _state["share_credentials"]}
@@ -1286,7 +1312,7 @@ async def pair_radar(request: Request):
 
 @router.get("/api/pair/status")
 async def pair_status(request: Request):
-    if not _is_loopback(request):
+    if not _owner_ok(request):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     now = int(time.time())
     _prune_pending()

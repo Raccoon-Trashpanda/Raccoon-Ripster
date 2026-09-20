@@ -23,7 +23,12 @@ function relCover(url, px) {
       const code = px <= 96 ? 'ab67616d00004851'
                  : px <= 400 ? 'ab67616d00001e02'
                  : 'ab67616d0000b273';
-      return url.replace(/ab67616d0000(b273|1e02|4851)/, code);
+      // Хост: i.scdn.co у части провайдеров виснет на TLS-рукопожатии (19.09.2026:
+      // TCP за 10 мс, дальше тишина до таймаута — обложки радара просто не
+      // появлялись, причём плавающе). Те же пути отдаёт image-cdn-ak.spotifycdn.com
+      // — собственный CDN Spotify, проверено на всех трёх размерах.
+      return url.replace(/ab67616d0000(b273|1e02|4851)/, code)
+                .replace('://i.scdn.co/', '://image-cdn-ak.spotifycdn.com/');
     }
     // Apple: размер — настоящий сегмент пути, любые значения живы (проверено).
     // Для зума (px>=700) берём 1000×1000 — правило по всему Ripster.
@@ -119,6 +124,14 @@ let _relShowing = _REL_PAGE_SIZE;
 let _relFilteredData = [];
 let _relView    = 'all';        // 'all' | 'new' | 'fav'
 let _relTypeOff = new Set();     // release types toggled off via chips
+// Источники ленты, скрытые тумблерами над радаром: 'releases' | 'bbc' |
+// 'soundcloud' | 'apple'. Скрытие — это ВИД, а не конфиг: источник продолжает
+// сканироваться, и включение обратно мгновенное, без сети.
+let _relSrcOff  = new Set();
+// Ось группировки ленты: 'date' | 'artist' | 'title' | 'flat'. Ставится при
+// отрисовке из сортировки; догрузка «показать ещё» читает её, чтобы рисовать
+// добавку ровно тем же способом, что и первую страницу.
+let _relGroupMode = 'date';
 
 function _relLoadJSON(key, fallback) {
   try { const r = localStorage.getItem(key); return r ? JSON.parse(r) : fallback; }
@@ -146,6 +159,7 @@ function _relSavePrefs() {
     sort:    document.getElementById('rel-sort')?.value,
     view:    _relView,
     typeOff: [..._relTypeOff],
+    srcOff:  [..._relSrcOff],
   });
 }
 function _relRestorePrefs() {
@@ -157,6 +171,7 @@ function _relRestorePrefs() {
   if (s && p.sort) s.value = p.sort;
   if (p.view) _relView = p.view;
   if (Array.isArray(p.typeOff)) _relTypeOff = new Set(p.typeOff);
+  if (Array.isArray(p.srcOff))  _relSrcOff  = new Set(p.srcOff);
 }
 
 function setRelView(v) { _relView = v; _relSavePrefs(); _applyRelFilter(); }
@@ -282,6 +297,110 @@ function renderRelChips() {
     }).join('');
     tc.style.display = types.length ? '' : 'none';
   }
+  _renderRelSrcToggles();
+}
+
+// ── Тумблеры источников над лентой ─────────────────────────────────────────
+// Утверждённый владельцем вид радара (23.07.2026): сверху — по кнопке на
+// источник, нажал — его контент в общей ленте, отжал — пропал, комбинируются
+// свободно. «Релизы» — это карточки артистов (Spotify и другие сервисы-релизы,
+// лейблы); у остальных трёх источников свои карточки.
+const _REL_SRCS = ['releases', 'bbc', 'soundcloud', 'apple'];
+const _REL_SRC_CLR = {releases:'#1db954', bbc:'#ff4d4d', soundcloud:'#ff5500', apple:'#fc3c44'};
+function _relSrcOf(r) {
+  const s = r && r.service;
+  return (s === 'bbc' || s === 'soundcloud' || s === 'apple') ? s : 'releases';
+}
+// Источник вообще сканируется? «Релизы» — всегда (Spotify включён по умолчанию);
+// BBC/SC/Apple — только если отмечены в настройках радара.
+function _relSrcScanned(src) {
+  if (src === 'releases') return true;
+  const cfg = ((S.config || {})['releases-services'] || 'spotify').split(',').map(s => s.trim());
+  return cfg.includes(src);
+}
+function _relSrcLabel(src) {
+  return src === 'releases' ? t('rl.srcbtn_releases')
+       : src === 'bbc' ? 'BBC' : src === 'soundcloud' ? 'SoundCloud' : 'Apple Music';
+}
+// Контейнер создаётся из JS, а не лежит в releases.html: закэшированный у
+// человека старый фрагмент вида не должен оставлять радар без панели.
+function _relSrcHost() {
+  let el = document.getElementById('rel-src-toggles');
+  if (el) return el;
+  const anchor = document.getElementById('rel-xsvc-note');
+  if (!anchor || !anchor.parentNode) return null;
+  el = document.createElement('div');
+  el.id = 'rel-src-toggles';
+  el.setAttribute('role', 'group');
+  el.style.cssText = 'display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px';
+  anchor.parentNode.insertBefore(el, anchor);
+  return el;
+}
+function _renderRelSrcToggles() {
+  const host = _relSrcHost();
+  if (!host) return;
+  host.setAttribute('aria-label', t('rl.src_panel'));
+  const counts = {};
+  for (const r of (_relCache.data || [])) { const s = _relSrcOf(r); counts[s] = (counts[s] || 0) + 1; }
+  host.innerHTML = _REL_SRCS.map(src => {
+    const clr = _REL_SRC_CLR[src];
+    const scanned = _relSrcScanned(src);
+    const on = scanned && !_relSrcOff.has(src);
+    const n  = counts[src] || 0;
+    const title = !scanned ? t('rl.src_enable_title')
+                : (on ? t('rl.src_hide_title') : t('rl.src_show_title'));
+    const style = on
+      ? `border:1px solid ${clr};background:${clr}22;color:${clr}`
+      : `border:1px ${scanned ? 'solid' : 'dashed'} var(--border);background:transparent;color:var(--muted)`;
+    return `<button type="button" aria-pressed="${on}" onclick="toggleRelSrc('${src}')" title="${esc(title)}"
+      style="${style};display:inline-flex;align-items:center;gap:6px;padding:5px 12px;border-radius:16px;font-size:11.5px;font-weight:700;cursor:pointer;font-family:var(--font);white-space:nowrap">
+      <span style="width:8px;height:8px;border-radius:50%;background:${on ? clr : 'transparent'};border:1.5px solid ${on ? clr : 'var(--muted2)'}"></span>${esc(_relSrcLabel(src))}${scanned ? (n ? `<span style="font-family:var(--mono);font-weight:600;opacity:.8">${n}</span>` : '') : '<span style="opacity:.8">+</span>'}</button>`;
+  }).join('');
+}
+// Результат фонового скана ОДНОГО сервиса (WS `releases_scan_done`, поллинг)
+// раньше целиком заменял ленту — и после каждого скана Spotify из общей ленты
+// молча исчезали BBC, SoundCloud, Apple, Qobuz, Tidal (замер 19.09.2026: в
+// ленте 5865 карточек, все spotify, при шести включённых источниках). Теперь
+// заменяются только записи тех сервисов, что пришли; остальное остаётся.
+function _relMergeScan(fresh) {
+  fresh = Array.isArray(fresh) ? fresh : [];
+  const svcs = new Set(fresh.map(r => r.service || ''));
+  const keep = (_relCache.data || []).filter(r => r.via_label || !svcs.has(r.service || ''));
+  const seen = new Set(), out = [];
+  for (const r of fresh.concat(keep)) {
+    const k = `${(r.title||'').toLowerCase()}|${(r.artist||'').toLowerCase()}|${(r.year||r.date||'').slice(0,4)}`;
+    if (seen.has(k)) continue;
+    seen.add(k); out.push(r);
+  }
+  out.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+  return out;
+}
+// Вызывается, когда пришёл конфиг (WS init). Лента, собранная с источниками по
+// умолчанию, перечитывается, если набор источников теперь другой.
+function _relRecheckSources() {
+  const v = document.getElementById('view-releases');
+  if (!v || !v.classList.contains('active')) return;
+  if (_relCache.key === _relCacheKey()) return;
+  if (typeof loadReleases === 'function') loadReleases(false);
+}
+function toggleRelSrc(src) {
+  if (!_relSrcScanned(src)) {
+    // Источник выключен в настройках — включаем его сканирование (тот же ключ,
+    // что и галочка в Настройках → Радар) и перечитываем ленту.
+    const cfg = ((S.config || {})['releases-services'] || 'spotify').split(',').map(s => s.trim()).filter(Boolean);
+    if (!cfg.includes(src)) cfg.push(src);
+    _relSrcOff.delete(src);
+    _relSavePrefs();
+    Promise.resolve(saveSetting('releases-services', cfg.join(','))).finally(() => {
+      _renderRelActiveSvcs();
+      if (typeof loadReleases === 'function') loadReleases(false);
+    });
+    _renderRelSrcToggles();
+    return;
+  }
+  if (_relSrcOff.has(src)) _relSrcOff.delete(src); else _relSrcOff.add(src);
+  _relSavePrefs();
+  _applyRelFilter();
 }
 
 // Карточка попала в ленту потому, что мы следим за ЛЕЙБЛОМ, а не за артистом.
@@ -299,30 +418,233 @@ function _relGroupGrid(cardsHtml) {
   return `<div class="card-grid">${cardsHtml}</div>`;
 }
 function _renderRelFlat(list) {
-  return _relGroupGrid(list.map(renderReleaseCard).join(''));
-}
-function _renderRelGroups(list) {
-  let html = '', curDate = null, buf = [];
-  const flush = () => {
-    if (!buf.length) return;
-    html += `<div style="margin-bottom:4px">
-      <div style="display:flex;align-items:baseline;gap:8px;margin:16px 0 9px;padding-bottom:5px;border-bottom:1px solid var(--border)">
-        <span style="font-size:13px;font-weight:800;color:var(--text)">${_relDateLabel(curDate)}</span>
-        <span style="font-size:10px;color:var(--muted2);font-family:var(--mono)">${buf.length} ${t('w.rel_abbr')}</span>
-      </div>
-      ${_relGroupGrid(buf.map(renderReleaseCard).join(''))}
-    </div>`;
-    buf = [];
-  };
-  for (const rel of list) {
-    if (rel.date !== curDate) { flush(); curDate = rel.date; }
-    buf.push(rel);
-  }
-  flush();
-  return html;
+  return _relGroupGrid(list.map(r => renderReleaseCard(r)).join(''));
 }
 
+// Буква для алфавитного оглавления. Диакритику снимаем (É→E), Ё складываем с Е,
+// цифры и всё, что не опозналось буквой, честно уходит в общую корзину «#» —
+// вместо того чтобы плодить по разделу на каждую экзотическую письменность.
+// Кириллицу проверяем по ИСХОДНОМУ символу: NFD разбирает Й на И + краткую,
+// и по «основе» он бы слился с И.
+function _relLetter(s) {
+  const raw = (s || '').trim();
+  if (!raw) return '#';
+  const ch = raw[0].toUpperCase();
+  let base = ch;
+  try { base = ch.normalize('NFD').replace(/[\u0300-\u036f]/g, ''); } catch (e) { /* старый движок */ }
+  if (/^[A-Z]/.test(base))  return base[0];
+  if (/^[А-ЯЁ]/.test(ch))   return ch === 'Ё' ? 'Е' : ch;
+  return '#';
+}
+
+// В единой сетке лента НЕ рвётся заголовками: у дня из одного-двух релизов
+// полноширинный разделитель отнимал остаток ряда, и справа оставалась пустая
+// полоса. Принадлежность карточки дню/букве живёт не в контейнере, а в её
+// атрибутах: data-gkey (то, на что отвечает плавающая метка: дата дня в
+// режиме дат, буква — в буквенном) и data-letter (в режиме дат — буква
+// артиста внутри дня; в буквенном совпадает с gkey). Липкую метку рисует
+// _relFloatSync по ПЕРВОЙ ВИДИМОЙ карточке, из этих атрибутов.
+function _relFeedHtml(list, keyOf, letterOf) {
+  let html = '';
+  for (const rel of list) {
+    const gkey = keyOf(rel);
+    html += renderReleaseCard(rel,
+      ` data-gkey="${esc(gkey)}" data-letter="${esc(letterOf ? letterOf(rel) : gkey)}"`);
+  }
+  if (!html) return '';
+  return `<div class="rel-group-float" aria-hidden="true"></div><div class="card-grid rel-feed">${html}</div>`;
+}
+function _renderRelGroups(list) {
+  // Порядок внутри дня — по алфавиту артиста (tie-break в сортировке
+  // _applyRelFilterCore), метка сверху показывает и день, и текущую букву:
+  // «16 дек · B». Два уровня: день, внутри — буквы.
+  return _relFeedHtml(list, r => r.date || '', r => _relLetter(r.artist));
+}
+function _renderRelAlpha(list, byTitle) {
+  return _relFeedHtml(list, r => _relLetter(byTitle ? r.title : r.artist), null);
+}
+
+// Полоса-оглавление строится по ВСЕМУ отфильтрованному списку, а не по
+// показанной странице: иначе половина алфавита просто отсутствовала бы, и
+// оглавление врало бы про содержимое ленты. Буква, до которой лента ещё не
+// долистана, сначала догружает страницы, потом прокручивает (_relJumpLetter).
+function _relAlphaIndexHtml(data, byTitle) {
+  const order = [], at = new Set();
+  for (const r of data) {
+    const L = _relLetter(byTitle ? r.title : r.artist);
+    if (!at.has(L)) { at.add(L); order.push(L); }
+  }
+  if (order.length < 2) return '';
+  // Полоса — навигация, а не история ленты: буквы обязаны идти по алфавиту.
+  // В режиме дат порядок появления давал «S C H G F J K Ш E N…», и найти нужную
+  // букву глазами было невозможно (замер 20.09.2026). Латиница, потом кириллица,
+  // «#» (цифры и прочее) — в конец.
+  const _rank = (L) => (L === '#' ? 2 : (/^[А-ЯЁ]/.test(L) ? 1 : 0));
+  order.sort((a, b) => _rank(a) - _rank(b) || a.localeCompare(b, 'ru'));
+  const hint = t('rl.alpha_jump');
+  return `<div class="rel-alpha-index" role="navigation" aria-label="${esc(hint)}" title="${esc(hint)}">`
+    + order.map(L => `<button type="button" onclick="_relJumpLetter('${escJ(L)}')">${esc(L)}</button>`).join('')
+    + `</div>`;
+}
+
+// Прокрутить к букве. Если она за пределами показанной страницы — сначала
+// доращиваем страницу до неё, иначе кнопка вела бы в пустоту.
+// Работает и в режиме дат: там буквы идут внутри каждого дня, и клик ведёт к
+// ПЕРВОМУ вхождению буквы в ленте — при сортировке по дате «сверху» это самый
+// свежий день, где эта буква есть.
+function _relJumpLetter(letter) {
+  const byTitle = (_relGroupMode === 'title');
+  const idx = _relFilteredData.findIndex(r => _relLetter(byTitle ? r.title : r.artist) === letter);
+  if (idx < 0) return;
+  if (idx >= _relShowing) {
+    _relShowing = Math.ceil((idx + 1) / _REL_PAGE_SIZE) * _REL_PAGE_SIZE;
+    _applyRelFilterCore(false);
+  }
+  const host = _relScroller();
+  const grid = document.getElementById('releases-grid');
+  if (!host || !grid) return;
+  const card = grid.querySelector(`.rel-feed .rel-card[data-letter="${CSS.escape(letter)}"]`);
+  if (!card) return;
+  const bar = grid.querySelector('.rel-alpha-index');
+  host.scrollTop += card.getBoundingClientRect().top - host.getBoundingClientRect().top
+                  - (bar ? bar.offsetHeight : 0);
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Прокрутка не должна уезжать под руками.
+//
+// «Показать ещё» дописывает карточки в конец, но в двух случаях лента
+// перерисовывается целиком (есть лейбловые релизы; звезда/«прочитано»), и тогда
+// все уже отрисованные карточки заменяются новыми узлами. Числовой scrollTop
+// при этом сохраняется, а вот СОДЕРЖИМОЕ на этой высоте — нет: карточки стоят с
+// `content-visibility:auto`, и заново созданные сначала занимают оценочную
+// высоту, а не настоящую. Отсюда и «радар прыгает непонятно куда».
+//
+// Поэтому держимся не за число, а за КАРТОЧКУ: запоминаем ту, что стоит у
+// верхней кромки, и после перестройки возвращаем её на то же место. Повтор в
+// rAF — потому что настоящие высоты `content-visibility` узнаёт только на
+// следующем кадре.
+// ──────────────────────────────────────────────────────────────────────
+function _relScroller() {
+  let el = document.getElementById('releases-grid');
+  while (el && el !== document.body) {
+    const s = getComputedStyle(el);
+    if ((s.overflowY === 'auto' || s.overflowY === 'scroll') && el.scrollHeight > el.clientHeight + 4) return el;
+    el = el.parentElement;
+  }
+  return null;
+}
+let _relKeepDepth = 0;
+function _relKeepScroll(mutate) {
+  const host = _relScroller();
+  const grid = document.getElementById('releases-grid');
+  if (_relKeepDepth || !host || !grid) { mutate(); return; }   // вложенный вызов — держит внешний
+  const hostTop = host.getBoundingClientRect().top;
+  let uid = null, was = 0;
+  for (const c of grid.querySelectorAll('.rel-card[data-uid]')) {
+    const top = c.getBoundingClientRect().top - hostTop;
+    if (top >= -4) { uid = c.dataset.uid; was = top; break; }
+  }
+  const prevTop = host.scrollTop;
+  _relKeepDepth++;
+  try { mutate(); } finally { _relKeepDepth--; }
+
+  const restore = () => {
+    let el = null;
+    if (uid) {
+      try { el = grid.querySelector(`.rel-card[data-uid="${CSS.escape(uid)}"]`); }
+      catch (e) { el = null; }
+    }
+    if (!el) { host.scrollTop = prevTop; return; }
+    const delta = (el.getBoundingClientRect().top - host.getBoundingClientRect().top) - was;
+    if (Math.abs(delta) > 1) host.scrollTop += delta;
+  };
+  restore();
+  requestAnimationFrame(() => requestAnimationFrame(restore));
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Липкая метка над ОДНОЙ сплошной сеткой.
+//
+// В сетке заголовков больше нет — день меняется прямо внутри ряда. Метку
+// .rel-group-float строит по ПЕРВОЙ ВИДИМОЙ карточке: её день и, внутри
+// дня, букву артиста — «16 дек · B». Счётчик «N рел.» считает карточки
+// того же дня (в буквенном режиме — той же буквы) уже в показанной ленте;
+// «показать ещё» дописывает карточки в конец, и счётчик сам вырастает на
+// следующем sync, второй разметки не требуя.
+// ──────────────────────────────────────────────────────────────────────
+let _relFloatRaf = 0;
+function _relFloatSync() {
+  _relFloatRaf = 0;
+  const grid  = document.getElementById('releases-grid');
+  const float = grid && grid.querySelector('.rel-group-float');
+  if (!float) return;
+  const feed = grid.querySelector('.rel-feed');
+  const host = _relScroller();
+  const line = (host ? host.getBoundingClientRect().top : 0)
+             + (grid.querySelector('.rel-alpha-index') ? 29 : 0);
+  let cur = null;
+  if (feed) {
+    // Первая карточка, чей НИЖНИЙ край ещё ниже кромки прокрутки, — верхняя
+    // видимая карточка ленты. Карточки за пределами экрана лежат на оценочной
+    // высоте content-visibility, но порядок и границы прямоугольников это не
+    // портит: здесь нужно только сравнение.
+    for (const c of feed.children) {
+      if (c.getBoundingClientRect().bottom > line + 1) { cur = c; break; }
+    }
+  }
+  if (!cur) {
+    float.classList.remove('on');
+    float.dataset.key = '';
+    float.innerHTML = '';
+    return;
+  }
+  const gkey   = cur.dataset.gkey || '';
+  const letter = cur.dataset.letter || '';
+  const key = gkey + '\u0000' + letter;
+  if (float.dataset.key !== key) {
+    float.dataset.key = key;
+    const isDate = _relGroupMode === 'date';
+    float.classList.toggle('rel-by-date', isDate);
+    float.classList.toggle('rel-by-alpha', !isDate);
+    const title = isDate ? _relDateLabel(gkey)
+                         : (gkey === '#' ? t('rl.alpha_other') : gkey);
+    float.innerHTML = '<div class="rel-group-head">'
+      + '<span class="rel-group-title">' + esc(title) + '</span>'
+      + (isDate && letter ? '<span class="rel-float-letter">' + esc(letter) + '</span>' : '')
+      + '<span class="rel-group-count"></span></div>';
+  }
+  let n = 0;
+  for (const c of feed.children) if ((c.dataset.gkey || '') === gkey) n++;
+  const cnt = float.querySelector('.rel-group-count');
+  if (cnt) {
+    const txt = n + ' ' + t('w.rel_abbr');
+    if (cnt.textContent !== txt) cnt.textContent = txt;
+  }
+  float.classList.add('on');
+}
+function _relFloatScheduleSync() {
+  if (_relFloatRaf) return;
+  _relFloatRaf = requestAnimationFrame(_relFloatSync);
+}
+// Скролл не всплывает из произвольного контейнера — слушаем на окне с
+// capture: радар скроллится внутри .view, а не документа.
+window.addEventListener('scroll', () => {
+  const v = document.getElementById('view-releases');
+  if (!v || !v.classList.contains('active')) return;
+  _relFloatScheduleSync();
+}, {capture: true, passive: true});
+
+// Перерисовка «на той же странице» (звезда, «прочитано», догрузка с лейблами)
+// заменяет весь грид целиком — и без удержания уносит человека с того места, где
+// он читал. Перерисовка со СБРОСОМ страницы (сменили фильтр, сортировку, поиск)
+// наоборот обязана показать начало ленты: там держать нечего.
 function _applyRelFilter(resetPage) {
+  if (resetPage === false) { _relKeepScroll(() => _applyRelFilterCore(false)); return; }
+  _applyRelFilterCore(resetPage);
+}
+
+function _applyRelFilterCore(resetPage) {
   const grid  = document.getElementById('releases-grid');
   const empty = document.getElementById('rel-empty');
   if (!grid) return;
@@ -335,16 +657,21 @@ function _applyRelFilter(resetPage) {
   if (_relView === 'new')  data = data.filter(_relIsNew);
   if (_relView === 'labels') data = data.filter(_relIsLabelRel);
   if (_relTypeOff.size)    data = data.filter(r => !_relTypeOff.has(r.type || 'album'));
+  if (_relSrcOff.size)     data = data.filter(r => !_relSrcOff.has(_relSrcOf(r)));
 
   const sort = document.getElementById('rel-sort')?.value || 'date_desc';
+  // Внутри одного дня лента упорядочена по алфавиту артиста: липкая метка
+  // обещает «16 дек · B», и буквы должны идти по порядку, а не как попали.
+  // Без этого tie-break'а второй уровень («внутри дня — буквы») был бы враньём.
+  const byArtistThen = (a, b) => (a.artist || '').localeCompare(b.artist || '');
   switch (sort) {
-    case 'date_asc':    data.sort((a,b) => (a.date||'').localeCompare(b.date||'')); break;
+    case 'date_asc':    data.sort((a,b) => (a.date||'').localeCompare(b.date||'') || byArtistThen(a,b)); break;
     case 'tracks_desc': data.sort((a,b) => (b.tracks||0) - (a.tracks||0)); break;
     case 'tracks_asc':  data.sort((a,b) => (a.tracks||0) - (b.tracks||0)); break;
     case 'artist_asc':  data.sort((a,b) => (a.artist||'').localeCompare(b.artist||'')); break;
     case 'artist_desc': data.sort((a,b) => (b.artist||'').localeCompare(a.artist||'')); break;
     case 'title_asc':   data.sort((a,b) => (a.title||'').localeCompare(b.title||'')); break;
-    default:            data.sort((a,b) => (b.date||'').localeCompare(a.date||''));
+    default:            data.sort((a,b) => (b.date||'').localeCompare(a.date||'') || byArtistThen(a,b));
   }
   _relFilteredData = data;
 
@@ -368,7 +695,9 @@ function _applyRelFilter(resetPage) {
             ${btn('↩ '+t('rl.reset_seen'), 'resetRelSeen()', 'var(--orange)')}
           </div></div>`;
       } else {
-        empty.textContent = _relView === 'fav' ? t('rl.no_fav')
+        const allSrcOff = _REL_SRCS.every(s => !_relSrcScanned(s) || _relSrcOff.has(s));
+        empty.textContent = allSrcOff ? t('rl.src_all_off')
+                          : _relView === 'fav' ? t('rl.no_fav')
                           : _relView === 'new' ? t('rl.no_new')
                           : t('rl.none_period');
       }
@@ -379,6 +708,9 @@ function _applyRelFilter(resetPage) {
   }
   if (empty) empty.style.display = 'none';
 
+  // Ось ленты выбирает сортировка: по датам — метка «день · буква», по
+  // артисту/названию — метка-буква с оглавлением, по трекам — сплошная сетка (буквы там были бы
+  // враньём: порядок не алфавитный).
   const grouped = (sort === 'date_desc' || sort === 'date_asc');
   // Лейбловые релизы отделяем В ОБОИХ режимах — и в группах по дате, и в
   // «плоском». Блок отвечает на вопрос «почему эта карточка здесь», а не «как
@@ -392,10 +724,35 @@ function _applyRelFilter(resetPage) {
   // честно отдал сервер. Снаружи это выглядело как «источник не работает».
   // Постраничность — свойство основной ленты, к отдельному разделу она не
   // применяется: лейбловых релизов десятки, а не тысячи.
+  const alphaTitle  = (sort === 'title_asc');
+  const alphaArtist = (sort === 'artist_asc' || sort === 'artist_desc');
+  _relGroupMode = grouped ? 'date' : (alphaTitle ? 'title' : (alphaArtist ? 'artist' : 'flat'));
+
   const visible = data.slice(0, _relShowing);
-  grid.innerHTML = grouped ? _renderRelGroups(visible) : _renderRelFlat(visible);
+  // Полоса букв — на обеих осях. В режиме дат она не украшение: внутри дня
+  // порядок алфавитный, и тык по букве ведёт к её первому вхождению в ленте
+  // (_relJumpLetter). В сплошном режиме (сортировка по трекам) буквы были бы
+  // враньём: порядок не алфавитный.
+  grid.innerHTML = (_relGroupMode === 'flat')
+    ? _relSliceHtml(visible)
+    : _relAlphaIndexHtml(data, alphaTitle) + _relSliceHtml(visible);
   _relUpdateLoadMore(data.length);
   _relHydrateQualitySelects();
+  // Карточки BBC перерисованы — вернуть кнопкам планирования их состояние.
+  if (typeof _bbcApplySchedBtns === 'function') _bbcApplySchedBtns();
+  // Лента перестроена целиком (новый .rel-group-float пуст) — а прокрутка
+  // могла и не дёрнуться, scroll-событие тогда не придёт.
+  _relFloatScheduleSync();
+}
+
+// Разметка ОДНОЙ порции карточек в текущем режиме. Ею рисуется и первая
+// страница, и добавка «показать ещё» — иначе догрузка легко разъезжается с
+// основным показом (так и было: добавка знала только про даты).
+function _relSliceHtml(list) {
+  if (_relGroupMode === 'date')   return _renderRelGroups(list);
+  if (_relGroupMode === 'artist') return _renderRelAlpha(list, false);
+  if (_relGroupMode === 'title')  return _renderRelAlpha(list, true);
+  return _renderRelFlat(list);
 }
 
 function _relUpdateLoadMore(total) {
@@ -429,47 +786,53 @@ function _relShowMore() {
   const from = _relShowing;
   _relShowing += _REL_PAGE_SIZE;
   const slice = data.slice(from, _relShowing);
-  if (!grid || !slice.length || from === 0) { _applyRelFilter(); return; }
-  // Догрузка дописывает карточки В КОНЕЦ сетки, а лейбловый блок стоит
-  // отдельно и выше — добавка ушла бы мимо него. Пока в ленте есть лейбловые
-  // релизы, перерисовываем видимое целиком (страница уже отфильтрована и
-  // отсортирована, считать заново нечего). Нет их — путь ровно прежний.
-  if (data.some(_relIsLabelRel)) { _applyRelFilter(false); return; }
-
-  const sortSel = document.getElementById('rel-sort');
-  const grouped = (() => { const v = sortSel && sortSel.value; return v === 'date_desc' || v === 'date_asc'; })();
+  if (!grid || !slice.length || from === 0) { _applyRelFilter(false); return; }
+  // Здесь стояла ветка «есть лейбловые релизы → перерисовать ВСЮ ленту»: она
+  // осталась от отдельного лейблового блока наверху, которого давно нет (теперь
+  // это бейдж на карточке, см. _relIsLabelRel). Ветка пережила блок и на каждом
+  // «Показать ещё» пересоздавала все карточки. Новые узлы с content-visibility
+  // встают сначала на оценочную высоту, и лента дёргалась на ~300px, пока
+  // _relKeepScroll не возвращал её на место (замер 19.09.2026, headless).
 
   // Рисуем ТОЛЬКО добавку. Полная перерисовка выбрасывала и разбирала заново
   // все уже показанные карточки вместе с их декодированными обложками.
-  const holder = document.createElement('div');
-  holder.innerHTML = grouped ? _renderRelGroups(slice) : _renderRelFlat(slice);
+  // Дописывание идёт внутри _relKeepScroll: даже «чистая» дозапись сдвигает
+  // ленту, когда браузер уточняет высоту карточек с content-visibility.
+  _relKeepScroll(() => {
+    const holder = document.createElement('div');
+    holder.innerHTML = _relSliceHtml(slice);
 
-  if (grouped) {
-    // Если добавка начинается той же датой, на которой список оборвался, её
-    // карточки переносятся в уже существующую сетку — иначе получится второй
-    // заголовок с той же датой.
-    const lastGroup = grid.lastElementChild;
-    const firstNew = holder.firstElementChild;
-    const dateOf = (el) => el && el.querySelector('span') ? el.querySelector('span').textContent.trim() : null;
-    if (lastGroup && firstNew && dateOf(lastGroup) === dateOf(firstNew)) {
-      const intoGrid = lastGroup.querySelector('div[style*="grid"]');
-      const fromGrid = firstNew.querySelector('div[style*="grid"]');
-      if (intoGrid && fromGrid) {
-        const added = fromGrid.children.length;
-        while (fromGrid.firstChild) intoGrid.appendChild(fromGrid.firstChild);
-        const cnt = lastGroup.querySelectorAll('span')[1];
-        if (cnt) {
-          const was = parseInt(cnt.textContent, 10) || 0;
-          cnt.textContent = `${was + added} ${t('w.rel_abbr')}`;
-        }
-        firstNew.remove();
+    // Лента — ОДНА сетка, поэтому добавка не может встать рядом вторым гридом:
+    // её содержимое всасывается в существующий .rel-feed (или .card-grid в
+    // сплошном режиме). Заголовков-разделителей в сетке больше нет — день и
+    // буква живут в data-gkey/data-letter карточек, и липкая метка пересчитает
+    // счётчик сама, когда её позовёт _relFloatSync.
+    const feed  = grid.querySelector('.rel-feed');
+    const nfeed = holder.querySelector('.rel-feed');
+    if (feed && nfeed) {
+      while (nfeed.firstChild) feed.appendChild(nfeed.firstChild);
+    } else {
+      // Сплошной режим (сортировка по трекам): без слияния добавка становилась
+      // ВТОРОЙ сеткой, и ряд на стыке вставал вразнобой с остальными.
+      const into = grid.querySelector('.card-grid');
+      const from = holder.querySelector('.card-grid');
+      if (into && from && !from.classList.contains('rel-feed')) {
+        while (from.firstChild) into.appendChild(from.firstChild);
+      } else if (from && !into) {
+        grid.appendChild(from);   // страховка: не терять карточки
       }
     }
-  }
-  while (holder.firstChild) grid.appendChild(holder.firstChild);
+    holder.innerHTML = '';
+    _relFloatScheduleSync();
+  });
 
   _relUpdateLoadMore(data.length);
   _relHydrateQualitySelects();
+  // Добавка к ленте — те же кнопки планирования, что и при полной перерисовке.
+  if (typeof _bbcApplySchedBtns === 'function') _bbcApplySchedBtns();
+  // Карточки, добавленные ВНУТРЬ существующей сетки, наблюдатель цвета не
+  // видит: он следит за childList самого #releases-grid, без subtree.
+  try { if (typeof tintVisibleCards === 'function') tintVisibleCards(); } catch (e) {}
 }
 
 function _relActiveSvcs() {
@@ -519,6 +882,7 @@ function _renderRelActiveSvcs() {
   + ((S.config?.['show-radar-labels'] === true)
       ? `<span style="display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:12px;font-size:10px;font-weight:700;border:1px solid rgba(62,207,170,.3);color:var(--green);background:rgba(62,207,170,.08)" title="${t('rl.src_labels')}">🏷 ${t('rl.labels_badge')}</span>`
       : '');
+  _renderRelSrcToggles();
 }
 
 function saveRelSvcConfig() {
@@ -655,7 +1019,86 @@ function _jwtExpired(token) {
 }
 
 
-function renderReleaseCard(rel) {
+// Эфир BBC и аплоад SoundCloud — не «релиз из треков»: у них нет ни ISRC для ⚡,
+// ни витрин для «где скачать», ни выбора качества релиза. Своя карточка — по
+// образцу тех, что уже живут во вкладках BBC (bbcCard) и SoundCloud
+// (renderScTile): ▶ поток, длительность, скачать их собственным путём, ↗.
+// Классы и data-uid те же, что у карточки релиза, — на них держатся прокрутка
+// (_relKeepScroll), подкраска обложек и звезда.
+function _relFmtDur(sec) {
+  sec = Math.max(0, Math.round(sec || 0));
+  if (!sec) return '';
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}` : `${m}:${String(s).padStart(2,'0')}`;
+}
+function _relMixCard(rel, attrs) {
+  const isBbc = rel.service === 'bbc';
+  const clr   = _REL_SRC_CLR[rel.service] || 'var(--muted)';
+  const uid   = _relUID(rel);
+  const isNew = _relIsNew(rel);
+  const isFav = _relIsFav(rel);
+  const baseBorder = isNew ? 'rgba(62,207,170,.55)' : 'var(--border)';
+  const dt  = rel.date ? new Date(rel.date + 'T00:00:00').toLocaleDateString(_dateLoc(), {day:'numeric',month:'short',year:'numeric'}) : '';
+  const dur = _relFmtDur(rel.duration);
+  const pid = isBbc ? ((rel.url || '').match(/programmes\/([a-z0-9]+)/i) || [])[1] || rel.id || '' : '';
+  // Будущий эфир BBC: качать его нечего (стрима ещё нет), зато можно
+  // записать с live-потока в момент эфира — кнопка планирования вместо
+  // MP3/CUE. Хелперы и состояние кнопок живёт в bbc.js (общие .bbc-sched-btn).
+  const liveStart = isBbc && typeof _bbcLiveFuture === 'function'
+    ? _bbcLiveFuture(rel) : '';
+  const badge = isBbc ? t('rl.episode_badge') : t('rl.upload_badge');
+  const play = isBbc
+    ? `playRelease('bbc','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')`
+    : `playStreamTrack('soundcloud','${escJ(rel.id)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')`;
+  const dl = isBbc
+    ? `bbcDownload('${escJ(pid)}','','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')`
+    : `_relScDownload(this,'${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}',${Number(rel.duration)||0})`;
+  const artistClick = isBbc ? '' : (rel.artist_id && typeof scBrowseUser === 'function'
+    ? ` onclick="event.stopPropagation();showView('soundcloud',document.querySelector('.nav-item[data-view=soundcloud]'));setTimeout(()=>scBrowseUser('${escJ(rel.artist_id)}','${escJ(rel.artist)}'),60)" style="cursor:pointer"` : '');
+  const btnS = 'background:transparent;border:1px solid var(--border);border-radius:7px;font-size:11px;color:var(--muted);cursor:pointer;font-family:var(--font)';
+  return `<div class="rel-card rel-card-mix${isNew ? ' rel-card-new' : ''}" data-uid="${esc(uid)}"${attrs || ''} style="background:var(--surface);border:1px solid ${baseBorder};border-radius:10px;overflow:hidden;transition:border-color .15s;content-visibility:auto;contain-intrinsic-size:auto 280px;display:flex;flex-direction:column;height:100%" onmouseover="this.style.borderColor='${clr}'" onmouseout="this.style.borderColor='${baseBorder}'">
+    <div style="position:relative">
+      ${rel.cover
+        ? `<img src="${esc(rel.cover)}" data-lightbox-src="${esc(rel.cover)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in;background:var(--surface2)" loading="lazy" decoding="async" onerror="this.removeAttribute('src')"/>`
+        : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:32px;color:var(--muted)">${isBbc ? '📻' : '☁'}</div>`}
+      ${liveStart ? '' : `<button onclick="event.stopPropagation();${play}" title="${t('btn.play')}" class="rel-play" aria-label="${t('btn.play')}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.5 L18 12 L9 17.5 Z"/></svg></button>`}
+      <div style="position:absolute;top:6px;left:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:${clr};font-weight:700">${isBbc ? 'BBC' : 'SOUNDCLOUD'}</span></div>
+      <div style="position:absolute;top:6px;right:6px"><span style="font-size:9px;padding:2px 5px;border-radius:4px;background:rgba(0,0,0,.72);color:var(--muted2);font-weight:700">${esc(badge)}</span></div>
+      ${isNew ? `<div style="position:absolute;bottom:6px;left:6px"><span style="font-size:8px;padding:2px 6px;border-radius:4px;background:var(--green);color:#06281f;font-weight:800;letter-spacing:.4px">${t('rl.new_badge')}</span></div>` : ''}
+      ${dur ? `<div style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:4px;font-size:10px;color:#fff;padding:2px 5px;font-family:var(--mono)">${dur}</div>` : ''}
+    </div>
+    <div style="padding:8px 10px">
+      <div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" title="${esc(rel.title)}" onclick="${play}">${esc(rel.title)}</div>
+      <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(rel.artist)}"${artistClick}>${isBbc ? '📻 ' : ''}${esc(rel.artist)}</div>
+      <div style="font-size:10px;color:var(--muted);margin-top:2px">${dt}</div>
+      ${liveStart
+        ? `<button class="rel-dl-btn bbc-sched-btn" data-key="${esc((rel.channel||'')+'|'+liveStart)}"
+             onclick="event.stopPropagation();bbcScheduleToggle(this,'${escJ(rel.channel||'')}','${escJ(liveStart)}',${Number(rel.duration)||0},'${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')"
+             style="width:100%;margin-top:6px;padding:5px 4px;border-radius:7px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)"></button>`
+        : `<button class="rel-dl-btn" onclick="event.stopPropagation();${dl}"
+             style="width:100%;margin-top:6px;padding:5px 4px;background:${clr}1f;border:1px solid ${clr}38;border-radius:7px;font-size:10px;font-weight:700;color:${clr};cursor:pointer;font-family:var(--font)">${isBbc ? '⬇ MP3' : t('btn.download')}</button>`}
+      <div class="rel-act-row">
+        ${isBbc && !liveStart ? `<button onclick="event.stopPropagation();bbcGetCue('${escJ(pid)}','${escJ(rel.title)}','${escJ(rel.artist)}')" style="${btnS};font-size:10px" title="${t('b.dl_cue')}">CUE</button>` : ''}
+        <button onclick="toggleRelFav('${escJ(uid)}')" style="${btnS};border-color:${isFav?'var(--orange)':'var(--border)'};color:${isFav?'var(--orange)':'var(--muted)'}" title="${isFav?t('sc2.unfav'):t('sc2.fav')}">${isFav?'★':'☆'}</button>
+        <button onclick="navigator.clipboard.writeText('${escJ(rel.url)}');toast(t('toast.link_copied'))" style="${btnS};font-size:10px" title="${t('ck.copy_link')}">⎘</button>
+        <a href="${esc(rel.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" style="${btnS};font-size:10px;text-decoration:none;display:flex;align-items:center;justify-content:center" title="${t('ck.open_on')} ${isBbc ? 'BBC' : 'SoundCloud'}">↗</a>
+      </div>
+    </div>
+  </div>`;
+}
+// Скачать аплоад SoundCloud тем же путём, что и кнопка во вкладке SoundCloud
+// (scDownload): HQ AAC при Go+ токене, иначе публичный MP3 128.
+async function _relScDownload(btn, url, title, artist, cover, duration) {
+  const quality = (S.config && (S.config['soundcloud-oauth-token'] || '').trim()) ? 'hq' : 'mp3';
+  const meta = { title, artist, artworkUrl: cover, type: 'track', duration: duration || 0, trackCount: 1 };
+  const r = await api('POST', '/api/queue/add', { url, quality, title, artist, meta });
+  if (r && r.ok)             toast('+ ' + title + ' → ' + t('q.queue_word'));
+  else if (r && r.duplicate) toast(t('sc.already_queued'), 'var(--muted)');
+  else                       toast(t('t.error_c') + ((r && (r.msg || r.detail)) || '?'), 'var(--red)');
+}
+
+function renderReleaseCard(rel, attrs) {
+  if (rel && (rel.service === 'bbc' || rel.service === 'soundcloud')) return _relMixCard(rel, attrs);
   const dt = rel.date ? new Date(rel.date + 'T00:00:00').toLocaleDateString(_dateLoc(), {day:'numeric',month:'short',year:'numeric'}) : '';
   const svcColors = {spotify:'#1db954', qobuz:'#1870f5', tidal:'#00d4b3', apple:'var(--red)', deezer:'#a238ff'};
   const svcClr  = svcColors[rel.service] || 'var(--muted)';
@@ -694,10 +1137,12 @@ function renderReleaseCard(rel) {
   // content-visibility lets the browser skip layout+paint for cards that are
   // off-screen (the grid renders 120 at a time); contain-intrinsic-size keeps
   // the scrollbar honest for the ones it skipped.
-  return `<div class="rel-card${isNew ? ' rel-card-new' : ''}" style="background:var(--surface);border:1px solid ${baseBorder};border-radius:10px;overflow:hidden;transition:border-color .15s;content-visibility:auto;contain-intrinsic-size:auto 300px;display:flex;flex-direction:column;height:100%" onmouseover="this.style.borderColor='${svcClr}'" onmouseout="this.style.borderColor='${baseBorder}'">
+  // data-uid — якорь прокрутки: по нему _relKeepScroll находит ту же карточку
+  // после полной перерисовки грида и возвращает её на прежнее место.
+  return `<div class="rel-card${isNew ? ' rel-card-new' : ''}" data-uid="${esc(uid)}"${attrs || ''} style="background:var(--surface);border:1px solid ${baseBorder};border-radius:10px;overflow:hidden;transition:border-color .15s;content-visibility:auto;contain-intrinsic-size:auto 300px;display:flex;flex-direction:column;height:100%" onmouseover="this.style.borderColor='${svcClr}'" onmouseout="this.style.borderColor='${baseBorder}'">
     <div style="position:relative">
       ${rel.cover
-        ? `<img src="${esc(relCover(rel.cover, 300))}" data-lightbox-src="${esc(rel.cover)}" onerror="if(this.src!==this.dataset.lightboxSrc){this.src=this.dataset.lightboxSrc}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" decoding="async"/>`
+        ? `<img src="${esc(relCover(rel.cover, 300))}" data-lightbox-src="${esc(relCover(rel.cover, 1000))}" onerror="if(this.src!==this.dataset.lightboxSrc){this.src=this.dataset.lightboxSrc}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" decoding="async"/>`
         : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;font-size:32px;color:var(--muted)">♪</div>`}
       <button onclick="event.stopPropagation();playRelease('${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')" title="${t('rl.listen')}"
         class="rel-play" aria-label="${t('rl.listen')}"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6.5 L18 12 L9 17.5 Z"/></svg></button>
@@ -790,8 +1235,11 @@ function _relSetQuality(sel) {
 // (cheap, synchronous, no per-card network call) — this upgrades them to the
 // full per-service option list once, using the same cached _qualitiesForEngine
 // the rest of the app already warms (Settings/Queue).
+// `:not([data-hyd])` — чтобы догрузка «показать ещё» не переписывала заново
+// селекторы всех уже показанных карточек: их разметку это не меняет, а сотни
+// присваиваний innerHTML прямо во время прокрутки — вполне ощутимо.
 async function _relHydrateQualitySelects() {
-  const selects = document.querySelectorAll('#releases-grid .rel-q-select');
+  const selects = document.querySelectorAll('#releases-grid .rel-q-select:not([data-hyd])');
   if (!selects.length) return;
   const bySvc = {};
   selects.forEach(sel => {
@@ -810,6 +1258,7 @@ async function _relHydrateQualitySelects() {
     bySvc[svc].forEach(sel => {
       const wasFocused = document.activeElement === sel;
       sel.innerHTML = optsHtml;
+      sel.dataset.hyd = '1';
       if (wasFocused) sel.focus();
     });
   }

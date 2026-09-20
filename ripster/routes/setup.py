@@ -261,6 +261,8 @@ async def _run_setup_component(key: str) -> dict:
             done = await _install_orpheus_component()
         elif key == "beatport":
             done = await _install_beatport_component()
+        elif key == "jiosaavn":
+            done = await _install_jiosaavn_component()
         elif key == "zhaarey":
             # Advanced: the Go downloader toolchain (own premium Apple ID + Docker).
             await _setup.ensure_git()
@@ -330,7 +332,7 @@ async def setup_component(key: str):
     приезжает событием `setup_component_done`, а прогресс — в консоль Setup.
     """
     known = {"apple", "ffmpeg", "mp4decrypt", "node", "soundcloud",
-             "orpheus", "beatport", "zhaarey", "widevine"}
+             "orpheus", "beatport", "jiosaavn", "zhaarey", "widevine"}
     if key not in known:
         return {"ok": False, "state": "failed",
                 "error": f"неизвестный компонент: {key}"}
@@ -494,10 +496,24 @@ async def wrapper_accounts_list():
     # (when the pool object itself doesn't exist yet).
     if 0 not in status_by_slot:
         status_by_slot[0] = {"running": await _amd.check_wrapper_running(), "busy": False}
+    # priority/enabled — для перетаскивания в настройках: без них фронт не знает
+    # текущий порядок, и строка после сброса отскакивала бы на старое место.
+    # Хранятся там же, где их пишет /prefs: у слота 0 — wrapper-primary-*,
+    # у остальных — в записи wrapper-accounts.
+    extras = list(_cfg.get("wrapper-accounts") or [])
+    def _pref(i: int, key: str, default):
+        if i == 0:
+            v = _cfg.get(f"wrapper-primary-{key}")
+        else:
+            e = extras[i - 1] if i - 1 < len(extras) and isinstance(extras[i - 1], dict) else {}
+            v = e.get(key)
+        return default if v is None else v
     return {
         "pool_enabled": _pool.pool_enabled(_cfg),
         "accounts": [
             {"slot": i, "label": a["label"], "primary": i == 0,
+             "priority": _pref(i, "priority", i),
+             "enabled": bool(_pref(i, "enabled", True)),
              **status_by_slot.get(i, {"running": False, "busy": False})}
             for i, a in enumerate(accounts)
         ],
@@ -769,7 +785,11 @@ async def tidal_accounts_list(probe: int = 0):
     out = {"pool": [{"slot": i,
                      "label": a.get("label") or (f"основной" if i == 0 else f"слот {i}"),
                      "country": (a.get("tidal-country") or a.get("country") or "").upper(),
-                     "primary": i == 0}
+                     "primary": i == 0,
+                     # Для перетаскивания порядка и выключателя: без них панель
+                     # не знала текущего порядка, и Tidal оставался без drag.
+                     "enabled": a.get("enabled", True),
+                     "priority": a.get("priority", i)}
                     for i, a in enumerate(accts)]}
     if not probe:
         return out
@@ -957,7 +977,7 @@ async def soundcloud_accounts_remove(slot: int):
 # У Apple своя ручка (`/api/wrapper/accounts/prefs`): там слот это контейнер, и
 # приоритет действует ВНУТРИ витрины, потому что страна решает, существует ли
 # релиз вообще. Здесь всё проще — приоритет это просто очередь.
-_PREFS_POOLS = ("deezer", "qobuz", "soundcloud", "yandex")
+_PREFS_POOLS = ("deezer", "qobuz", "soundcloud", "yandex", "tidal")
 
 
 @router.post("/api/{service}/accounts/prefs")
@@ -1363,6 +1383,17 @@ async def beatport_status():
     }
 
 
+@router.get("/api/jiosaavn/status")
+async def jiosaavn_status():
+    from ripster.engines.orpheus_jiosaavn import is_installed, _module_path
+    from ripster.engines.orpheus_beatport import _orpheus_dir as _od
+    return {
+        "orpheus_installed": (_od() / "orpheus.py").exists(),
+        "module_installed":  is_installed(),
+        "module_path":       str(_module_path()),
+    }
+
+
 @router.post("/api/setup/beatport")
 async def beatport_install():
     """Clone orpheusdl-beatport into orpheus/modules/beatport/ and install its
@@ -1548,6 +1579,27 @@ async def _install_orpheus_component() -> bool:
     except Exception as _e:
         await _setup.ilog(f"⚠ orpheus/core.py patch skipped: {_e}", "warn")
 
+    # Corridor de config: без патча core.py резолвит 'config' строго относительно
+    # CWD, то есть все движки Orpheus делили ОДИН settings.json — а полосы очереди
+    # у них разные (beatport и jiosaavn качают параллельно) и прогон перебивал
+    # качество/папку чужому. Контракт живёт в движке: `orpheus_cmd` выставляет
+    # ORPHEUS_CONFIG_DIR / ORPHEUS_SESSION_STORAGE, патч идемпотентен.
+    try:
+        from ripster.engines.orpheus_beatport import orpheus_core_corridor_patch
+        _core_py = orph_dir / "orpheus" / "core.py"
+        if _core_py.exists():
+            _src = _core_py.read_text(encoding="utf-8", errors="replace")
+            _patched = orpheus_core_corridor_patch(_src)
+            if _patched != _src:
+                _core_py.write_text(_patched, encoding="utf-8")
+                await _setup.ilog("✓ Patched orpheus/core.py (per-engine config corridor)", "success")
+            elif "ORPHEUS_CONFIG_DIR" not in _src:
+                await _setup.ilog("⚠ orpheus/core.py: config-corridor patch did not apply "
+                                  "(upstream changed) — Orpheus engines share one settings.json",
+                                  "warn")
+    except Exception as _e:
+        await _setup.ilog(f"⚠ orpheus/core.py config-corridor patch skipped: {_e}", "warn")
+
     # Isolate OrpheusDL in its OWN venv: its requirements pin protobuf==3.15.8,
     # which — installed into the shared bundled python — breaks AMD (Apple) and
     # pywidevine (both need protobuf>=6.33). The engines run orpheus under this
@@ -1612,6 +1664,46 @@ async def _install_beatport_component() -> bool:
 
     ok = is_installed()
     await _setup.ilog("✓ orpheusdl-beatport установлен." if ok
+                      else "✗ Модуль не определяется как установленный — смотри лог.",
+                      "success" if ok else "error")
+    return ok
+
+
+async def _install_jiosaavn_component() -> bool:
+    """JioSaavn (orpheusdl-jiosaavn): clone into orpheus/modules/jiosaavn. The
+    module has NO requirements.txt (it only uses OrpheusDL's own utils/requests),
+    so nothing is pip-installed and no shared pin (protobuf/construct) is touched.
+    Needs OrpheusDL; installs it first when missing. Returns is_installed()."""
+    import shutil
+    from ripster.engines.orpheus_jiosaavn import (_module_path, is_installed,
+                                                  REPO_URL, _ensure_module_init)
+    from ripster.engines.orpheus_beatport import _orpheus_dir as _od
+    mod_path = _module_path()
+    orph_dir = _od()
+
+    await _setup.ilog("── JioSaavn (orpheusdl-jiosaavn) ───────", "info")
+    if not (orph_dir / "orpheus.py").exists():
+        await _setup.ilog("ℹ OrpheusDL не найден — ставлю его сначала (база для JioSaavn)…", "info")
+        if not await _install_orpheus_component():
+            await _setup.ilog("✗ Не удалось поставить OrpheusDL — JioSaavn прерван.", "error")
+            return False
+    (orph_dir / "modules").mkdir(parents=True, exist_ok=True)
+    await _setup.ensure_git()
+    git = shutil.which("git") or "git"
+
+    if (mod_path / ".git").is_dir():
+        await _setup.ilog("↻ orpheusdl-jiosaavn уже есть — git pull…", "info")
+        await _setup.irun([git, "pull", "--ff-only"], cwd=str(mod_path))
+    elif not (mod_path / "interface.py").exists():
+        await _setup.ilog("⬇ Клонирую orpheusdl-jiosaavn…", "info")
+        rc, _ = await _setup.irun([git, "clone", REPO_URL, str(mod_path)])
+        if rc != 0:
+            await _setup.ilog("✗ Ошибка git clone", "error")
+            return False
+    _ensure_module_init()
+
+    ok = is_installed()
+    await _setup.ilog("✓ orpheusdl-jiosaavn установлен (логин не нужен)." if ok
                       else "✗ Модуль не определяется как установленный — смотри лог.",
                       "success" if ok else "error")
     return ok

@@ -104,6 +104,16 @@ async function loadSpotifyTokenStatus() {
   }
 }
 function startSpotifyTokenPoll() {
+  // Целей этого поллера в разметке НЕТ: `#sp-tok-fresh` и `#sp-push-log` не
+  // встречаются ни в одной вьюхе (0 вхождений). При этом урлбар запускал его
+  // на каждом открытии вкладки Spotify, и он раз в 20 с ходил на
+  // /api/admin/spotify-token-status, чтобы записать результат в никуда.
+  // Не заводим таймер, пока целей не существует — вернут панель, оживёт сам.
+  // 18.09.2026, найдено при чистке настроек Spotify.
+  if (!document.getElementById('sp-tok-fresh') && !document.getElementById('sp-push-log')) {
+    stopSpotifyTokenPoll();
+    return;
+  }
   loadSpotifyTokenStatus();
   if (_spTokPoll) clearInterval(_spTokPoll);
   _spTokPoll = setInterval(loadSpotifyTokenStatus, 20000);

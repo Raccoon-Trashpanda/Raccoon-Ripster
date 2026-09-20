@@ -5,7 +5,7 @@
 // ======================================================================
 
 // ── Service detection in URL bar ─────────────────────────────────
-const SVC_COLORS = {apple:'#fc3c44',qobuz:'#1b68d3',deezer:'#a238ff',tidal:'#00d4b3',spotify:'#1db954',soundcloud:'#ff5500',beatport:'#a6ce39',yandex:'#ffcc00',amazon:'#25d1da'};
+const SVC_COLORS = {apple:'#fc3c44',qobuz:'#1b68d3',deezer:'#a238ff',tidal:'#00d4b3',spotify:'#1db954',soundcloud:'#ff5500',beatport:'#a6ce39',yandex:'#ffcc00',amazon:'#25d1da',jiosaavn:'#2bc5b4'};
 const SVC_LABELS = {
   apple:      '🍎 Apple Music',
   qobuz:      '🎼 Qobuz',
@@ -14,6 +14,7 @@ const SVC_LABELS = {
   spotify:    '🟢 Spotify',
   soundcloud: '🎵 SoundCloud',
   beatport:   '🟣 Beatport',
+  jiosaavn:   '🇮🇳 JioSaavn',
   yandex:     '🟡 Yandex Music',
   amazon:     '🅰️ Amazon Music',
 };
@@ -33,6 +34,7 @@ function svcFromUrl(val) {
   if(val.includes('soundcloud.com'))       return 'soundcloud';
   if(val.includes('spotify.com'))          return 'spotify';
   if(val.includes('beatport.com'))         return 'beatport';
+  if(val.includes('jiosaavn.com'))         return 'jiosaavn';
   if(val.includes('music.yandex.'))        return 'yandex';
   if(val.includes('music.amazon.'))        return 'amazon';
   if(val.includes('bbc.co.uk'))            return 'bbc';
@@ -142,7 +144,7 @@ function showStab(id, btn) {
     loadTokenExpiry('tidal');
     try { loadTidalAccounts?.(); } catch {}
   }
-  if(id==='spotify') { setVal('s-sp-cid',c['spotify-client-id']||''); setVal('s-sp-csecret',c['spotify-client-secret']||''); _setSecret('s-sp-dc',c['spotify-sp-dc']); setVal('s-orp-path',c['orpheus-save-path']||''); setChk('s-orp-mp3',c['orpheus-convert-mp3']===true); setVal('s-orp-quality',c['orpheus-quality']||'hifi'); _renderSpotifySavedTarget(); loadSpotifyStatus(); loadOrpheusStatus(); testAuth('spotify'); }
+  if(id==='spotify') { setVal('s-sp-cid',c['spotify-client-id']||''); setVal('s-sp-csecret',c['spotify-client-secret']||''); _setSecret('s-sp-dc',c['spotify-sp-dc']); _setSecret('s-sp-radar-dc',c['spotify-radar-sp-dc']); setVal('s-sp-radar-cid',c['spotify-radar-client-id']||''); _setSecret('s-sp-radar-csecret',c['spotify-radar-client-secret']); setVal('s-orp-path',c['orpheus-save-path']||''); setChk('s-orp-mp3',c['orpheus-convert-mp3']===true); setVal('s-orp-quality',c['orpheus-quality']||'hifi'); _renderSpotifySavedTarget(); loadSpotifyStatus(); loadOrpheusStatus(); loadSpotifyRadarStatus?.(); testAuth('spotify'); }
   if(id==='digs') {
     setVal('s-dg-shape',   c['digs-shape']   || 'circle');
     setVal('s-dg-size',    String(c['digs-size'] || 44));
@@ -182,6 +184,12 @@ function showStab(id, btn) {
     loadBeatportStatus();
     if(c['beatport-username'] && c['beatport-password']) testAuth('beatport');
   }
+  if(id==='jiosaavn') {
+    const jq = document.getElementById('s-js-quality');
+    if(jq) jq.value = c['jiosaavn-quality']||'high';
+    setVal('s-js-path', c['jiosaavn-save-path']||'');
+    loadJiosaavnStatus();
+  }
   if(id==='yandex') {
     _setSecret('s-yandex-token', c['yandex-token']);
     setVal('s-yandex-qual', c['yandex-quality']||'flac');
@@ -206,6 +214,9 @@ function showStab(id, btn) {
     setChk('s-notify-on-done', !!c['notify-on-done']);
     // Release toasts default ON — the point of a watchlist is being told.
     setChk('s-notify-on-release', c['notify-on-release'] !== false);
+    // NZ-Friday pass is opt-in (default OFF) — the user decides.
+    setChk('s-watchlist-nz-early', c['watchlist-nz-early'] === true || c['watchlist-nz-early'] === 'true');
+    loadWlNzStatus();
     setChk('s-minimize-to-tray', c['minimize-to-tray']!==false);
     const _mz = document.getElementById('s-minimize-to');
     if(_mz) _mz.value = (c['minimize-to'] === 'tray') ? 'tray' : 'taskbar';
@@ -215,6 +226,26 @@ function showStab(id, btn) {
     if(sl) sl.value = mp;
     if(vl) vl.textContent = mp;
   }
+}
+
+// Watchlist NZ-early: which services really have an NZ account (read by the
+// server from measured account countries, not a fixed list) + next NZ pass.
+async function loadWlNzStatus() {
+  const el = document.getElementById('s-wl-nz-status');
+  if (!el) return;
+  let r;
+  try { r = await api('GET', '/api/watchlist/nz-status'); } catch (_) { el.textContent = ''; return; }
+  if (!r) return;
+  const svcName = s => ({tidal:'Tidal', qobuz:'Qobuz', deezer:'Deezer', apple:'Apple Music'}[s] || s);
+  const have = (r.accounts || []).map(a => svcName(a.service) + (a.via === 'amd-region-rotation' ? ' (AMD)' : '')).join(', ');
+  const parts = [];
+  parts.push(have ? ti('s.wl_nz_have', {list: have}) : t('s.wl_nz_none'));
+  if ((r.missing || []).length) parts.push(ti('s.wl_nz_missing', {list: r.missing.map(svcName).join(', ')}));
+  if (r.enabled && r.next_nz) {
+    const d = new Date(r.next_nz);
+    if (!isNaN(d)) parts.push(ti('s.wl_nz_next', {when: d.toLocaleString([], {weekday:'short', day:'numeric', month:'short', hour:'2-digit', minute:'2-digit'})}));
+  }
+  el.textContent = parts.join(' · ');
 }
 
 // ══ BOT CONFIG TAB ════════════════════════════════════════════════════
@@ -469,3 +500,28 @@ function _countryFlag(code) {
   return String.fromCodePoint(0x1F1E6+c.charCodeAt(0)-65, 0x1F1E6+c.charCodeAt(1)-65);
 }
 
+// ── JioSaavn settings tab (OrpheusDL module, no login) ─────────────────
+async function loadJiosaavnStatus() {
+  const el = document.getElementById('js-install-label');
+  const btn = document.getElementById('btn-js-install');
+  if(!el) return;
+  try {
+    const st = await api('GET','/api/jiosaavn/status');
+    const ok = !!(st && st.module_installed);
+    el.textContent = ok ? t('s.module_ok') : t('js.module_missing');
+    el.style.color = ok ? '#2bc5b4' : 'var(--orange)';
+    if(btn) btn.textContent = ok ? t('js.reinstall') : t('js.install');
+  } catch(e) {
+    el.textContent = t('js.status_err');
+    el.style.color = 'var(--muted)';
+  }
+}
+
+async function installJiosaavnModule() {
+  try {
+    const r = await api('POST','/api/setup/component/jiosaavn');
+    toast(r && r.ok === false ? (r.error || t('js.status_err')) : t('js.installing'));
+  } catch(e) { toast(t('js.status_err'), 'var(--red)'); return; }
+  // Install runs in the background (git clone, a few seconds) — re-check a few times.
+  for(const ms of [3000, 8000, 20000]) setTimeout(loadJiosaavnStatus, ms);
+}

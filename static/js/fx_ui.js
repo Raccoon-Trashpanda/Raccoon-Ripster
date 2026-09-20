@@ -68,7 +68,7 @@
   }
   // Background status/queue polls run every few seconds — they must NOT flash
   // the bar. Only genuine content/navigation loads drive it.
-  const SKIP = /(\/api\/queue|status|releases|telemetry|wrapper-status|wrapper\/logs|\/ping)/i;
+  const SKIP = /(\/api\/queue|status|releases|telemetry|wrapper-status|wrapper\/logs|\/ping|diagnostics|bot-overview|bot-config|bot-cache|token-expiry|session-info|\/api\/stats)/i;
   const _fetch = window.fetch;
   if (typeof _fetch === 'function') {
     window.fetch = function (input) {

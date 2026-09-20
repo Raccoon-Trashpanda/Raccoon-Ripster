@@ -155,7 +155,10 @@ async def _probe_bbc(overlay: dict | None = None) -> dict:
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get("https://www.bbc.co.uk/programmes/m002vbnb.json")
     except Exception as e:
-        return {"ok": False, "error_key": "pr.bbc_down", "error_args": {"e": str(e)}, "error": f"BBC недоступен: {e}"}
+        # У таймаутов httpx str(e) пустой — в лог уходило «BBC недоступен: » без причины
+        # (10 раз за неделю). Имя исключения — минимум, по которому видно «сеть/DNS/таймаут».
+        _e = str(e) or type(e).__name__
+        return {"ok": False, "error_key": "pr.bbc_down", "error_args": {"e": _e}, "error": f"BBC недоступен: {_e}"}
     if r.status_code != 200:
         return {"ok": False,
                 "error_key": "pr.bbc_http", "error_args": {"code": r.status_code}, "error": f"Публичный API BBC ответил {r.status_code} — "
@@ -1478,6 +1481,12 @@ async def logout_service(service: str, body: dict | None = None):
             except Exception as e:
                 print(f"[logout] apple identity: {e}", flush=True)
 
+    # Диагностируемость: без этой строки инцидент 18.09.2026 («нажал удалить
+    # токен Qobuz — недосчитался и других») расследовать было НЕЧЕМ — в логе не
+    # оставалось ровно ничего. Пишем, что именно сняли: ИМЕНА ключей и файлов,
+    # без значений.
+    print(f"[logout] {svc}: ключей очищено {len(cleared)} {cleared}; "
+          f"файлов удалено {len(removed)} {removed}", flush=True)
     if cleared and _save_config:
         _save_config(_cfg)
     print(f"[logout] {svc}: keys {len(cleared)}, files {len(removed)}"

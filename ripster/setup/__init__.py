@@ -156,9 +156,12 @@ def _detect_gamdl_flags() -> set[str]:
     if _gamdl_flags:
         return _gamdl_flags
     try:
-        gamdl_exe = shutil.which("gamdl") or "gamdl"
+        # НЕ shutil.which("gamdl"): console-script shim под изолированным
+        # embeddable-питоном молча выходит с кодом 1 → флаги пустые
+        # (preflight Gate 0.5). Тот же интерпретатор, -m gamdl.
+        from ripster.py_runtime import app_python
         r = subprocess.run(
-            [gamdl_exe, "--help"],
+            [app_python(), "-m", "gamdl", "--help"],
             capture_output=True, text=True, timeout=10, creationflags=_NO_WIN,
         )
         flags = set(re.findall(r"--([a-z][a-z0-9-]+)", r.stdout + r.stderr))

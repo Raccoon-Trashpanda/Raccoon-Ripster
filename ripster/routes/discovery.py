@@ -452,6 +452,51 @@ async def lyrics(artist: str = "", track: str = "", album: str = "", duration: i
 
 
 # ── Search ────────────────────────────────────────────────────────────────
+async def _search_beatport(q: str, ent: str, limit: int) -> dict:
+    """Unified-search wire for Beatport. The dedicated /api/beatport/search route
+    works fine; this bridges it into /api/search so the MAIN search bar (source =
+    Beatport) returns hits instead of `Unknown service: beatport` — the gap the
+    owner hit 18.09.2026 ('вбил в строке поиска, выбрал битпорт — ничего'). Maps
+    the unified album/track entity to Beatport's releases/tracks and normalizes
+    each card to the shared shape (service/cover/type) the result grid reads. On a
+    creds/token/network failure it surfaces the REAL reason (honest error), not a
+    silent empty list that reads as 'nothing found'."""
+    from ripster.routes.beatport import beatport_search as _bp_search
+    from fastapi import HTTPException as _HTTPException
+    rtype = "tracks" if ent == "track" else "releases"
+    try:
+        res = await _bp_search(q=q, result_type=rtype, page=1,
+                               per_page=max(5, min(int(limit or 25), 50)))
+    except _HTTPException as e:
+        d = e.detail
+        msg = d.get("msg") if isinstance(d, dict) else (d if isinstance(d, str) else str(d))
+        return {"results": [], "error": msg}
+    except Exception as e:
+        return {"results": [], "error": f"Beatport: {e}"}
+    out = []
+    for it in (res.get("results") or []):
+        it = dict(it)
+        it.setdefault("cover", it.get("artworkUrl", ""))
+        it["service"] = "beatport"
+        # НЕ переписываем `type`: _fmt_release/_fmt_track уже отдают
+        # 'release'/'track', и фронтовый _renderSearchCard рисует фирменную
+        # Beatport-карточку именно по `type in (release,track) && service==beatport`
+        # (static/js/cookies_ui.js). Клоббер в 'album' ронял релизы в дженерик.
+        out.append(it)
+    return {"results": out}
+
+
+async def _search_jiosaavn(q: str, ent: str, limit: int) -> dict:
+    """Unified-search wire for JioSaavn (public web API, no login). The logic
+    lives next to the engine (ripster/engines/orpheus_jiosaavn.search_jiosaavn);
+    search works from anywhere — only JioSaavn's audio CDN is geo-locked."""
+    try:
+        from ripster.engines.orpheus_jiosaavn import search_jiosaavn
+        return await search_jiosaavn(q, ent, limit)
+    except Exception as e:  # noqa: BLE001
+        return {"results": [], "error": f"JioSaavn: {e}"}
+
+
 @router.get("/api/search")
 async def api_search(q: str, service: str = "apple", type: str = "album", limit: int = 20, country: str = "",
                      request: Request = None):
@@ -521,6 +566,10 @@ async def api_search(q: str, service: str = "apple", type: str = "album", limit:
         return await _search_spotify(q, type, limit)
     elif service == "yandex":
         return await _search_yandex(q, type, limit)
+    elif service == "beatport":
+        return await _search_beatport(q, type, limit)
+    elif service == "jiosaavn":
+        return await _search_jiosaavn(q, type, limit)
     else:
         return {"results": [], "error": f"Unknown service: {service}"}
 
@@ -1516,6 +1565,7 @@ async def _search_deezer(q: str, ent: str, limit: int) -> dict:
                     "type":   ent,
                     "url":    item.get("link",""),
                     "cover":  (item.get("album") or {}).get("cover_medium","") or (item.get("album") or {}).get("cover_small","") or (item.get("album") or {}).get("cover",""),
+                    "duration": item.get("duration") or 0,
                     "service":"deezer",
                 })
             elif ep == "artist":
@@ -1588,6 +1638,10 @@ async def _search_qobuz(q: str, ent: str, limit: int) -> dict:
                 "tracks": item.get("tracks_count"),
                 "service":"qobuz",
             })
+            if ent == "track":
+                # Станционным событиям нужна длительность именно этого трека —
+                # везём её с поиска, как у Deezer/Tidal.
+                results[-1]["duration"] = item.get("duration") or 0
         return {"results": results}
     except Exception as e:
         return {"results": [], "error": str(e)}
@@ -1604,7 +1658,8 @@ async def _search_qobuz(q: str, ent: str, limit: int) -> dict:
 # service». Ровно тот класс, который ловит самопроверка связей: код есть, дороги
 # к нему нет.
 _ENGINE_SERVICES = {"apple": "zhaarey", "deezer": "deezer", "qobuz": "qobuz",
-                    "tidal": "tidal", "spotify": "spotify", "yandex": "yandex"}
+                    "tidal": "tidal", "spotify": "spotify", "yandex": "yandex",
+                    "jiosaavn": "orpheus_jiosaavn"}
 
 
 @router.get("/api/artist/{service}/{artist_id}")
@@ -1940,6 +1995,7 @@ async def _search_tidal(q: str, ent: str, limit: int) -> dict:
                     "type":    ent,
                     "url":     f"https://listen.tidal.com/track/{tr_id}",
                     "cover":   _tidal_cover((item.get("album") or {}).get("cover", "")),
+                    "duration": item.get("duration") or 0,
                     "service": "tidal",
                 })
             elif t_type == "artists":
@@ -2609,7 +2665,15 @@ async def _resolve_release_id(url: str) -> str:
             if not m:
                 return _fallback()
             kind, bid = m.group(1), m.group(2)
-            tok = await _bp._get_token()
+            # Токен ТОЛЬКО из сессии OrpheusDL (она пишет повёрнутый
+            # refresh_token обратно). Свой обмен на auth/o/token здесь запрещён:
+            # ротация отзывает семейство токенов → Beatport ложится у гостей
+            # (19.09.2026). Нет сессии → честный url:-фолбэк.
+            try:
+                from ripster.engines.orpheus_beatport import _beatport_access_token
+                tok = await _beatport_access_token()
+            except Exception:
+                tok = ""
             if not tok:
                 return _fallback()
             ep = "tracks" if kind == "track" else "releases"
@@ -2631,9 +2695,12 @@ async def _resolve_release_id(url: str) -> str:
             # releases cache under url:tidal.com/… instead of isrc:/upc:, so they
             # never cross-service-deduped. Fall back to the pasted token.
             hdr = None
+            _cc = ""   # страна СЕССИИ: альбом другой витрины даёт 404
             try:
                 from ripster.engines.tidal import _orpheus_access_token
                 _tok, _cc = await _orpheus_access_token()
+                if not _tok:
+                    _cc = ""
                 if _tok:
                     hdr = {"Authorization": f"Bearer {_tok}"}
             except Exception:
@@ -2647,7 +2714,7 @@ async def _resolve_release_id(url: str) -> str:
                     ep = "tracks" if kind == "track" else "albums"
                     async with _HTTP.ashared() as c:
                         r = await c.get(f"{_TIDAL_API}/{ep}/{tid}", headers=hdr,
-                                        params={"countryCode": _tidal_country()})
+                                        params={"countryCode": _cc or _tidal_country()})
                         if r.status_code == 200:
                             d = r.json()
                             if kind == "track" and d.get("isrc"):

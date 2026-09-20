@@ -40,6 +40,11 @@ from pathlib import Path
 
 _CNW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
+def dry_run() -> bool:
+    """Режим «только рассказать»: ставит healthcheck --no-fix."""
+    return os.environ.get("RIPSTER_HEALTH_DRY_RUN") == "1"
+
+
 DEFAULT_THRESHOLD = 3  # подряд идущих неудачных прохода чекера, не попыток внутри одного
 
 
@@ -118,6 +123,11 @@ def record_check(kind: str, key: str, alive: bool, *, country: str = "",
     state_key = f"{kind}:{key}"
     st = _load_state()
     entry = st.get(state_key) or {"streak": 0, "last_country": ""}
+    if dry_run():
+        # Проверочный прогон (healthcheck --no-fix) не пишет streak и ничего не
+        # снимает: 17.09.2026 такой прогон через две минуты после плановой
+        # проверки досчитал учётку Qobuz до порога и снял её.
+        return (0 if alive else int(entry.get("streak", 0)) + 1), False
     if alive:
         if entry["streak"]:
             entry["streak"] = 0
@@ -410,7 +420,8 @@ def check_all_deezer_arls(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
                          f"{streak}/{threshold} неудачных проверок подряд ({reason})")
     # Основной Free, а в пуле есть Family с lossless → повышаем автоматически.
     try:
-        lines += promote_best_deezer()
+        if not dry_run():
+            lines += promote_best_deezer()
     except Exception as e:  # noqa: BLE001
         lines.append(f"⚠️ Deezer: автозамена основного не отработала: {type(e).__name__}")
     return lines
@@ -578,10 +589,26 @@ def _notify_app_config_changed() -> bool:
         # Origin/Referer обязательны: у приложения стоит гард против запросов
         # с чужих страниц, и POST без них он отбивает как межсайтовый — что и
         # случилось при первой проверке (403 «Cross-site request blocked»).
+        # /api/config/reload теперь owner-only (был только loopback, а за туннелем
+        # внешний клиент тоже 127.0.0.1 — security 18.09.2026). Сторож свой: читает
+        # session-secret из config.yaml и подписывает cookie так же, как приложение
+        # (auth._sign_session). Если секрета нет — шлём без cookie: на локальной
+        # машине БЕЗ туннеля gate пропустит по loopback.
+        headers = {"Origin": "http://127.0.0.1:7799",
+                   "Referer": "http://127.0.0.1:7799/"}
+        try:
+            import yaml as _y, hmac as _hm, hashlib as _hl, time as _tm
+            cfg_path, _ = _config_paths()
+            _sec = ((_y.safe_load(cfg_path.read_text(encoding="utf-8")) or {}).get("session-secret") or "")
+            if _sec:
+                _iss = int(_tm.time())
+                _mac = _hm.new(_sec.encode(), str(_iss).encode(), _hl.sha256).hexdigest()
+                headers["Cookie"] = f"ripster-session={_iss}.{_mac}"
+        except Exception:
+            pass
         req = urllib.request.Request(
             "http://127.0.0.1:7799/api/config/reload", data=b"", method="POST",
-            headers={"Origin": "http://127.0.0.1:7799",
-                     "Referer": "http://127.0.0.1:7799/"})
+            headers=headers)
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status == 200
     except Exception:  # noqa: BLE001
@@ -747,6 +774,10 @@ def promote_best_deezer() -> list[str]:
         return lines
 
     cur, cur_info = results[0]
+    # Основное поле пустое — первая запись пула не «прежний основной»: менять
+    # нечего, и строка «назначен» была бы неправдой (17.09.2026).
+    if not cur.get("primary"):
+        return lines
     # Основной уже lossless — не трогаем: перестановка ради перестановки только
     # сбросила бы порядок пула и ничего не улучшила.
     if cur_info.get("lossless"):
@@ -763,6 +794,7 @@ def promote_best_deezer() -> list[str]:
         return lines
     old_alive = bool(cur_info.get("alive"))
 
+    wrote = False
     for path in _yaml_files_to_check():
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -784,7 +816,10 @@ def promote_best_deezer() -> list[str]:
                                   f" ({cur_info.get('plan') or 'Free'})"})
         data["deezer-accounts"] = kept
         _cs._atomic_write_yaml(path, data)
+        wrote = True
 
+    if not wrote:
+        return lines
     _notify_app_config_changed()
     lines.append(
         f"🔁 Deezer: основным назначен lossless-ARL "
@@ -1090,7 +1125,16 @@ def check_all_soundcloud_tokens(threshold: int = DEFAULT_THRESHOLD) -> list[str]
         return lines
 
     from . import account_roster as _ar
+    # «Активна» — та учётка, которая обслуживает загрузки. При пуле это не
+    # primary-ключ конфига, а выбор пула (soundcloud_pool.active_token):
+    # иначе отчёт показывает бесплатную primary активной, хотя движок
+    # подменяет токен на Go+-слот (или наоборот).
     active_token = (cfg.get("soundcloud-oauth-token") or "").strip()
+    try:
+        from . import soundcloud_pool as _scp
+        active_token = _scp.active_token(cfg) or active_token
+    except Exception:                     # noqa: BLE001
+        pass
     roster: list[str] = []
 
     seen_logins: dict[str, str] = {}

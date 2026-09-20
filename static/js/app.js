@@ -244,6 +244,10 @@ function handleMessage(msg) {
       // otherwise silently drop guest-only prefs (see _applyPlayerPrefsToUI).
       try { _applyPlayerPrefsToUI?.(); } catch {}
       applyConfig(); renderQueue(); updateTransport(); updatePills(); renderQualityGrid(); renderConfig(); _syncReleasesSettingsTab();
+      // Радар мог открыться ДО прихода конфига (восстановленный вид, ранний клик):
+      // тогда он загрузился с источниками по умолчанию (только Spotify) и считал
+      // эту ленту свежей. Конфиг пришёл — перепроверяем набор источников.
+      if (typeof _relRecheckSources === 'function') _relRecheckSources();
       if(typeof _maybeAskTelemetryName!=='undefined') setTimeout(_maybeAskTelemetryName, 2500);  // first-run consent ask (owner/tester builds only — public mirror doesn't ship telemetry_ui.js)
       setTimeout(autoValidateServices, 1500);   // probe all configured tokens on startup — no need to open each tab
       // Guarded: these live in cookies_ui.js. If that file ever fails to parse
@@ -457,10 +461,11 @@ function handleMessage(msg) {
       setTimeout(() => clearReleasesStatus(), 3000);
       // If backend sent releases in the WS message, render them directly
       if(msg.releases?.length) {
-        _relCache.data = msg.releases;
+        // Скан одного сервиса не должен вытирать из ленты остальные источники.
+        _relCache.data = (typeof _relMergeScan === 'function') ? _relMergeScan(msg.releases) : msg.releases;
         _relCache.ts   = Date.now();
         _relCache.key  = _relCacheKey();
-        _relSaveLS(msg.releases, _relCacheKey());
+        _relSaveLS(_relCache.data, _relCacheKey());
         const st = document.getElementById('rel-status');
         if(st) st.style.display = 'none';
         _applyRelFilter();
@@ -988,7 +993,7 @@ async function _chooseSpTargetDirect(url, quality, target) {
   }
 }
 
-function _svcLabel(svc){ return {apple:'Apple Music',qobuz:'Qobuz',deezer:'Deezer',tidal:'Tidal',spotify:'Spotify',soundcloud:'SoundCloud',yandex:t('s.svc_yandex')}[svc]||svc; }
+function _svcLabel(svc){ return {apple:'Apple Music',qobuz:'Qobuz',deezer:'Deezer',tidal:'Tidal',spotify:'Spotify',soundcloud:'SoundCloud',yandex:t('s.svc_yandex'),beatport:'Beatport',jiosaavn:'JioSaavn'}[svc]||svc; }
 // ── Service brand colors (single source of truth) ─────────────────────────
 // Default = real brand hues. User can override per service in Settings →
 // General → "Цвета сервисов" — overrides land in S.config['service-colors'].
@@ -996,7 +1001,7 @@ const SVC_BRAND = {
   apple:'#fc3c44', qobuz:'#1b68d3', tidal:'#00d4b3', deezer:'#a238ff',
   spotify:'#1db954', soundcloud:'#ff5500', bbc:'#e4003b', yandex:'#ffcc00',
   lucida:'#ff7a33', orpheus:'#1db954', amd:'#fc3c44', gamdl:'#fc3c44',
-  zhaarey:'#fc3c44', beatport:'#01f49c', wrapper:'#af52de',
+  zhaarey:'#fc3c44', beatport:'#01f49c', jiosaavn:'#2bc5b4', wrapper:'#af52de',
   watchlist:'#ffd60a', release:'#1db954', guest:'#c084a0',
   stats:'#3ecfaa', tunnel:'#6a6a8a', ngrok:'#6a6a8a',
   tokens:'#c084a0', startup:'#c084a0', queue:'#c084a0',
@@ -1021,8 +1026,10 @@ function svcLabelHTML(svc, label){
 function updateTransport() {
   const total = S.queue.length;
   const done  = S.queue.filter(t=>t.status==='done').length;
-  const pct   = total>0?Math.round(done/total*100):0;
-  document.getElementById('tp-bar').style.width = pct+'%';
+  // Общая полоса «сколько задач готово» убрана 19.09.2026 по просьбе владельца:
+  // прогресс виден в самих карточках (и в дереве треков), а внизу остались кнопки.
+  const _tpBar = document.getElementById('tp-bar');
+  if(_tpBar) _tpBar.style.width = (total>0?Math.round(done/total*100):0)+'%';
   document.getElementById('tp-label').textContent = `${done}/${total} done${S.running?(S.paused?' · PAUSED':' · Running'):''}`;
   const btnStart = document.getElementById('btn-start');
   const btnPause = document.getElementById('btn-pause');
@@ -1161,6 +1168,10 @@ function renderMeta(m) {
 // ── SETTINGS ──────────────────────────────────────────────────
 function applyConfig() {
   const c = S.config;
+  // Скин — часть «внешности», а не настроек качалки, но живёт в том же конфиге
+  // (ключ ui-skin) и возвращается сюда на каждом init, поэтому применяется
+  // здесь: иначе после любого реконнекта вкладки вид откатывался бы к классике.
+  try { setSkin(getSkin(), false); } catch (_) {}
   // Shared
   setVal('s-savepath',     c['save-path']||'');
   // Parallel-downloads slider — restore HERE (runs on every config load) and not
@@ -1256,6 +1267,7 @@ const GUEST_WRITABLE_PREFIXES = [
   'guest-folder',     // display label for local download folder
   'releases-',        // their release radar filter prefs
   'language',         // UI language
+  'ui-skin',          // interface skin — their own look, their own browser
   'service-colors',   // their per-service color overrides
   '_last_svc',        // last service picked in Search — own pick, own browser, not the owner's default
 ];
@@ -1767,6 +1779,125 @@ function setFont(key) {
   if(prev) prev.style.fontFamily = f.css;
 }
 
+// ── SKIN ──────────────────────────────────────────────────────────────────
+// Тема (data-theme) красит, скин (data-skin) формирует: радиус, плотность,
+// характер поверхности, типографика. Поэтому скины ортогональны темам и
+// каждый из них спроектирован сразу на все шесть.
+// 'classic' — значение по умолчанию; оформляющих правил для него в main.css
+// нет ни одного, то есть классика = ровно тот вид, что был до слоя скинов.
+const SKIN_ORDER = ['classic','neon','console','oled'];
+// cols — сколько карточек в мини-превью: Console обязан показать свою
+// плотность, остальным хватает двух.
+const SKINS = {
+  classic: { cap:'s.skin_classic', sub:'s.skin_classic_sub', cols:2 },
+  neon:    { cap:'s.skin_neon',    sub:'s.skin_neon_sub',    cols:2 },
+  console: { cap:'s.skin_console', sub:'s.skin_console_sub', cols:4 },
+  oled:    { cap:'s.skin_oled',    sub:'s.skin_oled_sub',    cols:2 },
+};
+const _SKIN_LS = 'amd-skin';   // pre-WS first frame + guests without a server config
+
+// Что применить: конфиг важнее локальной копии (для владельца это единый
+// источник правды), копия — для гостя и для первого кадра до инициализации.
+function getSkin() {
+  const c = S.config && S.config['ui-skin'];
+  if (SKIN_ORDER.indexOf(c) >= 0) return c;
+  let ls = '';
+  try { ls = localStorage.getItem(_SKIN_LS) || ''; } catch (_) {}
+  return SKIN_ORDER.indexOf(ls) >= 0 ? ls : 'classic';
+}
+
+function setSkin(name, persist) {
+  if (SKIN_ORDER.indexOf(name) < 0) name = 'classic';
+  document.documentElement.dataset.skin = name;
+  try { localStorage.setItem(_SKIN_LS, name); } catch (_) {}
+  _syncSkinPicker(name);
+  if (!persist) return;
+  if (S.config && S.config['ui-skin'] === name) return;   // already the stored pick
+  saveSetting('ui-skin', name);
+}
+
+// Один мини-образец = настоящая карточка на токенах --k-* своего скина:
+// обёртка несёт data-skin, и наследуемые токены пересчитываются под неё.
+// Классы собственные (sk-*), не .rel-card — иначе правила скина, выбранного
+// для всего экрана, перебили бы !important'ом превью соседа.
+function _skinMiniCard(kicker, title, meta, compact) {
+  return `<article class="sk-card"><i class="sk-cover"></i><div class="sk-body">`
+    + `<div class="sk-kicker">${kicker}</div>`
+    + `<div class="sk-title">${title}</div>`
+    + (compact ? '' : `<div class="sk-artist">${kicker}</div>`)
+    + (compact ? '' : `<div class="sk-meta">${meta}</div>`)
+    + (compact ? '' : `<div class="sk-btn">${t('btn.download')}</div>`)
+    + `</div></article>`;
+}
+const _SKIN_MINIS = [
+  ['Boiler Room','Fairmont at Dekmantel — Closing','12 · 2:01:44'],
+  ['Apple Music','Amelie Lens — Live at Awakenings','1 · 1:58:24'],
+  ['BBC Radio 1','Mary Ann Hobbs — Essential Mix','1:59:02 · HE-AAC'],
+  ['Nonesuch','Nils Frahm — Lost in Space','9 · 1:12:30'],
+];
+
+function renderSkinPicker(containerId) {
+  const host = document.getElementById(containerId || 'skin-picker');
+  if (!host) return;
+  const cur = getSkin();
+  host.setAttribute('role', 'radiogroup');
+  host.setAttribute('aria-label', t('s.skin'));
+  host.className = 'sk-sw';
+  host.innerHTML = SKIN_ORDER.map(name => {
+    const s = SKINS[name];
+    const n = s.cols === 4 ? 4 : 2;
+    let cards = '';
+    for (let i = 0; i < n; i++) {
+      const m = _SKIN_MINIS[(i + (name === 'classic' ? 0 : 1)) % _SKIN_MINIS.length];
+      cards += _skinMiniCard(m[0], m[1], m[2], s.cols === 4);
+    }
+    return `<button type="button" class="sk-opt" role="radio" data-skin="${name}"`
+      + ` aria-checked="${name === cur ? 'true' : 'false'}" tabindex="${name === cur ? 0 : -1}">`
+      + `<span class="sk-view"><span class="sk-stage${s.cols === 4 ? ' sk-g4' : ''}">${cards}</span></span>`
+      + `<span class="sk-cap"><b>${t(s.cap)}</b><span>${t(s.sub)}</span></span>`
+      + `</button>`;
+  }).join('');
+  host.onclick = e => {
+    const opt = e.target.closest ? e.target.closest('.sk-opt') : null;
+    if (opt && host.contains(opt)) setSkin(opt.dataset.skin, true);
+  };
+  // Клавиатура как в прототипе: ←/→ (+↑/↓) перемещают и сразу показывают,
+  // Home/End кидают в края, Enter/Space закрепляют выбор записью в конфиг.
+  host.onkeydown = e => {
+    const opts = [...host.querySelectorAll('.sk-opt')];
+    const i = opts.indexOf(document.activeElement);
+    if (i < 0) return;
+    let n = null;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') n = (i + 1) % opts.length;
+    else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') n = (i - 1 + opts.length) % opts.length;
+    else if (e.key === 'Home') n = 0;
+    else if (e.key === 'End') n = opts.length - 1;
+    else if (e.key === 'Enter' || e.key === ' ') { setSkin(opts[i].dataset.skin, true); e.preventDefault(); return; }
+    if (n !== null) { e.preventDefault(); setSkin(opts[n].dataset.skin, true); opts[n].focus(); }
+  };
+}
+
+function _syncSkinPicker(name) {
+  const host = document.getElementById('skin-picker');
+  if (!host) return;
+  host.querySelectorAll('.sk-opt').forEach(o => {
+    const on = o.dataset.skin === name;
+    o.setAttribute('aria-checked', on ? 'true' : 'false');
+    o.tabIndex = on ? 0 : -1;
+  });
+}
+
+// Подписи превью берутся из t() в момент сборки, поэтому смена языка обязана
+// пересобрать переключатель — иначе он навсегда остаётся на языке загрузки.
+(function _skinLangWatch() {
+  if (typeof MutationObserver === 'undefined') return;
+  try {
+    new MutationObserver(() => {
+      if (document.getElementById('skin-picker')) renderSkinPicker('skin-picker');
+    }).observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
+  } catch (_) {}
+})();
+
 // Re-merge guest-local prefs (localStorage) into S.config and re-mirror them
 // into the player/settings UI. Must run not just on first boot but every time
 // S.config gets wholesale-replaced — the 'init' WS message (sent on EVERY
@@ -1849,6 +1980,9 @@ function applyStoredPrefs() {
   const f = localStorage.getItem('amd-font')  || 'system';
   setTheme(t);
   setFont(f);
+  // Скидываем скин сразу, до WebSocket: конфиг приедет через секунду, а
+  // первая отрисовка не должна мигать с классики.
+  try { setSkin(getSkin(), false); } catch (_) {}
   // Player preferences land from S.config (which is loaded a bit later on
   // first boot) — poll until it's available, then apply.
   const tryApply = () => {
@@ -2134,10 +2268,10 @@ async function _relPollOnce() {
     }
     if (d?.releases?.length && !d.scanning) {
       _relStopPoll();
-      _relCache.data = d.releases;
+      _relCache.data = (typeof _relMergeScan === 'function') ? _relMergeScan(d.releases) : d.releases;
       _relCache.ts   = Date.now();
       _relCache.key  = _relCacheKey();
-      _relSaveLS(d.releases, _relCacheKey());
+      _relSaveLS(_relCache.data, _relCacheKey());
       const st = document.getElementById('rel-status');
       if (st) st.style.display = 'none';
       _applyRelFilter();
@@ -2197,6 +2331,9 @@ async function loadReleases(force = false) {
   if(btn) btn.disabled = true;
 
   const activeSvcs = _relActiveSvcs();
+  // Ключ того набора источников, что РЕАЛЬНО запрошен: конфиг может прийти,
+  // пока ждём ответы, и штамп «после» выдал бы неполную ленту за полную.
+  const _fetchKey  = _relCacheKey();
   const useSpotify = activeSvcs.includes('spotify');
   const useQobuz   = activeSvcs.includes('qobuz');
   const useTidal   = activeSvcs.includes('tidal');
@@ -2316,8 +2453,8 @@ async function loadReleases(force = false) {
   // New results found — update cache + localStorage + render
   _relCache.data = allReleases;
   _relCache.ts   = Date.now();
-  _relCache.key  = _relCacheKey();
-  _relSaveLS(allReleases, _relCacheKey());
+  _relCache.key  = _fetchKey;
+  _relSaveLS(allReleases, _fetchKey);
 
   if(empty) empty.style.display = 'none';
   _applyRelFilter();

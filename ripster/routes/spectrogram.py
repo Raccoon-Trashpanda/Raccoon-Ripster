@@ -605,7 +605,12 @@ async def analyze_by_path(req: PathRequest):
         raise HTTPException(413, imsg("err.file_too_big", "Файл слишком большой (лимит 200 МБ)"))
     try:
         return await asyncio.to_thread(_analyze, p, req.lang)
-    except FileNotFoundError:
+    except FileNotFoundError as _e:
+        # «ffmpeg не найден» — ТОЛЬКО если его и правда нет. Раньше так
+        # называлась любая пропажа файла внутри анализа — ложный диагноз.
+        import shutil as _sh
+        if _sh.which("ffmpeg") and _sh.which("ffprobe"):
+            raise HTTPException(500, f"файл не найден при анализе: {getattr(_e, 'filename', None) or _e}")
         raise HTTPException(500, imsg("err.ffmpeg_missing", "ffmpeg/ffprobe не найден — установи ffmpeg и добавь в PATH"))
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -637,7 +642,12 @@ async def analyze_upload(file: UploadFile = File(...), lang: str = Form("ru"),
         Path(dst).write_bytes(content)
         try:
             return await asyncio.to_thread(_analyze, dst, lang, style, all_styles)
-        except FileNotFoundError:
+        except FileNotFoundError as _e:
+            # «ffmpeg не найден» — ТОЛЬКО если его и правда нет. Раньше так
+            # называлась любая пропажа файла внутри анализа — ложный диагноз.
+            import shutil as _sh
+            if _sh.which("ffmpeg") and _sh.which("ffprobe"):
+                raise HTTPException(500, f"файл не найден при анализе: {getattr(_e, 'filename', None) or _e}")
             raise HTTPException(500, imsg("err.ffmpeg_missing", "ffmpeg/ffprobe не найден — установи ffmpeg и добавь в PATH"))
         except Exception as e:
             raise HTTPException(500, str(e))

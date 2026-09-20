@@ -24,8 +24,16 @@
             </select>
             <button onclick="scSearch()"
               style="padding:6px 12px;background:var(--surface);border:1px solid var(--border2);border-radius:8px;font-size:12px;font-weight:600;cursor:pointer;color:var(--text);font-family:var(--font);flex:0 0 auto">🔍</button>
+            <button id="sc-hist-btn" onclick="scShowHistory()" data-i18n-title="sc.hist_title" title="Недавно слушал"
+              style="padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer;color:var(--text);font-family:var(--font);flex:0 0 auto">🕘</button>
+            <button id="sc-feed-btn" onclick="scShowFeed()" data-i18n-title="sc.feed_title" title="Моя лента SoundCloud"
+              style="display:none;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;font-size:12px;cursor:pointer;color:var(--text);font-family:var(--font);flex:0 0 auto">📰</button>
           </div>
         </div>
+        <label id="sc-feed-opt" style="display:none;align-items:center;gap:6px;font-size:11px;color:var(--muted);margin:-4px 0 10px;cursor:pointer;user-select:none">
+          <input type="checkbox" id="sc-feed-toggle" onchange="scToggleFeed(this.checked)" style="margin:0"/>
+          <span data-i18n="sc.feed_opt">Показывать мою ленту SoundCloud (по OAuth-токену)</span>
+        </label>
         <div id="sc-status" data-i18n="sc.status" style="font-size:12px;color:var(--muted);padding:10px 0;display:none">Ищу…</div>
         <div id="sc-channel-bar" style="display:none;align-items:center;gap:10px;margin-bottom:12px;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:10px">
           <button onclick="scBackFromChannel()" style="padding:5px 10px;background:transparent;border:1px solid var(--border2);border-radius:7px;font-size:12px;color:var(--text);cursor:pointer;font-family:var(--font)" data-i18n="sc.back">← Назад</button>
@@ -35,6 +43,6 @@
         </div>
         <div id="sc-grid" class="card-grid"></div>
         <div id="sc-empty" data-i18n-html="sc.empty" style="text-align:center;padding:40px;font-size:13px;color:var(--muted)">
-          Введи запрос — например <b>anjunadeep</b> — и нажми поиск.
+          <span data-i18n-html="sc.hint">Введи запрос — например <b>anjunadeep</b> — и нажми поиск.</span>
         </div>
       </div>

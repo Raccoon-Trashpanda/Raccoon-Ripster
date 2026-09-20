@@ -239,6 +239,47 @@ async def sc_search(q: str = Query(""), kind: str = Query("all"),
     return {"ok": True, "query": q, "results": results}
 
 
+@router.get("/api/soundcloud/feed")
+async def sc_feed(limit: int = Query(40)):
+    """The owner's own SoundCloud stream (who they follow) — optional, off by
+    default in the UI, needs the OAuth token (Settings → SoundCloud). Not in the
+    guest allowlist (auth.py is deny-by-default), so guests never see it."""
+    oauth = (_cfg.get("soundcloud-oauth-token") or "").strip()
+    if not oauth:
+        return {"ok": False, "need_oauth": True, "error_key": "err.sc_feed_no_oauth",
+                "error": "Для ленты нужен OAuth-токен SoundCloud (Настройки → SoundCloud)",
+                "results": []}
+    cid = await _get_client_id()
+    auth_h = oauth if oauth.lower().startswith("oauth ") else f"OAuth {oauth}"
+    try:
+        async with _HTTP.ashared() as c:
+            r = await c.get(f"{_API}/stream",
+                            params={"client_id": cid, "limit": max(1, min(limit, 80))},
+                            headers={"Authorization": auth_h})
+    except Exception as e:
+        return {"ok": False, "error_key": "err.no_response",
+                "error": f"SoundCloud: {e}", "results": []}
+    if r.status_code in (401, 403):
+        return {"ok": False, "need_oauth": True, "error_key": "err.sc_feed_oauth_bad",
+                "error": "SoundCloud отверг OAuth-токен — обнови его в Настройках",
+                "results": []}
+    if r.status_code != 200:
+        return {"ok": False, "error_key": "err.no_response",
+                "error": f"SoundCloud API {r.status_code}", "results": []}
+    results, seen = [], set()
+    for item in (r.json().get("collection") or []):
+        obj = item.get("track") or item.get("playlist") or {}
+        k = obj.get("kind")
+        if not obj.get("id") or (k, obj["id"]) in seen:
+            continue
+        seen.add((k, obj["id"]))
+        if k == "track":
+            results.append(_norm_track(obj))
+        elif k == "playlist":
+            results.append(_norm_playlist(obj))
+    return {"ok": True, "results": results}
+
+
 @router.get("/api/soundcloud/user/{permalink}/tracks")
 async def sc_user_tracks(permalink: str, kind: str = Query("all"), limit: int = Query(30)):
     """A channel's own uploads, newest first — the reliable way to find a track
@@ -397,12 +438,36 @@ async def sc_tracklist_1001(request: Request):
     title = (body.get("title") or "").strip()
     if not title:
         return {"found": False, "error": "no title"}
+    # Air date = the tie-breaker between two mixes by the same DJ on the same
+    # show (HAAi's Essential Mix 2018 vs 2026). The BBC player path doesn't know
+    # it, so for a BBC pid ask the programmes API once (short timeout, optional).
+    mix_date = str(body.get("date") or "")[:10]
+    _mid = str(body.get("id") or "")
+    if not mix_date and _mid.startswith("bbc_") and re.fullmatch(r"bbc_[a-z0-9]{6,12}", _mid):
+        try:
+            async with httpx.AsyncClient(timeout=4.0, headers={"User-Agent": _UA}) as c:
+                r = await c.get(f"https://www.bbc.co.uk/programmes/{_mid[4:]}.json")
+            if r.status_code == 200:
+                mix_date = str((r.json().get("programme") or {})
+                               .get("first_broadcast_date") or "")[:10]
+        except Exception:
+            mix_date = ""
     res = await run_in_threadpool(
         tl1001.tracklist_for,
         title, (body.get("artist") or "").strip(), int(body.get("dur") or 0),
         body.get("sc_tracklist") or [], body.get("source_urls") or [],
         str(body.get("id") or ""),
+        date=mix_date,
     )
+    if res.get("ok") and _mid.startswith("bbc_"):
+        # Same hard gates as the BBC chain (air date / set year) — this route still
+        # serves BBC ids to clients holding the pre-/api/bbc/tracklist-best JS.
+        from ripster.routes.bbc import _tl1001_reject_reason
+        _yrs = set(re.findall(r"\b((?:19|20)\d{2})\b",
+                              f"{title} {body.get('artist') or ''}"))
+        _d = "" if (_yrs and mix_date[:4] not in _yrs) else mix_date
+        if _tl1001_reject_reason(res, [], _d, _yrs):
+            res = {"ok": False, "error": "no confident match"}
     out = {"found": bool(res.get("ok")), "cached": res.get("cached", False),
            "source": "1001tracklists"}
     if res.get("ok"):

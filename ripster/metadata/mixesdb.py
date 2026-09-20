@@ -221,4 +221,23 @@ def _parse_tracklist(wikitext: str) -> list[dict]:
         else:
             artist, title = "", rest
         tracks.append({"timestamp": ts, "artist": artist.strip(), "title": title.strip()})
+    if tracks:
+        return tracks
+    # The common MixesDB form is a numbered list with MINUTE cues:
+    #   # [000] Artist - Title [Label]      # [01?] … (minute unsure)   # Artist - Title
+    # Colon-only parsing returned [] for those pages (e.g. every recent Essential
+    # Mix), so the BBC/SC fallback never had a list to offer.
+    for m in re.finditer(r'(?m)^#\s*(?:\[(\d{1,3}|\d{1,2}\?|\?+)\]\s*)?(.+?)\s*$', wikitext):
+        mins, rest = m.group(1), m.group(2)
+        rest = re.sub(r'\[\[([^\]|]+)(?:\|[^\]]*)?\]\]', r'\1', rest)
+        rest = re.sub(r'\[https?://\S+\s+([^\]]+)\]', r'\1', rest)
+        rest = re.sub(r'\s*\[[^\]]*\]\s*$', '', rest).strip()          # trailing [Label]
+        if not rest or rest.startswith(("{", "[", "<")) or " - " not in rest:
+            continue
+        artist, title = rest.split(" - ", 1)
+        ts = ""
+        if mins and mins.isdigit():
+            n = int(mins)
+            ts = f"{n // 60}:{n % 60:02d}:00" if n >= 60 else f"{n}:00"
+        tracks.append({"timestamp": ts, "artist": artist.strip(), "title": title.strip()})
     return tracks

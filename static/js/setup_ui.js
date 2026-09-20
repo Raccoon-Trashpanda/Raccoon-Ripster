@@ -44,6 +44,9 @@ const SETUP_COMPONENTS = [
   { key:'beatport', icon:'🎚️', label:'Beatport', color:'#01f49c', def:true,
     desc:'Модуль orpheusdl-beatport поверх OrpheusDL. Если OrpheusDL не стоит — поставится автоматически.',
     endpoint:'/api/setup/component/beatport', status:'beatport' },
+  { key:'jiosaavn', icon:'🇮🇳', label:'JioSaavn', tag:'opt', color:'#2bc5b4',
+    desc:'',   // text lives in i18n: setup.jiosaavn.desc / setup.jiosaavn.tag
+    endpoint:'/api/setup/component/jiosaavn', status:'jiosaavn' },
   // ── Advanced ──────────────────────────────────────────────────────────────
   { key:'zhaarey', icon:'⚙️', label:'Apple wrapper (zhaarey)', tag:'продвинутое', color:'#af52de',
     desc:'Go + Docker + ТВОЙ premium Apple ID (~71 МБ Go). Для ALAC/Atmos через локальный wrapper. Большинству НЕ нужно — публичного Apple Music выше достаточно для lossless.',
@@ -68,6 +71,7 @@ async function fetchSetupStatuses() {
   try { const w = await api('GET','/api/widevine/status'); st.wvd = !!(w && w.installed); } catch {}
   try { const o = await api('GET','/api/orpheus/status'); st.orpheus = !!(o && o.installed); } catch {}
   try { const b = await api('GET','/api/beatport/status'); st.beatport = !!(b && b.module_installed); } catch {}
+  try { const j = await api('GET','/api/jiosaavn/status'); st.jiosaavn = !!(j && j.module_installed); } catch {}
   return st;
 }
 

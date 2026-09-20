@@ -18,8 +18,7 @@ its own bespoke broadcast-only flow.
 from __future__ import annotations
 
 import re
-import shutil
-import sys
+import subprocess
 from pathlib import Path
 
 from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
@@ -39,13 +38,15 @@ def _safe(s: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', '_', s or '').strip(" .")
 
 
-def find_yt_dlp() -> str | None:
-    found = shutil.which("yt-dlp") or shutil.which("yt-dlp.exe")
-    if found:
-        return found
-    # Fallback: sits next to the running interpreter on some installs.
-    candidate = Path(app_python()).parent / "yt-dlp.exe"
-    return str(candidate) if candidate.exists() else None
+def yt_dlp_cmd() -> list[str]:
+    # НЕ shutil.which()/Scripts\yt-dlp.exe: console-script shim под изолированным
+    # embeddable-питоном молча выходит с кодом 1 (см. preflight Gate 0.5).
+    # Единственный надёжный способ — тот же интерпретатор, `-m yt_dlp`.
+    py = app_python()
+    probe = subprocess.run([py, "-c", "import yt_dlp"], capture_output=True)
+    if probe.returncode != 0:
+        raise RuntimeError("yt-dlp не установлен в рабочий питон-окружение Ripster")
+    return [py, "-m", "yt_dlp"]
 
 
 def ep_dir(save_path: str, artist: str, title: str, pid: str) -> Path:
@@ -75,7 +76,7 @@ class BBCEngine(EngineBase):
 
     def build_cmd(self, url: str, quality: str, config: dict) -> list[str]:
         # `url` here is the already-resolved HLS m3u8 (see module docstring).
-        yt = find_yt_dlp()
+        yt = yt_dlp_cmd()
         if not yt:
             raise RuntimeError("yt-dlp not found (checked PATH and the interpreter's own folder)")
         title  = config.get("_bbc_title", "") or ""

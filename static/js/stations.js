@@ -275,6 +275,15 @@ async function stRun(url, label) {
  *
  * Играем ТОЛЬКО то, у чего есть сервис и идентификатор: без них стрим-адрес не
  * собрать, и такая строка в очереди была бы кнопкой без действия.
+ *
+ * Через `_playPreviewAt`, а не `playStreamTrack`: последний после своего await
+ * присваивал `Preview.queue` ОДНОЭЛЕМЕНТНЫЙ массив и молча съедал остальные
+ * треки эфира у Qobuz/Tidal (у Deezer путь синхронный — поэтому и не замечали).
+ * `_playPreviewAt` резолвит стрим сама по каждой строке очереди — тем же путём
+ * идёт плейлист.
+ *
+ * Очередь помечается в плеере (`_stevStationStart`): по этой метке плеер
+ * отличает станцию от любого другого запуска и шлёт события прослушивания.
  */
 function stQueue(tracks, label) {
   const playable = tracks.filter(x => x.service && x.id &&
@@ -284,16 +293,16 @@ function stQueue(tracks, label) {
     if (bar) bar.textContent = t('st.nothing_playable');
     return;
   }
-  const first = playable[0];
-  playStreamTrack(first.service, first.id, first.title || '', first.artist || '', first.cover || '');
-  // Остальное — в очередь предпросмотра, если она есть в этой сборке.
-  try {
-    if (window.Preview && Array.isArray(Preview.queue)) {
-      Preview.queue = playable.map(x => ({
-        url: '', service: x.service, id: x.id,
-        title: x.title || '', artist: x.artist || '', cover: x.cover || '',
-      }));
-      Preview.idx = 0;
-    }
-  } catch (_) {}
+  if (typeof _setupAudioEvents !== 'function' || typeof _playPreviewAt !== 'function') return;
+  Preview.queue = playable.map(x => ({
+    url: '', service: x.service, id: String(x.id),
+    title: x.title || '', artist: x.artist || '', cover: x.cover || '', full: true,
+    // Длительность с сервера: события прослушивания берут length_s отсюда,
+    // а не из того, что в этот момент стоит в <audio>.
+    duration: Number(x.duration) || 0,
+  }));
+  Preview.idx = 0;
+  _setupAudioEvents();
+  if (typeof _stevStationStart === 'function') { try { _stevStationStart(label); } catch (_) {} }
+  _playPreviewAt(0);
 }

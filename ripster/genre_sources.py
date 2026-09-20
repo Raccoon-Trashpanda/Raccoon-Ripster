@@ -231,11 +231,17 @@ async def musicbrainz_get(params: dict, what: str = "запрос"):
     return None
 
 
-async def musicbrainz_artists_by_tag(tag: str, limit: int = 40) -> list[tuple[int, str]]:
-    """Артисты жанра: пары «вес тега — имя», от сильного к слабому.
+async def musicbrainz_artists_by_tag(tag: str, limit: int = 40) -> list[tuple]:
+    """Артисты жанра: тройки «вес тега — имя — теги артиста», от сильного к слабому.
 
     Вес тега, а не `score` выдачи: score — релевантность СТРОКИ запросу, по
     нему в «melodic techno» лезла Лана Дель Рей.
+
+    Теги артиста — пары «вес — имя», от тяжёлых к лёгким — едут В ТОМ ЖЕ
+    ответе поиска (замер 20.09.2026): отвечать на вопрос «основной ли это у
+    артиста жанр» можно без единого дополнительного запроса, что при их
+    «не чаще запроса в секунду» дороже экономии. Разбор весов решает не этот
+    модуль — здесь только добыча.
     """
     t = (tag or "").strip()
     if not t:
@@ -245,17 +251,25 @@ async def musicbrainz_artists_by_tag(tag: str, limit: int = 40) -> list[tuple[in
     if r is None:
         return []
     want = t.lower()
-    out: list[tuple[int, str]] = []
+    out: list[tuple] = []
     try:
         for a in (r.json() or {}).get("artists") or []:
             name = (a.get("name") or "").strip()
             if not name:
                 continue
             weight = 0
+            tags: list[tuple[int, str]] = []
             for tg in (a.get("tags") or []):
-                if str(tg.get("name") or "").lower() == want:
-                    weight = int(tg.get("count") or 0)
-            out.append((weight, name))
+                n = str(tg.get("name") or "")
+                try:
+                    c = int(tg.get("count") or 0)
+                except (TypeError, ValueError):
+                    c = 0
+                tags.append((c, n))
+                if n.lower() == want:
+                    weight = c
+            tags.sort(key=lambda x: -x[0])
+            out.append((weight, name, tags))
     except Exception:                                          # noqa: BLE001
         return []
     out.sort(key=lambda x: -x[0])

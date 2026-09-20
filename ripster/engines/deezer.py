@@ -36,6 +36,32 @@ _RE_ARL        = re.compile(r"\b(arl|login|credentials|unauthori[sz]ed|not\s+log
 _RE_PERCENT    = re.compile(r"Download\s+at\s+(\d+)\s*%", re.I)
 # Per-track success marker: "Completed download of \01 - Artist - Title.flac"
 _RE_TRACK_DONE = re.compile(r"Completed\s+download\s+of", re.I)
+# Короткие ссылки «Поделиться» из приложения Deezer.
+_RE_SHORT_LINK = re.compile(r"^https?://(link\.deezer\.com|deezer\.page\.link|dzr\.page\.link)/", re.I)
+_RE_DZ_CANON   = re.compile(r"https?://(?:www\.)?deezer\.com/(?:[a-z]{2}/)?(track|album|playlist|artist)/\d+", re.I)
+
+
+def _expand_short_link(url: str) -> str:
+    """14.09.2026: deemix не знает `link.deezer.com/s/…` — отвечает «Link is not
+    recognized», пишет «All done!» и ноль файлов; сводка винила ARL и качество,
+    авто-повтор прогонял то же самое трижды. Разворачиваем в канонический
+    `www.deezer.com/<type>/<id>`: редирект кладёт его в параметр `dest`/`awf`."""
+    from urllib.parse import unquote
+    if not _RE_SHORT_LINK.match(url or ""):
+        return url
+    try:
+        with _HTTP.shared() as c:
+            r = c.get(url, follow_redirects=False, timeout=10)
+        loc = unquote(r.headers.get("location", ""))
+        if not loc:
+            r = _HTTP.client().get(url, timeout=10)
+            loc = unquote(str(r.url))
+        m = _RE_DZ_CANON.search(loc)
+        if m:
+            return m.group(0)
+    except Exception as e:
+        print(f"[deezer] short link not expanded: {e}", flush=True)
+    return url
 
 
 def _deemix_config_dir(override: str = "") -> Path:
@@ -199,6 +225,91 @@ def _arl_plan(arl: str = "") -> tuple[str, bool, bool]:
             bool(out.get("lossless")))
 
 
+_RE_DZ_ITEM = re.compile(r"deezer\.com/(?:[a-z]{2}(?:-[a-z]{2})?/)?(track|album)/(\d+)", re.I)
+
+
+def _deezer_region_lock(url: str, arl: str = "") -> dict | None:
+    """Закрыт ли релиз для СТРАНЫ аккаунта: {"country","locked","total"} или None.
+
+    Зачем: deemix при «нет в выбранном качестве» и при гео-блоке часто пишет
+    одно и то же («not found at desired bitrate and no alternative found») —
+    у гео-заблокированного трека в витрине аккаунта просто нет ни одного
+    файла, и отдельную ошибку страны (код 2002) deemix до неё не доходит.
+    Совет «выбери качество пониже» при гео-блоке не поможет никогда.
+
+    Различающий признак даёт сам Deezer: публичный `api.deezer.com/track/{id}`
+    отдаёт `available_countries` — список стран, где трек разрешён. Он НЕ
+    зависит от IP сервера (в отличие от `readable`), поэтому сверяем его со
+    страной ARL (`arl_info` → `country`). Только метаданные, без загрузки.
+
+    Ничего не ломает: не смогли спросить — None, и вызывающий покажет прежнее
+    сообщение про качество.
+    """
+    m = _RE_DZ_ITEM.search(url or "")
+    if not m:
+        return None
+    kind, item_id = m.group(1).lower(), m.group(2)
+    out: dict = {}
+
+    def _run() -> None:
+        try:
+            import asyncio
+            import httpx
+            from ripster import deezer_accounts as _da
+            from ripster.credential_health import _load_raw_config
+            arl_use = (arl or "").strip()
+            if not arl_use:
+                arl_use = str((_load_raw_config() or {}).get("deezer-arl") or "").strip()
+            if not arl_use:
+                return
+            loop = asyncio.new_event_loop()
+            try:
+                info = loop.run_until_complete(_da.arl_info(arl_use)) or {}
+            finally:
+                loop.close()
+            country = str(info.get("country") or "").strip().upper()
+            if not country:
+                return
+            with httpx.Client(timeout=6) as c:
+                if kind == "track":
+                    ids = [item_id]
+                else:
+                    r = c.get(f"https://api.deezer.com/album/{item_id}/tracks",
+                              params={"limit": 200})
+                    ids = [str(x.get("id")) for x in (r.json().get("data") or [])
+                           if x.get("id")][:60]
+                locked = total = 0
+                for tid in ids:
+                    d = c.get(f"https://api.deezer.com/track/{tid}").json()
+                    ac = d.get("available_countries")
+                    if not isinstance(ac, list) or not ac:
+                        continue            # нет данных о странах — не считаем
+                    total += 1
+                    if country not in {str(x).upper() for x in ac}:
+                        locked += 1
+            out.update(country=country, locked=locked, total=total)
+        except Exception:                                       # noqa: BLE001
+            pass
+
+    import threading
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=15)
+    return dict(out) if out.get("total") else None
+
+
+def _region_message(country: str, locked: int, total: int) -> str:
+    """Вердикт «гео-блок» тем же текстом, что и общий классификатор."""
+    from .errors import classify_download_error
+    hit = classify_download_error("region locked")
+    region = hit[1] if hit else "недоступно в регионе твоего аккаунта (гео-блок)."
+    cc = f" ({country})" if country else ""
+    if total and 0 < locked < total:
+        return (f"Deezer: {locked} из {total} треков закрыты для страны аккаунта{cc} — "
+                f"{region} Остальные недоступны в выбранном качестве — выбери MP3 320/128.")
+    return f"Deezer: релиз закрыт для страны аккаунта{cc} — {region}"
+
+
 @register
 
 class DeezerEngine(EngineBase):
@@ -208,6 +319,9 @@ class DeezerEngine(EngineBase):
     # учётку, а не про первую в списке. Экземпляр движка свой на задачу
     # (`get_engine` → `cls()`), так что параллельные загрузки не мешают.
     _last_arl = ""
+    # Ссылка этого прогона — чтобы при отказе спросить у Deezer, в каких
+    # странах релиз разрешён (гео-блок vs «нет в качестве»).
+    _last_url = ""
 
     def qualities(self) -> list[dict]:
         return [{**q, "engine": self.name} for q in _QUALITIES]
@@ -220,6 +334,7 @@ class DeezerEngine(EngineBase):
         # a no-op (behaves exactly as before the pool existed).
         arl      = (config.get("deezer-arl") or "").strip()
         self._last_arl = arl
+        self._last_url = url
         cfg_override = config.get("_deezer_cfg_dir") or ""
         out_path = config.get("deezer-save-path") or config.get("save-path", "downloads")
         bitrate  = _BITRATE.get(quality, "3")
@@ -258,7 +373,10 @@ class DeezerEngine(EngineBase):
                 # and is_finished() will map that to a user-visible error.
                 print(f"[deezer] cannot write ARL file: {e}", flush=True)
 
-        return [*deemix_cmd, "--bitrate", bitrate, "--path", str(out_path), url]
+        full_url = _expand_short_link(url)
+        self._last_url = full_url or url
+        return [*deemix_cmd, "--bitrate", bitrate, "--path", str(out_path),
+                full_url]
 
     def classify_line(self, line: str) -> str:
         low = line.lower()
@@ -342,12 +460,29 @@ class DeezerEngine(EngineBase):
         #     read as a dead/phantom link — so we return a SPECIFIC message here
         #     (the runner only re-classifies generic errors), and the wording below
         #     deliberately avoids "not found"/"removed".
+        #   • "can't stream the track from your current country" → deemix САМ
+        #     опознал гео-блок (media API, код 2002). Раньше эта строка
+        #     проваливалась в ветку качества ниже — она тоже кончается на
+        #     "no alternative found", — и человеку советовали понизить качество.
+        if tracks_ok == 0 and "from your current country" in low:
+            v = _deezer_region_lock(self._last_url, self._last_arl) or {}
+            return EngineResult(False, error=_region_message(
+                v.get("country", ""), v.get("locked", 0), v.get("total", 0)))
         bitrate_blocked = (
             "can't stream the track at the desired bitrate" in low
             or "not found at desired bitrate" in low
             or "no alternative found" in low
         )
         if bitrate_blocked and tracks_ok == 0:
+            # У гео-заблокированного трека в витрине аккаунта нет ни одного
+            # файла, и deemix пишет ровно ту же фразу про качество. Различает
+            # только сам Deezer — список стран трека против страны ARL.
+            # «can't stream at the desired bitrate» — это тариф, не регион.
+            if "can't stream the track at the desired bitrate" not in low:
+                v = _deezer_region_lock(self._last_url, self._last_arl)
+                if v and v.get("locked"):
+                    return EngineResult(False, error=_region_message(
+                        v["country"], v["locked"], v["total"]))
             return EngineResult(
                 False,
                 error="Deezer: трек недоступен в выбранном качестве "

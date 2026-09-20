@@ -32,12 +32,22 @@ class TaskStatus(str, Enum):
     # Transient: the task is queued but blocked on metadata fetch. Not used
     # as a blocker today — kept for future use once enrichment is mandatory.
     PENDING   = "pending"
+    # Отложенная запись BBC-эфира: задача ждёт своего времени. В отличие от
+    # PENDING она не «вот-вот стартует», а может ждать часы и пережить
+    # перезапуск — процесс очереди обязан её пропускать, пока не позовут.
+    SCHEDULED = "scheduled"
 
 
 # Legal transitions. Entries not in this table are rejected by advance().
 # Read as: FROM state → {allowed TO states}.
 _TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     TaskStatus.PENDING:   {TaskStatus.QUEUED, TaskStatus.CANCELLED},
+    # Отложенный эфир: время пришло → в очередь; человек отменил → cancelled;
+    # RUNNING — страховка на случай, если планировщик и процесс очереди
+    # разминулись (иначе переход был бы запрещён и задача зависла бы в
+    # «запланировано» при уже идущей записи).
+    TaskStatus.SCHEDULED: {TaskStatus.QUEUED, TaskStatus.RUNNING,
+                           TaskStatus.ERROR, TaskStatus.CANCELLED},
     # Running→queued is the "stop and requeue" edge used by /api/queue/stop.
     # It's deliberately allowed: pressing Stop should leave pending work that
     # the user can resume by pressing Start again, not force them to re-add

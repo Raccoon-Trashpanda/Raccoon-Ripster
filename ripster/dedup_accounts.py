@@ -242,6 +242,24 @@ async def apply(config: dict, service: str, confirm: bool = False) -> list[str]:
     _e, _p, _r, disable, _d = SERVICES[service](config)
     from ripster import credential_health as ch
     for d in dups:
+        if d.exact_copy:
+            # Точная копия — это ТОТ ЖЕ ключ, что и оставляемый. Реестр снятых
+            # опознаёт ключ по самой строке, поэтому снятие копии через него
+            # вычищало и оригинал: 16.09.2026 20:00 копия основного ARL Deezer
+            # в пуле увела за собой основной, и Deezer молчал до утра. Здесь
+            # только лишние строки пула, реестр не трогаем.
+            try:
+                removed = _drop_pool_copies(service, d.keep.secret, keep_one=not d.keep.primary)
+            except Exception as ex:                 # noqa: BLE001
+                lines.append(f"✗ {_mask(d.keep.secret)}: убрать копии не удалось ({type(ex).__name__})")
+                continue
+            if removed:
+                ch._notify_app_config_changed()
+                reason = "точная копия ключа слота %d" % d.keep.slot
+                ch._append_archive(f"{service}_dup", _mask(d.keep.secret), "", reason)
+                lines.append(f"💀 {service} {_mask(d.keep.secret)}: убрано копий из пула — "
+                             f"{removed} ({reason}, сам ключ оставлен)")
+            continue
         for e in d.drop:
             try:
                 disable(e)
@@ -258,6 +276,57 @@ async def apply(config: dict, service: str, confirm: bool = False) -> list[str]:
             ch._append_archive(f"{service}_dup", _mask(e.secret), "", reason)
             lines.append(f"💀 {service} {_mask(e.secret)} (слот {e.slot}) удалён: {reason}")
     return lines
+
+
+_POOL_FIELDS = {"deezer": "deezer-accounts", "qobuz": "qobuz-accounts",
+                "soundcloud": "soundcloud-accounts"}
+
+
+def _pool_secret(service: str, a) -> str:
+    if not isinstance(a, dict):
+        return ""
+    if service == "deezer":
+        return (a.get("arl") or "").strip()
+    if service == "soundcloud":
+        return (a.get("token") or "").strip()
+    from ripster import qobuz_accounts as qa
+    return (qa.account_secret(a) or "").strip()
+
+
+def _drop_pool_copies(service: str, secret: str, keep_one: bool) -> int:
+    """Убрать повторы ключа из пула в каждом файле, где он лежит.
+
+    keep_one — оставляемая запись сама живёт в пуле (не в основном поле):
+    тогда первая строка остаётся, уходят только следующие.
+    """
+    import yaml
+    from ripster import config_service as _cs
+    from ripster import credential_health as ch
+    field_name = _POOL_FIELDS[service]
+    target = (secret or "").strip()
+    removed = 0
+    for path in ch._yaml_files_to_check():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8-sig")) or {}
+        except Exception:                           # noqa: BLE001
+            continue
+        pool = data.get(field_name) if isinstance(data, dict) else None
+        if not isinstance(pool, list):
+            continue
+        kept, seen = [], False
+        for a in pool:
+            if _pool_secret(service, a) == target:
+                if keep_one and not seen:
+                    seen = True
+                    kept.append(a)
+                    continue
+                continue
+            kept.append(a)
+        if len(kept) != len(pool):
+            removed += len(pool) - len(kept)
+            data[field_name] = kept
+            _cs._atomic_write_yaml(path, data)
+    return removed
 
 
 def plan_sync(config: dict, service: str) -> tuple[list[Duplicate], list[str]]:

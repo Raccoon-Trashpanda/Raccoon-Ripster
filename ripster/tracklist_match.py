@@ -36,6 +36,41 @@ def _tokens(s: str) -> set[str]:
     return {w for w in _norm(s).split() if w and w not in _STOP and len(w) > 1}
 
 
+# Words that name a SHOW / station / format, never a DJ. A radio show passed as
+# the "artist" ("Radio 1's Essential Mix" → {essential}) used to count as an
+# artist match against EVERY episode of that show: HAAi's Essential Mix
+# (19.09.2026) got Hot Since 82's tracklist from two weeks earlier. These words
+# can never prove identity on their own.
+SHOW_TOKENS = {"essential", "bbc", "radio1", "r1", "1s", "sounds", "show",
+               "episode", "ep", "podcast", "residency", "presents", "pres",
+               "session", "sessions", "dj", "djs", "guest", "mixtape", "classic",
+               "one", "dance", "anthems", "hour", "hours"}
+
+
+def identity_tokens(artist: str, title: str = "") -> set[str]:
+    """Tokens that identify WHO played the mix: the artist minus show words; if
+    the artist is only a show name (radar cards pass the show as artist and the
+    DJ as title), fall back to the title minus show words. Empty = unknown."""
+    ident = _tokens(artist) - SHOW_TOKENS
+    if not ident:
+        ident = _tokens(title) - SHOW_TOKENS
+    return ident
+
+
+_RE_DATE = re.compile(r"\b((?:19|20)\d{2})-(\d{2})-(\d{2})\b")
+
+
+def _dates(s: str) -> list:
+    import datetime as _dt
+    out = []
+    for y, m, d in _RE_DATE.findall(s or ""):
+        try:
+            out.append(_dt.date(int(y), int(m), int(d)))
+        except ValueError:
+            pass
+    return out
+
+
 def _track_name(tr: dict) -> str:
     a = (tr.get("artist") or "").strip()
     t = (tr.get("title") or "").strip()
@@ -92,7 +127,7 @@ def check_title_similarity(target, cand):
 
 
 def check_artist_match(target, cand):
-    ta = _tokens(target.get("artist", ""))
+    ta = identity_tokens(target.get("artist", ""), target.get("title", ""))
     if not ta:
         return _chk("artist_match", False, 0, 0.15, "no target artist")
     ct = _tokens(cand.get("title", "")) | _tokens(
@@ -190,10 +225,23 @@ def check_event_date(target, cand):
                 f"years={yrs_t & yrs_c} shared={sorted(venue)[:4]}")
 
 
+def check_air_date(target, cand):
+    """The mix's known air/upload date (target['date'], YYYY-MM-DD…) vs the
+    dates in the candidate title (1001TL titles end with the broadcast date,
+    sometimes event date + broadcast date). Within 3 days = same airing."""
+    td = _dates(str(target.get("date") or "")[:10])
+    cd = _dates(cand.get("title", ""))
+    if not td or not cd:
+        return _chk("air_date", False, 0, 0.15, f"target={td[:1]} cand={cd[:2]}")
+    gap = min(abs((td[0] - c).days) for c in cd)
+    return _chk("air_date", True, 1.0 if gap <= 3 else 0.0, 0.15,
+                f"gap={gap}d")
+
+
 _CHECKS = [check_source_backlink, check_title_similarity, check_artist_match,
            check_duration, check_track_count, check_name_overlap,
            check_first_track, check_last_timestamp_plausible,
-           check_monotonic_timestamps, check_event_date]
+           check_monotonic_timestamps, check_event_date, check_air_date]
 
 
 def _tier(score: float, backlink: bool) -> str:
@@ -225,6 +273,13 @@ def score_candidate(target: dict, cand: dict) -> dict:
     ov = next((c for c in applic if c["name"] == "name_overlap"), None)
     if dur and dur["score"] == 0.0 and ov and ov["score"] < 0.15:
         score = min(score, 0.40)
+    # Identity veto: the mix's DJ must appear in the candidate (title or first
+    # track). Only the mix's own tracklist agreeing (name_overlap ≥ 0.5) can
+    # overrule it. A wrong tracklist is worse than none.
+    am = next((c for c in applic if c["name"] == "artist_match"), None)
+    if am and am["score"] == 0.0 and not (ov and ov["score"] >= 0.5):
+        return {"score": round(min(score, 0.30), 3), "tier": "reject",
+                "checks": checks, "reason": "artist mismatch"}
     return {"score": round(score, 3), "tier": _tier(score, False),
             "checks": checks, "reason": "weighted"}
 

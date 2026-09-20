@@ -105,6 +105,33 @@ def _disk_get(key: str):
     return v.get("result")
 
 
+def _disk_drop(key: str) -> None:
+    d = _disk_load()
+    if d.pop(key, None) is not None:
+        _disk_flush()
+
+
+def _cached_identity_ok(cached: dict, artist: str, title: str) -> bool:
+    """Самолечение кэша: запись, найденная когда-то старым (или просто ошибочным)
+    правилом сопоставления, иначе жила бы 10 дней и отдавалась без проверки.
+    19.09.2026 так Essential Mix HAAi получал трек-лист Hot Since 82 — правило
+    починили, а неверная запись осталась в кэше и в памяти процесса. Теперь каждая
+    удачная запись при чтении сверяется с тем, КТО играл микс: имя (без слов
+    передачи) должно найтись в адресе/заголовке страницы. Не нашлось — запись
+    выкидывается и трек-лист ищется заново. Не знаем, кто играл, — не судим."""
+    if not cached or not cached.get("ok"):
+        return True
+    from ripster import tracklist_match as TM
+    toks = TM.identity_tokens(artist, title)
+    if not toks:
+        return True
+    url = str(cached.get("url") or "")
+    slug = url.rstrip("/").rsplit("/", 1)[-1].rsplit(".", 1)[0].replace("-", " ")
+    hay = TM._tokens(slug + " " + str(cached.get("title") or ""))
+    need = max(1, (len(toks) + 1) // 2)
+    return len(toks & hay) >= need
+
+
 def _disk_set(key: str, result: dict) -> None:
     d = _disk_load()
     d[key] = {"ts": time.time(), "ok": bool(result.get("ok")), "result": result}
@@ -195,19 +222,33 @@ def _is_challenge(text: str) -> bool:
 
 
 _last_challenged = False  # set when the most recent fetch hit the anti-bot wall
+_net_failed = False       # set when a request in the current lookup failed on the wire
+
+
+def _reset_session() -> None:
+    """Self-heal after a challenge / wire failure: drop the shared client so the
+    next lookup re-warms a fresh `guid` cookie and logs in again (when creds are
+    configured). Stale cookies must never keep the source dead until restart."""
+    global _SESSION, _LOGGED_IN
+    _SESSION = None
+    _LOGGED_IN = False
 
 
 def _fetch_plain(url: str, timeout: float = 25.0) -> str | None:
     """Fetch through the shared (possibly authenticated) session so the auth
     cookie applies and the anti-bot challenge is avoided."""
-    global _last_challenged
+    global _last_challenged, _net_failed
     try:
         c = _session()
         r = c.get(url, headers={"Referer": _BASE + "/"})
         if r.status_code in (200, 206) and not _is_challenge(r.text):
             return r.text
-        _last_challenged = _is_challenge(r.text) or r.status_code == 206
+        _last_challenged = _is_challenge(r.text) or r.status_code in (206, 403, 429, 503)
+        if _last_challenged:
+            _reset_session()
     except Exception:
+        _net_failed = True
+        _reset_session()
         return None
     return None
 
@@ -286,6 +327,12 @@ def _native_search(query: str, limit: int) -> list[str]:
             r = c.post(_BASE + "/search/result.php",
                        data={"main_search": query, "search_selection": "9"})
     except Exception:
+        globals()["_net_failed"] = True
+        _reset_session()
+        return []
+    if r.status_code != 200 or _is_challenge(r.text):
+        globals()["_net_failed"] = True
+        _reset_session()
         return []
     out = []
     for rel in _REL_TL_RE.findall(r.text):
@@ -330,7 +377,8 @@ def search_urls(query: str, limit: int = 8) -> list[str]:
                 break
 
     out = out[:limit]
-    _HTML_CACHE[ckey] = (now, "\n".join(out))
+    if out or not _net_failed:      # never pin a wire failure as "no results" for 1 h
+        _HTML_CACHE[ckey] = (now, "\n".join(out))
     return out
 
 
@@ -402,7 +450,8 @@ def parse_tracklist(html_text: str) -> list[dict]:
 def tracklist_for(title: str, artist: str = "", duration: int = 0,
                   sc_tracklist: list | None = None,
                   source_urls: list | None = None,
-                  mix_id: str = "", force: bool = False) -> dict:
+                  mix_id: str = "", force: bool = False,
+                  date: str = "") -> dict:
     """Resolve → fetch → parse → VERIFY, with a 10-day disk cache so the same
     mix is never re-fetched from the site. Returns
        {ok, tracks, url, match:{score,tier,checks}, cached?, error?}.
@@ -417,7 +466,11 @@ def tracklist_for(title: str, artist: str = "", duration: int = 0,
     if not force:
         cached = _disk_get(ckey)
         if cached is not None:
-            return {**cached, "cached": True}
+            if _cached_identity_ok(cached, artist, title):
+                return {**cached, "cached": True}
+            print(f"[tl1001] кэш {ckey}: трек-лист чужого микса ({cached.get('url')}) "
+                  f"— выбросил, ищу заново", flush=True)
+            _disk_drop(ckey)
 
     # Circuit breaker: if 1001TL recently failed (slow/blocked), return instantly
     # instead of pinning a threadpool worker for tens of seconds → no app-wide lag.
@@ -429,18 +482,28 @@ def tracklist_for(title: str, artist: str = "", duration: int = 0,
     def _ret(result: dict) -> dict:
         # On a NETWORK failure (not just "no match"), trip the cooldown so we
         # stop hammering a slow/blocked 1001TL.
-        if not result.get("ok") and (result.get("challenged") or result.get("error") in (
+        wire = bool(result.get("challenged") or _net_failed)
+        if not result.get("ok") and (wire or result.get("error") in (
                 "no search results", "fetch/parse failed for all candidates")):
             globals()["_cooldown_until"] = time.time() + _COOLDOWN_SEC
-        _disk_set(ckey, result)
+        # A wire failure (captcha / timeout / reset) says nothing about whether the
+        # set exists — caching it as a 12 h miss kept a mix tracklist-less long after
+        # the site recovered. Only real outcomes go to disk; the in-memory cooldown
+        # alone covers the outage, and the next lookup after it retries cleanly.
+        if result.get("ok") or not wire:
+            _disk_set(ckey, result)
+        else:
+            result = {**result, "transient": True}
         return result
 
+    globals()["_net_failed"] = False
     urls = search_urls(q)
     if not urls:
         return _ret({"ok": False, "error": "no search results"})
 
     target = {"title": title, "artist": artist, "duration": duration,
-              "tracklist": sc_tracklist or [], "source_urls": source_urls or []}
+              "tracklist": sc_tracklist or [], "source_urls": source_urls or [],
+              "date": date or ""}
     best = None
     challenged = 0
     global _last_challenged

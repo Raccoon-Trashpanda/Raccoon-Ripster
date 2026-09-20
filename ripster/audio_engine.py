@@ -36,7 +36,11 @@ from pathlib import Path
 
 #: Расширения, которые читает libsndfile. MP3/AAC сюда не входят намеренно:
 #: у них своя история с декодером, а bit-perfect для lossy лишён смысла.
-LOSSLESS_EXT = {".flac", ".wav", ".aiff", ".aif", ".w64", ".ogg"}
+#: `.ogg` здесь БЫЛ и убран 19.09.2026: libsndfile его читает, но Ogg — почти
+#: всегда Vorbis, то есть сжатие С ПОТЕРЯМИ, и движок выдавал бы ему
+#: `bit_perfect=True`. От этого спасала только проверка на фронте
+#: (player.js) — одна линия защиты вместо двух. См. скилл ripster-audio-integrity.
+LOSSLESS_EXT = {".flac", ".wav", ".aiff", ".aif", ".w64"}
 
 
 @dataclass(frozen=True)

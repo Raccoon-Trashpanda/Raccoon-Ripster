@@ -275,6 +275,14 @@ async function _scPreloadQueue(queue, startIdx = 1) {
 function scInit() {
   const inp = document.getElementById('sc-q');
   if (inp && !inp.value) setTimeout(() => { try { inp.focus(); } catch(_){} }, 60);
+  try { _scSyncFeedUi(); } catch (_) {}
+  // Search stays primary (focused input); an empty tab opens on the own feed
+  // (only if the owner switched it on) or on recently played — never blank.
+  const grid = document.getElementById('sc-grid');
+  if (grid && !grid.children.length && !_scResults.length) {
+    if (_scHasOauth() && _scFeedOn()) scShowFeed();
+    else if (_scHistAll().length) scShowHistory();
+  }
 }
 
 function _scDur(sec) {
@@ -302,9 +310,9 @@ function renderScTile(it) {
   const sub      = isPl ? (it.tracks ? it.tracks + ' ' + t('sc.tracks_short') : '') : _scDur(it.duration);
   const art      = it.artwork || '';
   // Cover and ▶ both trigger play — track plays one, playlist enqueues all.
-  const playCall = isPl
+  const playCall = `_scHistAdd('${it.id}');` + (isPl
     ? `playScPlaylist('${it.id}','${escJ(it.title)}','${escJ(it.artist)}','${escJ(it.artwork_sm||it.artwork||'')}')`
-    : `playStreamTrack('soundcloud','${it.id}','${escJ(it.title)}','${escJ(it.artist)}','${escJ(it.artwork_sm||it.artwork||'')}')`;
+    : `playStreamTrack('soundcloud','${it.id}','${escJ(it.title)}','${escJ(it.artist)}','${escJ(it.artwork_sm||it.artwork||'')}')`);
   // Tracks get hover prewarm so clicking play is instant (URL already resolved).
   // Playlists skip hover prewarm — they need a separate endpoint for the track list.
   const hoverPre = !isPl
@@ -322,6 +330,7 @@ function renderScTile(it) {
       ${!isPl ? `<div id="sc-fmt-${it.id}" style="display:none;position:absolute;top:28px;right:6px;font-size:8px;font-weight:700;padding:1px 5px;border-radius:4px;background:rgba(0,0,0,.72);backdrop-filter:blur(4px);pointer-events:none"></div>` : ''}
       <div style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer" onclick="event.stopPropagation();${playCall}" title="${isPl ? t('sc2.play_pl') : t('btn.play')}">▶</div>
       ${sub ? `<div style="position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,.72);border-radius:4px;font-size:10px;color:#fff;padding:2px 5px;font-family:var(--mono)">${esc(sub)}</div>` : ''}
+      ${_scResumeBar(it)}
     </div>
     <div style="padding:8px 10px">
       <div onclick="_scOpenMix('${it.id}')" style="cursor:pointer" title="${t('sc2.open_mix')}">
@@ -503,6 +512,122 @@ async function scDownload(id) {
   if (r && r.ok)             toast(`+ ${it.title} → ${t('nav.queue').toLowerCase()}`);
   else if (r && r.duplicate) toast(t('sc.already_queued'), 'var(--muted)');
   else                       toast(t('err.generic') + ': ' + ((r && (r.msg || r.detail)) || '?'), 'var(--red)');
+}
+
+// ── Listening history + optional own feed (SC tab) ──────────────────────────
+// History and the feed switch are per-viewer conveniences → localStorage, every
+// access wrapped (private windows / blocked storage just get no history).
+// Resume position itself lives in the shared player store (_mixPosSave /
+// _mixPosGet, key 'soundcloud:<id>'); tiles only show it as a thin bar.
+const _SC_HIST_KEY = 'ripster_sc_hist';
+const _SC_FEED_KEY = 'ripster_sc_feed';
+const _SC_HIST_MAX = 60;
+
+function _scHistAll() {
+  try {
+    const a = JSON.parse(localStorage.getItem(_SC_HIST_KEY) || '[]');
+    return Array.isArray(a) ? a : [];
+  } catch { return []; }
+}
+
+function _scHistAdd(id) {
+  const it = _scResults.find(x => String(x.id) === String(id));
+  if (!it) return;
+  const rec = {};
+  ['id','kind','set_type','title','artist','user_permalink','artwork','artwork_sm',
+   'duration','url','genre','date','tracks','plays','has_tracklist']
+    .forEach(k => { if (it[k] != null) rec[k] = it[k]; });
+  rec.played = Date.now();
+  const list = _scHistAll().filter(x => !(String(x.id) === String(id) && x.kind === it.kind));
+  list.unshift(rec);
+  try { localStorage.setItem(_SC_HIST_KEY, JSON.stringify(list.slice(0, _SC_HIST_MAX))); } catch {}
+}
+
+function _scResumeBar(it) {
+  if (it.kind === 'playlist' || typeof _mixPosAll !== 'function') return '';
+  let e = null;
+  try { e = _mixPosAll()['soundcloud:' + it.id]; } catch { e = null; }
+  if (!e || !e.p || !e.d) return '';
+  const pct = Math.max(2, Math.min(100, e.p / e.d * 100)).toFixed(1);
+  return `<div title="${esc(ti('sc.resume_at', { t: _scDur(e.p) }))}" style="position:absolute;left:0;right:0;bottom:0;height:3px;background:rgba(0,0,0,.5)"><div style="height:100%;width:${pct}%;background:#ff5500"></div></div>`;
+}
+
+function _scHasOauth() {
+  return !!(S && S.config && String(S.config['soundcloud-oauth-token'] || '').trim());
+}
+function _scFeedOn() {
+  try { return localStorage.getItem(_SC_FEED_KEY) === '1'; } catch { return false; }
+}
+function scToggleFeed(on) {
+  try { localStorage.setItem(_SC_FEED_KEY, on ? '1' : '0'); } catch {}
+  _scSyncFeedUi();
+  if (on) scShowFeed();
+}
+function _scSyncFeedUi() {
+  const opt = document.getElementById('sc-feed-opt');
+  const box = document.getElementById('sc-feed-toggle');
+  const btn = document.getElementById('sc-feed-btn');
+  const owner = _scHasOauth();
+  if (opt) opt.style.display = owner ? 'inline-flex' : 'none';
+  if (box) box.checked = _scFeedOn();
+  if (btn) btn.style.display = (owner && _scFeedOn()) ? '' : 'none';
+}
+
+// Show a list (history / feed) in the grid, reusing the channel bar: ← Back
+// returns to the search the user came from, exactly like browsing a channel.
+function _scOpenList(label, results, extraHtml, emptyKey) {
+  if (!_scPrevSearch) {
+    _scPrevSearch = { q: document.getElementById('sc-q')?.value || '',
+                      results: _scResults.slice() };
+  }
+  const bar = document.getElementById('sc-channel-bar');
+  const nameEl = document.getElementById('sc-channel-name');
+  const avEl = document.getElementById('sc-channel-avatar');
+  const extra = document.getElementById('sc-channel-follow');
+  const empty = document.getElementById('sc-empty');
+  if (bar) bar.style.display = 'flex';
+  if (nameEl) nameEl.textContent = label;
+  if (avEl) avEl.style.display = 'none';
+  if (extra) extra.innerHTML = extraHtml || '';
+  _scResults = results || [];
+  const sortSel = document.getElementById('sc-sort');
+  if (sortSel) sortSel.value = 'relevance';   // keep list order (history = last played first)
+  if (!_scResults.length) {
+    const grid = document.getElementById('sc-grid');
+    if (grid) grid.innerHTML = '';
+    if (empty) { empty.textContent = t(emptyKey || 'sc.not_found'); empty.style.display = ''; }
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  _scRender();
+}
+
+function scShowHistory() {
+  const h = _scHistAll();
+  if (!h.length) { toast(t('sc.hist_empty'), 'var(--muted)'); return; }
+  _scOpenList('🕘 ' + t('sc.hist_title'), h,
+    `<button onclick="scClearHistory()" style="padding:5px 10px;background:transparent;border:1px solid var(--border2);border-radius:7px;font-size:12px;color:var(--muted);cursor:pointer;font-family:var(--font)">${esc(t('sc.hist_clear'))}</button>`);
+}
+
+function scClearHistory() {
+  if (!confirm(t('sc.hist_clear_q'))) return;
+  try { localStorage.removeItem(_SC_HIST_KEY); } catch {}
+  scBackFromChannel();
+  toast(t('sc.hist_cleared'), 'var(--muted)');
+}
+
+async function scShowFeed() {
+  const status = document.getElementById('sc-status');
+  if (status) { status.textContent = t('sc.searching'); status.style.display = ''; }
+  let d = null;
+  try { d = await api('GET', '/api/soundcloud/feed'); } catch (e) { d = null; }
+  if (status) status.style.display = 'none';
+  if (!d || !d.ok) {
+    const msg = (d && d.error_key) ? t(d.error_key) : ((d && d.error) || t('sc.search_error'));
+    toast(msg, 'var(--red)');
+    return;
+  }
+  _scOpenList('📰 ' + t('sc.feed_title'), d.results || [], '', 'sc.feed_empty');
 }
 
 // ── SoundCloud MixesDB tracklist + YouTube timecodes ───────────────────────
@@ -786,9 +911,9 @@ function _scDetailHTML(it) {
   if (it.duration) meta.push(_scDur(it.duration));
   if (it.plays)    meta.push((it.plays).toLocaleString('ru-RU') + ' ▶');
   if (it.genre)    meta.push(esc(it.genre));
-  const playCall = isPl
+  const playCall = `_scHistAdd('${it.id}');` + (isPl
     ? `playScPlaylist('${it.id}','${escJ(it.title)}','${escJ(it.artist)}','${escJ(it.artwork_sm||art)}')`
-    : `playStreamTrack('soundcloud','${it.id}','${escJ(it.title)}','${escJ(it.artist)}','${escJ(it.artwork_sm||art)}')`;
+    : `playStreamTrack('soundcloud','${it.id}','${escJ(it.title)}','${escJ(it.artist)}','${escJ(it.artwork_sm||art)}')`);
   const btn = (bg, bd, clr) => `flex:1;padding:8px 0;border:1px solid ${bd};background:${bg};border-radius:8px;font-size:12px;font-weight:600;color:${clr};cursor:pointer;font-family:var(--font)`;
   return `
     <div class="scd-head" style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--border);flex:0 0 auto">
@@ -1002,7 +1127,7 @@ async function playScPlaylist(plId, plTitle, plArtist, plCover) {
       console.log('[scplay] _playPreviewAt(0) resolved');
     } catch (e) {
       console.error('[scplay] _playPreviewAt threw:', e);
-      toast('Не удалось запустить трек: ' + e.message, 'var(--red)');
+      toast(t('sc2.play_fail') + e.message, 'var(--red)');
     }
     // Pre-resolve stream URLs for remaining tracks in background so playback
     // between tracks is instant (no fetch delay at each track boundary).
@@ -1011,7 +1136,7 @@ async function playScPlaylist(plId, plTitle, plArtist, plCover) {
     }
   } catch (e) {
     console.error('[scplay] fatal:', e);
-    toast('Ошибка плейлиста: ' + e.message, 'var(--red)');
+    toast(t('sc2.pl_err') + e.message, 'var(--red)');
   }
 }
 
