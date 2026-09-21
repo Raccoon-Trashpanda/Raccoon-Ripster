@@ -45,6 +45,9 @@ _RE_NO_RETRY = _re.compile(
     r'ARL\s+не\s+задан|'
     # SoundCloud engine not installed / no Node (engines/soundcloud.py) — permanent.
     r'движок\s+не\s+установлен|'
+    # Apple: витрина не отдала по ссылке ни одного трека (engines/zhaarey.py).
+    # Повтор шлёт ТОТ ЖЕ пустой запрос — три прогона вместо одной честной строки.
+    r'в\s+каталоге\s+ничего\s+нет|'
     # Beatport territory restriction is permanent for this account/region.
     r'Territory\s+Restricted|недоступен в регионе|region\s+locked|'
     # Отказ по правам аккаунта (Beatport/Tidal: «You do not have permission»)
@@ -397,6 +400,33 @@ def _extract_failed_tracks(log_text: str) -> list:
     return out
 
 
+async def _canonical_via_resolver(url: str):
+    """Канонический треклист релиза для Apple/Qobuz/Tidal — [{num,title,available}].
+
+    Берём общий `resolver.resolve` (им же строится дерево задачи в очереди), а не
+    пишем по фетчеру на сервис: два списка треков одного релиза рано или поздно
+    разойдутся, и тогда карточка отдачи и дерево будут спорить друг с другом.
+
+    Одиночный трек пропускаем: у недостачи там нет смысла, а resolver отдаёт на
+    такой ссылке запись с пустым названием, по которой ничего не сверишь.
+    """
+    if not url:
+        return None
+    try:
+        from ripster import resolver as _rs
+        items = await _rs.resolve(url)
+    except Exception as e:                       # noqa: BLE001
+        print(f"[shortfall] треклист не получен: {type(e).__name__}: {e}", flush=True)
+        return None
+    if len(items or []) < 2:
+        return None
+    out = [{"num": it.get("track_num") or i,
+            "title": it.get("title") or "",
+            "available": None}                   # знает только Deezer
+           for i, it in enumerate(items, 1)]
+    return out if any(t["title"] for t in out) else None
+
+
 async def _resolve_shortfall_detail(task: dict, reason: str):
     """#5b Phase 2: AUTHORITATIVE per-track shortfall report.
 
@@ -407,8 +437,14 @@ async def _resolve_shortfall_detail(task: dict, reason: str):
     HAS it and the run merely failed. Unlike ``_extract_failed_tracks`` (log-parse,
     empty for many engines) this works from the API regardless of log format.
 
-    Best-effort: returns None on any failure so it never blocks finalize. Deezer
-    first; Qobuz/Tidal/Apple resolvers are a follow-up (same shape).
+    Best-effort: returns None on any failure so it never blocks finalize.
+
+    Deezer keeps its own fetcher: only it reports per-track ``readable``, and that
+    flag is what tells a region-blocked track from a run that merely crashed.
+    Everyone else goes through ``resolver.resolve`` — the SAME tracklist the queue
+    tree shows the owner, so the card and the tree can't disagree about what the
+    release contains. Availability there is genuinely unknown (``None``), and
+    ``classify_missing`` treats unknown as "retry", never as "unavailable".
     """
     from ripster import release_diff as _rd
     url = task.get("url", "") or ""
@@ -416,6 +452,8 @@ async def _resolve_shortfall_detail(task: dict, reason: str):
     canonical = None
     if "deezer.com" in url or svc == "deezer":
         canonical = await _rd.fetch_deezer_tracklist(url)
+    if not canonical:
+        canonical = await _canonical_via_resolver(url)
     if not canonical:
         return None
     missing = _rd.diff_tracklist(canonical, task.get("_files") or [])
@@ -1866,9 +1904,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
     _sc_slot = None
     _yx_pool = None
     _yx_slot = None
-    # Пул учёток Tidal. Изолируется РАБОЧИМ КАТАЛОГОМ, а не файлом конфига:
-    # у OrpheusDL нет флага «свой конфиг», и папку данных он читает
-    # относительно cwd (см. ripster/tidal_pool.py).
+    # Пул учёток Tidal. Слот = отдельный рабочий каталог со своей сессией
+    # OrpheusDL; каталог настроек движку называют явно (см. ниже), чтобы прогон
+    # не трогал общий settings.json соседнего сервиса. Любая осечка здесь
+    # оставляет `_task_cwd` пустым, то есть прогон идёт как раньше, на основной
+    # учётке, — пул не имеет права ломать загрузку, которая и без него работала.
     _td_pool = None
     _td_slot = None
 
@@ -2045,7 +2085,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                         # без терминала. Выписываем её из refresh-токена — и
                         # ТОЛЬКО если файла ещё нет, иначе каждый прогон дёргал
                         # бы Tidal тремя запросами на ровном месте.
-                        _sess = _td_dir / "config" / "loginstorage.bin"
+                        _sess = _tdp.slot_session(_td_slot)
                         if _td_slot > 0 and not _sess.is_file() and _td_acct.get("tidal-refresh"):
                             _rep = await asyncio.to_thread(
                                 _tdp.write_session, _td_slot,
@@ -2064,8 +2104,19 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                 _td_pool.release(_td_slot)
                                 _td_pool, _td_slot = None, None
                         if _td_slot is not None:
+                            # Каталог конфига слота передаём движку НАПРЯМУЮ, а не
+                            # через окружение процесса: оно у всех движков одного
+                            # интерпретатора общее, и ORPHEUS_CONFIG_DIR, выставленный
+                            # здесь, уехал бы в параллельный прогон. CWD при этом
+                            # остаётся: по нему OrpheusDL находит modules/ и
+                            # extensions/ (они общие, через junction).
+                            _cfg_view["_tidal_config_dir"] = str(_tdp.slot_config_dir(_td_slot))
                             if _td_slot > 0:
                                 _task_cwd = str(_td_dir)
+                                # Слот без своей сессии не качает ничего, поэтому
+                                # пиним явно: иначе коридор основного движка
+                                # утянул бы сессию владельца в чужой прогон.
+                                _cfg_view["_tidal_session_storage"] = str(_tdp.slot_session(_td_slot))
                             if _td_acct.get("tidal-country"):
                                 _cfg_view["tidal-country"] = _td_acct["tidal-country"]
                             task["log"].append(

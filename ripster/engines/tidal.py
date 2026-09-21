@@ -16,7 +16,10 @@ Atmos (AC-4). The session is created once via:
 Both are driven from Settings → Tidal; after that the session refreshes itself.
 
 Download path: OrpheusDL CLI (`orpheus.py <tidal.com/browse/.../ID>`), cwd =
-orpheus/. Quality is taken from orpheus settings.json (global.general).
+orpheus/. Quality is taken from the engine's OWN config corridor,
+``orpheus/config/tidal/settings.json``, seeded from the shared
+``orpheus/config/settings.json`` (see `seed_settings` for what is inherited);
+the session stays the shared ``orpheus/config/loginstorage.bin``.
 
 Search / album / artist metadata still use Tidal's public API with the pasted
 ``tidal-token`` (access) — that path is unchanged and independent of downloads.
@@ -24,6 +27,7 @@ Search / album / artist metadata still use Tidal's public API with the pasted
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 import time
@@ -32,6 +36,9 @@ from pathlib import Path
 from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
 from .errors import classify_download_error
 from .registry import register
+# Формирование команды OrpheusDL (bootstrap + коридор конфига + пин сессии) —
+# одна реализация на все движки Orpheus, иначе они расходятся молча.
+from .orpheus_beatport import orpheus_cmd
 from ripster import http_client as _HTTP
 from ripster.safe_pickle import safe_loads as _pickle_loads
 from ripster.py_runtime import app_python
@@ -69,8 +76,132 @@ def _orpheus_python() -> str:
     # и именно про такие копии предупреждал разбор 16.08: расходятся они молча.
     return app_python()
 
-def _settings_path() -> Path:
-    return _orpheus_dir() / "config" / "settings.json"
+def _main_config_dir() -> Path:
+    """Каталог конфига OrpheusDL по умолчанию — он же хранилище общей сессии."""
+    return _orpheus_dir() / "config"
+
+def _corridor_config_dir() -> Path:
+    return _main_config_dir() / "tidal"
+
+def seed_settings(dst: Path, src: Path | None = None) -> Path:
+    """Посеять в коридор/слот копию общего settings.json — и только валидный JSON.
+
+    Прямой `shutil.copy2` здесь не годился бы: общий файл пишет и OrpheusDL на
+    финальной стадии прогона (core.py: `open(...,'w').write(json.dumps(...))`).
+    Пойманный на середине записи обрезок скопировался бы в коридор и прогон
+    упал бы уже там, в файле, которого до аварии не было. Поэтому читаем,
+    проверяем `json.loads` и пишем атомарно: временный файл рядом + `os.replace`.
+
+    Наследуется ВСЁ содержимое, а не только качество: в частности `modules.tidal`
+    с идентификаторами клиентов (`tv_atmos_token` и др.) — без них вход владельца
+    перестал бы обслуживаться. `src` передаёт пул: у него свой взгляд на то, где
+    лежит установка (см. `tidal_pool._base_dir`).
+    """
+    src = src or (_main_config_dir() / "settings.json")
+    try:
+        if not src.is_file() or dst.exists():
+            return dst
+        _copy_verbatim(src, dst)
+    except Exception:
+        # Посев — удобство, а не условие работоспособности: без него прогон
+        # получит defaults самого OrpheusDL, и это честнее падающего движка.
+        pass
+    return dst
+
+
+def _copy_verbatim(src: Path, dst: Path) -> None:
+    """Одна копия общего файла — атомарно и только если это валидный JSON.
+
+    Проверка JSON обязательна: общий файл пишет и сам OrpheusDL на финальной
+    стадии прогона (`open(...,'w').write(json.dumps(...))`), и пойманный на
+    середине записи обрезок иначе переехал бы в коридор — уже в файл, которого
+    до аварии не было вовсе.
+    """
+    text = src.read_text(encoding="utf-8")
+    cfg = json.loads(text)                # битый/обрезанный → не копируем
+    if not isinstance(cfg, dict) or not cfg:
+        return
+    st = src.stat()
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f"{dst.name}.{os.getpid()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, dst)                  # атомарно: полфайла никто не прочтёт
+    # mtime переносим: иначе копия сразу выглядела бы «новее источника».
+    try:
+        os.utime(dst, ns=(st.st_atime_ns, st.st_mtime_ns))
+    except OSError:
+        pass
+
+
+def seed_slot(slot_config_dir: Path, src: Path | None = None) -> Path:
+    """Каталог настроек слота пула — тот же коридор, только живущий в папке
+    учётки: копия общего файла при отсутствии + догон `modules.tidal` при каждой
+    последующей смене. Возвращает путь к settings.json слота."""
+    dst = seed_settings(Path(slot_config_dir) / "settings.json", src=src)
+    _refresh_inherited_tidal_keys(dst, src=src)
+    return dst
+
+
+def _refresh_inherited_tidal_keys(dst: Path, src: Path | None = None) -> None:
+    """Догнать из общего конфига `modules.tidal` — и ТОЛЬКО этот раздел.
+
+    Почему не полная перезапись по mtime (как делал посев до правки): общий файл
+    в конце КАЖДОГО прогона пишет сам OrpheusDL (core.py:365), то есть параллельный
+    прогон Spotify обновляет его mtime, и «пересев» затёр бы качество и папку
+    Tidal-прогона — ровно ту гонку, от которой коридор и защищает (поймано
+    тестом: 'hifi' превращался в 'normal').
+
+    И почему не весь раздел `modules`: там живут чужие сессии. Beatport ротит
+    refresh-токен и пишет его в конфиг прогона; общую копию этого токена OrpheusDL
+    не обновляет, и догон по всем модулям вернул бы в коридор уже ПОГАШЕННЫЙ
+    токен. Берём только Tidal: движок правит в нём единственный флаг
+    (`prefer_ac4`), и то сам, на каждом прогоне, после этого догона.
+
+    Догон обязателен: это ключи учётки, которыми живёт вход владельца. Когда
+    владелец меняет client_id в общем конфиге — коридор обязан это увидеть;
+    то же после переустановки OrpheusDL, когда свежий общий файл появляется
+    позже коридора.
+    """
+    try:
+        src = src or (_main_config_dir() / "settings.json")
+        if not src.is_file() or not dst.is_file():
+            return
+        shared = json.loads(src.read_text(encoding="utf-8")).get("modules", {}).get("tidal")
+        if not isinstance(shared, dict) or not shared:
+            return
+        cfg = json.loads(dst.read_text(encoding="utf-8"))
+        mods = cfg.get("modules")
+        mods = mods if isinstance(mods, dict) else {}
+        if mods.get("tidal") == shared:
+            return                                       # и так всё на месте
+        mods["tidal"] = shared
+        cfg["modules"] = mods
+        tmp = dst.with_name(f"{dst.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(cfg, indent=4, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, dst)
+    except Exception:
+        pass                                             # читаем то, что есть
+
+
+def _config_dir_for(config: dict | None) -> Path:
+    """Каталог конфига ЭТОГО прогона.
+
+    Пул Tidal работает иначе, чем одиночный прогон: слот >0 — отдельная папка
+    `dist/tidal_pool/acctN`, и его `config/` уже резолвится OrpheusDL относительно
+    CWD прогона. Раннер говорит нам об этом напрямую (`_tidal_config_dir`), а не
+    через переменную процесса: окружение у всех движков общее на один
+    интерпретатор, и выставленный в нём `ORPHEUS_CONFIG_DIR` отравил бы
+    параллельный прогон.
+    """
+    hint = (config or {}).get("_tidal_config_dir")
+    if hint:
+        return Path(hint)
+    return _corridor_config_dir()
+
+def _settings_path(config: dict | None = None) -> Path:
+    dst = seed_settings(_config_dir_for(config) / "settings.json")
+    _refresh_inherited_tidal_keys(dst)
+    return dst
 
 def _module_path() -> Path:
     return _orpheus_dir() / "modules" / "tidal"
@@ -78,7 +209,15 @@ def _module_path() -> Path:
 def _session_path() -> Path:
     # OrpheusDL persists its saved sessions (TV / Mobile) here. A non-trivial
     # file means at least one session was created and can be self-refreshed.
-    return _orpheus_dir() / "config" / "loginstorage.bin"
+    # В коридор НЕ переезжает: сюда пишет вход из Settings (routes/core.py),
+    # и прогон обязан читать ровно тот же файл.
+    return _main_config_dir() / "loginstorage.bin"
+
+def _slot_session_path(config: dict | None) -> Path:
+    """Сессия этого прогона: общая для основного аккаунта, своя у слота пула
+    (`tidal_pool.write_session` выписывает её в каталог слота)."""
+    hint = (config or {}).get("_tidal_session_storage")
+    return Path(hint) if hint else _session_path()
 
 
 # ── live access token from OrpheusDL's self-refreshing session ────────────────
@@ -108,22 +247,27 @@ _TV_SECRET_DEFAULT = "1nqpgx8uvBdZigrx4hUPDV2hOwgYAAAG5DYXOr6uNf8="
 # any client id, so we derive this session from the TV login automatically.
 _MOBILE_ATMOS_TOKEN_DEFAULT = "km8T1xS355y7dd3H"
 
+def _tidal_module_settings() -> dict:
+    """Раздел `modules.tidal`: сперва из конфига этого прогона (в него посеяно
+    всё из общего), а если его нет — прямо из общего. Второй путь обязателен для
+    свежей установки: там `orpheus/config/settings.json` появляется раньше
+    коридора, а идентификаторы клиентов нужны уже для входа."""
+    for getter in (lambda: _settings_path(), lambda: _main_config_dir() / "settings.json"):
+        try:
+            mod = json.loads(getter().read_text(encoding="utf-8"))["modules"]["tidal"]
+            if isinstance(mod, dict):
+                return mod
+        except Exception:
+            continue
+    return {}
+
 def _tv_client() -> tuple[str, str]:
-    try:
-        st = json.loads(_settings_path().read_text(encoding="utf-8"))["modules"]["tidal"]
-        tok = st.get("tv_atmos_token") or _TV_TOKEN_DEFAULT
-        sec = st.get("tv_atmos_secret") or _TV_SECRET_DEFAULT
-        return tok, sec
-    except Exception:
-        # No settings.json (fresh clone) → use the shipped module defaults.
-        return _TV_TOKEN_DEFAULT, _TV_SECRET_DEFAULT
+    st = _tidal_module_settings()
+    return (st.get("tv_atmos_token") or _TV_TOKEN_DEFAULT,
+            st.get("tv_atmos_secret") or _TV_SECRET_DEFAULT)
 
 def _mobile_atmos_client() -> str:
-    try:
-        st = json.loads(_settings_path().read_text(encoding="utf-8"))["modules"]["tidal"]
-        return st.get("mobile_atmos_hires_token") or _MOBILE_ATMOS_TOKEN_DEFAULT
-    except Exception:
-        return _MOBILE_ATMOS_TOKEN_DEFAULT
+    return _tidal_module_settings().get("mobile_atmos_hires_token") or _MOBILE_ATMOS_TOKEN_DEFAULT
 
 async def _orpheus_access_token() -> tuple[str, str]:
     """Return a FRESH (access_token, country) from the OrpheusDL TV session,
@@ -271,8 +415,14 @@ def is_authenticated(config: dict | None = None) -> bool:
 
 
 def _update_orpheus_settings(quality: str, save_path: str, config: dict, atmos: bool = False) -> None:
-    """Point OrpheusDL at the right quality + save folder (mirrors beatport)."""
-    sp = _settings_path()
+    """Point OrpheusDL at the right quality + save folder (mirrors beatport).
+
+    Пишется в каталог КОНКРЕТНОГО прогона (`_config_dir_for`), а не в общий
+    `orpheus/config/settings.json`: полоса у Tidal своя, но прогоны разных
+    сервисов идут параллельно, и общий файл означал бы гонку качества с
+    соседним движком (тот же разбор, что покоридорил Beatport/JioSaavn).
+    """
+    sp = _settings_path(config)
     if not sp.exists():
         return
     try:
@@ -319,7 +469,12 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict, atmos: 
         tm = cfg.setdefault("modules", {}).setdefault("tidal", {})
         tm["prefer_ac4"] = bool(atmos)
 
-        sp.write_text(json.dumps(cfg, indent=4, ensure_ascii=False), encoding="utf-8")
+        # Тот же атомарный приём, что и при посеве: перечитывает этот файл уже
+        # подпроцесс OrpheusDL, и полузаписанная строка была бы для него
+        # `JSONDecodeError` на старте.
+        tmp = sp.with_name(f"{sp.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(cfg, indent=4, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, sp)
     except Exception:
         pass
 
@@ -396,21 +551,14 @@ class TidalEngine(EngineBase):
         atmos = (quality == "atmos") or (orpheus_quality == "hifi" and bool(config.get("tidal-atmos")))
         _update_orpheus_settings(orpheus_quality, save_path, config, atmos=atmos)
 
-        # Run under the isolated OrpheusDL venv. Bootstrap via -c so orpheus.core
-        # imports even on an isolated interpreter (matches spotify/beatport engines).
-        orph_dir   = str(_orpheus_dir())
-        orpheus_py = str(_orpheus_dir() / "orpheus.py")
-        _boot = (
-            "import sys, runpy; "
-            f"sys.path.insert(0, {orph_dir!r}); "
-            f"sys.argv = [{orpheus_py!r}] + sys.argv[1:]; "
-            f"runpy.run_path({orpheus_py!r}, run_name='__main__')"
-        )
-        cmd = [_orpheus_python(), "-c", _boot]
-        if save_path:
-            cmd += ["-o", save_path.rstrip("/\\")]
-        cmd.append(_to_orpheus_url(url))
-        return cmd
+        # Каталог конфига — свой (см. `_config_dir_for`), а сессия — та, что
+        # принадлежит ЭТОЙ учётке: для основного прогона это общий
+        # `config/loginstorage.bin`, куда пишет вход из Settings, для слота пула —
+        # его собственный файл, выписанный `tidal_pool.write_session`. Путь
+        # сообщаем бутстрапом процесса, а не окружением app.py: окружение у всех
+        # движков одно на интерпретатор.
+        return orpheus_cmd(_config_dir_for(config), _to_orpheus_url(url), save_path,
+                           session_file=_slot_session_path(config))
 
     def __init__(self):
         # Раннер читает abort_reason после каждой строки и глушит процесс

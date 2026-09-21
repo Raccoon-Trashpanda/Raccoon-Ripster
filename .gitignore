@@ -68,3 +68,7 @@ Thumbs.db
 
 # Claude Code: внутренние скиллы и настройки — не для публичного репозитория
 .claude/
+
+# Local databases created at runtime (listening history, stats) — never ship them
+stations.db
+ripster_stats.db

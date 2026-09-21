@@ -15,9 +15,11 @@ What each source watches, and why that is the right thing to watch:
   soundcloud  the channels already on the watchlist — following a channel and
               wanting its uploads in the feed are the same intent, so there is no
               second list to maintain.
-  apple       the Apple artists on the watchlist, via the compilation-aware
-              lookup in watchlist.py, so label compilations show up here too
-              (see ripster/compilations.py for why that needs saying).
+  apple       the Apple artists on the watchlist — but only their MIXES: live
+              sessions and DJ mixes, picked from the release data itself (title
+              words, genre, track durations; see _apple_mix_verdict). Ordinary
+              albums and label compilations are deliberately kept out: they have
+              their own check in the watchlist, this source is for mixes only.
   labels      the LABELS on the watchlist, via watchlist._label_releases. A
               label is not an artist and has no id to resolve, so it needs its
               own source. Off by default (`show-radar-labels`): the radar feed
@@ -33,6 +35,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 from datetime import datetime, timedelta
 
@@ -330,6 +333,11 @@ async def releases_bbc(days: int = Query(90, ge=1, le=365),
                 "url":       f"https://www.bbc.co.uk/programmes/{ep.get('pid','')}",
                 "service":   "bbc",
                 "duration":  ep.get("duration") or 0,
+                # Отложенная запись будущего эфира (ripster/bbc_schedule.py):
+                # карточке нужно знать канал и точное начало, а не «дату».
+                "channel":     ep.get("channel") or "",
+                "avail_from":  ep.get("avail_from") or "",
+                "schedulable": bool(ep.get("schedulable")),
             })
         return out
 
@@ -573,21 +581,287 @@ async def releases_soundcloud(days: int = Query(90, ge=1, le=365),
                         "sources": len(entries)})
 
 
-# ── Apple ─────────────────────────────────────────────────────────────────────
+# ── Apple: только миксы (live-сессии и DJ-миксы) ─────────────────────────────
+# Спека радара: этот источник приносит МИКСТРЕКУЩИХСЯ артистов — живые сессии
+# и DJ-миксы. Обычные альбомы и лейбловые сборники здесь не нужны: за ними и
+# так следит сам вишлист, а радар дублировал их отдельным источником.
+#
+# Отбор идет по ДАННЫМ РЕЛИЗА, а не по списку «правильных» артистов: микс
+# узнаётся по прямому называнию (DJ Mix, Mixed by, Continuous Mix), по жанру
+# «DJ-Mixes» и по длительности треков (часовой трек-однушка — это сет, а не
+# песня). Слова «Live», «Sessions», «Mixtape» сами по себе ничего не значат
+# (концертник «Live at Wembley» — не микс), поэтому принимаются только вместе
+# с жанром или хронометражом.
+
+# Прямое называние сета: этого признака хватает самого по себе.
+_MIX_TITLE_RE = re.compile(
+    r"\bdj[\s&/-]*mix(?:es|set)?\b|\bmixed\s+by\b|\bcontinuous\s+mix\b",
+    re.IGNORECASE)
+# Слабые слова: у концертника «Live at Wembley» и у акустических «Sessions»
+# они тоже есть, поэтому в одиночку не принимаются — нужен жанр или хронометраж.
+_MIX_WEAK_RE = re.compile(r"\blive\b|\bsessions?\b|\bmixed\b|\bmixtape\b",
+                          re.IGNORECASE)
+_MIX_GENRE_RE = re.compile(r"dj[\s-]*mix", re.IGNORECASE)
+_MIX_CONT_MS = 40 * 60_000      # одна дорожка ≥ 40 мин — непрерывный сет
+_MIX_AVG_MS = 12 * 60_000       # средняя длина треков ≥ 12 мин — сессионный лонг-форм
+_MIX_MIN_TOTAL_MS = 40 * 60_000 # и общий хронометраж ≥ 40 мин, а не три баллады
+
+
+def _apple_mix_verdict(rel: dict) -> tuple[bool, str]:
+    """Микс или обычный релиз — по данным релиза. (is_mix, reason).
+
+    rel: name, genres (list[str]), track_times (list[int] ms; [] = не знаем).
+    Причина возвращается не для красоты: проверка источника показывает
+    ОТКЛОНЁННЫЕ релизы вместе с тем, почему они отклонены.
+    """
+    name = str(rel.get("name") or "")
+    m = _MIX_TITLE_RE.search(name)
+    if m:
+        return True, f"title:«{m.group(0).lower()}»"
+    if any(_MIX_GENRE_RE.search(str(g) or "") for g in (rel.get("genres") or [])):
+        return True, "genre:dj-mixes"
+    weak = _MIX_WEAK_RE.search(name)
+    times = [t for t in (rel.get("track_times") or []) if t]
+    if times:
+        total = sum(times)
+        if len(times) == 1 and total >= _MIX_CONT_MS:
+            return True, f"continuous:{total // 60000} min set"
+        if total >= _MIX_MIN_TOTAL_MS and total / len(times) >= _MIX_AVG_MS:
+            return True, f"long-form:avg {total // len(times) // 60000} min"
+        w = f" (weak title «{weak.group(0).lower()}» unconfirmed)" if weak else ""
+        return False, (f"regular:{len(times)} tracks, "
+                       f"avg {total // len(times) // 60000} min{w}")
+    if weak:
+        # Длительностей ещё нет — сборщик добьёт их лукупом и спросит снова.
+        return False, f"weak title «{weak.group(0).lower()}», no proof yet"
+    if rel.get("is_compilation"):
+        return False, "compilation"
+    return False, "regular album"
+
+
+async def _apple_itunes(client, params: dict) -> list:
+    """Публичный iTunes lookup — без токена. Пустой список при любом отказе."""
+    try:
+        r = await client.get("https://itunes.apple.com/lookup", params=params)
+        if r.status_code != 200:
+            return []
+        return (r.json() or {}).get("results") or []
+    except Exception as e:
+        print(f"[radar] apple lookup ({params.get('entity')}): {e}", flush=True)
+        return []
+
+
+def _apple_cover(row: dict) -> str:
+    return (row.get("artworkUrl100", "") or "").replace("100x100", "400x400")
+
+
+async def _apple_artist_albums(client, artist_id: str, storefront: str,
+                               with_comps: bool) -> list:
+    """Все релизы артиста из публичного iTunes: свои альбомы плюс родительские
+    коллекции его треков (так видны миксы, где артист — один из дорожек,
+    «Boiler Room x …»-образные)."""
+    albums: dict[str, dict] = {}
+    for x in await _apple_itunes(client, {"id": artist_id, "entity": "album",
+                                          "limit": 100, "sort": "recent",
+                                          "country": storefront}):
+        if x.get("wrapperType") != "collection" or not x.get("collectionId"):
+            continue
+        albums[str(x["collectionId"])] = {
+            "id": str(x["collectionId"]),
+            "name": x.get("collectionName", ""),
+            "artist": x.get("artistName", ""),
+            "date": (x.get("releaseDate", "") or "")[:10],
+            "cover": _apple_cover(x),
+            "url": x.get("collectionViewUrl", ""),
+            "genres": [x.get("primaryGenreName", "")] if x.get("primaryGenreName") else [],
+            "track_count": x.get("trackCount"),
+            "is_compilation": _comps.is_compilation(
+                album_artist=x.get("artistName", ""),
+                title=x.get("collectionName", "")),
+            "track_times": [],
+        }
+    if not with_comps:
+        return list(albums.values())
+    # Родительские коллекции их треков — так видны миксы, где артист не значится
+    # альбом-артистом («Boiler Room x …», лейбловые сессии). Отдельных лукупов
+    # не просим: у трек-строки уже есть collectionName, жанр и длительность —
+    # ровно те признаки, по которым вердикт и выносится.
+    parents: dict[str, dict] = {}
+    for x in await _apple_itunes(client, {"id": artist_id, "entity": "song",
+                                          "limit": 200, "sort": "recent",
+                                          "country": storefront}):
+        cid = str(x.get("collectionId") or "")
+        if x.get("wrapperType") != "track" or not cid or cid in albums:
+            continue
+        p = parents.setdefault(cid, {
+            "id": cid,
+            "name": x.get("collectionName", ""),
+            "artist": x.get("collectionArtistName") or x.get("artistName", ""),
+            "date": (x.get("releaseDate", "") or "")[:10],
+            "cover": _apple_cover(x),
+            "url": x.get("collectionViewUrl", ""),
+            "genres": [x.get("primaryGenreName", "")] if x.get("primaryGenreName") else [],
+            "track_count": 0,
+            "is_compilation": _comps.is_compilation(
+                album_artist=x.get("collectionArtistName") or x.get("artistName", ""),
+                title=x.get("collectionName", "")),
+            "track_times": [],
+        })
+        p["track_count"] += 1
+        if x.get("trackTimeMillis"):
+            p["track_times"].append(x["trackTimeMillis"])
+    albums.update({k: v for k, v in parents.items() if k not in albums})
+    return list(albums.values())
+
+
+async def _apple_catalog_boost(client, artist_id: str, storefront: str,
+                               bearer: str, albums: dict) -> None:
+    """Каталог с bearer из конфига: точные genreNames и честный isCompilation.
+    Публичный lookup называет жанром только один тег, а каталог — весь список,
+    и именно там миксы лежат под «DJ-Mixes». Молча проходим мимо, если
+    токена нет или каталог его не принимает."""
+    if not bearer:
+        return
+    hdr = {"Authorization": f"Bearer {bearer}", "Origin": "https://music.apple.com",
+           "Accept": "application/json"}
+    params = {"limit": "25",
+              "fields[albums]": "name,artistName,artworkUrl100,releaseDate,"
+                                "trackCount,isCompilation,isSingle,genreNames,url"}
+    off = 0
+    for _ in range(4):                            # ≤100 релизов на артиста
+        try:
+            r = await client.get(
+                f"https://amp-api.music.apple.com/v1/catalog/{storefront}/artists/{artist_id}/albums",
+                headers=hdr, params={**params, "offset": str(off)})
+            if r.status_code != 200:
+                return
+            data = (r.json() or {}).get("data") or []
+        except Exception as e:
+            print(f"[radar] apple catalog {artist_id}: {e}", flush=True)
+            return
+        for x in data:
+            a = x.get("attributes") or {}
+            cid = str(x.get("id") or "")
+            if not cid:
+                continue
+            g = albums.get(cid)
+            if g is None:
+                albums[cid] = g = {"id": cid, "name": a.get("name", ""),
+                                   "artist": a.get("artistName", ""),
+                                   "date": (a.get("releaseDate", "") or "")[:10],
+                                   "cover": _apple_cover(a), "url": a.get("url", ""),
+                                   "genres": [], "track_count": a.get("trackCount"),
+                                   "is_compilation": bool(a.get("isCompilation")),
+                                   "track_times": []}
+            g["genres"] = list(a.get("genreNames") or []) or g["genres"]
+            g["is_compilation"] = bool(a.get("isCompilation"))
+            g["track_count"] = a.get("trackCount") or g["track_count"]
+            g["cover"] = g["cover"] or _apple_cover(a)
+            g["url"] = g["url"] or a.get("url", "")
+        if len(data) < 25:
+            return
+        off += 25
+
+
+async def _apple_album_times(client, album_id: str, storefront: str) -> list:
+    rows = await _apple_itunes(client, {"id": album_id, "entity": "song",
+                                        "limit": 200, "country": storefront})
+    return [x["trackTimeMillis"] for x in rows
+            if x.get("wrapperType") == "track" and x.get("trackTimeMillis")]
+
+
+async def collect_apple_mixes(client, entries: list, storefront: str = "us",
+                              bearer: str = "", days: int = 90,
+                              with_comps: bool = True) -> dict:
+    """Миксы артистов вишлиста: {"mixes": [radar-предмет…], "rejected": [доказательство]}.
+
+    rejected — обычные релизы из того же окна с причиной отклонения: по ним
+    видно, что фильтр не просто «ничего не нашёл», а именно отсеивает альбомы.
+    """
+    cutoff = _cutoff(days)
+    today = datetime.now().strftime("%Y-%m-%d")
+    sem = asyncio.Semaphore(4)
+    mixes, rejected = [], []
+
+    async def _one(entry: dict):
+        aid = str(entry.get("artist_id") or "")
+        name = entry.get("name", "")
+        async with sem:
+            try:
+                albums = await _apple_artist_albums(client, aid, storefront, with_comps)
+                byid = {a["id"]: a for a in albums}
+                await _apple_catalog_boost(client, aid, storefront, bearer, byid)
+                todo = []
+                for a in byid.values():
+                    if not a["date"] or a["date"] < cutoff or a["date"] > today:
+                        continue
+                    ok, why = _apple_mix_verdict(a)
+                    if ok:
+                        mixes.append(_apple_mix_item(a, entry, why))
+                    elif not a["track_times"]:
+                        todo.append(a)   # вердикт вслепую — добьем длительностями
+                for a in todo[:8]:              # ≤8 лукупов на артиста — окно и так узкое
+                    if a.get("track_times"):
+                        continue
+                    a["track_times"] = await _apple_album_times(client, a["id"], storefront)
+                    ok, why = _apple_mix_verdict(a)
+                    (mixes if ok else rejected).append(
+                        _apple_mix_item(a, entry, why) if ok
+                        else {"artist": name, "title": a["name"], "date": a["date"],
+                              "reason": why})
+            except Exception as e:
+                print(f"[radar] apple {name}: {e}", flush=True)
+
+    await asyncio.gather(*(_one(e) for e in entries))
+    seen, uniq = set(), []
+    for r in mixes:
+        if r["id"] in seen:
+            continue
+        seen.add(r["id"])
+        uniq.append(r)
+    uniq.sort(key=lambda x: x["date"], reverse=True)
+    return {"mixes": uniq, "rejected": rejected[:200]}
+
+
+def _apple_mix_item(a: dict, entry: dict, why: str) -> dict:
+    # id — идентификатор коллекции, а НЕ url: у релиза, найденного через трек
+    # артиста, url несёт «?i=<трек>» и у каждого артиста свой, из-за чего один
+    # и тот же микс приезжал в ленту по разу на каждого участника.
+    url = (a.get("url") or "").split("?i=")[0]
+    return {
+        "id":        a.get("id") or url or a.get("name", ""),
+        "title":     a.get("name", ""),
+        "artist":    entry.get("name", ""),
+        "artist_id": entry.get("artist_id", ""),
+        "alb_artist": a.get("artist", ""),
+        "type":      "mix",
+        "group":     "mix",
+        "mix_signal": why,
+        "date":      a.get("date", ""),
+        "year":      (a.get("date") or "")[:4],
+        "tracks":    a.get("track_count"),
+        "cover":     a.get("cover", ""),
+        "url":       url,
+        "service":   "apple",
+    }
+
 
 @router.get("/api/releases/apple")
 async def releases_apple(days: int = Query(90, ge=1, le=365),
                          force: int = Query(0)):
-    """New Apple releases by the artists on the watchlist — compilations
-    included, which is the whole reason watchlist.py resolves them via tracks."""
-    key = f"apple|{days}"
+    """Apple-миксы артистов вишлиста — живые сессии и DJ-миксы, и НИЧЕГО
+    сверх них. Обычные альбомы и сборники отсевает _apple_mix_verdict.
+
+    Ключи кэша и склада — apple_mixes, а не apple: старая выдача была собранной
+    лентой альбомов, подмешать её к миксам означало бы кормить владельца ими
+    ещё и со склада."""
+    key = f"apple_mixes|{days}"
     if not force:
         hit = _serve_or_refresh(key, lambda: releases_apple(days=days, force=1))
         if hit is not None:
             return hit
 
     import httpx
-    from ripster.routes.watchlist import _apple_artist_collections
 
     entries = [e for e in _watch_entries("apple") if e.get("artist_id")]
     if not entries:
@@ -597,57 +871,14 @@ async def releases_apple(days: int = Query(90, ge=1, le=365),
     cfg        = _s.get("config") or {}
     storefront = cfg.get("storefront", "us") or "us"
     with_comps = cfg.get("watchlist-compilations", True) is not False
-    cutoff     = _cutoff(days)
-    today      = datetime.now().strftime("%Y-%m-%d")
-    sem        = asyncio.Semaphore(4)
-
-    async def _one(client, entry: dict) -> list:
-        async with sem:
-            try:
-                rels = await _apple_artist_collections(
-                    client, entry["artist_id"], storefront, with_comps)
-            except Exception as e:
-                print(f"[radar] apple {entry.get('name')}: {e}", flush=True)
-                return []
-        out = []
-        for x in rels:
-            date = (x.get("date") or "")[:10]
-            # Pre-orders carry a future date — they are not out yet.
-            if not date or date < cutoff or date > today:
-                continue
-            is_comp = bool(x.get("compilation"))
-            out.append({
-                "id":        x.get("url", "") or x.get("name", ""),
-                "title":     x.get("name", ""),
-                "artist":    entry.get("name", ""),
-                "artist_id": entry.get("artist_id", ""),
-                "alb_artist": x.get("artist", ""),
-                "type":      "compilation" if is_comp else "album",
-                "group":     "compilation" if is_comp else "album",
-                "date":      date,
-                "year":      date[:4],
-                "tracks":    None,
-                "cover":     x.get("cover", ""),
-                "url":       x.get("url", ""),
-                "service":   "apple",
-            })
-        return out
+    bearer     = str(cfg.get("authorization-token") or "").strip()
 
     async with httpx.AsyncClient(timeout=20) as client:
-        results = await asyncio.gather(*(_one(client, e) for e in entries),
-                                       return_exceptions=True)
-    releases = [r for res in results if isinstance(res, list) for r in res]
-    # The same compilation is reachable through several watched artists.
-    seen, uniq = set(), []
-    for r in releases:
-        if r["id"] in seen:
-            continue
-        seen.add(r["id"])
-        uniq.append(r)
-    uniq.sort(key=lambda x: x["date"], reverse=True)
-    # Склад: то, что источник уже не показывает, всё равно остаётся.
-    uniq = _durable_merge("apple", uniq, days)
-    return _store(key, {"ok": True, "releases": uniq, "sources": len(entries)})
+        got = await collect_apple_mixes(client, entries, storefront, bearer,
+                                        days, with_comps)
+    uniq = _durable_merge("apple_mixes", got["mixes"], days)
+    return _store(key, {"ok": True, "releases": uniq, "sources": len(entries),
+                        "rejected": len(got["rejected"])})
 
 
 # ── Лейблы ────────────────────────────────────────────────────────────────────

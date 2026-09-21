@@ -18,6 +18,11 @@
 Слот 0 — основная учётка (ключи ``tidal-*`` в конфиге) и ОБЫЧНЫЙ каталог
 ``orpheus/``: установка с одной учёткой должна вести себя ровно так же, как до
 появления пула, вплоть до того же файла сессии.
+
+Каталог настроек слота (``<слот>/config``) движок теперь знает явно: качество и
+папка сохранения пишутся в НЕГО, а не в общий ``orpheus/config/settings.json``,
+который одновременно перечитывает соседний прогон (Spotify). Сессия у слота
+своим файлом в этом же каталоге; основной аккаунт работает общей.
 """
 from __future__ import annotations
 
@@ -56,6 +61,20 @@ def slot_dir(slot: int) -> Path:
     return _base_dir() / "dist" / "tidal_pool" / f"acct{slot}"
 
 
+def slot_config_dir(slot: int) -> Path:
+    """Каталог настроек слота. Движок пишет качество/папку именно сюда — иначе
+    параллельный прогон соседнего сервиса перебивал бы настройки Tidal (тот же
+    разбор, что покоридорил Beatport с JioSaavn)."""
+    return slot_dir(slot) / "config"
+
+
+def slot_session(slot: int) -> Path:
+    """Файл сессии слота. Для основного аккаунта (слот 0) это общий
+    ``orpheus/config/loginstorage.bin`` — ровно тот, куда пишет вход из
+    Settings, поэтому никаких ручных действий переезд коридора не требует."""
+    return slot_config_dir(slot) / "loginstorage.bin"
+
+
 def _link_shared(dst: Path, src: Path) -> None:
     """Связать папку слота с общей. Junction на Windows, симлинк на Unix.
 
@@ -83,12 +102,15 @@ def ensure_slot(slot: int) -> Path:
     (d / "config").mkdir(parents=True, exist_ok=True)
     for name in _SHARED_DIRS:
         _link_shared(d / name, orpheus_dir() / name)
-    # Настройки копируем ОДИН раз: дальше у слота своя жизнь (качество, папка
-    # сохранения правятся движком под каждую задачу), а сессия у него своя по
-    # определению — ради неё всё и затевалось.
-    src, dst = orpheus_dir() / "config" / "settings.json", d / "config" / "settings.json"
-    if src.is_file() and not dst.is_file():
-        dst.write_bytes(src.read_bytes())
+    # Настройки заводит движок: `seed_slot` копирует общий файл только если он
+    # читается как JSON, пишет атомарно, и с тех пор `modules.tidal` догоняет
+    # общий конфиг сам. Раньше здесь лежал слепой `write_bytes(read_bytes(...))`
+    # без права на обновление — скопированная при создании осколка, копия годами
+    # показывала слоту устаревшие клиентские ключи, даже когда владелец менял их
+    # в общем конфиге.
+    from ripster.engines.tidal import seed_slot
+
+    seed_slot(slot_config_dir(slot), src=orpheus_dir() / "config" / "settings.json")
     return d
 
 

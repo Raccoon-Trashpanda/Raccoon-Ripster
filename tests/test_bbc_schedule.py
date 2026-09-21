@@ -7,7 +7,7 @@
 """
 import asyncio
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -52,14 +52,19 @@ def _future(minutes=30):
 
 def test_store_file_utc_and_atomic(ctx, tmp_path):
     store = ctx[0]
-    # Смещение +05:00 должно приехать в файл чистым UTC.
-    row = store.add(channel="bbc_radio_three",
-                    start_utc=bs.parse_utc("2026-09-21T03:00:00+05:00"),
+    # Смещение +05:00 должно приехать в файл чистым UTC. Дата — относительная:
+    # зашитая «2026-09-21» 21.09.2026 стала прошлым, и store.add честно отказал
+    # записывать прошедший эфир — тест упал, хотя код был исправен.
+    day = (datetime.now(timezone.utc) + timedelta(days=3)).date()
+    local = f"{day.isoformat()}T03:00:00+05:00"
+    want = (datetime.fromisoformat(local).astimezone(timezone.utc)
+            .strftime("%Y-%m-%dT%H:%M:%SZ"))
+    row = store.add(channel="bbc_radio_three", start_utc=bs.parse_utc(local),
                     duration=7200)
-    assert row["start_utc"] == "2026-09-20T22:00:00Z"
+    assert row["start_utc"] == want
     raw = json.loads(store.path.read_text(encoding="utf-8"))
     assert raw["version"] == bs.STORE_VERSION
-    assert raw["recordings"][0]["start_utc"] == "2026-09-20T22:00:00Z"
+    assert raw["recordings"][0]["start_utc"] == want
     # атомарная запись: временных файлов после save() не остаётся
     leftovers = [p.name for p in tmp_path.iterdir() if p.name.endswith(".tmp")]
     assert leftovers == []

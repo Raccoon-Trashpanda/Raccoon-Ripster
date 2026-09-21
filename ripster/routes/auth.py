@@ -967,11 +967,46 @@ def _spotify_devapi_hint(r) -> str:
             "На скачивание не влияет — оно идёт через вход «🎧 Войти в Spotify» (первый блок вкладки).")
 
 
+async def _sc_probe_token(cfg: dict, primary: str) -> tuple[str, str]:
+    """Какую учётку SoundCloud ОПИСЫВАЕТ панель. (token, подпись учётки).
+
+    Панель обязана говорить про ту учётку, которой реально едут загрузки:
+    у владельца 20.09.2026 первой в конфиге стоит free-учётка, а Go+ лежит
+    третьей в пуле — проба каждые 5 минут писала «Free (128 kbps)», тогда как
+    качало на Go+. Выбор берём у пула (`active_token` — он для отчётов и
+    сделан), а не заводим второй, свой: две линейки выбора разъезжаются.
+
+    Заодно лечим причину: ранг слота читает ИЗМЕРЕННОЕ (`known()`), и пока
+    учётку никто не опрашивал, Go+ не виден и пулу — поэтому здесь же греем
+    кэш (`account_info`, 6 ч) и уже потом спрашиваем активный токен.
+    """
+    try:
+        from ripster import soundcloud_accounts as _sa
+        from ripster import soundcloud_pool as _scp
+        accounts = _scp._configured_accounts(cfg)
+        if len(accounts) < 2:
+            return primary, ""
+        for a in accounts:                      # из кэша; в сеть — раз в 6 ч
+            await _sa.account_info(a["token"])
+        tok = (_scp.active_token(cfg) or "").strip() or primary
+        for i, a in enumerate(accounts):
+            if a["token"] == tok:
+                info = _sa.known(tok) or {}
+                label = a.get("label") or f"account{i}"
+                return tok, f"{info.get('login') or label}"
+        return tok, ""
+    except Exception as e:                      # noqa: BLE001
+        print(f"[soundcloud] выбор учётки для пробы не удался: {e}", flush=True)
+        return primary, ""
+
+
 async def _probe_soundcloud(overlay: dict | None = None) -> dict:
-    token = (_view(overlay).get("soundcloud-oauth-token") or "").strip()
+    cfg = _view(overlay)
+    token = (cfg.get("soundcloud-oauth-token") or "").strip()
     if not token:
         return {"ok": False,
                 "error_key": "pr.sc_no_token", "error": "Не заполнен OAuth токен в Settings → SoundCloud."}
+    token, _sc_who = await _sc_probe_token(cfg, token)
 
     try:
         async with httpx.AsyncClient(timeout=10) as c:
@@ -1010,7 +1045,8 @@ async def _probe_soundcloud(overlay: dict | None = None) -> dict:
     if not sub_label:
         sub_label = "Free (128 kbps)"
     print(f"[soundcloud] probe sub: plan_id={plan_id!r} plan_name={plan_name!r} "
-          f"go_plus_field={u.get('go_plus')} → {sub_label}", flush=True)
+          f"go_plus_field={u.get('go_plus')} → {sub_label}"
+          f"{f' (учётка загрузок: {_sc_who})' if _sc_who else ''}", flush=True)
     return {
         "ok": True,
         "user": {
