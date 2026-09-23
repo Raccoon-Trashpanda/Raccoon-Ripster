@@ -7,8 +7,15 @@
             <span style="font-size:22px">📻</span>
             <span style="font-size:14px;font-weight:700;color:var(--text)" data-i18n="v.bbc">BBC Sounds</span>
           </div>
-          <!-- Brand pills -->
+          <!-- Бренд-пилюли -->
           <div id="bbc-brands" style="display:flex;gap:5px;flex-wrap:wrap"></div>
+          <!-- Архив ↔ ближайшие эфиры (вход планировщика) -->
+          <div id="bbc-mode" style="display:flex;gap:4px;flex-shrink:0">
+            <button data-mode="past" onclick="bbcToggleUpcoming(false)" data-i18n="bbc.mode_past"
+              style="padding:4px 10px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);background:var(--surface);border:1px solid var(--border);color:var(--muted)">Все выпуски</button>
+            <button data-mode="up" onclick="bbcToggleUpcoming(true)" data-i18n="bbc.mode_upcoming"
+              style="padding:4px 10px;border-radius:20px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font);background:var(--surface);border:1px solid var(--border);color:var(--muted)">Ближайшие эфиры</button>
+          </div>
           <!-- Search -->
           <div style="display:flex;gap:5px;margin-left:auto;align-items:center">
             <input id="bbc-q" data-i18n-ph="bbc.search_ph" placeholder="Поиск…"
@@ -22,6 +29,46 @@
               style="display:none;padding:6px 10px;background:transparent;border:1px solid var(--border);border-radius:8px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)">
               <span data-i18n="bbc.clear">✕ Все</span>
             </button>
+          </div>
+        </div>
+
+        <!-- Отложенная запись эфиров (ripster/bbc_schedule.py). Ставится с
+             живого канала: выбранное время — начало записи live-потока. -->
+        <div id="bbc-sched" style="background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:10px 12px;margin-bottom:12px">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <span style="font-size:12px;font-weight:700;color:var(--text)" data-i18n="bbc.sched_title">⏰ Отложенная запись</span>
+            <span id="bbc-sched-count" style="font-size:11px;color:var(--muted)"></span>
+            <button onclick="bbcSchedForm(true)" id="bbc-sched-add" data-i18n="bbc.sched_new"
+              style="margin-left:auto;padding:5px 11px;background:rgba(228,0,59,.12);border:1px solid rgba(228,0,59,.45);border-radius:8px;font-size:11px;font-weight:700;color:#e4003b;cursor:pointer;font-family:var(--font)">
+              + Запланировать эфир
+            </button>
+          </div>
+
+          <div id="bbc-sched-empty" data-i18n="bbc.sched_empty" style="font-size:11px;color:var(--muted2);padding:6px 0">
+            Записей не запланировано.
+          </div>
+          <div id="bbc-sched-list" style="display:flex;flex-direction:column;gap:6px;margin-top:6px"></div>
+
+          <div id="bbc-sched-form" style="display:none;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+            <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">
+              <select id="bbc-sch-channel" data-i18n-title="bbc.sch_channel_t" title="Канал эфира"
+                style="padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);font-family:var(--font);outline:none"></select>
+              <input id="bbc-sch-start" type="datetime-local" data-i18n-title="bbc.sch_start_t" title="Начало эфира (local time)"
+                style="padding:5px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);font-family:var(--mono);outline:none"/>
+              <select id="bbc-sch-dur" data-i18n-title="bbc.sch_dur_t" title="Длительность записи"
+                style="padding:6px 8px;background:var(--surface2);border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--text);font-family:var(--font);outline:none"></select>
+              <button onclick="bbcSchedCreate()" data-i18n="bbc.sch_ok"
+                style="padding:6px 14px;background:rgba(228,0,59,.12);border:1px solid rgba(228,0,59,.45);border-radius:8px;font-size:12px;font-weight:700;color:#e4003b;cursor:pointer;font-family:var(--font)">
+                Записать
+              </button>
+              <button onclick="bbcSchedForm(false)" data-i18n="s.cancel"
+                style="padding:6px 12px;background:transparent;border:1px solid var(--border);border-radius:8px;font-size:12px;color:var(--muted);cursor:pointer;font-family:var(--font)">
+                Отмена
+              </button>
+            </div>
+            <div data-i18n="bbc.sch_hint" style="font-size:10.5px;color:var(--muted2);margin-top:6px">
+              Время — ваше местное; запись начнётся с live-потока выбранного канала.
+            </div>
           </div>
         </div>
 

@@ -1558,6 +1558,12 @@ async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
             artist = (((prog.get("parent") or {}).get("programme") or {}).get("title")
                       or ((prog.get("ownership") or {}).get("service") or {}).get("title")
                       or "BBC Radio")
+            # Обложка выпуска (у самого эпизода её часто нет — берём картинку
+            # передачи-брэнда): движок BBC звук картинкой не дополняет, а общий
+            # шаг очереди достаёт обложку из тегов — брать там нечего.
+            _ppid = ((prog.get("image") or {}).get("pid")
+                     or (((prog.get("parent") or {}).get("programme") or {})
+                         .get("image") or {}).get("pid") or "")
 
             # mediaset "pc" (not "iptv-all") — iptv-all only ever exposes a single
             # 51 kbps HE-AAC rendition; pc exposes that SAME variant plus a real
@@ -1596,6 +1602,8 @@ async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
     task["_bbc_artist"]   = artist
     task["_bbc_pid"]      = pid
     task["_bbc_duration"] = duration
+    from ripster.metadata import bbc as _md_bbc
+    task["_bbc_cover"]    = _md_bbc.ichef(_ppid, _md_bbc.EMBED_PX)
     return hls
 
 
@@ -1949,6 +1957,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             _cfg_view["_bbc_artist"]   = task.get("_bbc_artist", "")
             _cfg_view["_bbc_pid"]      = task.get("_bbc_pid", "")
             _cfg_view["_bbc_duration"] = task.get("_bbc_duration", 0)
+            _cfg_view["_bbc_cover"]    = task.get("_bbc_cover", "")
         # Отложенная запись эфира: канал и длительность приходят из плана
         # (ripster/bbc_schedule.py), движок по ним строит адрес live-потока.
         if engine_name == "bbc_live":
@@ -1956,6 +1965,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             _cfg_view["_bbc_live_channel"] = _m.get("channel") or ""
             _cfg_view["_bbc_duration"]     = int(_m.get("duration") or 0)
             _cfg_view["_bbc_title"]        = _m.get("title") or ""
+            _cfg_view["_bbc_cover"]        = _m.get("artworkUrl") or ""
         # Per-release lyrics checkbox override (None = use global config).
         _cfg_view["_lyrics_override"] = task.get("lyrics")
         # Spotify multi-account pool: РОТАЦИЯ аккаунтов (фейловер), не параллель —
@@ -2314,7 +2324,8 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                             _fp = _pool._ports(int(_forced))
                             from ripster import apple_accounts as _AAp
                             _name = "amd-wrapper" if int(_forced) == 0 else f"rip-wrapper-{int(_forced)}"
-                            if await asyncio.to_thread(_AAp.ensure_slot_up, _name, _fp[0]):
+                            if await asyncio.to_thread(
+                                    _AAp.ensure_slot_up, _name, _fp[0], 90.0, _config):
                                 _acq = (int(_forced), _fp[0], _fp[1])
                                 task["log"].append(
                                     f"🦝 слот закреплён за задачей: {_forced} (порт {_fp[0]})")
@@ -2388,7 +2399,14 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 await _broadcast({"type": "log", "msg": f"✗ {ev.message}", "level": "error", "task_id": tid})
                 if ev.message.startswith("ORPHEUS_NOT_AUTHED"):
                     await _broadcast({"type": "orpheus_not_authed"})
-                elif engine_name == "zhaarey" and "AMD" in ev.message:
+                elif engine_name == "zhaarey" and (
+                        "Invalid CKC" in ev.message or "AMD" in ev.message):
+                    # Хендофф в лестницу витрин/учёток. Раньше ловился ТОЛЬКО по
+                    # слову «AMD» в тексте — 23.09.2026 текст переписали честно
+                    # (без совета про публичный wrapper), слово исчезло, и перебор
+                    # своих учёток перестал запускаться вовсе: Hospital30 дважды
+                    # умер после одной попытки. Причина — Invalid CKC, по ней и
+                    # решаем; формулировка сообщения — не контракт.
                     _fatal_amd_hint = True
                 fatal_hit = True
                 await runner.cancel()
@@ -2555,8 +2573,15 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                 result.error += (
                                     f" Проверено: в магазине ссылки ({_link_cc.upper()}) релиз ЕСТЬ, "
                                     f"значит ограничивает страна аккаунта Apple, а не ссылка. "
-                                    f"Доступен в: {_lst}. Нужен аккаунт одной из этих стран "
-                                    f"либо публичный wrapper (он держит несколько регионов).")
+                                    f"Доступен в: {_lst}. Нужен аккаунт одной из этих стран"
+                                    # Совет про публичный wrapper звучит только
+                                    # тогда, когда он реально включён (владелец,
+                                    # 03.09.2026): в локальном режиме он никогда
+                                    # не подключается, и напоминание о нём —
+                                    # ложная надежда.
+                                    + (", либо публичный wrapper — он включён и держит несколько регионов."
+                                       if str(_config.get("apple-wrapper") or "auto").strip().lower() == "public"
+                                       else "; публичный wrapper выключен и сам не подключится."))
                             else:
                                 result.error += (f" Проверено: релиз есть в магазинах {_lst} "
                                                  f"— возьми ссылку оттуда.")
@@ -3420,6 +3445,64 @@ async def _warn_quality_mismatch(task: dict, audio: list, tid: str) -> None:
     except Exception as e:                                    # noqa: BLE001
         print(f"[quality-check] skipped: {e}", flush=True)
 
+
+# Как враппер объясняет своё молчание — по-человечески в одну строку. Те же
+# самые коды уходят в `_ladder`, чтобы отчёт в истории был машинно читаемым.
+_BLOCK_LABELS = {
+    "device_limit": "лимит устройств",
+    "login_failed": "логин отклонён",
+    "no_session": "сессии нет",
+    "stopped": "контейнер остановлен",
+    "": "причина в журнале контейнера не найдена",
+}
+
+
+def _why_not_usable(h: dict) -> str:
+    """Одна строка: почему слот пропущен. «Не поднялся» — это ТРИ разных
+    состояния (контейнер мёртв / порт закрыт / порт жив, но внутри некому дать
+    ключ), и сваливать их в одно было ошибкой 22.09.2026."""
+    if not h.get("running"):
+        return "контейнер не поднят — " + _BLOCK_LABELS.get(h.get("reason") or "", "не поднят")
+    if not h.get("session"):
+        return ("порт жив, но учётка не даёт ключ: "
+                + _BLOCK_LABELS.get(h.get("reason") or "", "?"))
+    if not h.get("port_open"):
+        return "порт расшифровки не отвечает"
+    return "не готов"
+
+
+def _rung_in_catalog(avail, cc: str):
+    """True/False — есть ли релиз в витрине `cc` по каталогу Apple; None — не
+    выяснили. Пустой ответ `apple_album_by_storefront` означает «не известно», а
+    НЕ «нигде нет»: False при пустом каталоге был бы тем же враньём, что и
+    «нет прав в регионе»."""
+    if not avail:
+        return None
+    try:
+        return str(cc) in avail
+    except Exception:
+        return None
+
+
+def _rung_text(d: dict) -> str:
+    """Одна ступень перебора в человеческую строку: не «✗», а ЧТО именно
+    случилось. `in_catalog=None` значит «каталог не спрашивали/не ответили» — и
+    тогда про права региона молчим, потому что сказать об этом нечего."""
+    out = str(d.get("outcome") or "?")
+    tag = {"ok": "✓ дал ключ", "nokey": "ключа нет", "down": d.get("why") or "не готов"}.get(out)
+    if out == "nokey":
+        here = d.get("in_catalog")
+        tag = ("релиза в этой витрине нет" if here is False else
+               "релиз там есть, но ключа не дали" if here else
+               "ключа нет")
+    return f"{d.get('country')}[слот {d.get('slot')}: {tag or out}]"
+
+
+# Ссылки на фоновые задачи треклиста: create_task без переменной — и Gatherer
+# в любой момент может собрать coroutine до того, как она отработает.
+_TRACKLIST_TASKS: set = set()
+
+
 async def run_task(task: dict) -> None:
     """Dispatch a single task to the correct engine runner."""
     svc    = task.get("service", "apple")
@@ -3435,6 +3518,15 @@ async def run_task(task: dict) -> None:
     from ripster.service_config import get_save_path
     task["_base_save_path"] = get_save_path(_config, svc, qid or "")
     await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+
+    # Треклист — СРАЗУ при старте, параллельно скачиванию, а не по его итогам.
+    # Ждать его нельзя: это сетевой запрос к чужому API, а загрузка обязана
+    # начинаться, даже если API лежит. ensure_tracks не бросает исключений и
+    # сам широковещает queue_update, когда список появится.
+    import ripster.metadata as _md
+    _tl = asyncio.create_task(_md.ensure_tracks(task))
+    _TRACKLIST_TASKS.add(_tl)
+    _tl.add_done_callback(_TRACKLIST_TASKS.discard)
 
     # Normalize empty engine string to configured default
     engine = engine or _config.get("engine", "zhaarey")
@@ -3491,25 +3583,35 @@ async def run_task(task: dict) -> None:
                 # ровно перелогин — противоречие, за которым стоит реальный вред:
                 # лишние логины жгут device-lease и загоняют аккаунт в throttle.
                 # Спрашиваем то же состояние и советуем то, что действительно чинит.
+                _sess_alive = False
                 try:
                     from ripster.apple_router import local_wrapper_session_alive
                     # to_thread: это HTTP-запрос с таймаутом 4 с, а мы в event loop.
                     _sess_alive = await asyncio.to_thread(local_wrapper_session_alive)
+                    if not _sess_alive:
+                        # Слот 0 молчит — это НЕ значит, что молчат все. Ключ в
+                        # этот момент мог отдавать другой слот (или мог бы), и
+                        # завязывать перебор своих учёток на один-единственный
+                        # контейнер значит лишать задачу ровно того лечения,
+                        # которое ей подходит.
+                        from ripster import apple_accounts as _AA_probe
+                        _sess_alive = await asyncio.to_thread(
+                            _AA_probe.any_session_alive, _config)
                 except Exception:
-                    _sess_alive = False
+                    pass
 
                 # Два разных случая, и подавлять фолбэк осмысленно только в одном.
                 #
                 # Сессия МЕРТВА — уход на публичный wrapper замаскировал бы поломку,
                 # которую владелец должен починить: подавляем, как и раньше.
                 #
-                # Сессия ЖИВА, а ключа нет — у контента просто нет прав в регионе
-                # аккаунта. Локальный wrapper этот релиз не достанет НИКОГДА:
-                # ни перелогин, ни ожидание не помогут. Раньше здесь всё равно
-                # была ошибка, а в сообщении стоял совет сделать руками ровно то,
-                # что код делать отказывался — переключиться на AMD с его
-                # несколькими регионами. Владелец упёрся в это дважды за минуту
-                # (01.08.2026). Теперь спасаем сами и честно говорим почему.
+                # Сессия ЖИВА, а ключа нет — РАНЬШЕ отсюда следовал вывод «у
+                # контента нет прав в регионе аккаунта». 22.09.2026 он оказался
+                # враньём: «живая сессия» относилась к слоту 0, а ключ запрашивал
+                # слот 1 с device-limit, и перебор своих витрин — единственное
+                # верное лечение — под этим выводом просто отменялся. Теперь
+                # живость проверяется по ВСЕМ своим учёткам, а причина отказа
+                # выясняется у каждой ступени отдельно.
                 _strict = bool((_config or {}).get("apple-local-only-strict", False))
                 if _sess_alive and not _strict:
                     # СНАЧАЛА своя витрина, и только потом чужой публичный wrapper.
@@ -3556,14 +3658,16 @@ async def run_task(task: dict) -> None:
                             _retried_sf = False      # и своя витрина не дала ключа
                         except Exception:
                             _retried_sf = False
-                    # ── ДРУГИЕ НАШИ аккаунты, прежде чем чужой публичный пул ──
-                    # 09.08.2026: у владельца пять Apple-учёток, и при отказе
-                    # канадской задача уходила в публичный wrapper-manager —
-                    # а тот лежал. Рядом простаивали ДВА британских слота, и
-                    # в GB этот альбом есть. Причина была не в логике выбора, а
-                    # в незнании: страну знал только основной слот, потому что
-                    # лишь он публикует порт учётки наружу. Теперь спрашиваем
-                    # каждый слот изнутри (ripster/apple_accounts.py).
+                    # ── ЛЕСТНИЦА СВОИХ АККАУНТОВ ──────────────────────────────────────────────
+                    # Перебор был ОДНОСТУПЕНЧАТЫМ: выбирался один слот, его
+                    # отказ проглатывался `except _NeedAMDFallback` ниже, и
+                    # честная ошибка выходила без попытки на остальных
+                    # учётках. 22.09.2026 к этому добавилась вторая
+                    # немая ступень: перебор требовал, чтобы каталог
+                    # ПОДТВЕРДИЛ релиз в чужой витрине, а поиск по названию
+                    # не находит DJ-миксы → `_avail` пуст → не проверена ни
+                    # одна GB-учётка. Пустой ответ каталога — «не
+                    # выяснили», а не «прав нет» (см. ladder_order).
                     if not _retried_sf:
                         try:
                             from ripster import apple_accounts as _AA
@@ -3580,42 +3684,67 @@ async def run_task(task: dict) -> None:
                             _failed_cc = (await asyncio.to_thread(local_wrapper_storefront) or "").lower()
                             _avail = await asyncio.to_thread(apple_album_by_storefront, url)
                             # Отказавшую витрину исключаем: она уже сказала «нет».
-                            # Исключаем и отказавшую витрину, и те, что уже
-                            # пробовали в этой задаче: раньше выбор был
-                            # одноразовым (флаг _slot_retried), и вторая наша
-                            # сессия не получала шанса вовсе. Теперь перебираем
-                            # все по очереди, пока не кончатся.
+                            # Исключаем и всё, что уже пробовала ЭТА задача, —
+                            # иначе перебор зациклится на первой же учётке.
                             _tried = set(task.get("_slots_tried") or [])
-                            _slot = await asyncio.to_thread(
-                                _AA.pick_slot_for, sorted(_avail),
-                                # config обязателен: без него приоритет и выключение
-                                # слотов из настроек до выбора не доедут, и функция
-                                # молча вернётся к прежнему «первый по стране».
-                                tuple(_tried | {_failed_cc}), _config)
-                            if _slot and _avail.get(_slot["country"]):
+                            if _failed_cc:
+                                _tried.add(_failed_cc)
+                            _cands = await asyncio.to_thread(
+                                _AA.ladder_order, _config, url, tuple(_tried), _avail)
+                            task["_ladder"] = []       # чем отчитаться в финале
+                            for _slot in _cands:
+                                if str(task.get("status") or "").lower() == "cancelled":
+                                    break             # отмена — воля человека
                                 _cc = _slot["country"]
-                                task["_slots_tried"] = sorted(_tried | {_cc})
-                                # Поднять слот и ДОЖДАТЬСЯ порта расшифровки.
-                                # 09.08.2026: британские сессии гасил сборщик
-                                # простоя, порт 10021 не слушал, загрузчик писал
-                                # «connection refused» — а наружу выходило «нет
-                                # прав в регионе». Права были; не было живой
-                                # сессии. Поднятый вручную слот взял альбом
-                                # целиком, 11 из 11, без единого Invalid CKC.
+                                _tried.add(_cc)
+                                task["_slots_tried"] = sorted(_tried)
                                 # Закрепляем слот ЗА ЗАДАЧЕЙ: иначе пул выдаст
-                                # повтору первый свободный, и вся работа по
-                                # подбору страны пропадёт впустую.
+                                # повтору первый свободный, и подбор страны
+                                # пропадёт, а раздача треков по пулу уедет в
+                                # контейнеры других витрин (09.08.2026).
                                 task["_force_slot"] = _slot["slot"]
+                                # Поднять слот и ДОЖДАТЬСЯ порта расшифровки;
+                                # если контейнера нет — пересоздать (пул умеет,
+                                # 22.09.2026 именно этого не хватало).
                                 _up = await asyncio.to_thread(
                                     _AA.ensure_slot_up, _slot["container"],
-                                    _slot.get("port") or 0)
+                                    _slot.get("port") or 0, 90.0, _config)
                                 if not _up:
+                                    # «не поднялся» ≠ «нет прав»: эти два
+                                    # исхода обязаны различаться и в логе, и
+                                    # в итоговом отчёте перебора. И «не
+                                    # поднялся» тоже НЕ одно состояние: 22.09
+                                    # слот 1 держал порт 10021 открытым, а
+                                    # внутри у него был device-limit — то есть
+                                    # ключ дать было некому. Различаем это по
+                                    # журналу самого контейнера.
+                                    _h = await asyncio.to_thread(
+                                        _AA.slot_health, _slot["container"],
+                                        _slot.get("port") or 0)
+                                    _why = _why_not_usable(_h)
+                                    # Пауза входа после отказа Apple — назвать её,
+                                    # а не «контейнер остановлен»: остановлен он
+                                    # именно потому, что логинить его сейчас вредно.
+                                    try:
+                                        from ripster import wrapper_pool as _wpp
+                                        _acs = _wpp.all_accounts(_config or {})
+                                        _pz = (_wpp.login_pause(_acs[_slot["slot"]])
+                                               if 0 <= _slot["slot"] < len(_acs) else None)
+                                        if _pz:
+                                            _why = ("вход на паузе до " + time.strftime(
+                                                "%d.%m %H:%M", time.localtime(_pz["until"]))
+                                                + " — Apple: " + _BLOCK_LABELS.get(
+                                                    _pz.get("reason") or "", _pz.get("reason") or "?"))
+                                    except Exception:
+                                        pass
                                     task["log"].append(
-                                        f"─── слот {_slot['slot']} ({_cc}) не поднялся "
-                                        f"— пропускаю ───")
-                                    print(f"[runner] slot {_slot['container']} did not come up",
+                                        f"─── слот {_slot['slot']} ({_cc}) пропускаю: {_why} ───")
+                                    print(f"[runner] slot {_slot['container']} skipped: {_h}",
                                           flush=True)
-                                    raise _NeedAMDFallback()
+                                    task["_ladder"].append(
+                                        {"slot": _slot["slot"], "country": _cc,
+                                         "outcome": "down", "why": _why})
+                                    continue
                                 _u2 = await asyncio.to_thread(
                                     rewrite_storefront_resolved, url, _cc)
                                 task["log"].append(
@@ -3625,53 +3754,66 @@ async def run_task(task: dict) -> None:
                                     "console.wrapper_other_slot", level="warn",
                                     frm=_failed_cc or "?", to=_cc, slot=_slot["slot"],
                                     task_id=task.get("id", "")))
-                                await _run_engine_task(task, engine, _u2, qid)
-                                _retried_sf = _attempt_succeeded(task)
-                                if not _retried_sf:
-                                    task["log"].append(_i18n.tr(
-                                        "console.slot_rung_failed",
-                                        slot=_slot["slot"], cc=_cc))
-                                    await _broadcast(_i18n.log_event(
-                                        "console.slot_rung_failed", level="warn",
-                                        slot=_slot["slot"], cc=_cc,
-                                        task_id=task.get("id", "")))
-                                    _revive_task(task, _cc)
-                            else:
-                                # Третий исход, который раньше был НЕМЫМ: слот не
-                                # подобрался. Отсутствие записи неотличимо от
-                                # «код не выполнялся» — на этом я уже дважды
-                                # построил неверный вывод. Пишем в общий лог, а
-                                # не в task["log"]: последний в консоль не идёт.
+                                _revive_task(task, _cc)      # ERROR→QUEUED до попытки
+                                try:
+                                    await _run_engine_task(task, engine, _u2, qid)
+                                except _NeedAMDFallback:
+                                    task["_ladder"].append(
+                                        {"slot": _slot["slot"], "country": _cc,
+                                         "outcome": "nokey",
+                                         "in_catalog": _rung_in_catalog(_avail, _cc)})
+                                    _failed_cc = _cc
+                                    continue                  # следующая учётка
+                                if _attempt_succeeded(task):
+                                    _retried_sf = True
+                                    task["_ladder"].append(
+                                        {"slot": _slot["slot"], "country": _cc,
+                                         "outcome": "ok"})
+                                    # память побед: следующий такой релиз
+                                    # начнётся с этой учётки
+                                    await asyncio.to_thread(
+                                        _AA.remember_win, _cc, url, _slot["slot"])
+                                    break
+                                _here = _rung_in_catalog(_avail, _cc)
+                                task["_ladder"].append(
+                                    {"slot": _slot["slot"], "country": _cc,
+                                     "outcome": "nokey", "in_catalog": _here})
+                                # «не дал релиз» и «релиза в этой витрине нет» —
+                                # РАЗНЫЕ утверждения, и путать их нельзя: 22.09
+                                # именно эта строка убедила владельца, что дело
+                                # в правах, хотя каталог показывал альбом в
+                                # четырёх витринах из пяти.
+                                _key = ("console.slot_rung_no_key" if _here is not False
+                                        else "console.slot_rung_no_release")
+                                task["log"].append(_i18n.tr(_key, slot=_slot["slot"], cc=_cc))
+                                await _broadcast(_i18n.log_event(
+                                    _key, level="warn",
+                                    slot=_slot["slot"], cc=_cc,
+                                    task_id=task.get("id", "")))
+                                _failed_cc = _cc
+                            if not _cands:
+                                # СВОИХ УЧЁТОК не нашлось вовсе — молчать
+                                # нельзя: отсутствие записи неотличимо от
+                                # «код не выполнялся», и на этом уже
+                                # строили неверный вывод.
                                 _all = await asyncio.to_thread(
-                                    _AA.all_slots, 8, False, _config)
-                                print(f"[runner] no own slot matched: our sessions="
-                                      f"{[(s['slot'], s['country']) for s in _all]}, "
+                                    _AA.all_slots, 8, True, _config)
+                                print(f"[runner] nothing to try: our sessions="
+                                      f"{[(s['slot'], s['country'], s.get('running')) for s in _all]}, "
                                       f"release available in={sorted(_avail)}, "
-                                      f"excluded='{_failed_cc}'", flush=True)
-                                # …и то же самое ЧЕЛОВЕКУ. Строка выше уходит в
-                                # stdout, а владелец смотрит в консоль задачи —
-                                # и видел там переход на публичный wrapper без
-                                # причины. Вопрос «у меня же несколько учёток,
-                                # неужели ни одна не может» задан 22.08.2026 на
-                                # японском релизе: свои витрины ca/gb/gb, релиз
-                                # издан только в jp. Ответ у кода был, наружу он
-                                # не выходил.
-                                _have = ", ".join(sorted(_avail)) or "—"
-                                _mine = ", ".join(sorted({s["country"] for s in _all
-                                                          if s.get("country")})) or "—"
-                                # Витрины, которые УЖЕ пробовали и которые отказали.
-                                # Без них строка читается как противоречие — своя
-                                # витрина стоит и в «издан в», и в «мои аккаунты», а
-                                # вывод «ни одна не подходит».
-                                _tried = ", ".join(sorted(
-                                    _failed_cc if isinstance(_failed_cc, (set, list, tuple))
-                                    else ([_failed_cc] if _failed_cc else []))) or "—"
-                                task["log"].append(_i18n.tr("console.no_own_slot",
-                                                            have=_have, mine=_mine,
-                                                            tried=_tried))
+                                      f"excluded={sorted(_tried)}", flush=True)
+                                task["log"].append(_i18n.tr(
+                                    "console.no_own_slot",
+                                    have=", ".join(sorted(_avail)) or "—",
+                                    mine=", ".join(sorted({s["country"] for s in _all
+                                                          if s.get("country")})) or "—",
+                                    tried=", ".join(sorted(_tried)) or "—"))
                                 await _broadcast(_i18n.log_event(
                                     "console.no_own_slot", level="warn",
-                                    have=_have, mine=_mine, tried=_tried,
+                                    have=", ".join(sorted(_avail)) or "—",
+                                    mine=", ".join(sorted({s["country"] for s in _all
+                                                          if s.get("country")})) or "—",
+                                    tried=", ".join(sorted(_tried)) or "—",
                                     task_id=task.get("id", "")))
                         except _NeedAMDFallback:
                             _retried_sf = False          # и чужой слот не дал ключа
@@ -3680,7 +3822,7 @@ async def run_task(task: dict) -> None:
                             # и отказ ветки был неотличим от её отсутствия.
                             _retried_sf = False
                             task["log"].append(
-                                f"─── выбор своего слота не состоялся: "
+                                f"─── перебор своих Apple-аккаунтов не состоялся: "
                                 f"{type(_e_slot).__name__}: {_e_slot} ───")
                             print(f"[runner] slot-pick failed: {_e_slot!r}", flush=True)
                     if not _retried_sf:
@@ -3690,32 +3832,51 @@ async def run_task(task: dict) -> None:
                         # каких обстоятельствах, включается только вручную
                         # (apple-wrapper = public). Все свои витрины и слоты
                         # перебраны, ключа нет → честная терминальная ошибка.
+                        _rung = task.get("_ladder") or []
+                        # Перебор реально шёл — значит человек вправе увидеть,
+                        # КОГО именно спрашивали и что ответил каждый. Раньше
+                        # наружу уходил вердикт движка про ОДНУ сессию («нет прав
+                        # в регионе, возьми релиз через AMD»), и владелец по
+                        # нему делал руками ровно то, что код делать
+                        # отказывался. Теперь отчёт — по всем своим учёткам, и
+                        # каждая ступень несёт НАСТОЯЩУЮ причину, а не mark.
+                        _who = ", ".join(_rung_text(d) for d in _rung)
+                        if _who:
+                            _ekey = "console.wrapper_own_accounts_fail"
+                            _eparams = {"tried": _who, "mode": _apple_wrapper_pref}
+                        else:
+                            _ekey = "console.wrapper_own_accounts_none"
+                            _eparams = {"mode": _apple_wrapper_pref}
+                        _msg = _i18n.tr(_ekey, **_eparams)
                         await _broadcast(_i18n.log_event(
-                            "console.wrapper_local_region_fail", level="error",
-                            task_id=task.get("id", "")))
-                        task["log"].append(
-                            "─── все свои Apple-аккаунты перебраны, ключ не выдан; "
-                            "публичный wrapper отключён (включается вручную в Настройках) ───")
+                            _ekey, level="error", task_id=task.get("id", ""), **_eparams))
+                        task["log"].append(f"─── {_msg} ───")
                         _try_advance_task(task, TaskStatus.ERROR)
                         # История больше НЕ пишется в _run_engine_task.finally:
                         # каждая CKC-ступень помечена `_in_retry`, и finally её
                         # пропускает (иначе SAFETY NET был бы нормой). Значит
                         # ФИНАЛЬНУЮ терминальную запись обязан сделать этот
                         # обработчик — иначе задача, перебравшая все свои учётки,
-                        # осталась бы без строки в истории. Вердикт берём из лога
-                        # движка (его «✗ …»), как это делает SAFETY NET. Дедуп по
-                        # id (history + stats) делает повтор записи безопасным.
-                        # 18.09.2026.
-                        if not task.get("error"):
+                        # осталась бы без строки в истории. Дедуп по id (history
+                        # + stats) делает повтор записи безопасным. 18.09.2026.
+                        if _who:
+                            # отчёт перебора важнее вердикта одной сессии
+                            task["error"] = _msg
+                        elif not task.get("error"):
                             task["error"] = _verdict_from_log(task) or (
-                                "Apple: ключ не выдан ни одной вашей учёткой "
-                                "(нет прав в регионе); публичный wrapper отключён.")
+                                "Apple: ключ не выдан ни одной вашей учёткой; "
+                                "публичный wrapper не участвует.")
                         _add_to_history(task)
                 else:
+                    # Два разных молчания: «пробовать было некого» и «пробовать
+                    # запрещено настройкой». Прежний текст сводил их к одному и
+                    # заверял владельца правами региона — как раз тем, что
+                    # каталог в этот раз и опровергал.
+                    _ekey = ("console.wrapper_strict_no_ladder" if _sess_alive
+                             else "console.wrapper_local_drm_fail")
                     await _broadcast(_i18n.log_event(
-                        "console.wrapper_local_region_fail" if _sess_alive
-                        else "console.wrapper_local_drm_fail",
-                        level="error", task_id=task.get("id", "")))
+                        _ekey, level="error", task_id=task.get("id", "")))
+                    task["log"].append(_i18n.tr(_ekey))
                     task["log"].append("─── local-only: AMD-фолбэк подавлен ───")
                     _try_advance_task(task, TaskStatus.ERROR)
                     # Как и выше: CKC-ступень помечена `_in_retry`, историю

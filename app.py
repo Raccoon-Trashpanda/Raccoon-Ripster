@@ -1239,7 +1239,7 @@ def _spawn_restart(delay: float = 0.4) -> None:
             [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:],
             cwd=str(BASE_DIR),
             env=restart_env,
-            creationflags=(subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP
                            | getattr(subprocess, "CREATE_NO_WINDOW", 0))
             if IS_WINDOWS else 0,
         )

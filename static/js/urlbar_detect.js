@@ -144,7 +144,7 @@ function showStab(id, btn) {
     loadTokenExpiry('tidal');
     try { loadTidalAccounts?.(); } catch {}
   }
-  if(id==='spotify') { setVal('s-sp-cid',c['spotify-client-id']||''); setVal('s-sp-csecret',c['spotify-client-secret']||''); _setSecret('s-sp-dc',c['spotify-sp-dc']); _setSecret('s-sp-radar-dc',c['spotify-radar-sp-dc']); setVal('s-sp-radar-cid',c['spotify-radar-client-id']||''); _setSecret('s-sp-radar-csecret',c['spotify-radar-client-secret']); setVal('s-orp-path',c['orpheus-save-path']||''); setChk('s-orp-mp3',c['orpheus-convert-mp3']===true); setVal('s-orp-quality',c['orpheus-quality']||'hifi'); _renderSpotifySavedTarget(); loadSpotifyStatus(); loadOrpheusStatus(); loadSpotifyRadarStatus?.(); testAuth('spotify'); }
+  if(id==='spotify') { setVal('s-sp-cid',c['spotify-client-id']||''); setVal('s-sp-csecret',c['spotify-client-secret']||''); _setSecret('s-sp-dc',c['spotify-sp-dc']); _setSecret('s-sp-radar-dc',c['spotify-radar-sp-dc']); setVal('s-sp-radar-cid',c['spotify-radar-client-id']||''); _setSecret('s-sp-radar-csecret',c['spotify-radar-client-secret']); setVal('s-orp-path',c['orpheus-save-path']||''); setChk('s-orp-mp3',c['orpheus-convert-mp3']===true); setVal('s-orp-quality',c['orpheus-quality']||'hifi'); _renderSpotifySavedTarget(); loadSpotifyStatus(); loadOrpheusStatus(); loadSpotifyRadarStatus?.(); loadSpotifyAccounts?.(); testAuth('spotify'); }
   if(id==='digs') {
     setVal('s-dg-shape',   c['digs-shape']   || 'circle');
     setVal('s-dg-size',    String(c['digs-size'] || 44));

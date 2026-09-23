@@ -63,6 +63,9 @@ def _normalize(meta: dict) -> dict:
         out["totalTracks"] = out["trackCount"]
     elif out["totalTracks"] and not out["trackCount"]:
         out["trackCount"] = out["totalTracks"]
+    if "tracks" in out and "tracksComplete" not in out:
+        _tc = out.get("trackCount") or 0
+        out["tracksComplete"] = not _tc or len(out["tracks"] or []) >= _tc
     return out
 
 
@@ -114,6 +117,14 @@ async def fetch_meta_any(url: str, service: str = "") -> Optional[dict]:
         meta = await fetch_meta_beatport(url)
     elif svc == "bbc":
         meta = await fetch_meta_bbc(url)
+    elif svc == "jiosaavn":
+        meta = await fetch_meta_jiosaavn(url)
+    elif svc == "amazon":
+        # Amazon Music serves a JS-only SPA shell (no OpenGraph/SEO tags) and has
+        # no anonymous catalog API, so there's no progress-card metadata source.
+        # The card fills from the downloaded file tags on success (amz writes a
+        # tagged FLAC + cover). Return None → stays sparse during download only.
+        return None
     elif svc == "orpheus_spotify":
         return None   # no metadata API — return None so enrich_meta merges instead of overwrites
 
@@ -152,9 +163,95 @@ async def fetch_meta_yandex(url: str) -> Optional[dict]:
         "album":      alb.get("title", ""),
         "artworkUrl": alb.get("cover", ""),
         "trackCount": alb.get("tracks") or len(tracks),
+        "tracks":     [{"num": t.get("track_no") or i,
+                        "title": t.get("title") or "",
+                        "artist": t.get("artist") or "",
+                        "dur": t.get("duration") or 0}
+                       for i, t in enumerate(tracks, 1)],
         "type":       "track" if tr else "albums",
         "year":       alb.get("year", ""),
         "service":    "yandex",
+    }
+
+
+async def fetch_meta_jiosaavn(url: str) -> Optional[dict]:
+    """Карточка для трека/альбома/плейлиста JioSaavn через публичный webapi.get.
+
+    Логина у сервиса нет, и мета-API не гео-заблокирован (в отличие от
+    аудиоконсоли saavncdn) — с нашего IP он честно отвечает и из России.
+    Удалённый/битый id сервис отдаёт НЕ 404, а 200 с карточкой-заглушкой
+    (albumid "0", без названия) — её считаем отсутствием меты, как движок.
+    Best-effort: любая неудача → None, карточка остаётся пустой, не падает."""
+    import urllib.parse
+    try:
+        from ripster.engines.orpheus_jiosaavn import (_webapi_get, _saavn_token,
+                                                      _un, _big_cover)
+    except Exception:
+        return None
+    path = urllib.parse.urlparse(url).path.lower()
+    if   "/album/" in path:    typ = "album"
+    elif "/song/" in path:     typ = "song"
+    elif "/playlist/" in path or "/featured/" in path: typ = "playlist"
+    else:
+        return None
+    try:
+        d = await _webapi_get(_saavn_token(url), typ)
+    except Exception:
+        return None
+    if d.get("error"):
+        return None
+
+    if typ == "album":
+        if not (d.get("title") or d.get("name")) or \
+                str(d.get("albumid") or "0") in ("", "0"):
+            return None
+        songs = d.get("songs") or []
+        return {
+            "id":         _saavn_token(url),
+            "type":       "albums",
+            "title":      _un(d.get("title") or d.get("name")),
+            "artist":     _un(d.get("primary_artists")),
+            "album":      _un(d.get("title") or d.get("name")),
+            "artworkUrl": _big_cover(d.get("image", "")),
+            "trackCount": len(songs),
+            "year":       str(d.get("year") or ""),
+            "date":       str(d.get("release_date") or "")[:10],
+            "label":      _un((songs[0] if songs else {}).get("label")),
+            "service":    "jiosaavn",
+        }
+
+    if typ == "playlist":
+        songs = d.get("songs") or []
+        if not d.get("listname"):
+            return None
+        return {
+            "id":         _saavn_token(url),
+            "type":       "playlist",
+            "title":      _un(d.get("listname")),
+            "artist":     _un(d.get("firstname") or d.get("username")),
+            "artworkUrl": _big_cover(d.get("image", "")),
+            "trackCount": len(songs),
+            "service":    "jiosaavn",
+        }
+
+    # song: webapi.get type=song отдаёт {'songs': {...}} — словарь одного трека
+    s = d.get("songs")
+    if isinstance(s, list):
+        s = s[0] if s else None
+    if not isinstance(s, dict) or not s.get("song"):
+        return None
+    return {
+        "id":         _saavn_token(url),
+        "type":       "track",
+        "title":      _un(s.get("song")),
+        "artist":     _un(s.get("primary_artists")),
+        "album":      _un(s.get("album")),
+        "artworkUrl": _big_cover(s.get("image", "")),
+        "trackCount": 1,
+        "year":       str(s.get("year") or ""),
+        "date":       str(s.get("release_date") or "")[:10],
+        "label":      _un(s.get("label")),
+        "service":    "jiosaavn",
     }
 
 
@@ -287,6 +384,13 @@ async def fetch_meta_soundcloud(url: str) -> Optional[dict]:
             "album":      d.get("title", ""),
             "artworkUrl": art,
             "trackCount": d.get("track_count") or len(tracks),
+            # SoundCloud отдаёт вложенные треки прямо в ответе /resolve;
+            # duration у него в миллисекундах.
+            "tracks":     [{"num": i,
+                            "title": (t or {}).get("title") or "",
+                            "artist": ((t or {}).get("user") or {}).get("username") or artist,
+                            "dur": int(((t or {}).get("duration") or 0) / 1000)}
+                           for i, t in enumerate(tracks, 1)],
             "year":       date[:4],
             "date":       date[:10],
             "genre":      d.get("genre", ""),
@@ -429,8 +533,113 @@ async def enrich_meta(task: dict) -> None:
         task["meta"] = {**old, **meta}
     else:
         task.setdefault("meta", {})["enriched"] = True
+    # Треклист добывается из ТОГО ЖЕ ответа, что и карточка, где это возможно
+    # (Qobuz, Deezer, Spotify, SoundCloud, Яндекс отдают списки треков сразу) —
+    # иначе там, где меты нет, всё равно уезжает отдельный запрос.
+    await ensure_tracks(task, broadcast=False)
     if _broadcast_fn and _queue_snapshot:
         await _broadcast_fn({"type": "queue_update", "queue": _queue_snapshot()})
+
+
+# ── Треклист задачи (дерево в карточке очереди) ───────────────────────────────
+# Едет полем задачи, а не только отдельной ручкой: человек должен видеть, ЧТО
+# именно качается, в первую же секунду, а не постфактум по тегам скачанных
+# файлов. Балласт ограничен: `_MAX_TRACKLIST` записей, в записи только строки и
+# секунды — обложек и URL здесь нет намеренно.
+_MAX_TRACKLIST = 200
+
+
+def _compact_tracks(rows) -> list:
+    """Любая форма трек-записи (резолвер, мета сервиса, Beatport) → {num,title,artist,dur}.
+
+    Строки с пустым названием СОХРАНЯЮТСЯ: дерево очереди помечает готовность по
+    позиции, и выбросив один трек из двенадцати, мы соврём про остальные одиннадцать.
+    """
+    out: list = []
+    for i, t in enumerate(rows or [], 1):
+        if not isinstance(t, dict):
+            continue
+        try:
+            num = int(t.get("num") or t.get("track_num") or t.get("trackNumber") or i)
+        except (TypeError, ValueError):
+            num = i
+        try:
+            dur = int(t.get("dur") or t.get("duration") or 0)
+        except (TypeError, ValueError):
+            dur = 0
+        title = str(t.get("title") or t.get("name") or "")[:160]
+        artist = str(t.get("artist") or "")[:120]
+        row = {"num": num, "title": title, "artist": artist}
+        if dur:
+            row["dur"] = dur
+        out.append(row)
+        if len(out) >= _MAX_TRACKLIST:
+            break
+    if not any(r["title"] or r["artist"] for r in out):
+        return []
+    return out
+
+
+async def _tracks_from_source(url: str, service: str) -> list:
+    """Треклист, которого нет в уже полученной метаданной: общий resolver
+    (Apple, Deezer, Qobuz, Tidal, JioSaavn) или учётная ручка Beatport.
+
+    Одиночный трек resolver отдаёт одной записью с пустым названием — это не
+    список, а его отсутствие."""
+    if not url:
+        return []
+    if service == "beatport" or "beatport.com" in url:
+        import re as _re
+        m = _re.search(r"beatport\.com/(?:[a-z]{2}/)?release/[^/]+/(\d+)", url)
+        if not m:
+            return []
+        from ripster.routes.beatport import beatport_release
+        rel = await beatport_release(int(m.group(1)))
+        rows = []
+        for i, x in enumerate((rel or {}).get("tracks") or [], 1):
+            title = (x.get("title") or "")
+            # Микс — часть названия у Beatport: без него ремиксы неразличимы.
+            if x.get("mix"):
+                title = f"{title} ({x['mix']})"
+            rows.append({"num": i, "title": title, "artist": x.get("artist") or ""})
+        return rows
+    from ripster import resolver as _rs
+    if not _rs._cfg:
+        _rs.install(_cfg)
+    rows = await _rs.resolve(url)
+    return rows if len(rows or []) > 1 else []
+
+
+async def ensure_tracks(task: dict, *, broadcast: bool = True) -> bool:
+    """Поставить на задачу `tracks` — [{num,title,artist,dur}] — если их ещё нет.
+
+    Никогда не бросает: треклист — украшение карточки, а загрузка обязана идти
+    и при полностью недоступном API сервиса. Возвращает True, только когда список
+    действительно лёг на задачу."""
+    if task.get("tracks"):
+        return False
+    meta = task.get("meta") or {}
+    try:
+        rows = meta.get("tracks") or []
+        # `tracksComplete` ставит сам сервис: Deezer отдаёт в карточке альбома
+        # первые 25 треков из сорока, и такой список надо допросить; Apple же
+        # теряет пару позиций из-за региона — допрос был бы тем же ответом.
+        # Там, где resolver бессилен (Spotify, SoundCloud), честны и те, что есть.
+        if not rows or not meta.get("tracksComplete", True):
+            rows = await _tracks_from_source(task.get("url") or "",
+                                             task.get("service") or "") or rows
+        tracks = _compact_tracks(rows)
+    except Exception as exc:
+        print(f"[tracks] {task.get('service', '')}: {type(exc).__name__}: {exc}",
+              flush=True)
+        return False
+    if not tracks:
+        return False
+    task["tracks"] = tracks
+    meta.pop("tracks", None)          # дубль на канале не нужен
+    if broadcast and _broadcast_fn and _queue_snapshot:
+        await _broadcast_fn({"type": "queue_update", "queue": _queue_snapshot()})
+    return True
 
 
 __all__ = [
@@ -444,4 +653,5 @@ __all__ = [
     "fetch_mix_detail",
     "auto_fetch_bearer",
     "enrich_meta",
+    "ensure_tracks",
 ]

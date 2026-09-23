@@ -495,7 +495,7 @@ class TidalEngine(EngineBase):
 
     _QUALITIES = [
         {"id": "hi_res",   "label": "MQA / Hi-Res", "sub": "Up to 24/192 MQA",  "badge": "HI-RES",   "color": "#ffd60a", "bitrate": "3000+ kbps", "ext": "flac", "req": "premium", "flag": "-q 3"},
-        {"id": "atmos",    "label": "Dolby Atmos",  "sub": "AC-4 spatial (где доступно)", "badge": "ATMOS", "color": "#9090c8", "bitrate": "~768 kbps", "ext": "m4a", "req": "premium", "flag": ""},
+        {"id": "atmos",    "label": "Dolby Atmos",  "sub": "AC-4 spatial (где доступно)", "sub_key": "qual.tidal.atmos.sub", "sub_args": {"codec": "AC-4 spatial"}, "badge": "ATMOS", "color": "#9090c8", "bitrate": "~768 kbps", "ext": "m4a", "req": "premium", "flag": ""},
         {"id": "lossless", "label": "FLAC",         "sub": "16-bit / 44.1 kHz", "badge": "LOSSLESS", "color": "#3ecfaa", "bitrate": "1411 kbps",  "ext": "flac", "req": "premium", "flag": "-q 2"},
         {"id": "high",     "label": "AAC 320",      "sub": "Lossy high",        "badge": "LOSSY",    "color": "#EF9F27", "bitrate": "320 kbps",   "ext": "m4a",  "req": "free",    "flag": "-q 1"},
         {"id": "low",      "label": "AAC 96",       "sub": "Lossy low",         "badge": "LOSSY",    "color": "#EF9F27", "bitrate": "96 kbps",    "ext": "m4a",  "req": "free",    "flag": "-q 0"},

@@ -23,7 +23,7 @@ from pathlib import Path
 from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
 from .registry import register
 from ripster import bbc_live_channels as _CH
-from ripster.engines.bbc import _safe, ep_dir
+from ripster.engines.bbc import _attach_cover, _safe, ep_dir
 
 _RE_FFMPEG_TIME = re.compile(r"time=(\d+):(\d+):(\d+)")
 # Класс поломки, который нельзя лечить повтором: эфир не открылся.
@@ -40,6 +40,7 @@ class BBCLiveEngine(EngineBase):
 
     def __init__(self):
         self._out_dir: str = ""
+        self._cover: str = ""
         self._expected: Path | None = None
         self._duration: int = 0
         self._elapsed: int = 0
@@ -47,7 +48,12 @@ class BBCLiveEngine(EngineBase):
         self.abort_reason: str = ""   # контракт ProcessRunner: непустая строка глушит процесс
 
     def qualities(self) -> list[dict]:
-        return [{"id": "live320", "label": "AAC-LC 320 · эфир", "sub": "BBC live worldwide",
+        # «320» здесь — не обещание, а измерение: промер 21.09.2026 по всем десяти
+        # каналам — мастер-плейлист live-потока отдаёт 48/96 кбит/с HE-AAC и
+        # 128/320 кбит/с AAC-LC, а ffmpeg -c copy с варианта 320000 кладёт в файл
+        # 319 937…320 046 бит/с профиля LC. Проверяется ВСЕГДА заново — и перед
+        # записью (маршрут /schedule/forecast), и по факту файла (is_finished).
+        return [{"id": "live320", "label": "AAC-LC 320 · эфир", "label_key": "qual.bbc_live.live320.label", "label_args": {"codec": "AAC-LC 320"}, "sub": "BBC live worldwide",
                   "badge": "LOSSY", "color": "#e4003b", "bitrate": "320 kbps",
                   "ext": "m4a", "engine": self.name}]
 
@@ -67,6 +73,24 @@ class BBCLiveEngine(EngineBase):
         if not ffmpeg:
             raise RuntimeError("ffmpeg не найден в PATH — запись эфира невозможна")
 
+        # Лестницу канала меряем ПЕРЕД записью: если ступени 320 в ней сейчас нет,
+        # пишем лучшую фактическую и называем её числом (verdict по файлу всё
+        # равно спрашивает файл, а не этот выбор). Прочитать мастер не удалось —
+        # идём по адресу 320, как ходили всегда.
+        want = _CH.BITRATE // 1000
+        try:
+            from ripster import bbc_quality as _q
+            pick = _q.best_live_variant(channel, want)
+        except Exception:
+            pick = {}
+        if pick.get("url"):
+            stream = pick["url"]
+        got_kbps = int(pick.get("kbps") or 0)
+        if got_kbps and got_kbps < want:
+            print(f"[bbc_live] {_CH.label(channel)}: варианта {want} кбит/с в лестнице "
+                  f"нет — пишем {got_kbps} кбит/с {pick.get('codec') or ''}".strip(),
+                  flush=True)
+
         self._duration = duration
         self._channel = channel
         title = _safe(str(config.get("_bbc_title") or "")) or \
@@ -76,6 +100,7 @@ class BBCLiveEngine(EngineBase):
         out_dir = ep_dir(str(config.get("save-path") or "downloads"),
                          _CH.label(channel), title, pid or channel)
         self._out_dir = str(out_dir)
+        self._cover = str(config.get("_bbc_cover") or "")
         self._expected = out_dir / f"{title}.m4a"
 
         return [
@@ -132,12 +157,33 @@ class BBCLiveEngine(EngineBase):
     def extract_save_dir(self, log_text: str) -> "str | None":
         return self._out_dir or None
 
+    def _actual_quality(self, path) -> str:
+        """«live320» только если файл действительно 320 кбит/с AAC-LC.
+
+        Поток на то и живой: лестница канала может измениться, а вместе с ней и
+        то, что приехало. Мёртвый вариант 320000 ffmpeg не валит — он может отдать
+        и менее полный звук, поэтому спрашиваем файл, а не адрес (ripster/
+        bbc_quality.py: промер 21.09.2026 — 319 937…320 046 бит/с, профиль LC).
+        """
+        try:
+            from ripster import bbc_quality as _q
+            v = _q.verdict(path, _CH.BITRATE // 1000)
+            if v.get("state") == "as_promised":
+                return "live320"
+            if v.get("state") == "below":
+                return f"live{v.get('kbps') or 0}k"
+        except Exception:
+            pass       # не сумели померить — не вешаем на задачу ложный ярлык
+        return ""
+
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
         got = self._expected if self._expected and self._expected.exists() else None
         size = got.stat().st_size if got else 0
         written = f" {size // 1024} КБ" if size else ""
         if rc == 0 and got and size > 10_000:
-            return EngineResult(success=True, tracks_ok=1, quality_actual="live320")
+            _attach_cover(self._out_dir, self._cover)
+            return EngineResult(success=True, tracks_ok=1,
+                                quality_actual=self._actual_quality(got))
         if self.abort_reason:
             # Вердикт движка (эфир не открылся / поток встал) — он точнее любого
             # общего «ffmpeg exited»; раннер кладёт его в result.error как есть.

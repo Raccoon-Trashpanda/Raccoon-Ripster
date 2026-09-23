@@ -177,11 +177,15 @@ def configured_arls(config: dict) -> list[dict]:
     out = []
     main = (config.get("deezer-arl") or "").strip()
     if main:
-        out.append({"arl": main, "label": "основной", "primary": True})
+        out.append({"arl": main, "label": "основной", "label_key": "acc.primary", "primary": True})
     for a in config.get("deezer-accounts") or []:
         if isinstance(a, dict) and (a.get("arl") or "").strip():
+            named = a.get("label")
             out.append({"arl": a["arl"].strip(),
-                        "label": a.get("label") or "без метки", "primary": False})
+                        "label": named or "без метки",
+                        # Свою метку не переводим — она уже написана владельцем.
+                        "label_key": None if named else "acc.unlabeled",
+                        "primary": False})
     return out
 
 

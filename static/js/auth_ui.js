@@ -587,7 +587,7 @@ async function loadDeezerAccounts() {
       <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
         ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
-        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
         ${acctPrefCtl('deezer', a)}
         ${a.primary ? '' : `<button onclick="removeDeezerAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
@@ -615,7 +615,7 @@ function _tidalRenderRows(list, accs, probe) {
     return `<div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
       ${acctDragHandle()}
       <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}"></span>
-      <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${meta?` <span style="color:var(--muted)">· ${escapeHtml(meta)}</span>`:''}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
+      <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${meta?` <span style="color:var(--muted)">· ${escapeHtml(meta)}</span>`:''}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
       ${acctPrefCtl('tidal', a)}
       ${a.primary ? '' : `<button onclick="removeTidalAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
     </div>`;
@@ -690,13 +690,85 @@ async function addDeezerAccount() {
 }
 
 async function removeDeezerAccount(slot) {
-  if(!confirm('Убрать этот аккаунт из пула?')) return;
+  if(!confirm(t('dlg.pool_remove'))) return;
   try {
     const r = await api('POST', `/api/deezer/accounts/${slot}/remove`);
     toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
     loadDeezerAccounts();
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
 }
+
+// ── Spotify multi-account pool (librespot corridors + browser OAuth per slot) ─
+// Отличие от Deezer/Qobuz: токен не вставляется — каждая доп. учётка получает
+// свой коридор и входит отдельным браузерным OAuth. Основной вход (слот 0) при
+// этом не трогается: blob пишется в corridor_blob(slot).
+async function loadSpotifyAccounts() {
+  const list = document.getElementById('spotify-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/spotify/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = accs.map(a => {
+      // Точка по состоянию входа: зелёная — живой blob; красная — известно, что
+      // учётка не отвечает; оранжевая — слот забронирован, вход ещё не пройден.
+      let dot = 'var(--orange)';
+      if (a.has_blob) dot = (a.health === 2 ? 'var(--red)' : 'var(--green)');
+      const meta = [a.login, a.country].filter(Boolean).join(' · ');
+      const pend = a.has_blob ? '' :
+        ` <span style="color:var(--orange)">${escapeHtml(t('sp.acc_pending'))}</span>`;
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${meta?` <span style="color:var(--muted)">· ${escapeHtml(meta)}</span>`:''}${a.primary?` <span style="color:var(--muted)">(${escapeHtml(t('s.slot_primary'))})</span>`:''}${pend}</span>
+        ${a.primary ? '' : `<button onclick="removeSpotifyAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`;
+    }).join('');
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addSpotifyAccount() {
+  const labelEl = document.getElementById('s-spotify-pool-label');
+  const hint = document.getElementById('sp-accounts-hint');
+  const setHint = h => { if (hint) hint.innerHTML = h; };
+  const label = (labelEl?.value || '').trim();
+  // 1) бронируем следующий слот (создаётся коридор + запись в конфиге).
+  let slot;
+  try {
+    const r = await api('POST', '/api/spotify/accounts/add', {label});
+    if (!r || !r.ok) { setHint(`<span style="color:var(--red)">${esc((r && r.msg) || t('t.error'))}</span>`); return; }
+    slot = r.slot;
+    if (labelEl) labelEl.value = '';
+  } catch(e) { setHint(`<span style="color:var(--red)">${esc(t('t.error'))}</span>`); return; }
+  // 2) запускаем браузерный вход в именно этот слот.
+  setHint(t('sp.ogg_starting'));
+  const s = await api('POST', '/api/spotify/auth/start', {slot});
+  if (!s || !s.ok) { setHint(`<span style="color:var(--red)">${t('dlg.err')}: ${esc(_probeMsg(s, 'error') || '?')}</span>`); loadSpotifyAccounts(); return; }
+  const how = await openAuthPage(s.auth_url, t('sp.ogg_login'));
+  if (how === 'here') { return; }   // страница уйдёт на Spotify и вернётся с ?spotify_login=ok
+  if (!how) { setHint(t('sl.cancelled')); loadSpotifyAccounts(); return; }
+  setHint(t('sp.ogg_page_opened'));
+  const deadline = Date.now() + 180 * 1000;
+  const poll = async () => {
+    if (Date.now() > deadline) { setHint(`<span style="color:var(--red)">${t('sp.ogg_timeout')}</span>`); loadSpotifyAccounts(); return; }
+    const p = await api('POST', '/api/spotify/auth/status', {slot});
+    if (p && p.ok && p.done) { setHint(`<span style="color:var(--green)">${t('sp.ogg_signed_in')}</span>`); loadSpotifyAccounts(); return; }
+    if (p && p.ok && p.pending) { setTimeout(poll, 2500); return; }
+    // Дубль той же учётки или иная неудача — понятным сообщением на языке UI.
+    setHint(`<span style="color:var(--red)">${esc(_probeMsg(p, 'error') || t('t.error'))}</span>`);
+    loadSpotifyAccounts();
+  };
+  setTimeout(poll, 3000);
+}
+
+async function removeSpotifyAccount(slot) {
+  if(!confirm(t('sp.acc_remove_confirm'))) return;
+  try {
+    const r = await api('POST', `/api/spotify/accounts/${slot}/remove`, {});
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadSpotifyAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
 
 // ── Qobuz multi-account pool (load-balanced) ────────────────────────────────
 // ── Приоритет и включение учётки — общий кусок для ВСЕХ сервисов ─────────────
@@ -760,6 +832,24 @@ function _acctPrefsPath(svc) {
 function _acctSorted(accs) {
   const pr = a => { const v = Number(a.priority); return Number.isFinite(v) ? v : a.slot; };
   return accs.slice().sort((a, b) => (pr(a) - pr(b)) || (a.slot - b.slot));
+}
+
+// Бэкенд описывает подпись учётки парой `label`/`label_key`: русский нужен боту
+// и CLI, а интерфейс обязан брать ПЕРЕВОД ключа. Без этого слоты уезжали в
+// английский интерфейс дословно: «основной», «слот 1», «без метки».
+function _acctLabel(a) {
+  if (!a) return '';
+  const s = (typeof errKeyText === 'function') ? errKeyText(a.label_key, a.label_args) : '';
+  return s || a.label || '';
+}
+
+// `t` на неизвестный ключ возвращает сам ключ — в интерфейсе это выглядит как
+// сломанная подпись. Эти строки появились вместе с вводом по токену, а
+// словарь i18n.js ведёт другая задача, поэтому до его обновления показываем
+// русский текст из разметки (там он стоит значением по умолчанию).
+function _tOr(key, fallback) {
+  const v = t(key);
+  return v === key ? fallback : v;
 }
 
 function acctDragHandle() {
@@ -893,7 +983,7 @@ async function loadQobuzAccounts() {
       <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
         ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
-        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
         ${acctPrefCtl('qobuz', a)}
         ${a.primary ? '' : `<button onclick="removeQobuzAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
@@ -926,7 +1016,7 @@ async function addQobuzAccount() {
 }
 
 async function removeQobuzAccount(slot) {
-  if(!confirm('Убрать этот аккаунт из пула?')) return;
+  if(!confirm(t('dlg.pool_remove'))) return;
   try {
     const r = await api('POST', `/api/qobuz/accounts/${slot}/remove`);
     toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
@@ -943,14 +1033,20 @@ async function loadAppleAccounts() {
     const accs = r.accounts || [];
     if(!accs.length) { list.innerHTML = ''; return; }
     list.innerHTML = _acctSorted(accs).map(a => {
-      const dot = a.busy ? 'var(--orange)' : (a.running ? 'var(--green)' : 'var(--muted)');
-      const state = a.busy ? 'занят' : (a.running ? 'готов' : 'не запущен');
+      // media-user-token НЕ равно логину: враппер такой слот не поднимает, и
+      // зелёная точка «не запущен» здесь означала бы поломку. Показываем
+      // ограничение строкой, а не молчаливым серым кружком.
+      const token = a.kind === 'token';
+      const dot = token ? 'var(--muted2)'
+                        : (a.busy ? 'var(--orange)' : (a.running ? 'var(--green)' : 'var(--muted)'));
+      const state = token ? _tOr('acc.token_only', 'токен · каталог/тексты/AAC, без ALAC')
+                          : (a.busy ? t('acc.busy') : (a.running ? t('acc.ready') : t('acc.not_started')));
       return `
       <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
         ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}" title="${state}"></span>
-        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
-        <span style="color:var(--muted);font-size:10px">${state}</span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}${token&&a.country?' <span style="color:var(--muted)">('+escapeHtml(a.country.toUpperCase())+')</span>':''}</span>
+        <span style="color:${token?'var(--muted2)':'var(--muted)'};font-size:10px">${state}</span>
         ${acctPrefCtl('apple', a)}
         ${a.primary ? '' : `<button onclick="removeAppleAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`;
@@ -967,6 +1063,18 @@ async function addAppleAccount() {
   const password = (passEl?.value || '').trim();
   const label    = (labelEl?.value || '').trim();
   if(!id || !password) { toast(t('t.error'), 'var(--red)'); return; }
+  // Токен, вставленный в поле Apple ID, врапперу хуже, чем пустая строка:
+  // `-L 0.AsA5…:пароль` для него логин, и каждая неудача сжигает слот
+  // устройства у Apple. Поэтому не добавляем, а перекладываем куда надо.
+  if (/^0\.[A-Za-z0-9+/=]{150,}$/.test(id)) {
+    const tokEl = document.getElementById('s-apple-pool-token');
+    if (tokEl) tokEl.value = id;
+    [emailEl, passEl, labelEl].forEach(el => { if(el) el.value = ''; });
+    toast(_tOr('acc.token_wrong_field',
+      'Это media-user-token, а не Apple ID — переложил его в поле «токен».'),
+      'var(--orange)');
+    return;
+  }
   try {
     const r = await api('POST', '/api/wrapper/accounts/add', {id, password, label});
     if(r.ok) {
@@ -979,8 +1087,35 @@ async function addAppleAccount() {
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
 }
 
+// Второй вход — по media-user-token. Сервер проверяет токен у Apple ДО записи в
+// конфиг и отвечает разным текстом на 403 (токен мёртв) и 401 (сломан наш
+// запрос): совет «вставьте свежий токен» при 401 отправил бы человека чинить то,
+// что не сломано.
+async function addAppleTokenAccount() {
+  const tokEl  = document.getElementById('s-apple-pool-token');
+  const ccEl   = document.getElementById('s-apple-pool-token-cc');
+  const token  = (tokEl?.value || '').trim();
+  const country = (ccEl?.value || '').trim().toLowerCase();
+  if(!token) { toast(t('t.error'), 'var(--red)'); return; }
+  toast(_tOr('acc.token_checking', 'Проверяю токен у Apple…'), 'var(--muted)');
+  try {
+    const r = await api('POST', '/api/wrapper/accounts/add', {token, country});
+    if(r.ok) {
+      // Причина целиком — подписью: текст про 403/401 и про «без ALAC» в одну
+      // строку не влезает, а именно он и есть ответ на вопрос «что не так».
+      toast(_tOr('acc.token_saved', 'Токен сохранён'), 'var(--green)', r.msg || '', 10000);
+      [tokEl, ccEl].forEach(el => { if(el) el.value = ''; });
+      loadAppleAccounts();
+    } else {
+      const ours = r.state === 'bad_request';
+      toast(_tOr(ours ? 'acc.token_bad_request' : 'acc.token_rejected', 'Токен не принят'),
+            ours ? 'var(--orange)' : 'var(--red)', r.msg || '', 12000);
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
 async function removeAppleAccount(slot) {
-  if(!confirm('Убрать этот аккаунт из пула? Его Docker-контейнер будет остановлен.')) return;
+  if(!confirm(t('acc.remove_confirm'))) return;
   try {
     const r = await api('POST', `/api/wrapper/accounts/${slot}/remove`);
     toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
@@ -1000,7 +1135,7 @@ async function loadSoundcloudAccounts() {
       <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
         ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
-        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
         ${acctPrefCtl('soundcloud', a)}
         ${a.primary ? '' : `<button onclick="removeSoundcloudAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
@@ -1027,7 +1162,7 @@ async function addSoundcloudAccount() {
 }
 
 async function removeSoundcloudAccount(slot) {
-  if(!confirm('Убрать этот аккаунт из пула?')) return;
+  if(!confirm(t('dlg.pool_remove'))) return;
   try {
     const r = await api('POST', `/api/soundcloud/accounts/${slot}/remove`);
     toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
@@ -1047,7 +1182,7 @@ async function loadYandexAccounts() {
       <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
         ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
-        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(a.label)}${a.primary?' <span style="color:var(--muted)">(основной)</span>':''}</span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
         ${acctPrefCtl('yandex', a)}
         ${a.primary ? '' : `<button onclick="removeYandexAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`).join('');
@@ -1074,7 +1209,7 @@ async function addYandexAccount() {
 }
 
 async function removeYandexAccount(slot) {
-  if(!confirm('Убрать этот аккаунт из пула?')) return;
+  if(!confirm(t('dlg.pool_remove'))) return;
   try {
     const r = await api('POST', `/api/yandex/accounts/${slot}/remove`);
     toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
@@ -1141,6 +1276,19 @@ async function logoutService(svc, btn) {
 }
 
 
+// ── Формат качества одной строкой ────────────────────────────────────────────
+// Потолок считает СЕРВЕР (ripster/quality_tiers.py — рядом с движками); UI
+// только оформляет пару {codec, kbps|bits,khz} в текст. Никаких тарифов и
+// битрейтов, додуманных здесь: две линейки оценок разъезжаются на первом же
+// изменении тарифной сетки. Нужен и строкам аккаунтов, и карточке SoundCloud
+// (sc.js) — отсюда глобальность.
+function qFmtLabel(c) {
+  if (!c) return '';
+  if (c.bits) return ti('q.hires', { codec: c.codec || '', bits: c.bits, khz: c.khz });
+  if (c.kbps != null) return ti('q.kbps', { codec: c.codec ? c.codec + ' ' : '', kbps: c.kbps });
+  return '';
+}
+
 // ── Обзор аккаунтов: страны, часовые пояса, ранняя доступность ───────────────
 // Показывает по каждой настроенной учётке страну и местное время, и КТО входит
 // в новый день раньше — на этом строится ловля ранних релизов (НЗ-Tidal).
@@ -1156,25 +1304,49 @@ async function renderAccountsOverview() {
   // готовый русский текст оттуда не переводился и приезжал русским даже в
   // английский интерфейс.
   const cname = cc => (cc && t('cc.' + cc) !== 'cc.' + cc) ? t('cc.' + cc) : (cc || '');
+  const flagOf = cc => { cc = String(cc || '').toUpperCase();
+    return /^[A-Z]{2}$/.test(cc)
+      ? String.fromCodePoint(0x1F1E6 + cc.charCodeAt(0) - 65, 0x1F1E6 + cc.charCodeAt(1) - 65)
+      : '🏳'; };
   const hint = d.hint
     ? `<div style="background:rgba(0,212,179,.1);border:1px solid rgba(0,212,179,.35);border-radius:8px;padding:8px 11px;font-size:12px;color:#8fe3d4;margin-bottom:8px">⚡ ${esc(ti('s.acc_hint', {
-        flag: d.hint.flag, label: d.hint.label, country: cname(d.hint.country),
+        flag: d.hint.flag,
+        label: d.hint.account ? `${d.hint.label} · ${d.hint.account}` : d.hint.label,
+        country: cname(d.hint.country),
         h: d.hint.hours, vs: d.hint.vs}))}</div>`
-    : '';
+    : '';;
   const rows = (d.accounts || []).map(a => {
-    const known = a.offset != null;
+    // СТРАНА и ЧАСОВОЙ ПОЯС — два разных факта. Раньше `known` считалось по
+    // offset'у, и на машине без IANA-базы (Windows без tzdata) строка с
+    // реальной страной превращалась в «страна не определена» — владелец терял
+    // CA у Apple и NZ у Tidal из-за сбоя чужого шага.
+    const ccKnown = !!a.country_known;
+    const tzKnown = !!a.tz_known;
     const rank = a.early_rank;
     const badge = rank === 1
       ? `<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;background:rgba(0,212,179,.16);color:#00d4b3;letter-spacing:.4px">${esc(t('s.acc_earliest'))}</span>`
-      : (known ? `<span style="font-size:11px;color:var(--muted2);font-family:var(--mono)">UTC${a.offset>=0?'+':''}${a.offset}</span>` : '');
+      : (tzKnown ? `<span style="font-size:11px;color:var(--muted2);font-family:var(--mono)">UTC${a.offset>=0?'+':''}${a.offset}</span>` : '');
     // У сервиса с пулом страна известна только по ОСНОВНОЙ учётке — остальные
     // могут стоять в других странах, а на этом держится ранняя доступность.
     // Молчать нельзя: панель выдала бы страну основной за страну всего пула.
-    const only = (known && a.country_is_primary_only)
+    const only = (ccKnown && a.country_is_primary_only)
       ? ` <span style="font-size:10px;color:var(--muted2)" title="${esc(t('s.acc_primary_only_t'))}">${esc(t('s.acc_primary_only'))}</span>` : '';
-    const geo = known
-      ? `<span style="color:var(--text)">${a.flag} ${esc(cname(a.country))}</span>${only} · <span style="color:var(--muted)">${esc(a.local_time)}</span>`
-      : `<span style="color:var(--muted2)">${esc(t('s.acc_unknown_country'))}</span>`;
+    const tzNote = `<span style="font-size:10px;color:var(--orange)" ` +
+      `title="${esc(t('s.acc_tz_unknown_t'))}">${esc(t('s.acc_tz_unknown'))}</span>`;
+    // Причина отсутствия страны приезжает с сервера кодом (`never_probe` /
+    // `no_country_field` / `dead_token` / `probe_failed`): только сервер знает,
+    // ЧТО именно не сработало, и отказ обязан это называть, а не прятаться за
+    // безликим «страна не определена».
+    const reason = a.country_reason || 'unknown';
+    // Разные страны аккаунтов — это НЕ подозрение на ошибку, а главный смысл
+    // панели: релиз появляется там, где раньше наступает пятница.
+    const spread = (a.countries || []).length > 1
+      ? ` <span style="font-size:10px;color:var(--muted2)" title="${esc((a.countries || []).map(cname).join(' · '))}">${esc(ti('s.acc_varies', {n: (a.countries || []).length}))}</span>` : '';
+    const geo = ccKnown
+      ? `<span style="color:var(--text)">${a.flag} ${esc(cname(a.country))}</span>${only}${spread} · ` +
+        (tzKnown ? `<span style="color:var(--muted)">${esc(a.local_time)}</span>` : tzNote)
+      : `<span style="color:var(--muted2)" title="${esc(ti('s.acc_why.' + reason))}">` +
+        `${esc(ti('s.acc_no_country', {why: ti('s.acc_why.' + reason)}))}</span>`;
     const acc = a.accounts > 1
       ? ` <span style="font-size:10px;color:var(--muted2)">· ${esc(ti('s.acc_count', {n: a.accounts}))}</span>` : '';
     // Срок подписки: его знает проба сервиса, и с этого захода он переживает
@@ -1194,6 +1366,26 @@ async function renderAccountsOverview() {
                  : (dl < 0 ? ' ' + t('s.sub_expired') : ' · ' + ti('s.sub_days', {n: dl}));
       sub = ` · <span style="color:${col}">${esc(ti('s.sub_until', {date: a.sub_end}) + left)}</span>`;
     }
+    // Тариф и ПОТОЛОК того, что он покупает: сервер присылает `tier` +
+    // `ceiling`, маппинг — на сервере). Истёкшая/мёртвая учётка читается
+    // сломанной: сервер сам гасит тариф в `tier_hidden`, остаётся назвать
+    // причину. Неизвестный тариф — «не определено», а не смелая догадка.
+    let qual = '';
+    if (a.tier_hidden === 'expired') {
+      qual = ` · <span style="color:var(--red)">${esc(t('s.q_expired'))}</span>`;
+    } else if (a.tier_hidden === 'dead') {
+      qual = ` · <span style="color:var(--red)">${esc(t('s.q_dead'))}</span>`;
+    } else if (a.tier || a.ceiling) {
+      const parts = [];
+      if (a.tier) parts.push(ti('s.q_tier', {tier: a.tier}));
+      parts.push(a.ceiling ? ti('s.q_ceiling', {label: qFmtLabel(a.ceiling)})
+                           : t('s.q_ceil_unknown'));
+      qual = ` · <span style="color:var(--muted)" title="${esc(t('s.q_t_tier'))}">` +
+             `${esc(parts.join(' · '))}</span>`;
+    } else {
+      qual = ` · <span style="color:var(--muted2)" title="${esc(t('s.q_t_unknown'))}">` +
+             `${esc(ti('s.q_tier', {tier: t('s.q_none')}))}</span>`;
+    }
     const st = a.configured
       ? `<span style="color:var(--green);font-size:11px">✓</span>`
       : `<span style="color:var(--red);font-size:11px">✗</span>`;
@@ -1209,10 +1401,17 @@ async function renderAccountsOverview() {
       const alive = s.alive === false
         ? `<span style="color:var(--muted2);font-size:10px">${esc(t('s.slot_retired'))}</span>`
         : (s.alive === true ? `<span style="color:var(--green);font-size:10px">✅</span>` : '');
-      const meta = ((s.country ? s.country + ' · ' : '') + bits) || '—';
+      // Слот обязан показать свою страну, а не молчать: смысл дерева в том,
+      // что 6 аккаунтов одного сервиса живут в 6 странах, и «нет страны» у
+      // слота — это тоже измерение, которое надо назвать.
+      const slotCc = (s.country || '').toUpperCase();
+      const where = slotCc
+        ? `${esc(flagOf(slotCc))} ${esc(cname(slotCc))} · `
+        : `<span style="color:var(--muted2)">${esc(t('s.slot_no_country'))}</span> · `;
+      const meta = where + (bits || '—');
       return `<div style="display:flex;align-items:center;gap:8px;padding:5px 10px 5px 30px;font-size:11px">
         <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
-          <span style="color:var(--text);font-weight:600">${esc(s.label || '—')}</span>
+          <span style="color:var(--text);font-weight:600">${esc((typeof errKeyText === 'function' && errKeyText(s.label_key)) || s.label || '—')}</span>
           <span style="color:var(--muted2);margin-left:4px">${esc(meta)}</span>
         </div>${alive}
       </div>`;
@@ -1224,7 +1423,7 @@ async function renderAccountsOverview() {
       `${st}
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;font-weight:600;color:var(--text)">${esc(a.label)}${acc}</div>
-        <div style="font-size:11px;margin-top:1px">${geo}${sub}</div>
+        <div style="font-size:11px;margin-top:1px">${geo}${sub}${qual}</div>
       </div>
       ${badge}${caret}`;
     const rowCss = 'display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px';

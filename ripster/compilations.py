@@ -60,6 +60,18 @@ _COMP_TITLE_RE = re.compile(
 )
 
 
+# Работа, под одной обложкой которой стоит несколько исполнителей, НЕ может
+# доказывать, что два каталога говорят об одном человеке: в чужом диджей-мите
+# или лейбловом «presents» твой заголовок — случайный сосед. Ровно так
+# 21.09.2026 испанский госпел-однофамилец привязался к «Solomon Grey» через
+# «Group Therapy Anjuna25 Special with Above & Beyond (DJ Mix)».
+_MIX_TITLE_RE = re.compile(
+    r"\b(?:dj[ -]?mix(?:es)?|dj[ -]?set|mixtape|mixed by|mix 0?\d|\bmix\b"
+    r"|presents|curated by|selected by|compiled by)\b",
+    re.IGNORECASE,
+)
+
+
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
@@ -91,6 +103,28 @@ def is_compilation(album_type: str = "", album_artist: str = "",
         if not track_artist or _norm(album_artist) != _norm(track_artist):
             return True
     return False
+
+
+def proves_identity(album_type: str = "", album_artist: str = "",
+                    title: str = "", track_artist: str = "") -> bool:
+    """May this release be used as evidence that two catalogs mean ONE person?
+
+    `is_compilation` answers a presentation question ("put it under Сборники").
+    This answers an epistemic one, and the bar is higher: a work that carries a
+    crowd — a comp, a sampler, a soundtrack, a DJ mix, a label showcase — has
+    titles two unrelated artists can share by accident, so agreeing on it proves
+    nothing about who is who. Rows like that are dropped from the shared-work
+    evidence in `artist_identity.classify`.
+
+    Safe on empty input: an unnamed row cannot be evidence either way, and the
+    caller decides what to do with a title it never saw.
+    """
+    if is_compilation(album_type, album_artist, title, track_artist):
+        return False
+    if _MIX_TITLE_RE.search(title or ""):
+        if not track_artist or _norm(album_artist) != _norm(track_artist):
+            return False
+    return bool(_norm(title))
 
 
 def classify(album_type: str = "", album_artist: str = "",

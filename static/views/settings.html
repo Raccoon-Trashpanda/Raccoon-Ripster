@@ -106,7 +106,7 @@
           </div>
           <div class="field-group mt8">
             <label class="lbl" data-i18n="dlorb.variant">Оформление круга</label>
-            <div class="toggle-sub" data-i18n="dlorb.variant_sub" style="margin-bottom:8px">Четыре варианта. Отличаются не только видом, но и тем, откуда берётся цвет: доминирующий тон обложки или её средний цвет.</div>
+            <div class="toggle-sub" data-i18n="dlorb.variant_sub" style="margin-bottom:8px">Семь вариантов одной системы: отличаются тем, как ведёт себя рассеивающийся свет (дышит, пульсирует, льётся ровно, гаснет) и как кольцо читает прогресс (тонкая/толстая дуга, бегущая точка). Цвет берётся из обложки: доминирующий тон или её средний цвет.</div>
             <div id="dlorb-variants" class="dlorb-vgrid"></div>
           </div>
         </div>
@@ -721,8 +721,20 @@
               style="flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);background:transparent;color:var(--muted)" data-i18n="s.wrapper_public"><span data-i18n="s.public">Публичный</span></button>
           </div>
           <div data-i18n-html="s.wrapper_modes_desc" style="margin-top:6px;font-size:11px;color:var(--muted);line-height:1.5">
-            <b><span data-i18n="s.public">Публичный</span></b> — пул wm.wol.moe (без Apple ID, работает сразу).
+            <b><span data-i18n="s.public">Публичный</span></b> — чужой пул wm.wol.moe (без Apple ID, Docker не нужен; пускает ли он нас — см. статус ниже).
             <b><span data-i18n="s.auto">Авто</span></b> — публичный, а при своём wrapper'е — локальный для своего региона.
+          </div>
+          <!-- ЧЕСТНЫЙ ИНДИКАТОР ПУБЛИЧНОГО WRAPPER'А. Раньше об этом месте
+               говорил только кружок в шапке, и врал: проверка здоровья
+               засчитывала «здорово» ответу 401 «нужен API-ключ», потому что
+               критерием было «HTTP-код меньше 500». Теперь здесь четыре
+               разных состояния — работает / отвечает, но нас не пускает /
+               не отвечает / не настроено — и каждое названо своими словами.
+               Заполняется из /api/amd/wrapper-status (см. refreshPublicWrapperStatus). -->
+          <div id="aw-public-status" style="display:none;margin-top:8px;font-size:11px;line-height:1.55;padding:8px 10px;border-radius:8px;border:1px solid var(--border);background:var(--surface2)">
+            <span id="aw-public-status-text"></span>
+            <a href="#" id="aw-public-recheck" onclick="refreshPublicWrapperStatus(true);return false"
+               style="color:var(--blue);text-decoration:none;white-space:nowrap" data-i18n="s.pubw_recheck">Проверить снова</a>
           </div>
           <!-- Advanced reveal for the own-premium local wrapper -->
           <div id="aw-advanced-link" style="margin-top:6px;font-size:11px">
@@ -737,7 +749,7 @@
             🟢 <b>Docker не нужен</b> для большинства сервисов — только для надёжного Apple <b>ALAC / Atmos</b> (режим «Локальный»). «Публичный» работает без Docker.
           </div>
           <div id="aw-local-note" data-i18n-html="s.docker_local_note" style="display:none;margin-top:6px;font-size:11px;color:var(--orange);line-height:1.5">
-            ⚙️ «Локальный» требует <b>Docker Desktop</b>. Не установлен? Поставь с <a href="https://www.docker.com/products/docker-desktop/" target="_blank" style="color:var(--orange)">docker.com</a> или переключись на «Публичный» (работает сразу).
+            ⚙️ «Локальный» требует <b>Docker Desktop</b>. Не установлен? Поставь с <a href="https://www.docker.com/products/docker-desktop/" target="_blank" style="color:var(--orange)">docker.com</a> или переключись на «Публичный» — он работает без Docker, но зависит от чужого сервиса (статус ниже).
           </div>
           <div id="aw-disabled-hint" data-i18n-html="s.wrapper_disabled_hint" style="display:none;margin-top:6px;font-size:11px;color:var(--orange);line-height:1.5">
             Доступно только для движка <b>zhaarey</b>. AMD v2 — это всегда публичный wrapper, gamdl — cookies.
@@ -771,7 +783,88 @@
           function setAppleWrapper(v){
             try{ saveSetting('apple-wrapper', v); }catch(e){}
             _hlAppleWrapper(v);
+            // Выбор «Публичный» без честного статуса — это обещание, которое
+            // никто не проверял. Спросим сразу, а не через минуту.
+            if(v==='public'){ try{ refreshPublicWrapperStatus(true); }catch(e){} }
           }
+          // ── ЧЕСТНЫЙ индикатор публичного wrapper'а ───────────────────────────
+          // Один источник правды — /api/amd/wrapper-status: его дёргает и эта
+          // строка, и healthcheck, так что расходиться они не могут. Четыре
+          // состояния: работает / жив, но нас не пускает / молчит / не настроено.
+          // Прежняя проверка здоровья считала «здорово» ЛЮБОЙ код ниже 500, то
+          // есть рисовала зелёное место на ответе 401 «нужен API-ключ».
+          let _pubwBusy = false, _pubwAt = 0;
+          async function refreshPublicWrapperStatus(manual){
+            var box = document.getElementById('aw-public-status');
+            var txt = document.getElementById('aw-public-status-text');
+            if(!box || !txt) return;
+            box.style.display = '';
+            if(_pubwBusy) return;
+            if(typeof api !== 'function' || typeof t !== 'function' || typeof ti !== 'function') return;
+            _pubwBusy = true; _pubwAt = Date.now();
+            if(manual) txt.textContent = t('s.pubw_checking');
+            var r = null, err = null;
+            try{ r = await api('GET', '/api/amd/wrapper-status'); }
+            catch(e){ err = e; }
+            finally{ _pubwBusy = false; }
+
+            var st = (r && r.state) || '';
+            var line, tone;
+            // `detail` приходит с ЧУЖОГО сервера — потому textContent, а не innerHTML.
+            var _det = function(){
+              var d = String((r && r.detail) || '').slice(0, 160).trim();
+              return d ? ti('s.pubw_detail', {detail: d}) : '';
+            };
+            if(err){
+              line = ti('s.pubw_own_error', {e: String(err.message || err)});
+              tone = 'var(--muted)';
+            } else if(['working','refusing','unreachable','not_configured'].indexOf(st) < 0){
+              // Ответа без `state` не бывает из нового кода — значит процесс
+              // приложения старше правки. Выдумывать тут «работает» нельзя.
+              line = t('s.pubw_no_state');
+              tone = 'var(--muted)';
+            } else if(st === 'working'){
+              line = ti('s.pubw_working', {n: (r.client_count == null ? '?' : r.client_count)});
+              if(Array.isArray(r.regions) && r.regions.length){
+                line += ti('s.pubw_regions', {r: r.regions.slice(0, 8).join(', ')});
+              }
+              tone = 'var(--green)';
+            } else if(st === 'not_configured'){
+              line = t('s.pubw_not_configured'); tone = 'var(--muted)';
+            } else if(st === 'unreachable'){
+              line = t('s.pubw_unreachable') + _det(); tone = 'var(--red)';
+            } else {
+              var rs = String(r.reason || '');
+              line = (rs === 'api_key')   ? t('s.pubw_refusing_api_key')
+                   : (rs === 'pool_empty') ? t('s.pubw_refusing_pool_empty')
+                   : (rs === 'no_status')  ? t('s.pubw_refusing_no_status')
+                   : rs.indexOf('http_') === 0 ? ti('s.pubw_refusing_http', {code: rs.slice(5)})
+                   : t('s.pubw_refusing');
+              line += _det(); tone = 'var(--orange)';
+            }
+            if(r && r.down) line += ti('s.pubw_latched', {s: (r.next_probe_in || 0)});
+            // Раз уж показываем: публичный путь — только по явному выбору, никакой
+            // тихой подмены локального враппера чужим.
+            line += t('s.pubw_manual_only');
+            txt.textContent = line;
+            box.style.color = tone;
+            box.style.borderColor = tone;
+          }
+          // Поллинг — только пока настройки реально на экране: вечный опрос чужого
+          // сервиса из фоновой вкладки не нужен ни нам, ни ему.
+          function _pubwVisible(){
+            var v = document.getElementById('view-settings');
+            return !!v && v.classList.contains('active');
+          }
+          if(!window._pubwTimer){
+            window._pubwTimer = setInterval(function(){
+              if(!document.getElementById('aw-public-status')){
+                clearInterval(window._pubwTimer); window._pubwTimer = null; return;
+              }
+              if(_pubwVisible() && Date.now() - _pubwAt > 60000) refreshPublicWrapperStatus(false);
+            }, 15000);
+          }
+          try{ refreshPublicWrapperStatus(false); }catch(e){}
           // Reflect the currently saved value from the CANONICAL store (S.config).
           // (The old code read window.config — never assigned — so it always fell
           // back to 'auto'.) applyConfig() also calls _hlAppleWrapper once config
@@ -859,7 +952,7 @@
               style="width:100%;font-family:monospace;font-size:11px;background:rgba(0,0,0,.25);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 11px;resize:vertical"></textarea>
             <div style="display:flex;gap:8px;margin-top:8px;align-items:center;flex-wrap:wrap">
               <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
-                onclick="document.getElementById('apple-cookies-file').click()" title="Выбрать файл cookies.txt из проводника"><span data-i18n="s.pick_cookies">📂 Выбрать файл cookies.txt</span></button>
+                onclick="document.getElementById('apple-cookies-file').click()" title="Выбрать файл cookies.txt из проводника" data-i18n-title="set.037"><span data-i18n="s.pick_cookies">📂 Выбрать файл cookies.txt</span></button>
               <input type="file" id="apple-cookies-file" accept=".txt,text/plain" style="display:none" onchange="importAppleCookiesFile(this)"/>
               <button class="btn-sm" style="padding:6px 12px;background:rgba(252,60,68,.18);color:#fc3c44;border:1px solid rgba(252,60,68,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"
                 onclick="(async()=>{const el=document.getElementById('apple-cookies'),st=document.getElementById('apple-cookies-status');st.textContent='…';try{const r=await api('POST','/api/apple/cookies',{text:el.value});st.textContent=r&&r.ok?(r.exists?('✅ Сохранено: '+r.lines+' cookies'+(r.looks_apple?'':' ⚠ нет apple.com')):'🗑 очищено'):('✗ '+((r&&r.error)||'ошибка'));st.style.color=r&&r.ok?'var(--green,#30d158)':'#fc3c44';}catch(e){st.textContent='✗ '+e;st.style.color='#fc3c44';}})()"><span data-i18n="s.save_cookies">💾 Сохранить cookies</span></button>
@@ -960,6 +1053,24 @@
               <input id="s-apple-pool-label" type="text" placeholder="Метка" data-i18n-ph="s.label_ph"
                 style="font-size:11px;flex:1;min-width:80px"/>
               <button class="btn-sm" onclick="addAppleAccount()" style="padding:6px 12px;background:rgba(10,132,255,.18);color:var(--blue);border:1px solid rgba(10,132,255,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"><span data-i18n="s.add_btn">+ Добавить</span></button>
+            </div>
+            <!-- Второй вход: media-user-token. Не «то же самое, но удобнее» —
+                 такой аккаунт физически не может расшифровывать ALAC/Atmos,
+                 поэтому враппер под него не поднимается. Это написано в форме,
+                 а не обнаруживается человеком по факту отказа. -->
+            <div style="display:flex;gap:5px;flex-wrap:wrap;margin-top:6px">
+              <input id="s-apple-pool-token" type="text" placeholder="media-user-token…" data-i18n-ph="s.apple_pool_token_ph"
+                style="font-size:11px;flex:2;min-width:180px"/>
+              <input id="s-apple-pool-token-cc" type="text" placeholder="страна (напр. es)" data-i18n-ph="s.apple_pool_token_cc_ph"
+                maxlength="2" style="font-size:11px;flex:0 0 90px;min-width:70px"/>
+              <button class="btn-sm" onclick="addAppleTokenAccount()" style="padding:6px 12px;background:rgba(10,132,255,.10);color:var(--blue);border:1px solid rgba(10,132,255,.35);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"><span data-i18n="s.add_token_btn">+ Токен</span></button>
+            </div>
+            <div style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5" data-i18n-html="s.apple_token_hint">
+              <b>Токен — не замена логину.</b> По нему проверяется витрина, берётся каталог, тексты и AAC;
+              ALAC/Atmos требует логина с паролем, поэтому Docker-слот для токена не создаётся.<br>
+              Токен проверяется сразу: <span style="color:var(--red)">403</span> — Apple отвергает сам токен
+              (он мёртв или из другой сессии), <span style="color:var(--orange)">401</span> — претензия к нашему
+              запросу, сам токен мог быть жив.
             </div>
           </div>
 
@@ -1651,6 +1762,26 @@
               <button class="btn-sm" id="sp-ogg-btn" onclick="spotifyOggLogin()" style="padding:8px 16px;background:#1db954;color:#000;border:none;border-radius:7px;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)" data-i18n="sp.ogg_login">🎧 Войти в Spotify</button>
               <div id="sp-ogg-hint" style="font-size:11px;color:var(--muted);flex:1;min-width:200px"></div>
             </div>
+          </div>
+
+          <!-- ─ Блок 0б: МУЛЬТИАККАУНТ ──────────────────────────────────
+               Каждая доп. учётка живёт в своём коридоре (dist/spotify_corridors)
+               со своим blob'ом и входит отдельным браузерным OAuth — по образцу
+               пула Deezer, но токен не вставляется, а получается входом. Слот 0
+               (основной вход наверху) в списке только показывается, удалить его
+               нельзя. -->
+          <div style="background:rgba(29,185,84,.06);border:1px solid rgba(29,185,84,.18);border-radius:9px;padding:10px 12px;margin-bottom:10px">
+            <div style="font-size:11px;font-weight:700;color:#1db954;margin-bottom:8px"><span data-i18n="s.extra_accounts">➕ Доп. аккаунты (балансировка загрузок)</span></div>
+            <div style="font-size:10px;color:var(--muted);margin-bottom:8px;line-height:1.5" data-i18n="s.pool_hint_spotify">
+              Добавь ещё Spotify-аккаунты — параллельные загрузки распределяются между всеми, у каждой своя сессия во своём коридоре.
+            </div>
+            <div id="spotify-accounts-list" style="margin-bottom:8px"></div>
+            <div style="display:flex;gap:5px;flex-wrap:wrap;align-items:center">
+              <input id="s-spotify-pool-label" type="text" placeholder="Метка новой учётки" data-i18n-ph="s.spotify_pool_label_ph"
+                style="font-size:11px;flex:1;min-width:140px"/>
+              <button class="btn-sm" onclick="addSpotifyAccount()" style="padding:6px 12px;background:rgba(29,185,84,.18);color:#1db954;border:1px solid rgba(29,185,84,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"><span data-i18n="sp.acc_add_login">+ Добавить и войти</span></button>
+            </div>
+            <div id="sp-accounts-hint" style="font-size:11px;color:var(--muted);margin-top:6px"></div>
           </div>
 
           <!-- ─ Блок 1: Релизы ──────────────────────────────────────────── -->

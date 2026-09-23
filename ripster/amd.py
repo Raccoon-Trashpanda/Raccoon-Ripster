@@ -493,6 +493,27 @@ def _wrapper_mode() -> str:
     return _cfg.get("wrapper-mode", "docker-remote")
 
 
+def _publish(spec: str, container_port: int) -> str:
+    """Строка для `docker -p`, в которой ХОСТ не теряется.
+
+    Раньше из настройки `decrypt-port: 127.0.0.1:10020` брался только хвост
+    после двоеточия, и докер получал `-p 10020:10020` — а это публикация на
+    ВСЕ интерфейсы. 21.09.2026 так и оказалось: порт 30020 без авторизации
+    отдавал `dev_token` и media-user-token активной учётки любому в сети.
+
+    Правила:
+      * «127.0.0.1:10020» — хост уважаем;
+      * «10020» — умолчание ПЕТЛЯ, а не 0.0.0.0: локальный враппер наружу не
+        нужен, и безопасное поведение должно получаться само, без настройки;
+      * «0.0.0.0:10020» — уважаем, но это осознанное открытие наружу.
+    """
+    s = str(spec or "").strip()
+    host, _, port = s.rpartition(":")
+    port = (port or s).strip() or str(container_port)
+    host = (host or "127.0.0.1").strip() or "127.0.0.1"
+    return f"{host}:{port}:{container_port}"
+
+
 def _wrapper_account_port() -> str:
     """Host port to publish the wrapper's account-info API (container 30020) on.
     Derived from `gamdl-wrapper-account-url` so both point at the same place;
@@ -608,9 +629,10 @@ async def check_wrapper_running() -> bool:
     treated as running — that is the 'decryptFragment: EOF' failure mode where
     Docker Desktop is up but no wrapper container is listening on the port.
     """
-    addr = _cfg.get("decrypt-port", "127.0.0.1:10020")
+    addr = str(_cfg.get("decrypt-port", "127.0.0.1:10020")).strip()
+    host, _, port = addr.rpartition(":")
+    host = (host or "127.0.0.1").strip() or "127.0.0.1"   # та же логика, что в _publish
     try:
-        host, port = addr.rsplit(":", 1)
         with socket.create_connection((host, int(port)), timeout=1) as conn:
             conn.settimeout(0.3)
             try:
@@ -743,8 +765,6 @@ async def _start_wrapper_docker(force_login: bool = False) -> dict:
 
     dec_port = _cfg.get("decrypt-port", "127.0.0.1:10020")
     m3u_port = _cfg.get("m3u8-port",    "127.0.0.1:20020")
-    dec_p    = dec_port.split(":")[-1]
-    m3u_p    = m3u_port.split(":")[-1]
     acct_p   = _wrapper_account_port()
     rootfs   = str(_rootfs_data(mode))
     Path(rootfs).mkdir(parents=True, exist_ok=True)
@@ -766,21 +786,27 @@ async def _start_wrapper_docker(force_login: bool = False) -> dict:
         if not (apple_id and apple_pwd):
             return {"ok": False,
                     "msg": "Apple ID и пароль не заданы в Settings → Apple Music → Wrapper"}
-        return await _docker_login(docker_path, image, dec_p, m3u_p, rootfs,
-                                   apple_id, apple_pwd, force_login)
+        return await _docker_login(docker_path, image, dec_port, m3u_port,
+                                   rootfs, apple_id, apple_pwd, force_login)
 
     # ── NORMAL path: saved session → detached, auto-restart, no 2FA. ──
     wrapper_args = "-H 0.0.0.0"
     cmd = [
         docker_path, "run", "-d",
         "--name", WRAPPER_CONTAINER_NAME,
-        "--restart", "unless-stopped",
+        # БЕЗ `--restart`: Docker Desktop теряет HostIp при перезапуске
+        # контейнера, и порты, созданные на 127.0.0.1, после перезагрузки
+        # машины поднимаются на 0.0.0.0. Порт 30020 отдаёт токены Apple
+        # без авторизации, поэтому цена такой «услужливости» — открытая
+        # сессия для всей локальной сети. Проверено 21.09.2026 на
+        # Docker Desktop 4.83 / engine 29.6.2. Приложение само поднимает
+        # враппер, когда он не отвечает, — автоподъём докером не нужен.
         "-v", f"{rootfs}:/app/rootfs/data",
-        "-p", f"{dec_p}:10020",
-        "-p", f"{m3u_p}:20020",
+        "-p", _publish(dec_port, 10020),
+        "-p", _publish(m3u_port, 20020),
         # Publish the account-info API too so the app can harvest a fresh
         # media-user-token from the subscribed account (music videos need it).
-        "-p", f"{acct_p}:30020",
+        "-p", _publish(acct_p, 30020),
         "-e", f"args={wrapper_args}",
         image,
     ]
@@ -865,7 +891,7 @@ async def _read_login_stream(proc: "asyncio.subprocess.Process") -> None:
         pass
 
 
-async def _docker_login(docker_path: str, image: str, dec_p: str, m3u_p: str,
+async def _docker_login(docker_path: str, image: str, dec_port: str, m3u_port: str,
                         rootfs: str, apple_id: str, apple_pwd: str,
                         force: bool) -> dict:
     """Login start for THIS wrapper build: it reads the 2FA code from a FILE
@@ -890,9 +916,9 @@ async def _docker_login(docker_path: str, image: str, dec_p: str, m3u_p: str,
         docker_path, "run", "-d",
         "--name", WRAPPER_CONTAINER_NAME,
         "-v", f"{rootfs}:/app/rootfs/data",
-        "-p", f"{dec_p}:10020",
-        "-p", f"{m3u_p}:20020",
-        "-p", f"{_wrapper_account_port()}:30020",
+        "-p", _publish(dec_port, 10020),
+        "-p", _publish(m3u_port, 20020),
+        "-p", _publish(_wrapper_account_port(), 30020),
         "-e", f"args={args_str}",
         image,
     ]

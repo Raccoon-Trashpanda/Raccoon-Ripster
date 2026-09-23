@@ -5,6 +5,12 @@ Walks the configured save-paths, reads tag metadata via mutagen, exposes:
   GET /api/library/scan?refresh=0  → flat list of tracks with metadata
   GET /api/library/cover/{cid}     → embedded cover art (cached)
   GET /api/library/file?p=<path>   → audio file stream with HTTP Range support
+  POST /api/library/folder         → add + scan a folder picked in the native
+                                     dialog (Tracker #9014), polled job
+  GET  /api/library/folder/status  → progress of such a job (incl. cancel)
+  GET  /api/library/folder/tracks  → incremental result batches
+  POST /api/library/peek           → tags from the FIRST BYTES of a dropped
+                                     file (same mutagen reader as the scanner)
 
 Path traversal is blocked: every file path must resolve under one of the
 configured roots (commonpath check). All endpoints are owner-only; guests are
@@ -15,10 +21,14 @@ Install: library.install(app, ctx)
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
+import io
+import json
 import os
 import re
 import subprocess
+import threading
 import time
 from pathlib import Path
 from urllib.parse import quote
@@ -45,13 +55,19 @@ _index: list[dict]        = []
 _index_ts: float          = 0.0
 _INDEX_TTL                = 600          # 10 min in-memory cache
 _index_lock               = asyncio.Lock()
+# поток job-сканера дописывает индекс вне event loop — asyncio.Lock ему не подходит
+_index_muthread           = threading.Lock()
 _cover_cache: dict[str, tuple[bytes, str]] = {}   # cid → (bytes, mime)
 _COVER_CACHE_MAX          = 200
 
 
 def install(app, ctx) -> None:
-    global _cfg
+    global _cfg, _base_dir
     _cfg = ctx.config
+    _base_dir = getattr(ctx, "base_dir", None) or Path.cwd()
+    # Без этого строки добавленные папки живут до перезапуска: файл состояния
+    # читается, но не читается НИКЕМ. Поймано прогоном «перезапусти и посмотри».
+    _load_extra_roots()
     app.include_router(router)
 
 
@@ -59,6 +75,90 @@ def install(app, ctx) -> None:
 
 _ROOT_KEYS = ("save-path", "qobuz-save-path", "tidal-save-path",
               "deezer-save-path", "soundcloud-save-path", "orpheus-save-path")
+
+_base_dir = None
+
+# Папки, добавленные через нативный выбор (Tracker #9014). СВОЙ файл состояния:
+# в config.yaml пишет только ядро, и трогать его отсюда нельзя.
+_ROOTS_FILE_NAME = "library_extra_roots.json"
+_extra_roots: list[Path] = []
+_roots_lock = threading.Lock()
+
+
+def _roots_file() -> Path:
+    return Path(_base_dir) / "config" / _ROOTS_FILE_NAME
+
+
+def _load_extra_roots() -> None:
+    global _extra_roots
+    try:
+        raw = json.loads(_roots_file().read_text(encoding="utf-8"))
+    except Exception:
+        return
+    out, seen = [], set()
+    for v in raw if isinstance(raw, list) else []:
+        try:
+            p = Path(str(v)).expanduser().resolve()
+        except Exception:
+            continue
+        if p.is_dir() and str(p).lower() not in seen:
+            seen.add(str(p).lower())
+            out.append(p)
+    with _roots_lock:
+        _extra_roots = out
+
+
+def _save_extra_roots() -> None:
+    try:
+        f = _roots_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        with _roots_lock:
+            data = [str(p) for p in _extra_roots]
+        tmp = f.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, f)
+    except Exception:
+        pass   # папка добавлена на этот запуск; на следующий просто не вспомнится
+
+
+def register_folder(path: str, extra: list[Path] | None = None) -> Path | None:
+    """Проверить выбранную пользователем папку и, если нужно, запомнить её.
+
+    Возвращает Path — папка стала новым корнем библиотеки (её увидят и обычный
+    скан, и /api/library/file после перезапуска). Возвращает None — запоминать
+    нечего: это уже корень или ветка уже индексируемого корня, сканировать её
+    можно и так. Бросает HTTPException — папки нет, либо она стоит ВЫШЕ
+    библиотеки и накрывает уже настроенный корень: такое добавление только
+    расширило бы круг папок, откуда отдаются файлы, а пользы бы не дало.
+
+    `extra` = уже запомненный набор (тесты подменяют живую копию)."""
+    try:
+        p = Path(str(path)).expanduser().resolve()
+    except Exception:
+        raise HTTPException(400, "Bad path")
+    if not p.is_dir():
+        raise HTTPException(404, "Folder does not exist")
+    pool = extra if extra is not None else _roots()
+    for r in pool:
+        if os.path.normcase(str(r)) == os.path.normcase(str(p)):
+            return None                      # этот же корень — просто пересканируем
+        try:
+            r.relative_to(p)
+            raise HTTPException(400, "folder contains a library root")
+        except ValueError:
+            pass
+        try:
+            p.relative_to(r)
+            return None                      # ветка уже индексируемого корня
+        except ValueError:
+            pass
+    with _roots_lock:
+        low = os.path.normcase(str(p))
+        if any(os.path.normcase(str(e)) == low for e in _extra_roots):
+            return p
+        _extra_roots.append(p)
+    _save_extra_roots()
+    return p
 
 
 def _roots() -> list[Path]:
@@ -79,6 +179,13 @@ def _roots() -> list[Path]:
             continue
         seen.add(key)
         out.append(p)
+    with _roots_lock:
+        extra = list(_extra_roots)
+    for p in extra:
+        key = str(p).lower()
+        if key not in seen and p.is_dir():
+            seen.add(key)
+            out.append(p)
     return out
 
 
@@ -239,6 +346,265 @@ async def lib_scan(refresh: int = 0):
         _index_ts = now
     return {"ok": True, "items": _index, "count": len(_index),
             "cached": False, "ts": _index_ts, "roots": [str(r) for r in _roots()]}
+
+
+# ── Added folders: native-picker jobs (Tracker #9014) ─────────────────────────
+#
+# Тот же walks+mutagen, что и у обычного скана, НО: job живёт в словаре, ход
+# отдаётся пачками (фронт дописывает трек-лист по мере скана, а не ждёт весь),
+# есть отмена и честный счётчик пропущенного не-аудио. Поток-воркер, а не
+# сопрограмма: mutagen'у блокирующий доступ к диску только на руку.
+
+_jobs: dict[str, dict] = {}
+_jobs_lock = threading.Lock()
+_JOB_TTL = 30 * 60
+_KEEP_ITEMS = 20000        # дальше — только счётчики: трек-лист столько не ест
+
+
+def _prune_jobs():
+    now = time.time()
+    with _jobs_lock:
+        for jid in [k for k, j in _jobs.items() if now - j.get("ts", now) > _JOB_TTL]:
+            _jobs.pop(jid, None)
+
+
+def _item_from(path: Path, root: Path) -> dict | None:
+    tags = _read_tags(path)
+    if not tags:
+        return None
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    try:
+        rel = str(path.relative_to(root))
+    except ValueError:
+        rel = path.name
+    return {**tags, "id": _cid(path), "path": str(path), "rel": rel,
+            "root": str(root), "ext": path.suffix.lstrip(".").lower(),
+            "size": stat.st_size, "mtime": int(stat.st_mtime)}
+
+
+def _cancel_job(job: dict, scanned: int, skipped: int, unreadable: int) -> None:
+    """Отмена: заморозить счётчики и уйти. Без этого фронт видит «сканирую…»
+    до конца обхода, хотя человека уже не слушают."""
+    job["scanned"], job["skipped"], job["unreadable"] = scanned, skipped, unreadable
+    job["state"] = "cancelled"
+    job["ts"] = time.time()
+
+
+def _scan_folder_job(jid: str, root: Path) -> None:
+    scanned = skipped = unreadable = 0
+    for dirpath, dirs, files in os.walk(root):
+        job = _jobs.get(jid)
+        if job is None:
+            return                    # job истёк — писать уже некому
+        if job.get("cancel"):
+            _cancel_job(job, scanned, skipped, unreadable)
+            return
+        dirs.sort(key=lambda s: s.lower())
+        for fn in sorted(files, key=_natkey):
+            # Проверка и на каждом файле: плоская папка «вся музыка» из полутора
+            # тысяч файлов иначе игнорировала бы отмену до самого её конца.
+            if job.get("cancel"):
+                _cancel_job(job, scanned, skipped, unreadable)
+                return
+            ext = os.path.splitext(fn)[1].lower()
+            if ext not in _AUDIO_EXTS:
+                skipped += 1
+                continue
+            path = Path(dirpath) / fn
+            item = _item_from(path, root)
+            if item is None:
+                # расширение аудио, а тег не прочитался: это НЕ «не-аудио»,
+                # и валить два разных дефекта в один счётчик — врать человеку
+                unreadable += 1
+                continue
+            scanned += 1
+            if len(job["items"]) < _KEEP_ITEMS:
+                job["items"].append(item)
+            job["found"] += 1
+        job["scanned"] = scanned
+        job["skipped"] = skipped
+        job["unreadable"] = unreadable
+        job["ts"] = time.time()
+    global _index, _index_ts
+    job = _jobs.get(jid)
+    if job is None:
+        return
+    with _index_muthread:
+        known = {it["id"] for it in _index}
+        for it in _jobs[jid]["items"]:
+            if it["id"] not in known:
+                _index.append(it); known.add(it["id"])
+        _index_ts = time.time()
+    job = _jobs[jid]
+    job["state"] = "done"
+    job["ts"] = time.time()
+
+
+_NAT_RE = re.compile(r"(\d+)")
+
+
+def _natkey(name: str):
+    """Порядок как в Проводе: цифры сравниваются числами (Track 2 < Track 10)."""
+    low = str(name).lower()
+    return [int(t) if t.isdigit() else t for t in _NAT_RE.split(low)]
+
+
+@router.post("/api/library/folder")
+async def lib_folder_add(req: Request):
+    """Занять выбранные папки и завести на каждую job-сканер.
+
+    Отказ по ОДНОЙ папке не отменяет остальные: человек принёс десять, девять
+    нормальные. Причина отказа возвращается рядом с путём и показывается фронту.
+    """
+    _prune_jobs()
+    try:
+        body = await req.json()
+    except Exception:
+        body = {}
+    paths = body.get("paths") or ([body["path"]] if body.get("path") else [])
+    if not isinstance(paths, list) or not paths:
+        raise HTTPException(400, "path or paths[] required")
+    if len(paths) > 20:
+        raise HTTPException(400, "too many folders at once")
+    started, refused = [], []
+    for raw in paths[:20]:
+        shown = str(raw)
+        try:
+            p = Path(shown).expanduser().resolve()
+            # None = уже внутри библиотеки: сканируем, но вторым корнем не делаем
+            register_folder(str(p))
+        except HTTPException as e:
+            refused.append({"path": shown, "error": str(e.detail)})
+            continue
+        except Exception:
+            refused.append({"path": shown, "error": "Bad path"})
+            continue
+        jid = hashlib.sha1(f"{p}|{time.time()}".encode()).hexdigest()[:12]
+        with _jobs_lock:
+            _jobs[jid] = {"id": jid, "root": str(p), "state": "running",
+                          "items": [], "found": 0, "scanned": 0, "skipped": 0,
+                          "unreadable": 0, "cancel": False, "ts": time.time()}
+        threading.Thread(target=_scan_folder_job, args=(jid, p), daemon=True).start()
+        started.append({"job": jid, "path": str(p)})
+    return {"ok": bool(started), "started": started, "refused": refused}
+
+
+@router.get("/api/library/folder/status")
+async def lib_folder_status(job: str = Query(...), cancel: int = 0):
+    j = _jobs.get(job)
+    if not j:
+        raise HTTPException(404, "no such job")
+    if cancel:
+        j["cancel"] = True
+    return {"ok": True, "state": j["state"], "root": j["root"],
+            "found": j["found"], "scanned": j["scanned"], "skipped": j["skipped"],
+            "unreadable": j.get("unreadable", 0),
+            "total": j["found"] + j["skipped"] + j.get("unreadable", 0)}
+
+
+@router.get("/api/library/folder/tracks")
+async def lib_folder_tracks(job: str = Query(...), after: int = 0):
+    j = _jobs.get(job)
+    if not j:
+        raise HTTPException(404, "no such job")
+    after = max(0, min(after, len(j["items"])))
+    batch = j["items"][after:after + 500]
+    return {"ok": True, "items": batch, "next": after + len(batch),
+            "state": j["state"], "found": j["found"], "skipped": j["skipped"],
+            "unreadable": j.get("unreadable", 0)}
+
+
+# ── Peek: ярлыки перетащенных файлов по ПЕРВЫМ БАЙТАМ ─────────────────────────
+#
+# Заголовок у mp3/flac/ogg/mp4 живёт в начале файла. Читает mutagen — ТОТ ЖЕ
+# код, что у сканера библиотеки, поэтому разойтись в показаниях две ветки
+# уже не могут. Ответ не проходит через _safe_resolve: наружу уходят поля,
+# которые сам пользователь принёс в окно.
+
+_PEEK_BUDGET = {".mp3": 320000, ".flac": 120000, ".ogg": 150000,
+                ".opus": 150000, ".m4a": 700000, ".aac": 96000, ".wav": 64,
+                ".alac": 700000, ".aif": 700000, ".aiff": 700000}
+
+
+@router.post("/api/library/peek")
+async def lib_peek(req: Request):
+    try:
+        body = await req.json()
+    except Exception:
+        raise HTTPException(400, "json required")
+    files = (body.get("files") or [])[:40]
+    out = []
+    for f in files:
+        name = str(f.get("name") or "")[:512]
+        ext = os.path.splitext(name)[1].lower()
+        try:
+            blob = base64.b64decode(str(f.get("b64") or ""), validate=True)
+        except Exception:
+            blob = b""
+        entry = {"name": name}
+        if ext not in _AUDIO_EXTS:
+            entry["audio"] = False
+            out.append(entry); continue
+        if not blob:
+            entry.update(audio=True, tags=None); out.append(entry); continue
+        try:
+            audio = mutagen.File(io.BytesIO(blob), easy=False)
+        except Exception:
+            audio = None
+        if audio is None:
+            entry.update(audio=True, tags=None, truncated=len(blob) < _PEEK_BUDGET.get(ext, 320000))
+            out.append(entry); continue
+        t = {"title": "", "artist": "", "album": "", "year": "", "has_cover": False, "duration": 0}
+        try:
+            if getattr(audio, "info", None) and getattr(audio.info, "length", None):
+                t["duration"] = int(audio.info.length)
+        except Exception:
+            pass
+        try:
+            if isinstance(audio, FLAC):
+                tg = audio.tags or {}
+                t["title"] = (tg.get("title") or [""])[0]
+                t["artist"] = (tg.get("artist") or [""])[0]
+                t["album"] = (tg.get("album") or [""])[0]
+                t["year"] = ((tg.get("date") or tg.get("year") or [""])[0] or "")[:4]
+                t["track"] = str((tg.get("tracknumber") or [""])[0] or "")
+                t["disc"] = str((tg.get("discnumber") or [""])[0] or "")
+                t["has_cover"] = bool(audio.pictures)
+            elif isinstance(audio, MP4):
+                tg = audio.tags or {}
+                t["title"] = (tg.get("\xa9nam") or [""])[0]
+                t["artist"] = (tg.get("\xa9ART") or [""])[0]
+                t["album"] = (tg.get("\xa9alb") or [""])[0]
+                t["year"] = str((tg.get("\xa9day") or [""])[0])[:4]
+                tr = (tg.get("trkn") or [None])[0]
+                t["track"] = str(tr[0]) if isinstance(tr, (list, tuple)) and tr else ""
+                dst = (tg.get("disk") or [None])[0]
+                t["disc"] = str(dst[0]) if isinstance(dst, (list, tuple)) and dst else ""
+                t["has_cover"] = bool(tg.get("covr"))
+            else:
+                tg = audio.tags
+                if tg:
+                    for key, dst_k in (("TIT2", "title"), ("TPE1", "artist"),
+                                       ("TALB", "album"), ("TRCK", "track"),
+                                       ("TPOS", "disc")):
+                        v = tg.get(key)
+                        if v: t[dst_k] = str(v)[:200]
+                    v = tg.get("TDRC") or tg.get("TYER")
+                    if v: t["year"] = str(v)[:4]
+                    if hasattr(tg, "getall"):
+                        t["has_cover"] = bool(tg.getall("APIC"))
+        except Exception:
+            pass
+        stem = os.path.splitext(name)[0]
+        # Как и сканер: заголовок из тегов, иначе — имя файла.
+        if not t["title"]:
+            t["title"] = stem
+        entry.update(audio=True, tags=t)
+        out.append(entry)
+    return {"ok": True, "results": out}
 
 
 @router.get("/api/library/cover/{cid}")

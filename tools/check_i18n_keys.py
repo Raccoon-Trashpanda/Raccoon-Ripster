@@ -20,46 +20,66 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parent.parent
 _TREES = ("static", "github_setup/static")
+# Словари, которые надо сложить, прежде чем судить о ключах: продукт и панель.
+_DICTS = ("js/i18n.js", "panel/i18n.panel.js")
+# Где ищутся ключи. Панель живёт отдельным документом со своей разметкой, и
+# пока её файл не в списке, пропущенная строка в мобильном UI не ловилась ничем.
+_SRC_GLOBS = ("js/*.js", "panel/*.js")
+_DICT_NAMES = {Path(p).name for p in _DICTS}
 
-_BLOCK = re.compile(r"^\s*(ru|en|hi|ja|zh)\s*:\s*\{", re.M)
-_ENTRY = re.compile(r"'([a-zA-Z][a-zA-Z0-9_.]*)'\s*:")
+_BLOCK = re.compile(r"^\s*(?:var\s+|const\s+|let\s+)?(ru|en|hi|ja|zh)\s*[:=]\s*\{", re.M)
+# Ключи таблиц пишут и в '', и в "" (так живёт блок ga.*). Regex только с ''
+# объявлял существующие двойные кавычки «отсутствующими ключами» — 54 ложных
+# находки на ровном месте.
+_ENTRY = re.compile(r"""['"]([a-zA-Z][a-zA-Z0-9_.]*)['"]\s*:""")
 # t('key') / ti('key', {...}) — только литералы; t('cc.' + x) намеренно не ловим
 _CALL = re.compile(r"\b(?:t|ti)\(\s*'([a-zA-Z][a-zA-Z0-9_.]*)'\s*[,)]")
 _ATTR = re.compile(r'data-i18n(?:-html|-ph|-title)?="([a-zA-Z][a-zA-Z0-9_.]*)"')
 
 
-def tables(i18n: Path) -> dict[str, set[str]]:
-    """Ключи по языковым блокам: {'ru': {...}, 'en': {...}, ...}."""
-    src = i18n.read_text(encoding="utf-8")
-    marks = [(m.group(1), m.start()) for m in _BLOCK.finditer(src)]
-    out: dict[str, set[str]] = {name: set() for name, _ in marks}
-    for m in _ENTRY.finditer(src):
-        prior = [n for n, p in marks if p < m.start()]
-        if prior:
-            out[prior[-1]].add(m.group(1))
+def tables(paths) -> dict[str, set[str]]:
+    """Ключи по языковым блокам: {'ru': {...}, 'en': {...}, ...}.
+
+    Файлов словаря может быть несколько: продукт (js/i18n.js) и мобильная
+    панель (panel/i18n.panel.js) дополняют LANG одним Object.assign, поэтому и
+    проверять их надо одним множеством — иначе ключи панели считались бы
+    отсутствующими.
+    """
+    out: dict[str, set[str]] = {}
+    for i18n in paths:
+        src = i18n.read_text(encoding="utf-8")
+        marks = [(m.group(1), m.start()) for m in _BLOCK.finditer(src)]
+        for name, _ in marks:
+            out.setdefault(name, set())
+        for m in _ENTRY.finditer(src):
+            prior = [n for n, p in marks if p < m.start()]
+            if prior:
+                out[prior[-1]].add(m.group(1))
     return out
 
 
 def scan(tree: Path) -> list[str]:
-    i18n = tree / "js" / "i18n.js"
-    if not i18n.exists():
+    dicts = [tree / rel for rel in _DICTS if (tree / rel).exists()]
+    if not dicts:
         return [f"{tree}: нет js/i18n.js"]
-    tbl = tables(i18n)
+    tbl = tables(dicts)
     ru, en = tbl.get("ru", set()), tbl.get("en", set())
     problems: list[str] = []
 
     used: dict[str, set[str]] = {}
-    for f in sorted(tree.glob("js/*.js")):
-        if f.name == "i18n.js":
-            continue
-        src = f.read_text(encoding="utf-8", errors="replace")
-        # Строчные комментарии выбрасываем: в них живут ПРИМЕРЫ вида t('i18n.key'),
-        # и без этого сканер стабильно даёт одну ложную находку, а инструмент,
-        # который всегда красный, перестают читать.
-        src = re.sub(r"^\s*//.*$", "", src, flags=re.M)
-        for k in _CALL.findall(src):
-            used.setdefault(k, set()).add(f.name)
-    for f in sorted([tree / "index.html", *tree.glob("views/*.html")]):
+    for pat in _SRC_GLOBS:
+        for f in sorted(tree.glob(pat)):
+            if f.name in _DICT_NAMES:
+                continue
+            src = f.read_text(encoding="utf-8", errors="replace")
+            # Строчные комментарии выбрасываем: в них живут ПРИМЕРЫ вида t('i18n.key'),
+            # и без этого сканер стабильно даёт одну ложную находку, а инструмент,
+            # который всегда красный, перестают читать.
+            src = re.sub(r"^\s*//.*$", "", src, flags=re.M)
+            for k in _CALL.findall(src):
+                used.setdefault(k, set()).add(f"{f.parent.name}/{f.name}")
+    for f in sorted([tree / "index.html", *tree.glob("views/*.html"),
+                     *tree.glob("panel/*.html")]):
         if not f.exists():
             continue
         for k in _ATTR.findall(f.read_text(encoding="utf-8", errors="replace")):

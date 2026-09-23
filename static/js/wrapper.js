@@ -15,7 +15,7 @@ async function checkWrapperStatus() {
     const r = await fetch('/api/wrapper-status');
     const d = await r.json();
     _dockerAvailable = d.docker !== false;
-    updateWrapperUI(d.running, d.port, d.docker, d.docker_msg, d.has_session);
+    updateWrapperUI(d.running, d.docker, d.docker_msg, d.has_session);
     // sync radio buttons with current mode
     const mode = d.mode || 'docker-remote';
     const radio = document.querySelector(`input[name="wrapper-mode"][value="${mode}"]`);
@@ -23,65 +23,10 @@ async function checkWrapperStatus() {
   } catch(e) {}
 }
 
-async function recheckWrapper() {
-  await checkWrapperStatus();
-  toast(t('s.wrapper_updated'));
-}
-
-// Health of the PUBLIC Apple wrapper-manager (wm.wol.moe). This is what the AMD
-// engine decrypts through, and it periodically overloads (502 / gRPC Deadline).
-// We surface it in its own topbar pill so the owner can tell "public is down"
-// apart from "my local wrapper is off" — even while the local wrapper is active.
-async function checkPublicWrapperStatus(manual) {
-  if (document.body.classList.contains('guest-mode')) return;
-  const pill = document.getElementById('public-wrapper-pill');
-  if (!pill) return;
-  if (manual) pill.innerHTML = '<div class="dot"></div>Public…';
-  try {
-    const r = await fetch('/api/amd/wrapper-status');
-    const d = await r.json();
-    const ok = !!d.ready && !d.error;
-    pill.className = 'pill ' + (ok ? 'pill-ok' : 'pill-err');
-    pill.innerHTML = '<div class="dot"></div>' + (ok ? 'Public ✓' : 'Public ✗');
-    const inst = d.instance || 'wm.wol.moe';
-    pill.title = ok
-      ? `${inst} — ${t('s.pubw_ok')} (${d.client_count ?? '?'})`
-      : `${inst} — ${t('s.pubw_down')}: ${d.error || 'not ready'}`;
-    if (manual) toast(pill.title, ok ? 'var(--green)' : 'var(--red)');
-  } catch (e) {
-    pill.className = 'pill pill-warn';
-    pill.innerHTML = '<div class="dot"></div>Public ?';
-    pill.title = 'wm.wol.moe — ' + e.message;
-  }
-}
-
-function updateWrapperUI(running, port, dockerOk, dockerMsg, hasSession) {
-  const pill     = document.getElementById('wrapper-pill');
+function updateWrapperUI(running, dockerOk, dockerMsg, hasSession) {
   const banner   = document.getElementById('wrapper-banner');
   const okBanner = document.getElementById('wrapper-ok-banner');
-  const q        = S.config['quality'] || 'alac';
-  const qdef     = QUALITIES.find(x => x.id === q) || QUALITIES[0];
-  const needsWrapper = qdef && qdef.req === 'wrapper';
   const isAMDEngine  = (S.config?.engine || '') === 'amd';
-
-  // Topbar pill — hide entirely when AMD is selected (public wrapper, no local Docker needed)
-  if(pill) {
-    if(isAMDEngine) {
-      pill.style.display = 'none';
-    } else {
-      pill.style.display = '';
-      if(running) {
-        pill.className = 'pill pill-ok';
-        pill.innerHTML = '<div class="dot"></div>Wrapper ✓';
-      } else {
-        pill.className = 'pill ' + (needsWrapper ? 'pill-err' : 'pill-warn');
-        pill.innerHTML = '<div class="dot"></div>Wrapper offline';
-      }
-      pill.title   = port + ' — ' + (running ? t('s.wrapper_connected') : t('s.wrapper_not_running'));
-      pill.onclick  = recheckWrapper;
-      pill.style.cursor = 'pointer';
-    }
-  }
 
   // Docker status note in banner
   const dockerStat = document.getElementById('wb-docker-status');

@@ -211,11 +211,151 @@ def popularity_weight(item: dict) -> float:
 
 
 def _key(item: dict) -> str:
-    """Чем считаем запись той же самой: ISRC, иначе «артист — название»."""
-    isrc = (item.get("isrc") or "").strip().upper()
-    if isrc:
-        return "i:" + isrc
-    return "t:" + norm(item.get("artist", "")) + "|" + norm(item.get("title", ""))
+    """Чем считаем запись той же самой: ISRC, иначе «артист — название».
+
+    Ключ ОДИН на весь станционный код и он же лежит в `station_events`: раньше
+    здесь жили три функции на один смысл (`_key`, `_ev_key` внутри сборки и
+    `station_events.track_key`) и они расходились написаниями ISRC — кулдаун
+    промахивался мимо трека, который стоит в той же базе под другим ключом.
+    """
+    from ripster import station_events as _se
+    return _se.track_key(item)
+
+
+# ── Ручки: разнообразие / настроение / язык ──────────────────────────────────
+#
+# Модель — яндекс-ротор (research §5.3): настройки влияют на эфир СЕРВЕРОМ и в
+# той же сессии, а не «настраивают плеер». Значения задаём сами, но честно:
+# ручка имеет право на существование, только если у нас есть данные, которые её
+# соблюдают. Поэтому `knob_report()` отвечает на вопрос «что ЭТА ручка сделала
+# с этим эфиром» — включая «ничего» (правило скилла ripster-setting-with-no-wire:
+# контрол, который ничего не меняет, обязан быть назван no-op'ом, а не выглядеть
+# рабочим).
+
+DIVERSITIES = ("favorite", "default", "discover", "popular")
+ENERGIES = ("calm", "all", "active")
+LANGUAGES = ("any", "russian", "not-russian")
+KNOB_DEFAULTS = {"diversity": "default", "energy": "all", "language": "any"}
+
+
+def knobs_norm(knobs: Optional[dict]) -> dict:
+    """Ручки к известным значениям. Незнакомое — не ошибка, а «как сейчас».
+
+    Падать из-за опечатки посреди эфира хуже, чем проигнорировать её; но и
+    принимать «diversity: favourite» молча нельзя — такое значение никогда не
+    пройдёт в `knob_report` как активное, и вранья нет.
+    """
+    out = dict(KNOB_DEFAULTS)
+    src = knobs or {}
+    for key, allowed in (("diversity", DIVERSITIES), ("energy", ENERGIES),
+                         ("language", LANGUAGES)):
+        v = str(src.get(key) or "").strip().lower()
+        if v in allowed:
+            out[key] = v
+    return out
+
+
+def knob_report(knobs: Optional[dict]) -> dict:
+    """Что каждая ручка реально делает с ЭТИМ эфиром. ru-строки, их показывает
+    отладка; экрану достаточно поля `effect`."""
+    k = knobs_norm(knobs)
+    return {
+        "diversity": {
+            "value": k["diversity"],
+            "effect": "active" if k["diversity"] != "default" else "no-op",
+            "why": ("доля знакомых артистов и вес популярности: «свой» — тот, о ком у "
+                    "владельца есть события станции (другого источника у нас пока нет)"
+                    if k["diversity"] != "default" else
+                    "значение по умолчанию: оценки не меняет, эфир собирается как всегда"),
+        },
+        "energy": {
+            "value": k["energy"], "effect": "no-op",
+            "why": "признаков bpm/energy у станционных треков нет: bpm добывается только "
+                   "из Beatport и к станции не относится. Ручка заработает с Яндекс-ротором "
+                   "(G1), где energy приходит с сервера",
+        },
+        "language": {
+            "value": k["language"], "effect": "no-op",
+            "why": "язык трека определить нечем ни у одного из наших источников; "
+                   "у Яндекса это параметр сервера — там ручка станет настоящей",
+        },
+    }
+
+
+def _pop_factor(pop: float, diversity: str) -> float:
+    """Насколько весомее популярность. `default` — ровно прежнее поведение
+    (популярность и есть вес), `discover` разворачивает знак, `popular` усиливает."""
+    if diversity == "discover":
+        return 1.35 - 0.8 * pop
+    if diversity == "popular":
+        return 0.2 + 1.6 * pop
+    if diversity == "favorite":
+        return 0.6 + 0.8 * pop
+    return pop
+
+
+def _known_factor(known: bool, diversity: str) -> float:
+    """Доля «своих» в эфире — единственное, чем ручка `diversity` платит сейчас.
+
+    «Свой» = артист, о котором у владельца есть события станции. Порог
+    заведомо узкий: телефонные прослушивания и свои фонотека в счёт не идут
+    (это стадию 2/3), и сказано об этом вслух, а не молча.
+    """
+    if diversity == "discover":
+        return 0.5 if known else 1.6
+    if diversity == "favorite":
+        return 1.6 if known else 0.8
+    return 1.0
+
+
+def base_weight(item: dict) -> float:
+    """Вес кандидата ДО всякой истории: только источник записи.
+
+    Отдельно от популярности намеренно: ручка `diversity` меняет знак именно у
+    популярности, и перемножать их заранее нельзя.
+    """
+    w = 1.0
+    if item.get("curated"):
+        w *= 1.35            # курируемое ведёт, но не вытесняет остальных
+    if item.get("from_artist"):
+        # Трек артиста жанра вернее, чем трек со словом жанра в названии. Это не
+        # «чуть лучше»: без перевеса поиск по слову забивает эфир своим объёмом.
+        w *= 3.0
+    return w
+
+
+def taste_bias() -> dict:
+    """Долгий профиль: {нормализованный артист: множитель веса}.
+
+    Источник — только наша локальная `station_events`, наружу ничего не уходит.
+    ОЦЕНКА ПО ГЛУБИНЕ, а не по числу строк-скипов: `depth` — средняя доля
+    трека, которую человек послушал. Раньше здесь стояло `1.3 − 0.95·skip_rate`
+    по строкам, и «скип на 3-й секунде» с «дослушал 295-ю из 300 и переключил»
+    были одним и тем же ×0.35.
+
+    Сбой базы НЕ должен ронять станцию: нет истории — работаем как раньше.
+    """
+    out: dict[str, float] = {}
+    try:
+        from ripster import station_events as _se
+        if _se._DB is None:
+            return {}
+        for name, st_ in _se.artist_stats(90).items():
+            b = 1.0
+            d = st_.get("depth")
+            if d is not None:
+                # заглухо скипанное ×0.55, дослушанное до конца ×1.45
+                b *= 0.55 + 0.9 * float(d)
+            b *= 1.0 + 0.25 * min(3, st_.get("downloads", 0))   # скачал — сильный плюс
+            b *= 1.0 + 0.15 * min(3, st_.get("likes", 0))
+            if st_.get("dislikes"):
+                b *= 0.5
+            out[norm(name)] = max(0.2, min(2.5, b))
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[station] история прослушиваний недоступна ({type(e).__name__}) — "
+              f"эфир без подстройки", flush=True)
+    return out
+
 
 
 # ── Кэш артистов жанра ───────────────────────────────────────────────────────
@@ -671,19 +811,47 @@ async def _service_search(service: str, query: str, limit: int) -> list[dict]:
     return items
 
 
-async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) -> dict:
-    """Собрать эфир станции.
+def services_norm(services) -> Optional[set]:
+    """Список сервисов, которые ПРОСИЛИ, к множествому виду.
 
-    Возвращает `{ok, id, title, tracks, sources, reason}`. `reason` заполняется,
-    только когда собрать не вышло, — экран обязан сказать правду, а не общее
-    «проверьте связь».
+    Пустой/`None`/один неизвестный элемент — «не просили фильтровать», то есть
+    прежнее поведение: у вызова без этого параметра (старый `/api/station`,
+    тесты, мобильный клиент) пул собирается как собирался. Фильтр обязан быть
+    отказом от запроса, а не способом остаться без музыки.
+    """
+    if not services or isinstance(services, str):
+        services = [services] if services else None
+    out = {str(s).strip().lower() for s in (services or []) if str(s).strip()}
+    return out & set(SEARCH_SERVICES + ("soundcloud",)) or None
+
+
+async def pool(station_id: str, *, want: int = 40, knobs: Optional[dict] = None,
+               services=None) -> dict:
+    """Собрать ПУЛ кандидатов станции. Вся сеть — здесь, и больше нигде.
+
+    Возвращает `{ok, id, title, candidates, sources, artists, knobs,
+    knob_report, took_ms}`, либо `{ok: false, …, reason}`. Кандидат —
+    `{item, key, artist, base, pop, fresh, heard}`: голая запись сервиса плюс
+    то, из чего ранжер и антиповтор собирают пачку.
+
+    Пул, а не эфир, потому что сессия обязана выдавать вторую, третью и
+    десятую пачки БЕЗ новых запросов к витринам: `build()` мерит себя секундами,
+    а у MusicBrainz «не чаще запроса в секунду» — с новыми запросами на
+    дозаказ ограничитель встал бы посреди эфира (риск Р3, docs/STATIONS_GAP.md).
+
+    `services` — за чем ОБРАЩАТЬСЯ вообще. Плеер стримит только Qobuz/Tidal/
+    Deezer, и раньше фронт выбрасывал строки apple/yandex/soundcloud ПОСЛЕ того,
+    как сервер заплатил за них сетью: `reserve` считал то, что никогда не
+    заиграет, и дозаказ начинался позже, чем надо. Сказанный сюда список снимает
+    лишний запрос ещё до похода в сеть — см. STATIONS_GAP.md, решение по Р2.
     """
     st = _BY_ID.get(station_id)
     if not st:
-        return {"ok": False, "id": station_id, "tracks": [],
+        return {"ok": False, "id": station_id, "title": "", "candidates": [],
                 "reason": f"нет такой станции: {station_id}"}
     _id, sc_slug, query, title = st
     _ensure_config()
+    want_svcs = services_norm(services)
 
     started = time.time()
 
@@ -691,21 +859,29 @@ async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) ->
     # Что бывает без этого слоя, описано в artists_for_genre().
     artists = await artists_for_genre(query)
 
-    tasks = [_sc_chart(sc_slug, limit)]
-    names = ["soundcloud:chart"]
+    asked = lambda svc: want_svcs is None or svc in want_svcs        # noqa: E731
+    tasks = []
+    names = []
+    if asked("soundcloud"):
+        tasks.append(_sc_chart(sc_slug, want))
+        names.append("soundcloud:chart")
     for svc in SEARCH_SERVICES:
-        tasks.append(_service_search(svc, query, limit))
+        if not asked(svc):
+            continue
+        tasks.append(_service_search(svc, query, want))
         names.append(svc)
     # Треки найденных артистов — у каждого сервиса свои. Спрашиваем разом,
     # отказ одного не мешает остальным.
     for a in artists[:10]:
         for svc in ("deezer", "qobuz", "tidal"):
+            if not asked(svc):
+                continue
             tasks.append(_artist_tracks(svc, a, 3))
             names.append(f"artist:{svc}")
 
     got = await asyncio.gather(*tasks, return_exceptions=True)
     sources: dict[str, int] = {}
-    pool: list[dict] = []
+    rows: list[dict] = []
     for name, res in zip(names, got):
         # Имя у источника треков артиста НЕ уникально: ten artists × три
         # сервиса дают десять «artist:deezer» подряд. Раньше каждое следующее
@@ -719,6 +895,11 @@ async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) ->
             continue
         kept = []
         for it in res:
+            if want_svcs is not None and str(it.get("service") or "").lower() not in want_svcs:
+                # Страховка: источник отдал строку с чужим тегом сервиса. Меньше
+                # всего хочется, чтобы отфильтрованный источник тихо вернулся в
+                # пул через чужую метку.
+                continue
             if not it.get("curated"):
                 gm = genre_matches(_id, it.get("genre") or "")
                 if it.get("from_artist"):
@@ -734,15 +915,15 @@ async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) ->
                     continue
             kept.append(it)
         sources[name] += len(kept)
-        pool.extend(kept)
+        rows.extend(kept)
 
-    if not pool:
-        return {"ok": False, "id": _id, "title": title, "tracks": [], "sources": sources,
-                "reason": "ни один источник не дал треков этого жанра"}
+    if not rows:
+        return {"ok": False, "id": _id, "title": title, "candidates": [],
+                "sources": sources, "reason": "ни один источник не дал треков этого жанра"}
 
     # Дедуп: ISRC вернее названия, но названием добираем то, у чего ISRC нет.
     uniq: dict[str, dict] = {}
-    for it in pool:
+    for it in rows:
         k = _key(it)
         if k not in uniq:
             uniq[k] = it
@@ -751,126 +932,169 @@ async def build(station_id: str, limit: int = 30, seed: Optional[int] = None) ->
             uniq[k] = it            # запись от артиста/чарта вернее найденной словом
     items = list(uniq.values())
 
-    # Взвешенный отбор без повторов. Зерно на вызов: перерисовка не дёргает
-    # список, а следующее нажатие даёт другой эфир.
-    rnd = random.Random(seed if seed is not None else int(time.time() * 1000))
-
     # ЧТО ЧЕЛОВЕК УЖЕ СКАЗАЛ СТАНЦИЯМ (station_events.py). Ровно этого не хватало,
     # чтобы станция перестала быть «случайной выборкой по жанру»: скип на пятой
     # секунде и дослушанный трек — противоположные сигналы, и оба у нас теперь
-    # записаны. Всё локальное, наружу ничего не уходит.
-    #
-    # Сбой базы НЕ должен ронять станцию: нет истории — работаем как раньше.
+    # записаны. Всё локальное, наружу ничего не уходит. Здесь берём только два
+    # факта — «забанен» и «звучал недавно, и когда именно»; что с ними делать,
+    # решает draw().
     banned: set = set()
-    recent: set = set()
-    artist_bias: dict = {}
+    heard: dict = {}
     try:
         from ripster import station_events as _se
         if _se._DB is not None:
             banned = _se.banned_track_keys()
-            recent = _se.recent_track_keys(7)
-            for name, st_ in _se.artist_stats(90).items():
-                b = 1.0
-                if st_.get("skip_rate") is not None:
-                    # 0 скипов → ×1.3, сплошные скипы → ×0.35.
-                    b *= 1.3 - 0.95 * float(st_["skip_rate"])
-                b *= 1.0 + 0.25 * min(3, st_.get("downloads", 0))   # скачал — сильный плюс
-                b *= 1.0 + 0.15 * min(3, st_.get("likes", 0))
-                if st_.get("dislikes"):
-                    b *= 0.5
-                artist_bias[norm(name)] = max(0.2, min(2.5, b))
+            heard = _se.recent_track_history(7)
     except Exception as e:                                     # noqa: BLE001
         print(f"[station] история прослушиваний недоступна ({type(e).__name__}) — "
               f"эфир без подстройки", flush=True)
 
-    def _ev_key(it: dict) -> str:
-        isrc = norm((it.get("isrc") or "")).upper()
-        if isrc:
-            return f"isrc:{isrc}"
-        return f"name:{(it.get('artist') or '').strip().lower()}|{(it.get('title') or '').strip().lower()}"
-
-    # Забаненное выбрасываем всегда; «звучало на неделе» — только если после
-    # этого эфир не схлопнется (правило «лучше повтор, чем пустая плитка»).
-    if banned:
-        items = [it for it in items if _ev_key(it) not in banned] or items
-    if recent:
-        fresh = [it for it in items if _ev_key(it) not in recent]
-        if len(fresh) >= limit:
-            items = fresh
-
-    weights = []
+    cand = []
     for it in items:
-        w = popularity_weight(it)
-        if it.get("curated"):
-            w *= 1.35            # курируемое ведёт, но не вытесняет остальных
-        if it.get("from_artist"):
-            # Трек артиста жанра вернее, чем трек со словом жанра в названии.
-            # Это не «чуть лучше»: без перевеса поиск по слову забивает эфир
-            # своим объёмом.
-            w *= 3.0
-        w *= artist_bias.get(norm(it.get("artist", "")), 1.0)
-        weights.append(w)
-
-    order: list[dict] = []
-    pool_i = list(range(len(items)))
-    while pool_i and len(order) < limit * 2:
-        tot = sum(weights[i] for i in pool_i)
-        if tot <= 0:
-            break
-        pick = rnd.random() * tot
-        acc = 0.0
-        chosen = pool_i[-1]
-        for i in pool_i:
-            acc += weights[i]
-            if acc >= pick:
-                chosen = i
-                break
-        pool_i.remove(chosen)
-        order.append(items[chosen])
-
-    # Анти-повтор артиста подряд: на телефоне без него шло по четыре трека
-    # одного исполнителя кряду.
-    # Анти-повтор артиста подряд: на телефоне без него шло по четыре трека
-    # одного исполнителя кряду.
-    #
-    # Первая версия этого места ВСТАВЛЯЛА запасной трек и следом всё равно
-    # исходный — то есть не разводила соседей, а добавляла лишнего, и один и
-    # тот же трек попадал в эфир дважды («Fairy Fountain», «Pick 'Em Up»,
-    # замер 06.09.2026). Правильно — отложить, а не продублировать.
-    out: list[dict] = []
-    used: set[int] = set()
-    pending: list[int] = []
-    for idx, it in enumerate(order):
-        if idx in used:
-            continue
-        same = out and norm(out[-1].get("artist", "")) == norm(it.get("artist", ""))
-        if same:
-            # Ищем следующего с ДРУГИМ артистом; исходный ждёт своей очереди.
-            alt = next((j for j in range(idx + 1, len(order))
-                        if j not in used
-                        and norm(order[j].get("artist", "")) != norm(it.get("artist", ""))), None)
-            if alt is not None:
-                out.append(order[alt]); used.add(alt)
-                pending.append(idx)
-                if len(out) >= limit:
-                    break
-                continue
-        out.append(it); used.add(idx)
-        if len(out) >= limit:
-            break
-    # Отложенные добираем в конец, если места ещё есть.
-    for idx in pending:
-        if len(out) >= limit:
-            break
-        if idx not in used:
-            out.append(order[idx]); used.add(idx)
-
-    _preview_put(_id, out[:limit])
+        k = _key(it)
+        cand.append({"item": it, "key": k, "artist": norm(it.get("artist", "")),
+                     "base": base_weight(it), "pop": popularity_weight(it),
+                     "fresh": k not in heard, "heard": heard.get(k, "")})
+    # Дизлайк ban'ит трек навсегда — но не ценой пустой плитки: если выбито
+    # всё, эфир остаётся, и человек видит его, а не «проверьте связь».
+    kept_c = [c for c in cand if c["key"] not in banned]
     return {"ok": True, "id": _id, "title": title,
-            "tracks": out[:limit], "sources": sources,
-            "artists": artists[:10],
-            "from_artists": sum(1 for t in out[:limit] if t.get("from_artist")),
+            "candidates": kept_c or cand, "sources": sources, "artists": artists[:10],
+            "knobs": knobs_norm(knobs), "knob_report": knob_report(knobs),
             "took_ms": int((time.time() - started) * 1000)}
+
+
+def rank(candidates: list, *, bias: Optional[dict] = None, session: Optional[dict] = None,
+         knobs: Optional[dict] = None) -> list:
+    """Оценить кандидатов: долгий профиль + то, что сказали В ЭТОЙ СЕССИИ + ручки.
+
+    Чистая функция без сети и без базы — `next` пересобирает пачку за
+    миллисекунды. Возвращает `[{"cand":…, "weight":…}]` от сильного к слабому;
+    порядок нужен для отладки и для «что дальше», а отбор всё равно
+    взвешенно-случайный (правило 6: не argmax, иначе станция застывает).
+
+    `bias` — `taste_bias()` (долгий профиль), `session` —
+    `station_events.session_feedback()` (сказанное внутри сессии). Оба пустые —
+    эфир собирается ровно как до петли обратной связи.
+    """
+    k = knobs_norm(knobs)
+    div = k["diversity"]
+    bias = bias or {}
+    # Ключи фидбека — как их записал сервис («Jeff Mills»), ключи кандидата —
+    # нормализованные. Сверять иначе нельзя: молча промахнёмся мимо каждого
+    # артиста и перестройка не сработает ни разу.
+    sess = {norm(a): v for a, v in (session or {}).items()}
+    out = []
+    for c in candidates:
+        a = c["artist"]
+        w = c["base"] * _pop_factor(c["pop"], div)
+        w *= bias.get(a, 1.0)
+        if a in sess:
+            # Сказанное ЗДЕСЬ И СЕЙЧАС должно перебивать популярность, иначе
+            # петля обратной связи видна только в логах. Разрыв по популярности
+            # между мировым хитом и малоизвестным треком — около 3.4× (0.875 vs
+            # 0.255 после логарифма), а прежний множитель скипа опускал вес лишь
+            # до 0.4 — скипнутый хит оставался впереди, и следующая пачка
+            # начиналась с него же. Коэффициент 1.6 и нижняя граница 0.12 дают
+            # скипу перевес над этим разрывом; лайк и скачивание по-прежнему
+            # упираются в 3.0.
+            w *= max(0.12, min(3.0, 1.0 + 1.6 * float(sess[a])))
+        w *= _known_factor(bool(a) and a in bias, div)
+        out.append({"cand": c, "weight": max(0.01, w)})
+    out.sort(key=lambda e: -e["weight"])
+    return out
+
+
+def draw(ranked: list, need: int, rnd, *, cap: int = 0, gap: int = 1) -> list:
+    """Взять пачку из ранжированных кандидатов.
+
+    Три правила в одном месте:
+
+    * отбор взвешенно-случайный (рулетка), а не по порядку весов;
+    * `cap` — не больше N треков одного артиста на пачку, `gap` — не ближе N
+      позиций друг к другу. У прежней сборки был только запрет соседства, и
+      «артист на 1-й и на 4-й позиции» проходил свободно;
+    * КУЛДАУН С ДОЗАПОЛНЕНИЕМ. Первыми идут свежие, и только когда их не
+      хватает — повторы, строго ДАВНИШНИЕ по времени последнего прослушивания.
+      Прежнее `if len(fresh) >= limit` на типичном эфире отменяло всё правило
+      целиком, а намерение «лучше повтор, чем пустая плитка» теперь соблюдается
+      честно: пустой пачки не бывает, но повтор не пролезет, пока есть свежее.
+    """
+    out: list = []
+    fresh = [e for e in ranked if e["cand"].get("fresh", True)]
+    # «Давнишние первыми»: пустой heard (звучало вне окна кулдауна) — самый
+    # старый, он и идёт в начало.
+    stale = sorted((e for e in ranked if not e["cand"].get("fresh", True)),
+                   key=lambda e: str(e["cand"].get("heard") or ""))
+
+    def over_cap(e) -> bool:
+        return cap > 0 and sum(1 for o in out
+                               if o["cand"]["artist"] == e["cand"]["artist"]) >= cap
+
+    def too_near(e) -> bool:
+        return gap > 0 and any(o["cand"]["artist"] == e["cand"]["artist"] for o in out[-gap:])
+
+    def spend(pool_: list, weighted: bool = True) -> None:
+        while pool_ and len(out) < need:
+            avail = [e for e in pool_ if not over_cap(e)]
+            # Разнос — мягкое правило: если все оставшиеся нарушают дистанцию,
+            # берём любого, дыры в эфире дороже.
+            opts = [e for e in avail if not too_near(e)] or avail
+            if not opts:
+                return
+            if weighted:
+                tot = sum(e["weight"] for e in opts)
+                chosen = opts[-1]
+                if tot > 0:
+                    pick, acc = rnd.random() * tot, 0.0
+                    for e in opts:
+                        acc += e["weight"]
+                        if acc >= pick:
+                            chosen = e
+                            break
+            else:
+                # Повторы — не лотерея: из годных берётся САМЫЙ ДАВНИЙ. Иначе
+                # «дозаполнили» означало бы «вернули что попало».
+                chosen = opts[0]
+            out.append(chosen)
+            pool_.remove(chosen)
+
+    spend(fresh)
+    if len(out) < need:
+        spend(stale, weighted=False)
+    return out[:need]
+
+
+async def build(station_id: str, limit: int = 30, seed: Optional[int] = None,
+                knobs: Optional[dict] = None) -> dict:
+    """Собрать эфир станции ОДНОЙ пачкой — так станции жили до сессий.
+
+    Возвращает `{ok, id, title, tracks, sources, reason}`. `reason` заполняется,
+    только когда собрать не вышло, — экран обязан сказать правду, а не общее
+    «проверьте связь».
+
+    Бесконечный эфир, который меняет курс по фидбеку, — `station_sessions.py`
+    (`POST /api/station/session`); он собран на тех же `pool/rank/draw`, и
+    различается только тем, что пул после первой пачки остаётся на сервере.
+    """
+    p = await pool(station_id, want=limit, knobs=knobs)
+    if not p.get("ok"):
+        p = dict(p)
+        p.pop("candidates", None)
+        p["tracks"] = []
+        return p
+    rnd = random.Random(seed if seed is not None else int(time.time() * 1000))
+    picked = draw(rank(p["candidates"], bias=taste_bias(), knobs=p["knobs"]),
+                  limit, rnd, cap=0, gap=1)
+    tracks = [e["cand"]["item"] for e in picked]
+
+    _preview_put(p["id"], tracks)
+    return {"ok": True, "id": p["id"], "title": p["title"],
+            "tracks": tracks, "sources": p["sources"], "artists": p["artists"],
+            "from_artists": sum(1 for t in tracks if t.get("from_artist")),
+            "repeats": sum(1 for e in picked if not e["cand"]["fresh"]),
+            "knobs": p["knobs"], "knob_report": p["knob_report"],
+            "took_ms": p["took_ms"]}
 
 
 # ── Личная часть: что человек СЛУШАЛ и что КАЧАЛ ─────────────────────────────

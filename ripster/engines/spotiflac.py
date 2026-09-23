@@ -64,7 +64,7 @@ class SpotiflacEngine(EngineBase):
     _QUALITIES = [
         {
             "id": "flac", "label": "FLAC (best)", "engine": "spotiflac",
-            "sub": "True lossless — source: Tidal/Qobuz/Amazon (публичный API)",
+            "sub": "True lossless — source: Tidal/Qobuz/Amazon (публичный API)", "sub_key": "qual.spotiflac.flac.sub", "sub_args": {"codec": "True lossless", "sources": "Tidal/Qobuz/Amazon"},
             "badge": "LOSSLESS", "color": "#30d158", "bitrate": "lossless",
             "ext": "flac", "req": "none",
         },

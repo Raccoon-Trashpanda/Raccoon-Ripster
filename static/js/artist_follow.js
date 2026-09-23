@@ -43,7 +43,7 @@ function afIsFollowed(name) { return _afFollowed.has(_afNorm(name)); }
 // Разметка кнопки. Одна и та же в радаре и в поиске — чтобы жест был один.
 function afButton(name, extraStyle) {
   const on = afIsFollowed(name);
-  const enc = encodeURIComponent(name || '');
+  const enc = encodeURIComponent(name || '').replace(/'/g, '%27');
   return `<button class="af-btn${on ? ' on' : ''}" data-af="${esc(name || '')}"
     onclick="event.stopPropagation();followArtist(decodeURIComponent('${enc}'),this)"
     title="${on ? t('af.following') : t('af.follow')}"

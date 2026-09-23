@@ -939,7 +939,7 @@ async function uploadToCloud(taskId, btn) {
         document.body.appendChild(el);
         return el;
       })();
-      bar.innerHTML = `☁ <span style="word-break:break-all">${esc(res.url)}</span> <button onclick="navigator.clipboard.writeText('${esc(res.url)}').then(()=>{this.textContent='✓'});this.textContent='📋'" style="background:#2a3550;border:1px solid #3a4460;border-radius:4px;color:#7c9fff;cursor:pointer;padding:3px 8px;font-size:12px">📋 ${t('t.copy')}</button>`;
+      bar.innerHTML = `☁ <span style="word-break:break-all">${esc(res.url)}</span> <button onclick="navigator.clipboard.writeText('${escJ(res.url)}').then(()=>{this.textContent='✓'});this.textContent='📋'" style="background:#2a3550;border:1px solid #3a4460;border-radius:4px;color:#7c9fff;cursor:pointer;padding:3px 8px;font-size:12px">📋 ${t('t.copy')}</button>`;
       bar.style.display = 'flex';
       setTimeout(() => { bar.style.display = 'none'; }, 18000);
     } else {

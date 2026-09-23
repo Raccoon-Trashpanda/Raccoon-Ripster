@@ -15,6 +15,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query
 from ripster.i18n_msg import imsg
 
+from ripster import artist_identity as _ident
 from ripster import compilations as _comps
 from ripster import watchlist_suggest as _wls
 
@@ -1186,6 +1187,24 @@ def _enqueue(task: dict, artist: str = "", title: str = "", also=()) -> bool:
     return True
 
 
+def _auto_pull(entry: dict, rel: dict) -> bool:
+    """Качать ли ЭТУ находку молча, и вслух — почему нет.
+
+    Гейт строже, чем у ленты: показать карточку однофамильца — дело вкуса
+    владельца, а скачанный чужой альбом остаётся в библиотеке. Поэтому пока
+    личность подписки не решена (`auto_pull_ok`), автозакачка стоит, хотя
+    уведомление о находке человек получит.
+    """
+    if not entry.get("auto_download"):
+        return False
+    ok, why = _ident.auto_pull_ok(entry, rel)
+    if not ok:
+        print(f"[watchlist] {entry.get('name')}: «"
+              f"{rel.get('title') or rel.get('name') or ''}» не качаем — {why}",
+              flush=True)
+    return ok
+
+
 def _notify_release(artist: str, release: str, compilation: bool, queued: bool,
                     rel: dict | None = None) -> None:
     """Native desktop toast for a watchlist hit. Best-effort and never fatal —
@@ -1466,9 +1485,11 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
 # со службой apple — и вишлист честно молчал. Владелец скачал релиз руками за
 # сутки до даты. Ровно ради этих полусуток и заведён новозеландский аккаунт.
 #
-# Поэтому опрашиваем ещё и ранние витрины: артист ищется в их каталогах по имени
-# (`ripster.artist_xref`, сверка только по точному совпадению), а найденный релиз
-# идёт общим путём — уведомление и, если включено авто-скачивание, очередь.
+# Поэтому опрашиваем ещё и ранние витрины: кому из них принадлежит артист
+# подписки решает НЕ имя, а `ripster.artist_identity` — витрина опрашивается
+# только по id, подтверждённому ОБЩИМИ РАБОТАМИ (ISRC/UPC, пересечение
+# дискографий, лейблы). Найденный релиз идёт общим путём — уведомление и, если
+# включено авто-скачивание, очередь.
 
 _EARLY_WINDOW_DAYS = 14    # проверка раз в 6ч; окна с запасом хватает
 _SEEN_CAP = 80             # столько ключей релизов помним на артиста
@@ -1589,8 +1610,6 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
     сразу» и, при включённом авто-скачивании, обрушило бы в очередь чужой
     бэк-каталог. Ровно та же осторожность, что и у Apple-ветки с `prev is None`.
     """
-    from ripster import artist_xref as _xref
-
     services = _early_services(cfg)
     if not services:
         return 0
@@ -1600,14 +1619,54 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
     found = 0
 
     async with httpx.AsyncClient(timeout=20) as client:
+        # Кому из артистов принадлежит чужая витрина, решает НЕ имя: кандидатов
+        # ищет по имени, но принимает их `artist_identity` по общим работам
+        # (ISRC/UPC, пересечение дискографий, лейблы). Здесь ставка выше, чем в
+        # ленте: неподтверждённая привязка ровно авто-скачивает чужой релиз и
+        # присылает тост от имени чужого артиста.
+        bd = _s.get("base_dir")
+        if await _ident.bind_pass(targets, client, cfg,
+                                  spotify_state=(_ident.load_spotify_state(bd)
+                                                 if bd else None)):
+            save(_s["items"])
+
+        # Молчаливая дозагрузка того, что уже объявляли, но взять было
+        # неоткуда — ДО гейта по идентичности. Ни тоста, ни события: человек про
+        # этот релиз уже знает, ему нужен файл, а не второе уведомление.
+        # Развязка сознательная: подтверждение личности решает, показывать ли
+        # НОВИНКУ, а не отирать обещанное — иначе непроверенный id тихо терял бы
+        # отложенный релиз навсегда (он уже в `seen`).
+        if early_dl:
+            for entry in targets:
+                nm = str(entry.get("name") or "").strip()
+                if not entry.get("auto_download"):
+                    continue
+                for p in list(_pending_live(entry)):
+                    _rel = dict(p.get("rel") or {})
+                    _ttl = _rel.get("title") or p.get("title") or ""
+                    if not _ttl:
+                        _pending_drop(entry, p.get("key", ""))
+                        continue
+                    _u = await _pick_download_url(
+                        _rel, entry.get("service", "apple"), "", cfg, _ttl)
+                    if not _u:
+                        continue
+                    _tsk = _make_task(_u, entry.get("quality", ""), cfg,
+                                      "watchlist-early")
+                    _pending_drop(entry, p.get("key", ""))
+                    if not _enqueue(_tsk, nm, _ttl, (_rel.get("url"),)):
+                        continue
+                    _enrich_soon(_tsk)
+                    await broadcast({"type": "queue_update", "queue": snapshot()})
+                    print(f"[watchlist] ⤵ добрал '{_ttl}' ({nm}) — "
+                          f"появился там, где можно взять", flush=True)
+
         for service in services:
-            names = [str(e.get("name") or "").strip() for e in targets
-                     if str(e.get("name") or "").strip()]
-            xref = await _xref.resolve_many(names, service, client)
+            xref = _ident.confirmed_map(targets, service)
             if not xref:
                 continue
-            print(f"[watchlist] {service}: polling {len(xref)} of {len(names)} artists",
-                  flush=True)
+            print(f"[watchlist] {service}: polling {len(xref)} of {len(targets)} "
+                  f"artists (confirmed ids only)", flush=True)
 
             for entry in targets:
                 nm = str(entry.get("name") or "").strip()
@@ -1633,47 +1692,24 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
                         _seen_add(entry, r.get("title", ""))
                     continue
 
-                # Сначала — молчаливая дозагрузка того, что уже объявляли, но
-                # взять было неоткуда. Ни тоста, ни события: человек про этот
-                # релиз уже знает, ему нужен файл, а не второе уведомление.
-                if entry.get("auto_download") and early_dl:
-                    for p in list(_pending_live(entry)):
-                        _rel = dict(p.get("rel") or {})
-                        _ttl = _rel.get("title") or p.get("title") or ""
-                        if not _ttl:
-                            _pending_drop(entry, p.get("key", ""))
-                            continue
-                        _u = await _pick_download_url(
-                            _rel, entry.get("service", "apple"), "", cfg, _ttl)
-                        if not _u:
-                            continue
-                        _tsk = _make_task(_u, entry.get("quality", ""), cfg,
-                                          "watchlist-early")
-                        _pending_drop(entry, p.get("key", ""))
-                        if not _enqueue(_tsk, nm, _ttl, (_rel.get("url"),)):
-                            continue
-                        _enrich_soon(_tsk)
-                        await broadcast({"type": "queue_update", "queue": snapshot()})
-                        print(f"[watchlist] ⤵ добрал '{_ttl}' ({nm}) — "
-                              f"появился там, где можно взять", flush=True)
-
                 for r in rels:
                     title = r.get("title", "")
                     if not title or _seen_has(entry, title):
                         continue
                     _seen_add(entry, title)
                     found += 1
+                    pull = _auto_pull(entry, r)
                     await broadcast({"type": "watchlist_new_release",
                                      "artist": nm, "release": title,
                                      "compilation": False,
                                      "early": service,
                                      "url": r.get("url", "")})
                     _notify_release(nm, f"{title} (уже доступен в {service})",
-                                    False, bool(entry.get("auto_download")), r)
+                                    False, pull, r)
                     print(f"[watchlist] ⚡ '{title}' ({nm}) already in {service} - "
                           f"not in Apple yet", flush=True)
 
-                    if not (entry.get("auto_download") and early_dl):
+                    if not (early_dl and pull):
                         continue
                     # Куда стрелять — решает доступность, а не подписка. Если в
                     # любимом сервисе релиза ещё нет, берём ту витрину, где он
@@ -1771,6 +1807,19 @@ async def _check_watchlist_pass():
                 entry["last_check"] = datetime.now().isoformat(timespec="seconds")
                 if not latest:
                     continue
+                # Яблоко склеивает однофамильцев на одной странице: у
+                # «Solomon Grey» (668535482) рядом лежат и испанские синглы
+                # другого человека, и австралийские ремиксы нужного. Релиз со
+                # страницы проходит, только если опирается о подтверждённый
+                # профиль личности подписки; иначе — скрыт и помечен владельцу,
+                # но НЕ стёрт (см. ripster/artist_identity.py).
+                _ok, _why = _ident.home_show(entry, latest)
+                if not _ok:
+                    _ident.hidden_add(entry, latest, _why)
+                    print(f"[watchlist] {entry['name']}: скрыт «{latest['name']}» — "
+                          f"{_why}", flush=True)
+                    save(items)
+                    continue
                 release_url  = latest["url"]
                 release_name = latest["name"]
                 prev = entry.get("last_release")
@@ -1800,6 +1849,7 @@ async def _check_watchlist_pass():
                         continue
                     new_found += 1
                     save(items)
+                    pull = _auto_pull(entry, latest)
                     await broadcast({"type":     "watchlist_new_release",
                                      "artist":   entry["name"],
                                      "release":  release_name,
@@ -1807,8 +1857,8 @@ async def _check_watchlist_pass():
                                      "url":      release_url})
                     _notify_release(entry["name"], release_name,
                                     bool(latest.get("compilation")),
-                                    bool(entry.get("auto_download")), latest)
-                    if entry.get("auto_download") and release_url:
+                                    pull, latest)
+                    if pull and release_url:
                         # Нашли в Apple — но качать надо туда, куда подписан
                         # владелец. Для service="apple" это короткое замыкание
                         # внутри _pick_download_url и ровно прежнее поведение.

@@ -12,9 +12,10 @@ Uses asyncio concurrency (semaphore) so 200 artists scan in ~15s instead of hour
 «Centuries»: релиз лежал в Tidal NZ за сутки до мировой даты).
 
 Поэтому список артистов каждого источника — это подписки его аккаунта ПЛЮС те,
-за кем следят в других сервисах, найденные в этом каталоге по имени
-(`ripster.artist_xref`, сверка только по точному совпадению). Выключается
-ключом `radar-cross-service: false`.
+за кем следят в других сервисах. Кого из них считать «тем же артистом», решает НЕ
+имя: `ripster.artist_identity` подтверждает тождество общими работами (ISRC/UPC,
+пересечение дискографий, лейблы) и хранит подтверждённый id на самой подписке.
+Выключается кросс-обход ключом `radar-cross-service: false`.
 """
 from __future__ import annotations
 
@@ -27,11 +28,14 @@ import httpx
 from fastapi import APIRouter
 
 from ripster import artist_xref as _xref
+from ripster import artist_identity as _ident
 
 router     = APIRouter()
 _config: dict = {}
 _broadcast    = None
 _watchlist: list = []
+_save_watchlist  = None
+_base_dir        = None
 
 _TIDAL_API   = "https://api.tidal.com/v1"
 _QOBUZ_API   = "https://www.qobuz.com/api.json/0.2"
@@ -40,10 +44,12 @@ _TIMEOUT     = httpx.Timeout(connect=10, read=20, write=10, pool=5)
 
 
 def install(app, ctx) -> None:
-    global _config, _broadcast, _watchlist
+    global _config, _broadcast, _watchlist, _save_watchlist, _base_dir
     _config    = ctx.config
     _broadcast = ctx.broadcast
     _watchlist = ctx.watchlist
+    _save_watchlist = getattr(ctx, "save_watchlist", None)
+    _base_dir  = ctx.base_dir
     _xref.configure(ctx.config, ctx.base_dir)
     app.include_router(router)
 
@@ -112,9 +118,15 @@ async def _watchlist_artists(service: str, artists: list) -> list[dict]:
     полсуток пропадало впустую.
 
     Имена берём из вишлиста — это то, чего владелец действительно ждёт, и это
-    десятки записей, а не тысячи: полный кросс-обход всех подписок Spotify стоил
-    бы часов запросов и бана. Лейблы и SoundCloud пропускаем — там артиста нет.
-    Найденное кэшируется на диск, так что платим только за первый проход.
+    десятки записей, а не тысячи. Лейблы и SoundCloud пропускаем — там артиста нет.
+
+    КТО именно «тот же артист» решает НЕ имя. `artist_identity` подтверждает
+    тождество общими работами (ISRC/UPC, пересечение дискографий, лейблы) и
+    хранит подтверждённый id НА самой подписке. Без подтверждения подписка в
+    чужую витрину не добавляется вовсе: пропущенная находка мешает владельцу
+    меньше, чем чужой релиз в ленте (жалоба с 03.09.2026 — «BOP», «Solomon
+    Grey»). Привязка идёт по чуть-чуть на скане, в темпе радара; подтверждённое
+    не протухает.
     """
     if (_config or {}).get("radar-cross-service") is False:
         return []
@@ -122,21 +134,30 @@ async def _watchlist_artists(service: str, artists: list) -> list[dict]:
         return []
 
     have = {str(a.get("id")) for a in (artists or [])}
-    names = sorted({
-        str(e.get("name") or "").strip()
-        for e in (_watchlist or [])
-        if e.get("kind") != "label" and str(e.get("name") or "").strip()
-        and (e.get("service") or "apple") != service
-    })
-    if not names:
+    entries = [e for e in (_watchlist or [])
+               if e.get("kind") != "label" and str(e.get("name") or "").strip()
+               and (e.get("service") or "apple") != service]
+    if not entries:
         return []
 
-    found = await _xref.resolve_many(names, service)
+    # Имя здесь только находит кандидатов; в скан уходит id, подтверждённый
+    # общими работами подписки и витрины.
+    if await _ident.bind_pass(entries, None, _config,
+                              spotify_state=(_ident.load_spotify_state(_base_dir)
+                                             if _base_dir else None)) and _save_watchlist:
+        _save_watchlist(_watchlist)
+
+    found = _ident.confirmed_map(entries, service)
+    if len(entries) > len(found):
+        print(f"[radar] {service}: {len(entries) - len(found)} of {len(entries)} "
+              f"watchlist artists have no confirmed id - skipped: a name is not "
+              f"an identity", flush=True)
+
     extra = [{"id": v["id"], "name": v.get("name") or nm, "via_xref": True}
              for nm, v in found.items() if str(v.get("id")) not in have]
     if extra:
         print(f"[radar] {service}: subscriptions {len(artists)}, added from watchlist "
-              f"{len(extra)} (of {len(names)} names)", flush=True)
+              f"{len(extra)} (confirmed of {len(entries)} names)", flush=True)
     return extra
 
 

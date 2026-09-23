@@ -398,100 +398,12 @@ body{height:100%;margin:0}
 .app{display:grid;grid-template-columns:220px minmax(0, 1fr);grid-template-rows:68px minmax(0, 1fr);flex:1 1 0;min-height:0;width:100vw;gap:0;overflow:hidden}
 .topbar{grid-column:1/-1;display:flex;align-items:center;padding:0 20px 0 20px;background:var(--topbar-bg);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);gap:12px;position:relative;z-index:100;overflow:hidden;min-width:0}
 .topbar > *{flex-shrink:0}
-.tb-status{font-size:11px;font-family:var(--mono);color:var(--muted);white-space:nowrap;flex-shrink:0}
-/* ── Live-connection pulse (replaces the old "● Connected" text label) ──────
-   A wordless ECG trace: it runs while the socket is alive, slows to an amber
-   beat while reconnecting, and flatlines when the connection is really gone.
-   Every few cycles the line gathers itself into a raccoon's profile and then
-   unfolds back into the trace — same path, morphed control point by control
-   point (both `d` values below carry an identical 20-segment structure, which
-   is what lets the browser interpolate instead of snapping).
-
-   Smoothness notes, learned the hard way: the first version used
-   `filter: drop-shadow` on the animated path and `vector-effect`, and both
-   force a per-frame repaint outside GPU compositing — the beat visibly
-   stuttered. The glow is now a second, thicker copy of the same path, and
-   nothing animated carries a filter. */
-.tb-pulse{width:56px;height:34px;flex-shrink:0;display:flex;align-items:center;cursor:default}
-/* Framed "instrument window" in the corner. At double size the trace needs a
-   container of its own, or it reads as something that overflowed the bar. The
-   frame tints with the connection state, so the corner carries the status even
-   at a glance from across the room. */
-.tb-pulse-framed{width:112px;height:52px;padding:2px 7px;border-radius:12px;
-  background:var(--console-bg);border:1px solid var(--border);
-  transition:border-color .8s ease,background .8s ease}
-.tb-pulse-framed[data-state="live"]{border-color:color-mix(in srgb,var(--green) 34%,var(--border))}
-.tb-pulse-framed[data-state="wait"]{border-color:color-mix(in srgb,var(--orange) 36%,var(--border))}
 /* Square icon button (theme switch) — matches the pill//details heights. */
 .tb-icon-btn{background:var(--surface);border:1px solid var(--border);border-radius:9px;
   width:34px;height:34px;font-size:15px;cursor:pointer;display:flex;align-items:center;
   justify-content:center;color:var(--text);flex-shrink:0;padding:0;line-height:1;
   transition:border-color var(--tr),background var(--tr)}
 .tb-icon-btn:hover{border-color:var(--muted);background:var(--surface2)}
-/* Edge feather as a CSS mask, not an SVG <mask>: an SVG mask over a moving
-   element re-rasterises every frame, which kept the beat stuttering even after
-   the drop-shadow was gone. This one is composited. */
-.tb-pulse svg{width:100%;height:100%;overflow:hidden;
-  -webkit-mask-image:linear-gradient(to right,transparent 0,rgba(0,0,0,.45) 7%,#000 18%,#000 82%,rgba(0,0,0,.45) 93%,transparent 100%);
-  mask-image:linear-gradient(to right,transparent 0,rgba(0,0,0,.45) 7%,#000 18%,#000 82%,rgba(0,0,0,.45) 93%,transparent 100%)}
-.tb-pulse path{fill:none;stroke-linecap:round;stroke-linejoin:round}
-.tb-pulse .tb-pulse-wave{fill:currentColor;fill-opacity:0;transition:fill-opacity .8s ease}
-.tb-pulse[data-morph="face"] .tb-pulse-wave{fill-opacity:1}
-.tb-pulse .tb-pulse-base{stroke:var(--border2);stroke-width:1;opacity:.5;
-  transition:stroke .8s ease,opacity .8s ease}
-
-/* Both trace copies share the geometry; only width and opacity differ. */
-.tb-pulse .tb-pulse-wave,
-.tb-pulse .tb-pulse-glow{
-  d:path("M0 24 C0.73 24.00, 1.47 24.00, 2.22 24.00 C2.96 24.00, 3.69 24.00, 4.44 24.00 C5.18 24.00, 5.91 24.00, 6.67 24.00 C7.40 24.00, 8.13 24.00, 8.89 24.00 C9.62 24.00, 10.36 24.00, 11.11 24.00 C11.84 24.00, 12.58 24.00, 13.33 24.00 C14.07 24.00, 14.80 24.00, 15.56 24.00 C16.29 24.00, 17.02 24.00, 17.78 24.00 C18.51 24.00, 19.24 24.00, 20.00 24.00 C20.40 23.14, 20.79 22.28, 21.20 21.40 C21.60 22.26, 21.99 23.12, 22.40 24.00 C23.06 18.39, 23.72 12.78, 24.40 7.00 C25.06 15.58, 25.72 24.16, 26.40 33.00 C27.06 29.44, 27.72 25.87, 28.40 22.20 C29.09 22.79, 29.79 23.39, 30.50 24.00 C31.55 24.00, 32.60 24.00, 33.69 24.00 C34.74 24.00, 35.79 24.00, 36.88 24.00 C37.93 24.00, 38.98 24.00, 40.06 24.00 C41.11 24.00, 42.17 24.00, 43.25 24.00 C44.30 24.00, 45.35 24.00, 46.44 24.00 C47.49 24.00, 48.54 24.00, 49.62 24.00 C50.68 24.00, 51.73 24.00, 52.81 24.00 C53.86 24.00, 54.92 24.00, 56.00 24.00 C56.73 24.00, 57.47 24.00, 58.22 24.00 C58.96 24.00, 59.69 24.00, 60.44 24.00 C61.18 24.00, 61.91 24.00, 62.67 24.00 C63.40 24.00, 64.13 24.00, 64.89 24.00 C65.62 24.00, 66.36 24.00, 67.11 24.00 C67.84 24.00, 68.58 24.00, 69.33 24.00 C70.07 24.00, 70.80 24.00, 71.56 24.00 C72.29 24.00, 73.02 24.00, 73.78 24.00 C74.51 24.00, 75.24 24.00, 76.00 24.00 C76.40 23.14, 76.79 22.28, 77.20 21.40 C77.60 22.26, 77.99 23.12, 78.40 24.00 C79.06 18.39, 79.72 12.78, 80.40 7.00 C81.06 15.58, 81.72 24.16, 82.40 33.00 C83.06 29.44, 83.72 25.87, 84.40 22.20 C85.09 22.79, 85.79 23.39, 86.50 24.00 C87.55 24.00, 88.60 24.00, 89.69 24.00 C90.74 24.00, 91.79 24.00, 92.88 24.00 C93.93 24.00, 94.98 24.00, 96.06 24.00 C97.11 24.00, 98.17 24.00, 99.25 24.00 C100.30 24.00, 101.35 24.00, 102.44 24.00 C103.49 24.00, 104.54 24.00, 105.62 24.00 C106.68 24.00, 107.73 24.00, 108.81 24.00 C109.86 24.00, 110.92 24.00, 112.00 24.00 Z");
-  will-change:transform;
-  transition:d .85s cubic-bezier(.55,.05,.25,1), stroke .8s ease, opacity .8s ease;
-}
-.tb-pulse .tb-pulse-wave{stroke:var(--muted2);stroke-width:1.5;opacity:0}
-.tb-pulse .tb-pulse-glow{stroke:var(--muted2);stroke-width:4;opacity:0}
-
-/* The shift MUST equal the pattern's period exactly. It was left at -60 when the
-   cycle became 56 units wide, so every loop jumped 4 units — that mismatch, not
-   the frame rate, is what read as the heartbeat "breaking off" each time round. */
-@keyframes tb-pulse-run{from{transform:translateX(0)}to{transform:translateX(-56px)}}
-
-.tb-pulse[data-state="live"] .tb-pulse-wave{stroke:var(--green);opacity:1}
-.tb-pulse[data-state="live"] .tb-pulse-glow{stroke:var(--green);opacity:.20}
-.tb-pulse[data-state="wait"] .tb-pulse-wave{stroke:var(--orange);opacity:.95}
-.tb-pulse[data-state="wait"] .tb-pulse-glow{stroke:var(--orange);opacity:.16}
-/* Gone: the trace fades out and the flat baseline is all that's left. */
-.tb-pulse[data-state="off"] .tb-pulse-wave,
-.tb-pulse[data-state="off"] .tb-pulse-glow{opacity:0}
-.tb-pulse[data-state="off"] .tb-pulse-base{stroke:var(--muted2);opacity:.4}
-
-/* Travel moves the GROUP, not the two paths separately: one promoted layer, no
-   pair of animations to drift apart. Paused (not removed) during the morph, so
-   the trace holds its exact position instead of snapping back to phase zero. */
-.tb-pulse .tb-pulse-run{will-change:transform}
-.tb-pulse[data-state="live"] .tb-pulse-run{animation:tb-pulse-run 2.4s linear infinite}
-.tb-pulse[data-state="wait"] .tb-pulse-run{animation:tb-pulse-run 4.6s linear infinite}
-.tb-pulse[data-morph] .tb-pulse-run{animation-play-state:paused}
-
-/* The morph itself. Held one full breath, then released. */
-.tb-pulse[data-morph="face"] .tb-pulse-wave,
-.tb-pulse[data-morph="face"] .tb-pulse-glow{d:path("M0 24 C1.00 24.00, 4.42 24.07, 6.00 24.00 C7.58 23.93, 8.43 24.00, 9.50 23.60 C10.57 23.20, 11.60 22.50, 12.40 21.60 C13.20 20.70, 13.77 19.40, 14.30 18.20 C14.83 17.00, 15.15 15.77, 15.60 14.40 C16.05 13.03, 16.45 11.17, 17.00 10.00 C17.55 8.83, 18.23 7.47, 18.90 7.40 C19.57 7.33, 20.28 9.43, 21.00 9.60 C21.72 9.77, 22.43 8.67, 23.20 8.40 C23.97 8.13, 24.87 7.92, 25.60 8.00 C26.33 8.08, 26.97 8.40, 27.60 8.90 C28.23 9.40, 28.77 10.22, 29.40 11.00 C30.03 11.78, 30.73 12.77, 31.40 13.60 C32.07 14.43, 32.73 15.20, 33.40 16.00 C34.07 16.80, 34.80 17.67, 35.40 18.40 C36.00 19.13, 36.52 19.80, 37.00 20.40 C37.48 21.00, 38.10 21.53, 38.30 22.00 C38.50 22.47, 38.52 22.92, 38.20 23.20 C37.88 23.48, 37.17 23.57, 36.40 23.70 C35.63 23.83, 32.67 23.95, 33.60 24.00 C34.53 24.05, 39.27 24.00, 42.00 24.00 C44.73 24.00, 47.67 24.00, 50.00 24.00 C52.33 24.00, 55.00 24.00, 56.00 24.00 C56.80 24.00, 57.61 24.00, 58.43 24.00 C59.24 24.00, 60.04 24.00, 60.87 24.00 C61.67 24.00, 62.48 24.00, 63.30 24.00 C64.11 24.00, 64.91 24.00, 65.74 24.00 C66.54 24.00, 67.35 24.00, 68.17 24.00 C68.98 24.00, 69.78 24.00, 70.61 24.00 C71.41 24.00, 72.22 24.00, 73.04 24.00 C73.85 24.00, 74.65 24.00, 75.48 24.00 C76.28 24.00, 77.09 24.00, 77.91 24.00 C78.72 24.00, 79.52 24.00, 80.35 24.00 C81.15 24.00, 81.95 24.00, 82.78 24.00 C83.59 24.00, 84.39 24.00, 85.22 24.00 C86.02 24.00, 86.82 24.00, 87.65 24.00 C88.46 24.00, 89.26 24.00, 90.09 24.00 C90.89 24.00, 91.69 24.00, 92.52 24.00 C93.33 24.00, 94.13 24.00, 94.96 24.00 C95.76 24.00, 96.56 24.00, 97.39 24.00 C98.19 24.00, 99.00 24.00, 99.83 24.00 C100.63 24.00, 101.43 24.00, 102.26 24.00 C103.06 24.00, 103.87 24.00, 104.70 24.00 C105.50 24.00, 106.30 24.00, 107.13 24.00 C107.93 24.00, 108.74 24.00, 109.57 24.00 C110.37 24.00, 111.17 24.00, 112.00 24.00 Z")}
-
-.tb-pulse .tb-pulse-face-detail{opacity:0;transition:opacity .45s ease}
-.tb-pulse[data-morph="face"] .tb-pulse-face-detail{opacity:1;transition:opacity .5s ease .45s}
-.tb-pulse .tb-pulse-mask{fill:var(--topbar-bg);opacity:.92;stroke:none}
-.tb-pulse .tb-pulse-nose{fill:var(--topbar-bg)}
-.tb-pulse .tb-pulse-eye{fill:currentColor}
-.tb-pulse[data-state="live"] .tb-pulse-face-detail{color:var(--green)}
-.tb-pulse[data-state="wait"] .tb-pulse-face-detail{color:var(--orange)}
-
-@media (prefers-reduced-motion:reduce){
-  .tb-pulse .tb-pulse-wave,
-  .tb-pulse .tb-pulse-glow{animation:none!important;transition:stroke .8s ease,opacity .8s ease}
-  /* Motion was the whole signal, so colour has to carry it alone — hold the
-     trace still and visible rather than leaving an ambiguous flat line. */
-  .tb-pulse[data-state="live"] .tb-pulse-wave,
-  .tb-pulse[data-state="wait"] .tb-pulse-wave{opacity:1}
-}
 .tb-restart{background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:14px;padding:2px 7px;cursor:pointer;line-height:1;flex-shrink:0}
 .tb-restart:hover{color:var(--fg);border-color:var(--muted)}
 .sidebar{background:var(--sidebar-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;padding:12px 10px 0;gap:2px;min-height:0;scrollbar-width:thin}
@@ -506,23 +418,14 @@ body{height:100%;margin:0}
 .tb-mark{width:34px;height:34px;border-radius:10px;background:var(--surface);border:1.5px solid var(--border);display:flex;align-items:center;justify-content:center;flex-shrink:0;overflow:hidden}
 .tb-name{font-family:Georgia,'Times New Roman',serif;font-size:14px;font-weight:700;letter-spacing:-.3px;color:var(--text)}
 .tb-sub{font-size:10px;color:var(--muted);font-weight:400;font-family:var(--mono)}
-/* (.tb-pills — removed; topbar now uses a single details popover instead of a row of pills) */
+/* (.tb-pills — removed; the topbar carries no status lamps since 21.09.2026) */
 .pill{display:flex;align-items:center;gap:5px;font-size:10px;font-weight:600;padding:4px 10px;border-radius:20px;font-family:var(--display);letter-spacing:.2px}
-/* In the topbar the wrapper pills carry a label ("Wrapper ✓", "Public ✗") that
-   the JS rewrites on every status poll. Two word-pills side by side made the
-   corner noisy, so here they collapse to bare status lamps — the text is still
-   written by the JS (untouched) and still reachable through the tooltip. */
-.topbar .pill{font-size:0;gap:0;padding:0;width:26px;height:26px;border-radius:50%;
-  justify-content:center;flex-shrink:0}
-.topbar .pill .dot{width:9px;height:9px}
 .pill .dot{width:5px;height:5px;border-radius:50%;flex-shrink:0}
 .pill-ok{background:rgba(62,207,170,.12);color:var(--green)}.pill-ok .dot{background:var(--green);animation:pulse-g 2s infinite}
 .pill-warn{background:rgba(239,159,39,.12);color:var(--orange)}.pill-warn .dot{background:var(--orange)}
 .pill-err{background:rgba(226,75,74,.12);color:var(--danger)}.pill-err .dot{background:var(--danger)}
 .pill-blue{background:rgba(10,132,255,.12);color:var(--blue)}.pill-blue .dot{background:var(--blue)}
 @keyframes pulse-g{0%,100%{box-shadow:0 0 0 0 rgba(62,207,170,.5)}50%{box-shadow:0 0 0 4px rgba(62,207,170,0)}}
-
-/* (.tb-status — defined in layout section above) */
 
 /* Ripster Radar — "new" glow + "live" (instant queryWhatsNewFeed hit) badge */
 .rel-card-new{box-shadow:0 0 0 1px rgba(62,207,170,.22),0 4px 18px rgba(62,207,170,.14)}
@@ -536,13 +439,14 @@ body{height:100%;margin:0}
 .nav-item:hover{background:var(--surface);color:var(--text)}
 .nav-item.active{background:rgba(192,132,160,.12);color:var(--red);font-weight:600;box-shadow:inset 2px 0 0 var(--red);border-radius:10px}
 .nav-item .icon{font-size:14px;width:20px;text-align:center;flex-shrink:0}
-/* Сегментированный стеклянный таб-бар настроек (разбор Grok v001, приоритет №4):
-   горизонтальный скролл вместо переноса 15 вкладок на вторую строку-сироту. */
-.stab-bar{display:flex;gap:4px;margin-top:10px;padding:4px;border-radius:12px;
-  background:var(--surface);border:1px solid var(--border);overflow-x:auto;overflow-y:hidden;
-  scrollbar-width:thin;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
-.stab-bar::-webkit-scrollbar{height:6px}
-.stab-bar::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+/* Сегментированный стеклянный таб-бар настроек (разбор Grok v001, приоритет №4).
+   Перенос по строкам (20.09.2026, трекер #9004): в one-row + overflow-x:auto
+   последние вкладки уезжали за край и оставались недостижимыми — мёртвая фича.
+   flex-wrap гарантирует, что каждая вкладка видима и кликабельна на любой
+   ширине и в любой теме, без скрытого скролла, о котором надо догадаться. */
+.stab-bar{display:flex;flex-wrap:wrap;gap:4px;margin-top:10px;padding:4px;border-radius:12px;
+  background:var(--surface);border:1px solid var(--border);overflow:visible;
+  -webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
 .stab{padding:7px 13px;font-size:12px;font-weight:600;border:none;background:transparent;color:var(--muted);cursor:pointer;font-family:var(--font);transition:all .15s;border-radius:9px;white-space:nowrap;flex:0 0 auto}
 .stab.active{color:var(--red);background:var(--surface2);box-shadow:inset 0 0 0 1px var(--border)}
 .stab:hover:not(.active){color:var(--text);background:var(--surface2)}
@@ -857,15 +761,16 @@ button:focus-visible{ outline: 2px solid rgba(192,132,160,.55); outline-offset: 
 .qi-tree-toggle:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
 .qi-tree{margin-top:6px;padding:4px 0 2px 2px;border-left:1px solid var(--border);width:100%;max-height:320px;overflow-y:auto}
 .qi-tree[hidden]{display:none}
-.qt-row{display:grid;grid-template-columns:22px minmax(0,1fr) 14px;column-gap:6px;align-items:center;padding:3px 8px 4px 8px}
+.qt-row{display:grid;grid-template-columns:22px minmax(0,1fr) 44px 14px;column-gap:6px;align-items:center;padding:3px 8px 4px 8px}
 .qt-n{font-size:10px;color:var(--muted);font-family:var(--mono);text-align:right;font-variant-numeric:tabular-nums}
 .qt-name{font-size:11px;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .qt-art{color:var(--muted)}
+.qt-dur{font-size:10px;color:var(--muted);font-family:var(--mono);text-align:right;font-variant-numeric:tabular-nums}
 .qt-mark{font-size:10px;text-align:center;color:var(--muted)}
 .qt-done .qt-mark{color:var(--green)}
 .qt-err .qt-mark{color:var(--red)}
 .qt-wait .qt-name,.qt-miss .qt-name{color:var(--muted)}
-.qt-track{grid-column:2 / 4;height:3px;margin-top:3px;background:rgba(255,255,255,.07);border-radius:2px;overflow:hidden}
+.qt-track{grid-column:2 / 5;height:3px;margin-top:3px;background:rgba(255,255,255,.07);border-radius:2px;overflow:hidden}
 .qt-bar{height:100%;border-radius:2px;transition:width .4s ease}
 .qt-done .qt-bar{opacity:.55}
 .qt-bar.qt-indet{width:35%!important;animation:qtIndet 1.3s ease-in-out infinite}
@@ -1109,6 +1014,11 @@ img[data-cover].loaded{
 }
 .pp-transport:hover{ color:var(--text); background:var(--pp-tile-hover); }
 .pp-transport:active{ transform:scale(.94); }
+/* Минус по треку: включённое состояние обязано быть видно — иначе «уже
+   отказано» и «ещё не нажато» неразличимы, а кнопка обязана показывать
+   состояние ИГРАЮЩЕГО трека, как сердце рядом. */
+#pp-dis-btn.on{ color:var(--red); background:rgba(192,132,160,.16); }
+#pp-dl-btn:disabled{ opacity:.35; cursor:not-allowed; }
 .pp-extra{
   width:34px; height:34px; border-radius:2px;
   background:var(--pp-tile); color:var(--text); border:none;
@@ -1249,9 +1159,6 @@ img[data-cover].loaded{
   .topbar{height:48px;padding:0 10px;gap:7px;grid-column:1}
   .tb-controls{display:none!important}
   #lang-switcher{display:none!important}
-  .tb-status{display:none!important}
-  .tb-pulse{display:none!important}   /* same call as the old text status: topbar is too tight */
-  .wrapper-pill{display:none!important}
   .tb-sub{display:none}
   .tb-mark{width:28px;height:28px;border-radius:8px}
   .tb-name{font-size:12px}
@@ -1268,8 +1175,6 @@ img[data-cover].loaded{
   .queue-list{padding:12px 14px;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:9px}
   .qi{padding:0}
   .qi-art{width:100%}
-  /* Keep details popover from overflowing */
-  #tb-details-pop{left:8px;right:8px;min-width:0}
   /* Player: above the tab bar, full width */
   #preview-player{left:0!important;bottom:56px!important}
   /* When player is hidden on mobile, slide it fully below the tab bar */
@@ -1339,7 +1244,6 @@ body.guest-mode .owner-only { display:none !important; }
    the WHOLE queue (a guest manages only their own tasks via the × on each card). */
 body.guest-mode #wrapper-banner,
 body.guest-mode #wrapper-ok-banner,
-body.guest-mode #wrapper-pill,
 body.guest-mode #url-quality,
 body.guest-mode #btn-start,
 body.guest-mode #btn-pause,
@@ -1357,14 +1261,12 @@ body.guest-mode .transport { display:none !important; }
 /* Telegram Mini App (html.tg-webapp set by the /tg bootstrap) — hide the same
    owner-only chrome REGARDLESS of guest-mode detection, so the desktop-Telegram
    WebApp (where guest-mode may apply differently) also stays clean. */
-html.tg-webapp #wrapper-pill,
 html.tg-webapp #wrapper-banner,
 html.tg-webapp #wrapper-ok-banner,
 html.tg-webapp #guest-banner,
 html.tg-webapp #mgt-tokens,
 html.tg-webapp #font-picker,
 html.tg-webapp #theme-btn,
-html.tg-webapp #tb-details-btn,
 html.tg-webapp #url-quality,
 html.tg-webapp #btn-start,
 html.tg-webapp #btn-pause,
@@ -1380,8 +1282,7 @@ html.tg-webapp #preview-player { bottom:120px !important; }
    Hide every owner-only element + the two owner tabs that aren't tagged owner-only. */
 html.tg-webapp .owner-only,
 html.tg-webapp .nav-item[data-view="setup"],
-html.tg-webapp .nav-item[data-view="console"],
-html.tg-webapp #tb-details-pop { display:none !important; }
+html.tg-webapp .nav-item[data-view="console"] { display:none !important; }
 body.guest-mode .guest-only { display:flex !important; }
 /* Views use .active class for visibility — prevent guest-only class from
    always showing a view regardless of active state (e.g. view-guest-prefs
@@ -2326,26 +2227,31 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
    инлайном (и меняет на наведении своими обработчиками) — инлайн бьёт класс, и
    попытка красить рамку отсюда просто ничего не даёт: в проверке 01.08.2026
    вместо тона обложки оставалась зелёная рамка «новинки».
+   ДВА КРАСИТЕЛЯ. --tint — акцент (полосы панелей, кольцо под курсором), он
+   обязан читаться. --tint-glow — приглушённый, тянется к фону темы: кольцо и
+   ореол карточки должны быть намёком на обложку. 21.09.2026 лососевое кольцо
+   вокруг бирюзовой обложки — это один «читаемый» цвет служил и ореолу.
    Ни текст, ни фон цветом не красятся: акцент рядом с содержимым читается,
    заливка под содержимым — нет. Переход мягкий, но быстрый — цвет приезжает
    вместе с обложкой, а не заметно позже. */
-.rel-card{--tint:transparent;transition:box-shadow .22s ease}
+.rel-card{--tint:transparent;--tint-glow:transparent;transition:box-shadow .22s ease}
 .rel-card.tinted{
-  box-shadow:0 0 0 2px color-mix(in srgb,var(--tint) 62%,transparent),
-             0 6px 22px color-mix(in srgb,var(--tint) 16%,transparent)}
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--tint-glow) 85%,transparent),
+             0 6px 22px color-mix(in srgb,var(--tint-glow) 12%,transparent)}
 .rel-card.tinted:hover{
-  box-shadow:0 0 0 2px var(--tint),
-             0 10px 30px color-mix(in srgb,var(--tint) 28%,transparent)}
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--tint) 75%,transparent),
+             0 10px 30px color-mix(in srgb,var(--tint-glow) 20%,transparent)}
 /* Движок без color-mix (старый WebView2) — сплошное кольцо в тон. */
 @supports not (color:color-mix(in srgb,red 50%,blue)){
-  .rel-card.tinted{box-shadow:0 0 0 2px var(--tint)}
+  .rel-card.tinted{box-shadow:0 0 0 2px var(--tint-glow)}
 }
 
-/* Панель поиска в тон артиста — видно, чей результат сейчас на экране. */
-#view-search{--tint:transparent;transition:box-shadow .3s ease}
+/* Панель поиска в тон артиста — видно, чей результат сейчас на экране.
+   Полоса — акцент, тень под панелью — приглушённое свечение. */
+#view-search{--tint:transparent;--tint-glow:transparent;transition:box-shadow .3s ease}
 #view-search.tinted .view-head,
 #view-search.tinted .search-panel{
-  box-shadow:inset 0 2px 0 0 var(--tint),0 8px 26px color-mix(in srgb,var(--tint) 12%,transparent)}
+  box-shadow:inset 0 2px 0 0 var(--tint),0 8px 26px color-mix(in srgb,var(--tint-glow) 10%,transparent)}
 
 @media (prefers-reduced-motion:reduce){
   .rel-card,#view-search{transition:none}
@@ -2569,12 +2475,12 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 #pp-queue .pq-chap.on .pq-chap-l{color:var(--text);font-weight:600}
 #pp-queue .pq-chap.on .pq-chap-t{color:var(--red)}
 
-/* Дискография в тон артиста: полоса сверху и мягкий ореол. Фон не красим —
-   под ним весь текст страницы. */
-#sc-detail,.detail-panel{--tint:transparent;transition:box-shadow .3s ease}
+/* Дискография в тон артиста: полоса сверху (акцент) и мягкий ореол
+   (приглушённое свечение). Фон не красим — под ним весь текст страницы. */
+#sc-detail,.detail-panel{--tint:transparent;--tint-glow:transparent;transition:box-shadow .3s ease}
 #sc-detail.tinted,.detail-panel.tinted{
   box-shadow:inset 0 3px 0 0 var(--tint),
-             0 10px 34px color-mix(in srgb,var(--tint) 14%,transparent)}
+             0 10px 34px color-mix(in srgb,var(--tint-glow) 12%,transparent)}
 @supports not (color:color-mix(in srgb,red 50%,blue)){
   #sc-detail.tinted,.detail-panel.tinted{box-shadow:inset 0 3px 0 0 var(--tint)}
 }
@@ -2661,48 +2567,48 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 .card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(var(--card-min,185px),1fr));gap:12px;align-items:stretch}
 @media(max-width:699px){.card-grid{--card-min:160px}}
 
-/* ── РАДАР: ОДНА СПЛОШНАЯ СЕТКА, ДАТА ВНЕ Ё ──────────────────────
-   Разделитель рвал ряд: полноширинная шапка дня (бывш. grid-column:1/-1)
-   начинала новую строку сетки, и день из одного-двух релизов лежал влево с
-   пустым полем до края экрана. Теперь шапок в сетке НЕТ вовсе: карточки
-   заполняют ряд до конца, день меняется посреди ряда. Принадлежность
-   карточки дню/букве живёт в её data-gkey/data-letter, а липкая метка
-   .rel-group-float читает их с первой видимой карточки (sc_tab.js,
-   _relFloatSync) и показывает два уровня: «16 дек · B» + счётчик «N рел.».
+/* ── РАДАР: СЕКЦИИ ПО ДНЯМ, ЛИПКАЯ ШАПКА В ПОТОКЕ ─────────────────────
+   Каждый день — секция с полноширинной шапкой и своей сеткой карточек
+   (sc_tab.js, _relGroupSecs). Липкий уровень один — шапка дня, и читается
+   из неё ДВА уровня: дата и текущая буква (.rel-letter-cur, её пересчитывает
+   по первой видимой карточке дня _relHeadsSync). Две отдельные липкие строки
+   (дата и буква) конкурировали бы за одну полосу экрана, и нижняя пряталась
+   бы под верхней; в одной строке конфликта нет.
 
-   Фон метки обязан быть непрозрачным: она стоит поверх уезжающих под неё
-   карточек, и сквозь прозрачный фон они проступали бы прямо по тексту. */
-/* height:0 — метка не занимает места в потоке; сама шапка absolute, и ленту
-   не сдвигает, когда появляется. pointer-events:none — не перехватывает
-   клики по карточкам под ней. Отступ живёт ВНУТРИ шапки (её padding-top):
-   метка сменяется ровно в тот пиксель, в котором её покидает предыдущая. */
-.rel-group-float{position:sticky;top:0;z-index:6;height:0;pointer-events:none}
-.rel-group-float > .rel-group-head{position:absolute;left:0;right:0;top:0;display:none}
-.rel-group-float.on > .rel-group-head{display:flex}
-.rel-group-head{
+   Шапка — обычный поток с position:sticky: она РЕЗЕРВИРУЕТ Своё место (не
+   height:0 и не absolute-копия, как было в отклонённой попытке), поэтому
+   закрытых ею карточек не существует: видимые карточки всегда начинаются
+   под ней. Фон обязан быть непрозрачным: в прилипшем состоянии шапка лежит
+   поверх уезжающих под неё карточек. */
+.rel-sec{margin:0 0 14px}
+.rel-date-head{
+  position:sticky;top:0;z-index:6;
   display:flex;align-items:baseline;gap:8px;
-  margin:0;padding:11px 2px 5px;
-  border-bottom:1px solid var(--border);background:var(--bg);
+  padding:11px 2px 6px;
+  background:var(--bg);border-bottom:1px solid var(--border);
 }
 .rel-group-title{font-size:13px;font-weight:800;color:var(--text)}
 .rel-group-count{font-size:10px;color:var(--muted2);font-family:var(--mono)}
-/* Буква дня — вторым элементом метки, крупнее даты и своим цветом: она
-   работает указателем места внутри дня, а не подписью к ряду. */
-.rel-float-letter{
+/* Буква дня — вторым элементом шапки, крупнее даты и своим цветом: она
+   работает указателем места внутри дня, а не подписью к ряду. Пустая не
+   тянет за собой разделитель «·». */
+.rel-letter-cur{
   font-family:var(--display);font-size:16px;font-weight:800;line-height:1.1;
   letter-spacing:-.5px;color:var(--red);
 }
-.rel-float-letter::before{content:'·';margin-right:.4em;font-weight:400;color:var(--muted2)}
-/* Буквенный режим: буква — ЗАГОЛОВОК ленты, крупнее всех элементов метки. */
-.rel-by-alpha .rel-group-title{
+.rel-letter-cur:empty{display:none}
+.rel-letter-cur::before{content:'·';margin-right:.4em;font-weight:400;color:var(--muted2)}
+/* Буквенный режим (сортировка по артисту/названию): буква — ЗАГОЛОВОК секции,
+   крупнее всех элементов шапки. */
+.rel-sec-letter .rel-group-title{
   font-family:var(--display);font-size:20px;line-height:1.1;
   letter-spacing:-.5px;min-width:1.1em;color:var(--red);
 }
 
-/* Полоса-оглавление сама прилипает ВЫШЕ шапок, поэтому копия шапки отступает
-   на её высоту. Высота задана здесь и постоянна: строка не переносится
-   (кириллица + латиница + «#» — это под шестьдесят кнопок), длинный алфавит
-   прокручивается вбок. Переносился бы — отступ пришлось бы угадывать. */
+/* Полоса-оглавление прилипает ВЫШЕ шапок дней. Её высота задана здесь и
+   постоянна: строка не переносится (кириллица + латиница + «#» — это под
+   шестьдесят кнопок), длинный алфавит прокручивается вбок. Переносился бы —
+   отступ пришлось бы угадывать. */
 .rel-alpha-index{
   position:sticky;top:0;z-index:7;
   display:flex;align-items:center;gap:2px;
@@ -2719,10 +2625,12 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   cursor:pointer;
 }
 .rel-alpha-index button:hover{background:var(--surface2);color:var(--text)}
-/* Отступ прилипшей копии ровно на высоту полосы — и ТОЛЬКО когда полоса на
-   экране есть. Безусловное `top:29px` оставляло бы щель в одну строку, когда
-   буква в ленте одна и оглавление не рисуется. */
-.rel-alpha-index ~ .rel-group-float{top:29px}
+/* Когда полоса на экране есть, шапка дня прилипает под неё, а не заезжает
+   под кнопки: отступ ровно на высоту полосы (30px). */
+.rel-alpha-index ~ .rel-sec .rel-date-head{top:30px}
+/* Прыжок по букве из оглавления обязан приводить цель ПОД полосу, а не под
+   неё: scroll-margin-top = полоса (30) + запас на шапку дня (~48). */
+.rel-sec,.rel-sec .rel-card{scroll-margin-top:78px}
 
 /* Ряд действий на карточке релиза — СЕТКА РАВНЫХ колонок, не flex-wrap.
    Было display:flex;flex-wrap:wrap — и пятая кнопка («открыть релиз») уезжала на
@@ -2766,24 +2674,62 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   bottom:0;
   z-index:3;
   background:var(--sidebar-bg);
-  flex:0 0 112px;    /* не ужимать: 0 1 позволял высоте уехать к min-height и ниже */
-  height:112px;
-  min-height:64px;
+  /* ВЫСОТА — по факту кругов, а не вечно. Ровно 112px без условий означали, что
+   док выедает пятую часть панели, даже когда не качается НИЧЕГО, и последний
+   пункт меню («Admin») уезжал под его непрозрачный фон (трекер #9006).
+   flex-basis:auto — высота берётся из height, поэтому именно height и переключается
+   (при прежднем flex:0 0 112px любой height перекрывался базисом). min-height:0 —
+   чтобы нулевой док действительно схлопывался. */
+  flex:0 0 auto;
+  height:0;
+  min-height:0;
   margin-bottom:0;   /* см. bottom:0 выше — отступ снизу и был второй половиной щели */
   overflow:hidden;
   contain:layout paint;
   pointer-events:none;
   isolation:isolate;
+  transition:height .3s cubic-bezier(.4,0,.2,1);
 }
+/* «Есть круги» определяем по DOM, а не классом из JS: узел .dlorb добавляет и
+   снимает сам dlorb.js (в том числе в режимах, где sync() не вызывается), и
+   рассинхрон класса с содержимым дал бы либо пустую дыру в 112px, либо обрезанный
+   круг. Укатывающийся круг ещё 0.72s остаётся ребёнком, поэтому док схлопнется
+   ПОСЛЕ того, как последний круг уйдёт за правый край, а не перережет его.
+   Поле метаданных (dlmeta) при нулевой высоте не видно: оно позиционировано
+   абсолютно по центру дока и живёт только вместе с кругами.
+   112 -> 132 (#9012): круг стал 56px вместо 44, плюс рассеивающийся свет
+   (см. .dlorb-glow) — нужен вертикальный запас, чтобы ореол читался вокруг круга,
+   а не упирался в верх/низ дока. Схлопывание в 0 при пустом доке не тронуто. */
+.dlorb-dock:has(.dlorb){height:132px}
 .dlorb{
   position:absolute;left:0;top:50%;
-  width:44px;height:44px;
-  transform:translate3d(-76px,-50%,0);
+  width:56px;height:56px;
+  transform:translate3d(-92px,-50%,0);
   transition:transform .62s cubic-bezier(.22,.85,.3,1), opacity .34s ease;
   will-change:transform;
   opacity:0;
 }
 .dlorb.is-in{opacity:1}
+/* РАССЕИВАЮЩИЙСЯ СВЕТ (#9012). Отдельный слой — прямой ребёнок .dlorb, а НЕ
+   внутри .dlorb-skin: у skin overflow:hidden (держит вращающийся квадратный
+   градиент ::before, см. ниже), и он же отрезал бы свет. Свет — радиальный
+   градиент, который ДОВОДИТСЯ ДО ПРОЗРАЧНОСТИ ещё до своей собственной границы
+   (последняя стопа transparent на 66% радиуса). Поэтому прямоугольный клип дока
+   (overflow:hidden + contain:paint) режет только пустоту — ореол физически не
+   может «квадратиться», как это делал box-shadow (доказано: 13px отсечённой
+   круглой тени на правой стене дока). Тон берётся из палитры самого круга
+   (--orb-glow/--orb-glow-mid считает JS из доминирующего/среднего цвета обложки).
+   inset:-30px — свет шире круга (56+60=116px) и льётся ЗА его рамку; яркое ядро
+   (0–38%) умещается в PAD_R≈22 от стены, наружу уходит уже гаснущий хвост. */
+.dlorb-glow{
+  position:absolute;inset:-30px;border-radius:50%;z-index:0;pointer-events:none;
+  opacity:0;transition:opacity .8s ease;
+  background:radial-gradient(circle at 50% 50%,
+    var(--orb-glow,transparent) 0%,
+    var(--orb-glow-mid,transparent) 38%,
+    transparent 66%);
+}
+.dlorb.is-current .dlorb-glow{opacity:1}
 .dlorb-body{
   position:absolute;inset:0;border-radius:50%;
   background:rgba(255,255,255,.045);
@@ -2798,8 +2744,19 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   opacity:0;
   transition:opacity .8s ease;
   background:var(--orb-c,transparent);
+  /* Клип для вращающегося ::before: без overflow:hidden квадратный слой под
+     углом вылезал бы за круг и за сам орб (трекер #9004). НЕ снимать: свет
+     (#9012) живёт НАД этим слоем отдельным .dlorb-glow, а не внутри skin,
+     поэтому клип больше ничего не режет — квадратная тень убрана из вариантов. */
+  overflow:hidden;
 }
 .dlorb.is-current .dlorb-skin{opacity:1}
+/* Градиент + вращение живут на ::before, а не на .dlorb-skin: у вращаемого
+   .dlorb-skin getBoundingClientRect раздувался до (inset-3px-квадрат)·√2 и
+   вылезал за орб. Статичный skin остаётся внутри, крутится только внутренняя
+   «краска», обрезанная этим же skin'ом. */
+.dlorb.is-current .dlorb-skin::before{content:'';position:absolute;inset:0;
+  border-radius:50%;background:inherit}
 .dlorb-ring{position:absolute;inset:0;width:100%;height:100%;transform:rotate(-90deg);overflow:visible}
 .dlorb-track{fill:none;stroke:rgba(255,255,255,.10);stroke-width:3}
 .dlorb-arc{
@@ -2807,6 +2764,13 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   transition:stroke-dashoffset .45s linear, stroke .8s ease;
 }
 .dlorb.is-ghost .dlorb-arc{stroke:rgba(255,255,255,.14)}
+/* «Бегущая точка» на конце дуги — второй способ прочесть прогресс (#9012).
+   По умолчанию скрыта; варианты ember/halo включают её. Позиционируется из JS
+   атрибутом rotate(angle 20 20) вокруг центра системы координат 0 0 40 40. */
+.dlorb-head{fill:var(--orb-c-lt,#fff);opacity:0;transition:opacity .5s ease}
+.dlorb.is-current .dlorb-head{opacity:0}
+[data-orb-variant="ember"] .dlorb.is-current .dlorb-head,
+[data-orb-variant="halo"] .dlorb.is-current .dlorb-head{opacity:1}
 .dlorb-txt{
   position:absolute;inset:0;display:flex;flex-direction:column;
   align-items:center;justify-content:center;gap:1px;
@@ -2832,41 +2796,73 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 @keyframes dlorb-spin{to{transform:rotate(360deg)}}
 @keyframes dlorb-breathe{0%,100%{filter:saturate(1.15) brightness(1)}50%{filter:saturate(1.5) brightness(1.16)}}
 @keyframes dlorb-drift{0%,100%{background-position:0% 50%}50%{background-position:100% 50%}}
+/* Дыхание и пульс САМОГО СВЕТА (#9012) — меняем непрозрачность/размер слоя
+   .dlorb-glow, а не тень элемента: свет гаснет и разгорается, рамка круга цела. */
+@keyframes dlorb-glow-breathe{0%,100%{opacity:.55;transform:scale(.94)}50%{opacity:1;transform:scale(1.04)}}
+@keyframes dlorb-glow-pulse{0%,100%{opacity:.4;transform:scale(.9)}50%{opacity:1;transform:scale(1.12)}}
 
-/* ── Вариант 1: neon (доминирующий тон обложки) ──
-   «Мягкое переливание внутри, как в неоне Яндекса» — два смещённых радиальных
-   пятна поверх конического, всё это медленно вращается и дышит. */
-[data-orb-variant="neon"] .dlorb.is-current .dlorb-skin{
+/* ══ ВАРИАНТЫ — одна система, два независимых признака ══════════════════
+   Признак А — КАК ВЕДЁТ СЕБЯ СВЕТ (слой .dlorb-glow + «краска» skin::before).
+   Признак Б — КАК КОЛЬЦО ЧИТАЕТ ПРОГРЕСС (толщина дуги, бегущая точка .dlorb-head).
+   Ни один вариант больше не рисует ореол через box-shadow: именно он давал
+   квадрат (круглая тень, срезанная стеной дока). Свет — радиальный градиент,
+   доведённый до прозрачности до своей границы, поэтому клип режет пустоту. */
+
+/* ── 1: neon — вращающийся конический свет + дышащая заливка; тонкая дуга ── */
+[data-orb-variant="neon"] .dlorb.is-current .dlorb-skin::before{
   background:
     radial-gradient(circle at 32% 26%, var(--orb-c-lt,#fff) 0%, transparent 56%),
     radial-gradient(circle at 74% 76%, var(--orb-c-dk,#000) 0%, transparent 60%),
     conic-gradient(from 0deg, var(--orb-c), var(--orb-c-lt), var(--orb-c-dk), var(--orb-c));
   animation:dlorb-spin 7.5s linear infinite, dlorb-breathe 3.4s ease-in-out infinite;
-  box-shadow:0 0 12px -2px var(--orb-c), 0 0 22px -8px var(--orb-c);
 }
-/* ── Вариант 2: aurora (СРЕДНИЙ цвет обложки + дополняющий тон) ── */
-[data-orb-variant="aurora"] .dlorb.is-current .dlorb-skin{
+/* ── 2: aurora — дрейфующий линейный свет; ореол в ДОПОЛНЯЮЩИЙ тон (c2) ── */
+[data-orb-variant="aurora"] .dlorb.is-current .dlorb-glow{
+  background:radial-gradient(circle at 50% 50%,
+    var(--orb-glow2,transparent) 0%, var(--orb-glow2-mid,transparent) 38%, transparent 66%);
+}
+[data-orb-variant="aurora"] .dlorb.is-current .dlorb-skin::before{
   background:linear-gradient(115deg, var(--orb-c-dk), var(--orb-c), var(--orb-c2), var(--orb-c-lt), var(--orb-c-dk));
   background-size:340% 340%;
   animation:dlorb-drift 5.2s ease-in-out infinite, dlorb-spin 13s linear infinite;
-  box-shadow:0 0 14px -3px var(--orb-c2);
 }
-/* ── Вариант 3: vinyl (СРЕДНИЙ цвет — только на этикетке) ── */
-[data-orb-variant="vinyl"] .dlorb.is-current .dlorb-skin{
+/* ── 3: vinyl — свет только на этикетке, узкий приглушённый ореол; тонкая дуга ── */
+[data-orb-variant="vinyl"] .dlorb.is-current .dlorb-glow{inset:-14px;opacity:.7}
+[data-orb-variant="vinyl"] .dlorb.is-current .dlorb-skin::before{
   background:
     radial-gradient(circle at 50% 50%, var(--orb-c) 0 26%, transparent 27%),
     repeating-radial-gradient(circle at 50% 50%, rgba(255,255,255,.07) 0 1px, rgba(0,0,0,.55) 1px 3px),
     #0b0b0e;
   animation:dlorb-spin 4.6s linear infinite;
-  box-shadow:0 0 10px -4px var(--orb-c);
 }
-/* ── Вариант 4: mono (доминирующий тон, только кольцо; без переливания) ── */
-[data-orb-variant="mono"] .dlorb.is-current .dlorb-skin{
-  background:rgba(255,255,255,.05);
-  animation:none;
-  box-shadow:none;
+/* ── 4: mono — света нет вовсе, всё читает толстое кольцо; доминирующий тон ── */
+[data-orb-variant="mono"] .dlorb.is-current .dlorb-glow{opacity:0}
+[data-orb-variant="mono"] .dlorb.is-current .dlorb-skin::before{background:rgba(255,255,255,.05)}
+[data-orb-variant="mono"] .dlorb.is-current .dlorb-arc{stroke-width:5}
+/* ── 5: ember — ДЫШАЩИЙ ореол + медленный конический свет; дуга + бегущая точка ── */
+[data-orb-variant="ember"] .dlorb.is-current .dlorb-glow{
+  animation:dlorb-glow-breathe 3.6s ease-in-out infinite;
 }
-[data-orb-variant="mono"] .dlorb.is-current .dlorb-arc{stroke-width:4}
+[data-orb-variant="ember"] .dlorb.is-current .dlorb-skin::before{
+  background:
+    radial-gradient(circle at 50% 30%, var(--orb-c-lt,#fff) 0%, transparent 60%),
+    conic-gradient(from 210deg, var(--orb-c-dk), var(--orb-c), var(--orb-c-dk));
+  animation:dlorb-spin 11s linear infinite;
+}
+[data-orb-variant="ember"] .dlorb.is-current .dlorb-arc{stroke-width:3.5}
+/* ── 6: halo — широкий ровный рассеянный свет, без внутреннего движения; дуга + точка ── */
+[data-orb-variant="halo"] .dlorb.is-current .dlorb-glow{inset:-38px}
+[data-orb-variant="halo"] .dlorb.is-current .dlorb-skin::before{
+  background:radial-gradient(circle at 50% 42%, var(--orb-c-lt,#fff) 0%, var(--orb-c) 55%, var(--orb-c-dk) 100%);
+}
+[data-orb-variant="halo"] .dlorb.is-current .dlorb-arc{stroke-width:3.5}
+/* ── 7: pulse — ореол часто пульсирует, заливка статична; тонкая дуга, без точки ── */
+[data-orb-variant="pulse"] .dlorb.is-current .dlorb-glow{
+  animation:dlorb-glow-pulse 1.5s ease-in-out infinite;
+}
+[data-orb-variant="pulse"] .dlorb.is-current .dlorb-skin::before{
+  background:linear-gradient(135deg, var(--orb-c-dk), var(--orb-c), var(--orb-c-lt));
+}
 
 /* Образцы в настройках — та же разметка круга, тот же CSS, ничего не дублируем. */
 .dlorb-vgrid{display:flex;gap:8px;flex-wrap:wrap}
@@ -2877,16 +2873,63 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 }
 .dlorb-vcard:hover{background:var(--surface2,var(--surface));border-color:var(--border2,var(--border))}
 .dlorb-vcard.active{border-color:var(--red)}
-.dlorb-vstage{position:relative;height:52px;overflow:hidden;contain:layout paint}
-.dlorb-vstage .dlorb{left:50%;margin-left:-22px;transform:translate3d(0,-50%,0)!important}
+/* Высота сцены = самый большой ореол, иначе он срезается сверху и снизу.
+   Замер 21.09.2026: сцена была 161×72, а свечение у вариантов 84–132 px —
+   резало по 6–30 px сверху И снизу у КАЖДОГО варианта, в обеих темах. По
+   бокам запас был, поэтому на глаз читалось как «плоский верх и низ».
+   Обрезку не снимаем: она держит сцену в своих границах и не даёт свечению
+   наехать на соседнюю карточку — не хватало именно места, а не свободы. */
+.dlorb-vstage{position:relative;height:140px;overflow:hidden;contain:layout paint}
+.dlorb-vstage .dlorb{left:50%;margin-left:-28px;transform:translate3d(0,-50%,0)!important}
 .dlorb-vname{font-size:10px;font-weight:700;color:var(--text);margin-top:4px;font-family:var(--display)}
 .dlorb-vmode{font-size:8.5px;color:var(--muted);margin-top:1px}
+
+/* ══ НАДПИСИ О ЗАГРУЗКЕ (#9012) — В КОЛОНКЕ ПАНЕЛИ, НАД КРУГОМ ═══════════
+   Панель 220px физически не вмещает «название + артист + год + лейбл» одной
+   строкой читаемо, поэтому стек карточек живёт НАД полоской кругов, но строго
+   ВНУТРИ колонки панели: левый край и ширина стека = прямоугольник дока,
+   низ — верхней кромке круга. Никакой правки контент-области здесь нет и
+   быть не может: контейнер `.dlcallouts` заданной ширины с overflow:hidden, и
+   всё, что шире колонки или выехало за неё на въезде, отрезается по её краям.
+   (22.09 карточки прибивали к <body> СПРАВА от панели — они ложились поверх
+   сетки релизов и закрывали карточки. Владелец это отменил: метаданные качающегося
+   релиза не имеют права ехать поперёк контента.)
+   «Нфс-мост» — это ОЩУЩЕНИЕ приезда, а не копия вида: карточка врывается ОТ
+   ЛЕВОЙ СТЕНКИ колонки (амплитуда = вся её ширина) и встаёт в свою строку
+   стека. Вправо въезд не направлен НИКОГДА: правая стенка колонки и есть
+   граница контента, и даже мимолётный прямоугольник поперёк неё — это уже
+   «карточка поверх релизов», пусть и на полсекунды. */
+.dlcallouts{position:fixed;left:0;bottom:0;z-index:40;pointer-events:none;
+  display:flex;flex-direction:column-reverse;gap:6px;align-items:stretch;
+  /* Стена стека: clip по краям колонки держит и карточку, и её въезд.
+     contain:paint — тот же рубеж, что у .dlorb-dock, против теней и blur. */
+  overflow:hidden;contain:layout paint;
+  /* left/width/bottom/max-height задаёт JS по прямоугольнику дока (dlorb.js). */
+  max-width:100%}
+.dlcall{position:relative;box-sizing:border-box;width:100%;min-width:0;flex:0 0 auto;
+  padding:8px 34px 8px 12px;border-radius:11px;
+  background:var(--surface);border:1px solid var(--border);
+  box-shadow:0 6px 18px rgba(0,0,0,.28);
+  opacity:0;transform:translateX(calc(-100% - 12px));
+  transition:opacity .34s ease, transform .46s cubic-bezier(.22,.85,.3,1)}
+.dlcall::before{content:'';position:absolute;left:4px;top:8px;bottom:8px;width:3px;border-radius:3px;
+  background:var(--call-c,var(--red))}
+.dlcall.is-in{opacity:1;transform:translateX(0)}
+.dlcall-title{font-family:var(--display);font-size:11.5px;font-weight:800;line-height:1.22;color:var(--text);
+  display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.dlcall-artist{font-size:10px;color:var(--muted);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dlcall-meta{font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:2px;letter-spacing:.2px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dlcall-pct{position:absolute;right:9px;top:50%;transform:translateY(-50%);
+  font-family:var(--display);font-size:13px;font-weight:800;color:var(--call-c,var(--text));line-height:1}
+@media(max-width:699px){.dlcallouts{display:none}}
 
 @media(max-width:699px){.dlorb-dock{display:none}}
 @media(prefers-reduced-motion:reduce){
   .dlorb{transition:none}
-  .dlorb-skin{animation:none!important}
+  .dlorb-skin,.dlorb-skin::before,.dlorb-glow{animation:none!important}
   .dlorb-more{transition:none}
+  .dlcall{transition:none;transform:none}
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -2913,9 +2956,6 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   html[data-theme="ember"], html[data-theme="sepia"], html[data-theme="neon"]{
     --sb-thumb:var(--border2);
   }
-  /* Рамка индикатора: тон состояния вместо подмешанного к границе. */
-  .tb-pulse-framed[data-state="live"]{border-color:var(--green)}
-  .tb-pulse-framed[data-state="wait"]{border-color:var(--orange)}
   /* Кнопки действий в очереди: без запасного рамка и фон пропадали целиком,
      то есть кнопка переставала читаться как кнопка. */
   .qi-actions .dl-action-btn,.dl-action-btn{
@@ -2948,9 +2988,35 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
    рост запрещаем явно, а прокрутку отдаём только телу. */
 #view-stations > .st-top { flex: 0 0 auto; overflow: visible; }
 #view-stations > #st-body { flex: 1 1 auto; overflow-y: auto; min-height: 0; padding-bottom: 60px; }
+/* Ряд ручек — прямой div вида: общая страховка для таких узлов растягивает их
+   на всё свободное место. Шапке рост уже запрещён, здесь то же самое. */
+#view-stations > .st-knobs { flex: 0 0 auto; overflow: visible; }
 .st-top { display:flex; align-items:baseline; gap:14px; flex-wrap:wrap; margin-bottom:14px; }
 .st-title { font-size:19px; font-weight:600; color:var(--text); }
 .st-status { font-size:12px; color:var(--muted); min-height:16px; flex:1; }
+
+/* ── Ручки эфира (настроение / разнообразие / язык) ────────────────────────
+   Живой контрол и отключённый обязаны выглядеть по-разному: человек не должен
+   догадываться, что «настроение» — декорация. Мёртвая ручка подаётся серверным
+   докладом knob_report (effect: "no-op" на ВСЕХ значениях), а не нашим мнением. */
+.st-knobs { display:flex; flex-wrap:wrap; gap:10px 20px; margin:-4px 0 16px; }
+.st-knob { display:flex; align-items:baseline; flex-wrap:wrap; gap:7px; }
+.st-knob-t { font-size:11.5px; font-weight:600; color:var(--muted2); letter-spacing:.02em; }
+.st-knob-chips { display:flex; gap:4px; flex-wrap:wrap; }
+.st-knob-chip {
+  font:inherit; font-size:11px; padding:3px 9px; border-radius:11px; cursor:pointer;
+  color:var(--muted); background:var(--surface); border:1px solid var(--border);
+  transition:color .14s ease, border-color .14s ease, background-color .14s ease;
+}
+.st-knob-chip:hover { color:var(--text); border-color:var(--border2); }
+.st-knob-chip:focus-visible { outline:2px solid var(--border2); outline-offset:2px; }
+.st-knob-chip.on { color:var(--text); background:var(--surface2); border-color:var(--border2); }
+/* Значение, которое сервер объявил no-op: выбор засчитан, но эфир не меняет —
+   пунктир говорит об этом до нажатия. */
+.st-knob-chip.noop { border-style:dashed; opacity:.7; }
+.st-knob-dead .st-knob-chip { cursor:not-allowed; opacity:.42; text-decoration:line-through; }
+.st-knob-note { font-size:10.5px; color:var(--muted2); font-style:italic; flex:1 1 100%; }
+.st-knob-dead .st-knob-note { color:var(--orange); font-style:normal; }
 
 .st-sec { margin-bottom:22px; }
 .st-sec-h { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; margin-bottom:9px; }
@@ -3176,16 +3242,23 @@ html[data-skin="console"] .main,
 html[data-skin="oled"] .main,
 html[data-skin="neon"] .topbar,
 html[data-skin="console"] .topbar,
-html[data-skin="oled"] .topbar,
+html[data-skin="oled"] .topbar{background:var(--k-page)}
+/* Панель — НЕ в том списке. Скину менять ей цвет напрямую нельзя: всё, что
+   живёт ВНУТРИ панели, красится по --sidebar-bg (док кругов — см. .dlorb-dock),
+   и между «чем залито окно» и «чем залит док» возникал чужой прямоугольник
+   (трекер #9006: чёрный квадрат в левом нижнем углу на всех пяти темах).
+   Поэтому скин ПЕРЕОПРЕДЕЛЯЕТ токен на самой панели, а рисует по-прежнему
+   правило .sidebar{background:var(--sidebar-bg)}: источник цвета один, и
+   наследники (док) физически не могут разойтись с родителем. */
 html[data-skin="neon"] .sidebar,
 html[data-skin="console"] .sidebar,
-html[data-skin="oled"] .sidebar{background:var(--k-page)}
+html[data-skin="oled"] .sidebar{--sidebar-bg:var(--k-page)}
 /* Прилипшая шапка группы обязана оставаться НЕПРОЗРАЧНОЙ (под неё уезжают
    карточки) и совпадать по тону со страницей, иначе под текстом буквы
    проступают чужие обложки. */
-html[data-skin="neon"] .rel-group-head,
-html[data-skin="console"] .rel-group-head,
-html[data-skin="oled"] .rel-group-head,
+html[data-skin="neon"] .rel-date-head,
+html[data-skin="console"] .rel-date-head,
+html[data-skin="oled"] .rel-date-head,
 html[data-skin="neon"] .rel-alpha-index,
 html[data-skin="console"] .rel-alpha-index,
 html[data-skin="oled"] .rel-alpha-index{
@@ -3287,7 +3360,7 @@ html[data-skin="neon"] .block:hover{box-shadow:var(--k-glow)}
    абсолютно — схлопывается в НУЛЕВУЮ ширину: карточки рисуются, но их не видно,
    а подпись вылезает за плитку (20.09.2026, замер в браузере: .sk-view w=0). */
 .sk-opt{position:relative;display:flex;flex-direction:column;align-items:stretch;
-  justify-content:flex-start;gap:6px;width:152px;
+  justify-content:flex-start;gap:6px;width:166px;
   padding:8px;cursor:pointer;text-align:left;font-family:var(--font);
   background:var(--surface2);border:1px solid var(--border);
   border-radius:calc(var(--radius-sm)* .9);color:var(--text);
@@ -3319,14 +3392,18 @@ html[data-skin="neon"] .block:hover{box-shadow:var(--k-glow)}
 .sk-cover{display:block;width:100%;aspect-ratio:1;border-radius:var(--k-cover-r);
   background:linear-gradient(150deg, color-mix(in srgb,var(--k-accent) 46%,var(--surface3)), var(--surface3) 78%)}
 .sk-body{display:flex;flex-direction:column;gap:calc(3px*var(--k-fs));padding:calc(6px*var(--k-fs)) 1px 1px}
-.sk-kicker{display:none;font-size:calc(9px*var(--k-fs));font-weight:700;letter-spacing:.7px;
+.sk-kicker{display:none;font-size:calc(8px*var(--k-fs));font-weight:700;letter-spacing:.3px;
   text-transform:uppercase;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--k-ink3)}
 [data-skin="neon"] .sk-kicker,[data-skin="console"] .sk-kicker,[data-skin="oled"] .sk-kicker{display:block}
-[data-skin="neon"] .sk-kicker{color:var(--k-accent);letter-spacing:-.1px}
-[data-skin="console"] .sk-kicker{font-family:var(--mono);letter-spacing:.6px}
-[data-skin="oled"] .sk-kicker{letter-spacing:.4px}
+[data-skin="neon"] .sk-kicker{color:var(--k-accent);letter-spacing:-.2px}
+[data-skin="console"] .sk-kicker{font-family:var(--mono);letter-spacing:.2px}
+[data-skin="oled"] .sk-kicker{letter-spacing:.2px}
+/* <button> в main.css:638 задаёт white-space:nowrap — он каскадом доезжал до
+   .sk-title и ломал -webkit-line-clamp: текст шёл одной строкой и резался
+   посреди слова. Возвращаем перенос, чтобы clamp показал 2 строки + «…». */
 .sk-title{font-family:var(--k-display);font-size:calc(13px*var(--k-fs));font-weight:600;
   line-height:1.25;color:var(--k-ink);display:-webkit-box;-webkit-line-clamp:2;
+  white-space:normal;overflow-wrap:anywhere;
   -webkit-box-orient:vertical;overflow:hidden}
 [data-skin="neon"] .sk-title{letter-spacing:-.3px}
 [data-skin="console"] .sk-title{letter-spacing:.1px}
@@ -3354,6 +3431,11 @@ html[data-skin="neon"] .block:hover{box-shadow:var(--k-glow)}
 .sk-cap{display:block;white-space:normal;overflow-wrap:anywhere;min-width:0}
 .sk-cap b{display:block;font-size:11.5px;font-weight:700;color:var(--text);
   white-space:normal}
-.sk-cap span{display:block;font-size:9px;color:var(--muted);margin-top:2px;
+/* Подписка = ровно 2 строки по высоте (min-height) и не больше 2 (clamp),
+   чтобы все четыре плитки держали одинаковую высоту и ряд не «елосился»
+   (трекер #9004: «дефолт · как сейчас» — 1 строка против 2 у соседей). */
+.sk-cap span{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+  overflow:hidden;min-height:calc(2*1.35*9px);
+  font-size:9px;color:var(--muted);margin-top:2px;
   line-height:1.35;font-family:var(--mono);white-space:normal;overflow-wrap:anywhere}
 @media (prefers-reduced-motion:reduce){.sk-opt,.sk-opt:hover{transition:none;transform:none}}

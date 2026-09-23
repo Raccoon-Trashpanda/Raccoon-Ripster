@@ -189,7 +189,7 @@ async function _chooseSpTarget(notifId, target, remember, quality) {
     detectUrlService('');
     toast('+ '+r.target.title, _svcColor(target), _svcLabel(target));
   } else {
-    toast(t('t.not_found_on')+_svcLabel(target), 'var(--orange)', r.error||'');
+    handleSpotifyNotFound(r, qFinal);
   }
 }
 
@@ -278,7 +278,7 @@ async function chooseUrlSvc(url, quality, srcSvc, targetSvc) {
       document.getElementById('url-input').value='';
       toast('+ '+r.target.title+' → '+t('q.queue_word'),'#1db954');
     } else {
-      toast(t('t.not_found_c')+(r.error||url),'var(--orange)');
+      handleSpotifyNotFound(r, resolveQuality(targetSvc));
     }
     return;
   }
@@ -431,9 +431,16 @@ async function _qualitiesForEngine(engine) {
     // was offered Apple's ALAC/Atmos list — qualities BBC cannot produce (its
     // engine declares exactly one: MP3 320 from the Sounds stream).
     const qs = await (await fetch(`/api/qualities?service=${encodeURIComponent(engine)}`)).json();
-    _QUALITIES_BY_ENGINE[engine] = (Array.isArray(qs) && qs.length) ? qs : QUALITIES;
+    _QUALITIES_BY_ENGINE[engine] = (Array.isArray(qs) && qs.length) ? localizeQualities(qs) : QUALITIES;
     return _QUALITIES_BY_ENGINE[engine];
   } catch(e) { return QUALITIES; }
+}
+
+// Смена языка: кэш качеств по движкам живёт отдельно от QUALITIES, и бейдж
+// «AAC-LC 320 · эфир» в карточке очереди переживал перезагрузку страницы только
+// потому, что кэш заполнялся уже на новом языке. Перекладываем весь кэш.
+function _localizeCachedEngineQualities() {
+  Object.keys(_QUALITIES_BY_ENGINE).forEach(e => localizeQualities(_QUALITIES_BY_ENGINE[e]));
 }
 
 function _qualityFor(task) {
@@ -565,6 +572,10 @@ function buildQueueItem(task) {
   if(task.engine && !_QUALITIES_BY_ENGINE[task.engine]) {
     _qualitiesForEngine(task.engine).then(()=>updateQueueItem(task));
   }
+  // Мета треков пришла бы с задачей, но восстановленная после перезапуска
+  // карточка её не имеет — просим один раз здесь, а не по клику.
+  if(typeof qtLoad === 'function' &&
+     (task.status === 'running' || task.status === 'queued')) qtLoad(task);
   const q = _qualityFor(task);
   const m = task.meta;
   const el = document.createElement('div');
@@ -573,6 +584,7 @@ function buildQueueItem(task) {
   el.dataset.id = task.id;
   el.dataset.st = task.status;
   el.dataset.partial = String(_isPartial);
+  el.dataset.tree = (typeof _qtSig === 'function') ? _qtSig(task) : '';
   el.style.setProperty('--qi-p', (task.progress||0) + '%');
   const _isSingleTrack = m?.type === 'song' || m?.type === 'track';
   const trackCount = _isSingleTrack ? 1 : (m?.trackCount || m?.totalTracks || 0);

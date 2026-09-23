@@ -168,7 +168,7 @@ function _digsItem(it) {
   const whyHtml = cut > 0
     ? esc(why.slice(0, cut + 2)) + '<b>' + esc(why.slice(cut + 2)) + '</b>'
     : esc(why);
-  const enc = encodeURIComponent(it.artist || '');
+  const enc = encodeURIComponent(it.artist || '').replace(/'/g, '%27');   // ' не кодируется, а стоит внутри '…' в onclick
   // Действия названы словами: иконка лупы не читалась совсем. Но ТРИ одинаковых
   // кнопки-пилюли на каждой из тридцати карточек весили больше самих находок —
   // шестьдесят четыре рамки спорили за внимание с тем, ради чего вкладка нужна.
@@ -1129,7 +1129,7 @@ async function digsBubbles(artist) {
     const ang = (i / items.length) * Math.PI * 2 - Math.PI / 2;
     // Размер несёт похожесть — пузырь остаётся данными, а не украшением.
     const sz = 54 + Math.round(34 * ((it.score || 1) / max));
-    const enc = encodeURIComponent(it.name);
+    const enc = encodeURIComponent(it.name).replace(/'/g, '%27');
     // Знакомых не прячем, но и не выдаём за находку — приглушаем и подписываем.
     const kn = it.known ? ' dg-bb-known' : '';
     const ttl = esc(it.name) + (it.known ? ' — ' + t('digs.bb_known') : '');
@@ -1144,7 +1144,7 @@ async function digsBubbles(artist) {
         onclick="event.stopPropagation();digsPick(decodeURIComponent('${enc}'),this.parentNode)">✓</button>
     </div>`;
   }).join('');
-  const encA = encodeURIComponent(artist);
+  const encA = encodeURIComponent(artist).replace(/'/g, '%27');
   ov.innerHTML = `<div class="dg-bb-wrap">
       <button class="dg-bb-close" onclick="digsBubblesClose()">×</button>
       <div class="dg-bb dg-bb-core" style="left:50%;top:50%;width:112px;height:112px">

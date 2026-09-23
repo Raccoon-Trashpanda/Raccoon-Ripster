@@ -127,6 +127,109 @@ def dev_token() -> tuple[str, str]:
     return _dev_token_cache
 
 
+# ── media-user-token, вставленный прямо в настройки ──────────────────────────
+
+_ME_STOREFRONT = "https://amp-api.music.apple.com/v1/me/storefront"
+
+
+def _amp_error_detail(e: urllib.error.HTTPError) -> str:
+    """Что сказал amp-api в теле ошибки (`Invalid authentication` и т. п.) —
+    это единственная улика, по которой 401 отличают от 403. Тело не содержит
+    токена, но мы его всё равно не печатаем целиком."""
+    try:
+        raw = e.read().decode("utf-8", "ignore")[:2000]
+        errs = (json.loads(raw).get("errors") or [{}])[0]
+        return str(errs.get("title") or errs.get("code") or "").strip()
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def probe_media_user_token(mut: str, timeout: float = 12.0) -> dict:
+    """Жив ли этот media-user-token и в какой он витрине.
+
+    Нужен ровно там, где нет `cookies.txt`: человек вставляет токен в поле
+    настроек, и ответить надо СРАЗУ и по-разному на три случая
+    (23.09.2026, триал ES):
+
+      * `ok`            — 200, витрина получена;
+      * `token_rejected`— 403: Apple отвергает САМ токен («Invalid
+        authentication»). Ни Origin, ни перелогин здесь ни при чём —
+        лечится только свежим токеном с этой же сессии;
+      * `bad_request`   — 401: у amp-api претензия к связке заголовков
+        (developer token / Origin), а не к токену. То есть сломаны МЫ.
+
+    Различие 401/403 измерено, а не догадано: на заведомо живом токене
+    отсутствие `Origin` и подменный dev_token дают 401, а мёртвый токен — 403.
+    Смешивать их, как это делает `verdict()` для файла куки (там оба кода
+    значат «экспортируй заново»), для поля настроек нельзя: человек получил бы
+    совет менять токен там, где надо починить запрос, и наоборот.
+
+    `unknown` — спросить не удалось (нет живого dev_token, сеть). Это ответ, а
+    не отказ отвечать: состояние токена при этом НЕ известно, и врать про него
+    нельзя.
+    """
+    tok = (mut or "").strip()
+    if not tok:
+        return {"state": "empty", "storefront": "", "reason": "токен не вставлен"}
+    if len(tok) < 40 or "." not in tok:
+        # media-user-token — длинная JWT-подобная строка. Короткий или плоский
+        # набор символов — это почти всегда опечатка/обрезок, и спрашивать Apple
+        # незачем: ответ 403 ничего не объяснит человеку.
+        return {"state": "malformed", "storefront": "",
+                "reason": "не похоже на media-user-token (длина или формат)"}
+    dev, src = dev_token()
+    if not dev:
+        return {"state": "unknown", "storefront": "",
+                "reason": "нет действующего Apple dev_token — токен не проверен"}
+    headers = {"Authorization": f"Bearer {dev}", "Media-User-Token": tok,
+               "Origin": "https://music.apple.com", "User-Agent": "Ripster"}
+    try:
+        req = urllib.request.Request(_ME_STOREFRONT, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            body = json.loads(r.read().decode("utf-8", "ignore"))
+    except urllib.error.HTTPError as e:
+        detail = _amp_error_detail(e)
+        if e.code == 403:
+            return {"state": "token_rejected", "storefront": "", "dev_src": src,
+                    "http": 403,
+                    "reason": f"Apple отвергает этот токен (HTTP 403: "
+                              f"{detail or 'без описания'}) — "
+                              f"он мёртв или взят не из той сессии; запрос корректный, "
+                              f"dev_token проверен ({src})"}
+        if e.code == 401:
+            return {"state": "bad_request", "storefront": "", "dev_src": src,
+                    "http": 401,
+                    "reason": f"amp-api не принял связку заголовков (HTTP 401: "
+                              f"{detail or 'без описания'}) — "
+                              f"это наша сторона, токен при этом мог остаться живым"}
+        return {"state": "unknown", "storefront": "", "http": e.code,
+                "reason": f"amp-api ответил HTTP {e.code}"}
+    except Exception as e:                       # noqa: BLE001
+        return {"state": "unknown", "storefront": "",
+                "reason": f"запрос не прошёл: {type(e).__name__}"}
+
+    data = body.get("data") or []
+    first = data[0] if data and isinstance(data[0], dict) else {}
+    attrs = first.get("attributes") or {}
+    sid = str(first.get("id") or "").split("-")[0]
+    # `/v1/me/storefront` называет витрину ЧИСЛОМ (`143444`) и человекочитаемым
+    # именем (`United Kingdom`). Число переводит тот же словарь, что и проба
+    # контейнера, — иначе одна и та же витрина в двух местах называлась бы
+    # по-разному. Имя в код не переименовываем: «un» из «United Kingdom» был бы
+    # страной, которой нет.
+    from ripster.apple_accounts import STOREFRONT_IDS
+    cc = STOREFRONT_IDS.get(sid, "")
+    if not cc and len(sid) == 2 and sid.isalpha():
+        cc = sid.lower()
+    if not cc:
+        return {"state": "ok", "storefront": "", "storefront_name": str(attrs.get("name") or sid),
+                "dev_src": src,
+                "reason": f"токен жив, но витрину ({sid or attrs.get('name') or '?'}) "
+                          f"в код не перевести — впишите страну сами"}
+    return {"state": "ok", "storefront": cc, "storefront_name": str(attrs.get("name") or ""),
+            "dev_src": src, "reason": f"токен жив, витрина {cc}"}
+
+
 # ── вердикт ──────────────────────────────────────────────────────────────────
 
 def verdict(cookies_path: str | Path) -> dict:

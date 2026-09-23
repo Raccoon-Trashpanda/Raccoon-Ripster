@@ -107,18 +107,28 @@ def parse_syllable_ttml(ttml: str) -> list[dict]:
 
 
 async def _storefront(c: httpx.AsyncClient, h: dict) -> str:
+    """Витрина ПОДПИСКИ этого аккаунта, '' — если не удалось спросить.
+
+    '' означает «не измерено», а не «американская витрина». Раньше здесь стояло
+    `or "us"`, и сбой /me (401, таймаут, 5xx) тихо превращался в «мы в US»:
+    поиск уходил в каталог US, не находил там трек, который есть в CA, и
+    наружу это приходило как «лирики нет». Выдуманная витрина стоит дороже
+    честного «не знаю» — ровно как выдуманная страна в обзоре аккаунтов.
+    """
     now = time.time()
     if _sf_cache["sf"] and now - _sf_cache["ts"] < _SF_TTL:
         return _sf_cache["sf"]
     try:
         r = await c.get(f"{_AMP}/v1/me/storefront", headers=h)
         if r.status_code == 200:
-            sf = (r.json().get("data") or [{}])[0].get("id") or "us"
-            _sf_cache.update(sf=sf, ts=now)
+            sf = str((r.json().get("data") or [{}])[0].get("id") or "").strip().lower()
+            if sf:
+                # Сбой не кэшируем: он не свойство аккаунта, а свойство канала.
+                _sf_cache.update(sf=sf, ts=now)
             return sf
     except Exception:  # noqa: BLE001
         pass
-    return _sf_cache["sf"] or "us"
+    return ""
 
 
 async def _find_song_id(c: httpx.AsyncClient, h: dict, sf: str,
@@ -160,6 +170,11 @@ async def word_lyrics(title: str, artist: str = "", isrc: str = "") -> Optional[
     h = _headers(bearer, mut)
     async with httpx.AsyncClient(timeout=20) as c:
         sf = await _storefront(c, h)
+        if not sf:
+            # Витрина не измерена — спрашивать каталог негде. Молча идти «не
+            # нашли» нельзя: это выглядит как отсутствие лирики, а на деле у
+            # аккаунта не спросили магазин.
+            return None
         sid = await _find_song_id(c, h, sf, title, artist, isrc)
         if not sid:
             return None

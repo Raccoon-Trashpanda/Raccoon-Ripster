@@ -2,7 +2,8 @@
 URL resolver — expands album/playlist URLs to individual per-track URLs.
 
 resolve(url) -> list[dict]
-  Each dict: {url, title, artist, artwork_url, track_num, total}
+  Each dict: {url, title, artist, artwork_url, track_num, total, duration}
+  `duration` — секунды; 0 там, где источник его не сообщает.
 
 Single track  → list of 1 item (url == original, no HTTP call made)
 Album/playlist → list of N items (N HTTP calls may be made)
@@ -51,6 +52,11 @@ def _is_single_track(url: str) -> bool:
     if "tidal.com" in u:
         return "/track/" in u
 
+    if "jiosaavn.com" in u:
+        # у JioSaavn трек живёт в /song/, альбом — /album/, плейлист —
+        # /playlist|/featured (в т.ч. /s/playlist/…); обычной грамматики нет
+        return "/song/" in u
+
     return True   # Unknown service — treat as single track
 
 
@@ -75,13 +81,16 @@ async def resolve(url: str) -> list[dict]:
             return await asyncio.wait_for(_resolve_qobuz(url),  timeout=12)
         if "tidal.com" in u:
             return await asyncio.wait_for(_resolve_tidal(url),  timeout=12)
+        if "jiosaavn.com" in u:
+            return await asyncio.wait_for(_resolve_jiosaavn(url), timeout=12)
     except Exception as e:
         print(f"[resolver] {url[:60]} → {e}", flush=True)
     return []
 
 
 def _single(url: str) -> list[dict]:
-    return [{"url": url, "title": "", "artist": "", "artwork_url": "", "track_num": 1, "total": 1}]
+    return [{"url": url, "title": "", "artist": "", "artwork_url": "",
+             "track_num": 1, "total": 1, "duration": 0}]
 
 
 # ── Apple Music ────────────────────────────────────────────────────────────────
@@ -134,6 +143,7 @@ async def _apple_album(url: str, sf: str, album_id: str) -> list[dict]:
             "artwork_url": art,
             "track_num":   t.get("trackNumber", i),
             "total":       total,
+            "duration":    _secs(t.get("trackTimeMillis"), 1000),
         })
     return out
 
@@ -185,6 +195,7 @@ async def _apple_playlist(url: str, sf: str, playlist_id: str) -> list[dict]:
             "artwork_url": art,
             "track_num":   i,
             "total":       total,
+            "duration":    _secs(attrs.get("duration")),
         })
     return out
 
@@ -254,6 +265,7 @@ async def _deezer_album(album_id: str) -> list[dict]:
             "artwork_url": art,
             "track_num":   i + 1,
             "total":       total,
+            "duration":    _secs(t.get("duration")),
         }
         for i, t in enumerate(tracks) if t.get("id")
     ]
@@ -304,6 +316,7 @@ async def _deezer_playlist(playlist_id: str) -> list[dict]:
             "artwork_url": art,
             "track_num":   i + 1,
             "total":       n,
+            "duration":    _secs(t.get("duration")),
         }
         for i, t in enumerate(tracks_out) if t.get("id")
     ]
@@ -356,6 +369,7 @@ async def _qobuz_album(album_id: str, app_id: str, headers: dict) -> list[dict]:
             "artwork_url": art,
             "track_num":   t.get("track_number", i + 1),
             "total":       total,
+            "duration":    _secs(t.get("duration")),
         }
         for i, t in enumerate(items) if t.get("id")
     ]
@@ -387,6 +401,7 @@ async def _qobuz_playlist(playlist_id: str, app_id: str, headers: dict) -> list[
             "artwork_url": art,
             "track_num":   i + 1,
             "total":       total,
+            "duration":    _secs(t.get("duration")),
         }
         for i, t in enumerate(items) if t.get("id")
     ]
@@ -457,6 +472,7 @@ async def _tidal_album(album_id: str, country: str, headers: dict) -> list[dict]
             "artwork_url": art,
             "track_num":   t.get("trackNumber", i + 1),
             "total":       total,
+            "duration":    _secs(t.get("duration")),
         }
         for i, t in enumerate(items) if t.get("id")
     ]
@@ -497,6 +513,7 @@ async def _tidal_playlist(playlist_id: str, country: str, headers: dict) -> list
             "artwork_url": "",
             "track_num":   i + 1,
             "total":       n,
+            "duration":    _secs(t.get("duration")),
         }
         for i, t in enumerate(tracks_out) if t.get("id")
     ]
@@ -509,9 +526,61 @@ def _tidal_artist(track: dict) -> str:
     return (track.get("artist") or {}).get("name", "")
 
 
+# ── JioSaavn ─────────────────────────────────────────────────────────────────
+
+async def _resolve_jiosaavn(url: str) -> list[dict]:
+    """Треклист альбома/плейлиста JioSaavn для дерева очереди.
+
+    Общий парсер ``_parse_path_service`` здесь не годится: id у JioSaavn —
+    НЕ числовой хвост ссылки (``/album/<slug>/<enc_id>``), а slug'ы и id
+    могут содержать дефисы и подчёркивания, поэтому берем последний сегмент
+    (тот же приём, что ``_saavn_token`` в движке — импорт ради одного
+    выражения не заводим)."""
+    from ripster.engines.orpheus_jiosaavn import _webapi_get, _un, _big_cover
+
+    token = url.split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    token = token.rsplit("/", 1)[-1]
+    path  = url.lower()
+    typ = "album" if "/album/" in path else \
+          "playlist" if ("/playlist/" in path or "/featured/" in path) else ""
+    if not token or not typ:
+        return []
+    d = await _webapi_get(token, typ)
+    if d.get("error"):
+        return []
+    songs = d.get("songs") or []
+    if not songs:
+        return []
+    art = _big_cover(d.get("image", ""))
+    out = []
+    for i, t in enumerate(songs, 1):
+        perma = t.get("perma_url") or ""
+        if not perma:
+            continue
+        out.append({
+            "url":         perma,
+            "title":       _un(t.get("song") or t.get("title")),
+            "artist":      _un(t.get("primary_artists") or t.get("singers")),
+            "artwork_url": art,
+            "track_num":   t.get("track_number") or i,
+            "total":       len(songs),
+            "duration":    _secs(t.get("duration")),
+        })
+    return out
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 async def _gather(*coros):
     """Run coroutines concurrently, return results in order."""
     import asyncio
     return await asyncio.gather(*coros)
+
+
+def _secs(value, divisor: int = 1) -> int:
+    """Длительность источника → целые секунды. API отдают её то числом, то
+    строкой, то в миллисекундах; 0 — честное «не знаю», а не выдуманная цифра."""
+    try:
+        return int(float(value) / divisor)
+    except (TypeError, ValueError):
+        return 0

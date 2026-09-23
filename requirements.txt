@@ -38,6 +38,15 @@ streamrip==2.0.5
 # Electron/QtWebEngine). ripster_launcher.py falls back to the default browser if
 # this is absent. Pulls pythonnet + clr_loader on Windows.
 pywebview==6.2.1
-tzdata
+# IANA tz database. Windows ships none, and `zoneinfo` silently raises
+# ZoneInfoNotFoundError → the account-countries panel lost every timezone
+# offset. Pure DATA (all 633 files; the 22 __init__.py hold 252 bytes of
+# docstring, no code) with ZERO Requires-Dist, so it cannot perturb the
+# construct/protobuf pins in ripster-dependency-versions. Pinned like every
+# other line here on purpose: `updater.update_source()` re-runs a plain
+# `pip install -r requirements.txt`, and an unpinned line gives pip a reason
+# to re-resolve the whole file — the exact way a "harmless" package breaks
+# Apple decrypt. Bump deliberately, next to a re-verify of pywidevine+pymp4.
+tzdata==2026.4
 sounddevice==0.5.6
 soundfile==0.14.0

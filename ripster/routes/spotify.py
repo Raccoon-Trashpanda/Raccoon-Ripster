@@ -28,6 +28,8 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 # Search helpers from discovery — imported lazily to avoid circular issues at
 # module load time (discovery.install() must run before any convert call).
 from ripster import compilations as _comps
+from ripster import artist_identity as _ident
+from ripster.artist_xref import norm
 from ripster.routes import discovery as _disc
 
 router  = APIRouter()
@@ -102,13 +104,19 @@ _sp_radar_token: dict = {}
 _radar_creds_sig: str = ""               # last logged credential set (names only)
 _radar_oauth_nonces: dict = {}           # state nonce -> issued ts (radar OAuth CSRF)
 
+# Подписки вишлиста — ради них лента чистится от однофамильцев (см.
+# _sp_identity_filter): по имени подписки мы знаем, КТО именно имеется в виду,
+# и подтверждённый id этого человека хранным.
+_sp_watchlist: list = []
+_sp_save_watchlist = None
+
 
 _save_config_fn = None   # set by install()
 
 
 def install(app, ctx) -> None:
     global _cfg, _broadcast, _token_file, _sp_cache_file, _save_config_fn, _sp_state_file
-    global _radar_token_file
+    global _radar_token_file, _sp_watchlist, _sp_save_watchlist
     _cfg             = ctx.config
     _broadcast       = ctx.broadcast
     _token_file      = ctx.base_dir / "spotify_token.json"
@@ -116,6 +124,8 @@ def install(app, ctx) -> None:
     _sp_cache_file   = ctx.base_dir / "spotify_releases_cache.json"
     _sp_state_file   = ctx.base_dir / "spotify_artist_state.json"
     _save_config_fn  = ctx.save_config
+    _sp_watchlist    = getattr(ctx, "watchlist", None) or []
+    _sp_save_watchlist = getattr(ctx, "save_watchlist", None)
     _load_disk_cache()
     _load_artist_state()
     _reconcile_from_cache()
@@ -361,6 +371,99 @@ def _merge_followed(existing: list, fetched: list, paged_ok: bool) -> list:
     return out
 
 
+def _sp_identity_filter(rels: list) -> list:
+    """Лента Spotify-ветки: имя подписки — ловушка, id — доказательство.
+
+    Полки здесь — подписки ВЛАДЕЛЬЦА на его Spotify-аккаунте, но список этих
+    подписок historically пополнялся и по ИМЕНИ вишлиста (разбор 21.09.2026:
+    id «Solomon Grey» 7pCfNMc... несёт испанский госпел однофамильца, «BOP»
+    02ZCVD... — drum&bass при хип-хоп подписке). Поэтому правило то же, что у
+    radar-ветки (`_identity_filter`) и у `stitch_shows`:
+
+      • карточка имени, которого нет среди подписок, проходит молча — это
+        собственные follow'ы аккаунта, судить нечем и незачем;
+      • имя совпало с подпиской — пускаем только id, подтверждённый общими
+        работами (`identity.services.spotify`), и всё, что пускается, ещё раз
+        проверяется кластерной цензурой склеенной страницы (`home_show`);
+      • «не знаю» — скрываем и помечаем владельцу (`hidden_add`), склад не
+        трогаем: подтверждения приходят с bind_pass в темпе радара.
+    """
+    entries = _sp_watchlist or []
+    if not entries:
+        return rels
+    by_name: dict[str, list] = {}
+    for e in entries:
+        if e.get("kind") == "label":
+            continue
+        nm = norm(str(e.get("name") or ""))
+        if nm and e.get("artist_id"):
+            by_name.setdefault(nm, []).append(e)
+    if not by_name:
+        return rels
+
+    touched, out = False, []
+    for r in rels:
+        # Сравнивать можно только с id ТОГО ЖЕ сервиса: карточка Apple или BBC
+        # несёт apple-id, и против подтверждённого spotify-id он не совпадёт
+        # никогда — на пробе это дало бы 538 «скрытых» из 2378 на ровном месте.
+        if str(r.get("service") or "spotify").lower() != "spotify":
+            out.append(r)
+            continue
+        same_name = by_name.get(norm(str(r.get("artist") or "")))
+        if not same_name:
+            out.append(r)
+            continue
+        aid  = str(r.get("artist_id") or "")
+        conf = set().union(*[_ident.confirmed_ids(e, "spotify")
+                             for e in same_name]) if same_name else set()
+        if not conf:
+            # Подписка ещё НЕ привязана к Spotify. Это наш пробел, а не улика:
+            # сухой прогон 21.09.2026 показал, что такое правило скрыло бы 299
+            # карточек у 123 артистов, и почти все — настоящие подписки владельца
+            # (Above & Beyond, Sasha, Bonobo, Chase & Status). Пустая лента хуже
+            # чужой карточки, поэтому пропускаем и ждём привязку (bind_pass идёт
+            # в темпе радара); скрывать начнём, когда появится с чем сравнивать.
+            #
+            # Одно исключение из «ждём» — карточка, у которой вообще нет id
+            # артиста: она держится ТОЛЬКО на строке имени, и ждать нечего,
+            # когда подписку уже разбирали и ни одна витрина её личность не
+            # подтвердила (`pending`). Тогда имя и есть та самая не проверенная
+            # догадка, из- которой живёт жалоба: «BOP» pending на всех четырёх
+            # витринах, а его карточка в ленте (21.09.2026).
+            if not aid and any(_ident.identity_of(e).get("services")
+                               for e in same_name):
+                why = ("атрибуция по одному имени; личность подписки ни одна "
+                       "витрина не подтвердила")
+                for e in same_name:
+                    _ident.hidden_add(e, r, why)
+                touched = True
+                continue
+            out.append(r)
+            continue
+        if not (aid and aid in conf):
+            why = ("followed Spotify id differs from the one confirmed for "
+                   "the watchlist subscription")
+            for e in same_name:
+                _ident.hidden_add(e, r, why)
+            touched = True
+            continue
+        owner = next((e for e in same_name
+                      if aid in _ident.confirmed_ids(e, "spotify")), None)
+        if owner is not None:
+            ok, why = _ident.home_show(owner, r)
+            if not ok:
+                _ident.hidden_add(owner, r, why)
+                touched = True
+                continue
+        out.append(r)
+    if touched and _sp_save_watchlist:
+        try:
+            _sp_save_watchlist(entries)
+        except Exception:                                # noqa: BLE001
+            pass
+    return out
+
+
 def _build_feed(days: int, types: str) -> dict:
     """Pure, network-free: build the releases feed from the durable per-artist
     store, filtered to the currently-followed artists + day window + types."""
@@ -389,6 +492,7 @@ def _build_feed(days: int, types: str) -> dict:
             seen.add(rid)
             releases.append(rel)
     releases.sort(key=lambda x: x.get("date", ""), reverse=True)
+    releases = _sp_identity_filter(releases)
     checked  = sum(1 for a in followed if a in _sp_artist_state)
     ban_left = int(_sp_banned_until - datetime.now().timestamp())
     return {
@@ -2379,6 +2483,85 @@ async def sp_radar_logout():
 
 # ── Spotify → target conversion ───────────────────────────────────────────
 
+# Serving quality per service — only a sensible DEFAULT for non-JS consumers of
+# `available_on`. The web UI always recomputes the owner's configured quality via
+# resolveQuality(service) when they actually pick one, so a URL is never queued
+# under another service's quality code.
+_CONVERT_DEFAULT_QUALITY = {
+    "apple": "alac", "deezer": "flac", "qobuz": "27",
+    "tidal": "lossless", "beatport": "hifi",
+}
+
+
+def _hit_from_matrix(m: dict, service: str, title: str, artist: str):
+    """Turn one availability-matrix verdict into a convert target dict, or None.
+
+    The matrix matched by ISRC/UPC — a confident identity match, not a fuzzy
+    title collision — so when it says a service is available we can hand back its
+    URL without risking the wrong release."""
+    v = (m.get("services") or {}).get(service) or {}
+    if not (v.get("available") and v.get("url")):
+        return None
+    return {
+        "service":    service,
+        "url":        v.get("url", ""),
+        "title":      v.get("title") or title,
+        "artist":     v.get("artist") or artist,
+        "cover":      v.get("cover", ""),
+        "quality":    _CONVERT_DEFAULT_QUALITY.get(service, ""),
+        "matched_by": v.get("matched_by", ""),
+        "region":     v.get("storefront", ""),
+    }
+
+
+async def _convert_available_elsewhere(requested: str, upc: str, isrc: str,
+                                       title: str, artist: str, m: dict = None) -> list:
+    """Where the release DOES live, so the UI can offer it as an explicit choice.
+
+    Reuses the availability matrix (the same machinery as /api/availability) —
+    the seeder/ISRC-derivation dance there is what lets us honestly answer for
+    Qobuz and Tidal, which can't be looked up by barcode directly."""
+    if m is None:
+        try:
+            from ripster import availability as _av
+            m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist)
+        except Exception:
+            return []
+    out = []
+    for svc, v in (m.get("services") or {}).items():
+        if svc == requested or not (v.get("available") and v.get("url")):
+            continue
+        out.append({
+            "service": svc,
+            "url":     v.get("url", ""),
+            "title":   v.get("title") or title,
+            "artist":  v.get("artist") or artist,
+            "cover":   v.get("cover", ""),
+            "quality": _CONVERT_DEFAULT_QUALITY.get(svc, ""),
+            "region":  v.get("storefront", ""),
+        })
+    # Stable, human-useful order: best audio first, storefront filler last.
+    order = {"qobuz": 0, "tidal": 1, "apple": 2, "deezer": 3, "beatport": 4}
+    out.sort(key=lambda x: order.get(x["service"], 9))
+    return out
+
+
+async def _deezer_convert_match(sp_type: str, isrc: str, upc: str,
+                                query: str, title: str, artist: str):
+    """Honest Deezer match: exact by ISRC/UPC first, verified fuzzy as fallback."""
+    from ripster.routes.isrc import _deezer_search_isrc, _deezer_search_upc, verified_match
+    if sp_type == "track" and isrc:
+        exact = await _deezer_search_isrc(isrc)
+        if exact:
+            return exact
+    if sp_type == "album" and upc:
+        exact = await _deezer_search_upc(upc)
+        if exact:
+            return exact
+    res = await _disc._search_deezer(query, sp_type, 5)
+    return verified_match(res.get("results", []), title, artist)
+
+
 @router.post("/api/convert/spotify")
 async def api_convert_spotify(body: dict):
     sp_url  = body.get("url", "").strip()
@@ -2414,45 +2597,84 @@ async def api_convert_spotify(body: dict):
 
     sp_type = "album" if "/album/" in sp_url else "track" if "/track/" in sp_url else "album"
 
-    # Exact match first (ISRC for tracks, UPC for albums) — only for Deezer,
-    # which exposes free no-auth lookup-by-code endpoints. No fuzzy-search
-    # ambiguity possible: either it's the exact release or nothing.
-    if service == "deezer":
-        from ripster.routes.isrc import _deezer_search_isrc, _deezer_search_upc
-        exact = None
-        if sp_type == "track" and isrc:
-            exact = await _deezer_search_isrc(isrc)
-        elif sp_type == "album" and upc:
-            exact = await _deezer_search_upc(upc)
-        if exact:
-            return {
-                "ok": True, "source": {"url": sp_url, "title": title},
-                "target": exact, "query": query, "service": service,
-            }
-
+    # Search ONLY the requested service. The old code had no branch for qobuz or
+    # tidal, so both fell into an `else` that ran the Apple search and returned
+    # the Apple URL as `ok: True` — the UI then queued an Apple link under the
+    # chosen service's quality and wrote "downloaded" while the file landed in
+    # downloads/apple/. A fresh single missing on Qobuz/Tidal at release day is
+    # normal (storefronts fill at different times); saying so is the whole job.
+    found = None
+    matrix_m = None
     if service == "apple":
+        from ripster.routes.isrc import verified_match
         res = await _disc._search_apple(query, sp_type, 5, "")
+        found = verified_match(res.get("results", []), title, artist)
     elif service == "deezer":
-        res = await _disc._search_deezer(query, sp_type, 5)
+        found = await _deezer_convert_match(sp_type, isrc, upc, query, title, artist)
+    elif service in ("qobuz", "tidal"):
+        # These two match by ISRC only — availability.matrix runs the seeder
+        # (Deezer/Apple/Beatport by UPC) → derive ISRC → probe Qobuz/Tidal chain.
+        try:
+            from ripster import availability as _av
+            matrix_m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist)
+            found = _hit_from_matrix(matrix_m, service, title, artist)
+        except Exception:
+            found = None
     else:
-        res = await _disc._search_apple(query, sp_type, 5, "")
+        found = None
 
-    results = res.get("results", [])
-    if not results:
-        return {"ok": False, "error": f"Not found on {service}: {query}", "query": query}
+    if found and found.get("url"):
+        return {
+            "ok":      True,
+            "source":  {"url": sp_url, "title": title},
+            "target":  found,
+            "query":   query,
+            "service": service,
+        }
 
-    # Fuzzy fallback (no ISRC/UPC available, or the exact lookup found
-    # nothing) — verify title+artist actually overlap before accepting a
-    # result instead of trusting whatever the search ranked first.
-    from ripster.routes.isrc import verified_match
-    best = verified_match(results, title, artist)
-    if not best:
-        return {"ok": False, "error": f"No confident match on {service} for: {query}", "query": query}
-
+    # Not on the requested service — never answer with a substitute. Say where it
+    # isn't and list, explicitly, where it IS, so the UI can offer a real choice.
+    available_on = await _convert_available_elsewhere(
+        service, upc, isrc, title, artist, matrix_m)
+    # Матрица ищет по UPC/ISRC, а предрелиз у Apple по штрихкоду не находится.
+    # 23.09.2026, CHVRCHES «Roses» (выход 25.09): Apple отдавал сингл по
+    # названию с проверкой, а владелец видел «нет на Qobuz» без единого
+    # варианта. Та же проверенная выборка, что и у прямого конвертера в Apple.
+    if service != "apple" and not any(a.get("service") == "apple" for a in available_on):
+        try:
+            from ripster.routes.isrc import verified_match
+            res = await _disc._search_apple(query, sp_type, 5, "")
+            hit = verified_match(res.get("results", []), title, artist)
+            if hit and hit.get("url"):
+                available_on.append({
+                    "service": "apple", "url": hit["url"],
+                    "title": hit.get("title") or title,
+                    "artist": hit.get("artist") or artist,
+                    "cover": hit.get("cover", ""),
+                    "quality": _CONVERT_DEFAULT_QUALITY.get("apple", ""),
+                    "region": hit.get("storefront", ""),
+                })
+                _ord = {"qobuz": 0, "tidal": 1, "apple": 2, "deezer": 3, "beatport": 4}
+                available_on.sort(key=lambda x: _ord.get(x["service"], 9))
+        except Exception:
+            pass
+    # Релиз, который ещё не вышел, — это не «не найдено»: витрины наполняются в
+    # день выхода, и сказать это прямо полезнее, чем «нет совпадения».
+    release_date = str(meta.get("date") or "")
+    try:
+        import datetime as _dtm
+        upcoming = len(release_date) == 10 and release_date > _dtm.date.today().isoformat()
+    except Exception:
+        upcoming = False
     return {
-        "ok":      True,
-        "source":  {"url": sp_url, "title": title},
-        "target":  best,
-        "query":   query,
-        "service": service,
+        "release_date": release_date,
+        "upcoming":     upcoming,
+        "ok":           False,
+        "requested":    service,
+        "not_found_on": service,
+        "reason":       "not_found",
+        "error":        f"No confident match on {service} for: {query}",
+        "query":        query,
+        "source":       {"url": sp_url, "title": title},
+        "available_on": available_on,
     }

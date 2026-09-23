@@ -109,11 +109,25 @@ function _pqLiveNote() {
 //
 // Ширину меряем в пикселях и из неё считаем длительность, чтобы длинная строка
 // не пролетала за то же время, что короткая: скорость постоянная (~40 px/с).
+//
+// ТРИ ПРОХОДА: завернуть, прочитать всех, записать всем. Чтение ширины вскрывает
+// череду записей, и браузер пересчитывает layout НА КАЖДУЮ СТРОКУ: на списке
+// из 500 треков это дали зафиксированный 9-секундный freeze окна (21.09.2026),
+// а на 2000 — и вовсе уронили рендерер. Раздельные чтение и запись — один
+// reflow на всю перерисовку.
+//
+// И СПИСКАМИ БОЛЬШЕ 60 СТРОК — ПО КАДРАМ: даже «одна волна чтений» на
+// двухтысячном списке стоит десятки секунд (см. замер 21.09: 52 с self-time на
+// строчке чтения ширин). Нарезка по 60 элементов в кадр растягивает тот же
+// объём работы на секунду ПЛАВАЮЩИХ кадров вместо одного зависания; повторный
+// вызов отменяет незавершённый предыдущий скан (новый список — новые ширины).
+let _mqRun = 0;
 function mqScan(root) {
   const scope = root || document;
   let els;
-  try { els = scope.querySelectorAll('[data-mq]'); } catch (e) { return; }
-  els.forEach(el => {
+  try { els = [...scope.querySelectorAll('[data-mq]')]; } catch (e) { return; }
+  const pairs = [];
+  for (const el of els) {
     let inner = el.firstElementChild;
     if (!inner || !inner.classList.contains('mq-i')) {
       inner = document.createElement('span');
@@ -121,18 +135,32 @@ function mqScan(root) {
       while (el.firstChild) inner.appendChild(el.firstChild);
       el.appendChild(inner);
     }
-    // clientWidth — видимая ширина, scrollWidth — сколько текст занял бы весь.
-    const dx = inner.scrollWidth - el.clientWidth;
-    if (dx > 4) {
-      el.style.setProperty('--mq-dx', dx + 'px');
-      el.style.setProperty('--mq-dur', Math.max(5, dx / 40 + 4).toFixed(1) + 's');
-      el.classList.add('mq-on');
-    } else {
-      el.classList.remove('mq-on');
-      el.style.removeProperty('--mq-dx');
-      el.style.removeProperty('--mq-dur');
+    pairs.push([el, inner]);
+  }
+  const run = ++_mqRun;
+  const apply = (from, to) => {
+    // чтения всех идут подряд, записи — после: между ними ни одного
+    // изменения DOM, и layout пересчитывается один раз на порцию
+    for (let k = from; k < to; k++) {
+      const el = pairs[k][0];
+      const dx = pairs[k][1].scrollWidth - el.clientWidth;
+      if (dx > 4) {
+        el.style.setProperty('--mq-dx', dx + 'px');
+        el.style.setProperty('--mq-dur', Math.max(5, dx / 40 + 4).toFixed(1) + 's');
+        el.classList.add('mq-on');
+      } else {
+        el.classList.remove('mq-on');
+        el.style.removeProperty('--mq-dx');
+        el.style.removeProperty('--mq-dur');
+      }
     }
-  });
+  };
+  if (pairs.length <= 60) { apply(0, pairs.length); return; }
+  (function step(k) {
+    if (run !== _mqRun) return;               // список перерисовали — старый скан не нужен
+    apply(k, Math.min(k + 60, pairs.length));
+    if (k + 60 < pairs.length) requestAnimationFrame(() => step(k + 60));
+  })(0);
 }
 
 function _ppRenderQueue(create) {
@@ -144,10 +172,18 @@ function _ppRenderQueue(create) {
     box.id = 'pp-queue';
     document.body.appendChild(box);
   }
+  // Кнопка «Добавить папку» — в ОБОИХ состояниях списка. Пустой трек-лист —
+  // как раз тот момент, когда папку и хотят добавить; прятать её за
+  // «непустостью» означало бы показать её только тем, кто в ней не нуждается.
+  const folderBtn = `<button class="pq-folder" onclick="ppAddFolderFromNativePicker()"
+      title="${t('dnd.pick_title')}">${t('dnd.pick_btn')}</button>`;
   if (!q.length) {
     box.innerHTML = `<div class="pq-head"><span>${t('pq.title')}</span>
-        <button class="pq-x" onclick="togglePlayerQueue()" aria-label="${t('pq.close')}">×</button></div>
-      <div class="pq-empty">${t('pq.empty')}</div>`;
+        <span class="pq-head-btns">${folderBtn}
+        <button class="pq-x" onclick="togglePlayerQueue()" aria-label="${t('pq.close')}">×</button></span></div>
+      <div class="pq-empty">${t('pq.empty')}</div>
+      <div class="pq-empty-hint">${t('dnd.drop_hint')}</div>`;
+    _pqRendered();
     return;
   }
   // Альбом трека: явное поле, иначе из подписи «Сервис · Альбом». Нужно, чтобы
@@ -207,7 +243,8 @@ function _ppRenderQueue(create) {
   box.innerHTML = `
     <div class="pq-head">
       <span>${ti('pq.title_n', { n: q.length })}${_pqLiveNote()}</span>
-      <span style="display:flex;gap:6px;align-items:center">
+      <span class="pq-head-btns">
+        ${folderBtn}
         <button class="pq-clear" onclick="_pqClear(event)" title="${t('pq.clear')}">${t('pq.clear')}</button>
         <button class="pq-x" onclick="togglePlayerQueue()" aria-label="${t('pq.close')}">×</button>
       </span>
@@ -218,7 +255,18 @@ function _ppRenderQueue(create) {
   const cur = box.querySelector('.pq-row.on');
   if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest' });
   // Длинные названия — посчитать, что не влезло, и запустить бегущую строку.
-  try { mqScan(box); } catch (e) {}
+  // Во время потокового дропа (id= running) — НЕ считаем: список перерисовывается
+  // каждые 250 мс, а бегущая строка всё равно не прочитается человеком «на лету»;
+  // один финальный прогон делает _ppRenderQueue из finally обработчика дропа.
+  try { if (!(typeof _dndState !== 'undefined' && _dndState.running)) mqScan(box); } catch (e) {}
+  _pqRendered();
+}
+
+// Панель перерисована: вложенные модули (player_dnd) доделывают то, что нельзя
+// выразить строкой шаблона, — например прячут кнопку «Добавить папку» там, где
+// моста к системному диалогу нет.
+function _pqRendered() {
+  try { document.dispatchEvent(new CustomEvent('ripster:queue-rendered')); } catch (e) {}
 }
 function _pqJump(i) {
   if (typeof Preview === 'undefined' || !Preview.queue || !Preview.queue[i]) return;
@@ -294,8 +342,96 @@ function _ppSyncFav() {
   b.textContent = on ? '♥' : '♡';
   b.style.color = on ? 'var(--red)' : '';
   b.title = on ? t('af.following') : t('af.follow');
+  _ppSyncDis(it);
+  _ppSyncDl(it);
 }
 document.addEventListener('ripster:track-start', _ppSyncFav);
+
+// ── «Не надо» и «скачать» по играющему треку ────────────────────────────────
+//
+// Оба — про живой эфир, поэтому и живут в транспортном баре, а не в карточках
+// списка. На сервере это два события станции: `dislike` (бан трека навсегда —
+// `banned_track_keys` в station_events ждал именно их) и `download` (самый
+// сильный плюс, вес 1.5, которого нет ни у одного из разобранных сервисов).
+//
+// Вторая нажатие на 🚫 снимает минус событием `undislike`: без выхода одна
+// промашная кнопка означала бы «эта песня исчезла у вас навечно».
+
+const _ppDisliked = new Set();
+
+function _ppDisKey(it) {
+  if (!it) return '';
+  return String(it.service || '') + ':' + String(it.id || '') + '|' +
+         String(it.artist || '').toLowerCase() + '|' + String(it.title || '').toLowerCase();
+}
+
+/** Минус работает только в станции: вне неё у нас нет права говорить серверу
+ *  «забань этот трек в эфире», которого и так нет. Кнопка, которая ничего не
+ *  меняет, должна выглядеть неактивной, а не обещать. */
+function _stevOnQueue() {
+  return !!(typeof _stevActive === 'function' && _stevActive());
+}
+
+function _ppSyncDis(it) {
+  const b = document.getElementById('pp-dis-btn');
+  if (!b) return;
+  const on = it && _ppDisliked.has(_ppDisKey(it));
+  b.classList.toggle('on', !!on);
+  b.title = on ? t('st.disliked') : t('st.dislike');
+}
+
+function _ppSyncDl(it) {
+  const b = document.getElementById('pp-dl-btn');
+  if (!b) return;
+  const can = !!(it && (it.dl || it.url));
+  b.disabled = !can;
+  b.title = can ? t('st.dl_title') : t('st.dl_no_link');
+}
+
+function ppDislikeCurrent() {
+  const it = (typeof Preview !== 'undefined' && Preview.queue) ? Preview.queue[Preview.idx] : null;
+  if (!it) { toast(t('pq.no_artist'), 'var(--muted)'); return; }
+  if (!_stevOnQueue()) { toast(t('st.dis_station_only'), 'var(--muted)', '', 4000); return; }
+  const k = _ppDisKey(it);
+  const on = !_ppDisliked.has(k);
+  if (on) _ppDisliked.add(k); else _ppDisliked.delete(k);
+  if (typeof _stevDislike === 'function') { try { _stevDislike(it, on); } catch (_) {} }
+  _ppSyncDis(it);
+  if (!on) { toast(t('st.dis_off'), 'var(--muted)', '', 3500); return; }
+  // Отказ — это и «пропустить»: трек оборван на той же секунде, что и
+  // записана в событии (skip шлёт player.js, глубина — там же).
+  toast(ti('st.dis_on', { t: esc(it.title || it.artist || '') }), 'var(--orange)',
+        t('st.dis_hint'), 6000);
+  if (typeof previewNext === 'function') previewNext();
+}
+
+async function ppDownloadCurrent() {
+  const it = (typeof Preview !== 'undefined' && Preview.queue) ? Preview.queue[Preview.idx] : null;
+  if (!it) { toast(t('pq.no_artist'), 'var(--muted)'); return; }
+  const url = it.dl || '';
+  if (!url) { toast(t('st.dl_no_link'), 'var(--orange)', '', 4500); return; }
+  const btn = document.getElementById('pp-dl-btn');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await api('POST', '/api/queue/add',
+                        { url, title: it.title || '', artist: it.artist || '', source: 'station' });
+    if (r && r.ok) {
+      toast(ti('st.dl_queued', { t: esc(it.title || it.artist || '') }), 'var(--green)');
+      // Событие — только на НАСТОЯЧНУЮ постановку в очередь. «Уже в очереди» —
+      // это не новая любовь, а повтор нажатия, и считать его плюсом дважды
+      // значит надуть профиль.
+      if (typeof _stevDownload === 'function') { try { _stevDownload(it); } catch (_) {} }
+    } else if (r && r.duplicate) {
+      toast(t('st.dl_duplicate'), 'var(--muted)', '', 4000);
+    } else {
+      toast(t('st.dl_failed') + ': ' + esc((r && (r.msg || r.detail)) || ''), 'var(--red)');
+    }
+  } catch (e) {
+    toast(t('st.dl_failed') + ': ' + esc(String((e && e.message) || e)), 'var(--red)');
+  } finally {
+    _ppSyncDl(it);
+  }
+}
 
 // ── Мягкий вход трека на пути <audio> ────────────────────────────────────────
 //

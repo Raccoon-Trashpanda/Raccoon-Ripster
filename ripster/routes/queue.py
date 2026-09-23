@@ -16,7 +16,6 @@ Install: queue.install(app, ctx)
 from __future__ import annotations
 
 import asyncio
-import re
 import uuid
 from datetime import datetime
 
@@ -110,14 +109,12 @@ async def get_queue(request: Request):
     return _queue_snapshot()
 
 
-# Треклист задачи для раскрытия карточки деревом. Отдельной ручкой и отдельным
-# кэшем, а НЕ полем задачи: задача целиком летит в каждый queue_update по WS, и
-# сотня названий на каждом тике прогресса была бы чистым балластом. Запрашивается
-# только когда человек раскрыл карточку. Пустой список — честное «не знаю
-# треков» (Spotify/SoundCloud/BBC, сеть): фронт тогда рисует пронумерованные строки.
-_TRACKLIST_CACHE: dict[str, list] = {}
-
-
+# Треклист задачи для раскрытия карточки деревом. Живёт ПОЛЕМ ЗАДАЧИ, а не
+# отдельным кэшем: он приходит вместе с queue_update и готов в первую секунду,
+# а не тогда, когда человек догадался нажать ⌄. Ручка осталась для клиентов,
+# которые читают список по требованию (мобильные, восстановленная после
+# перезапуска задача без меты). Пустой список — честное «не знаю треков»
+# (Amazon, orpheus-Spotify, сеть): фронт тогда рисует пронумерованные строки.
 @router.get("/api/queue/{task_id}/tracks")
 async def queue_task_tracks(task_id: str, request: Request):
     task = next((t for t in _queue if t.get("id") == task_id), None)
@@ -126,34 +123,14 @@ async def queue_task_tracks(task_id: str, request: Request):
     sid = _guest_session_id(request)
     if sid and task.get("session_id") != sid:
         raise HTTPException(403, imsg("err.forbidden", "Нет доступа"))
-    if task_id in _TRACKLIST_CACHE:
-        return {"ok": True, "tracks": _TRACKLIST_CACHE[task_id]}
-    url = task.get("url") or ""
-    tracks: list = []
-    try:
-        m_bp = re.search(r"beatport\.com/(?:[a-z]{2}/)?release/[^/]+/(\d+)", url)
-        if m_bp:
-            from ripster.routes.beatport import beatport_release
-            rel = await asyncio.wait_for(beatport_release(int(m_bp.group(1))), 15)
-            tracks = [{"title": (x.get("title") or "") + (f" ({x['mix']})" if x.get("mix") else ""),
-                       "artist": x.get("artist") or ""}
-                      for x in (rel.get("tracks") or [])]
-        else:
-            from ripster import resolver as _resolver
-            if not _resolver._cfg:
-                _resolver.install(_cfg)
-            got = await asyncio.wait_for(_resolver.resolve(url), 15)
-            if len(got) > 1:
-                tracks = [{"title": x.get("title") or "", "artist": x.get("artist") or ""}
-                          for x in got]
-    except Exception as e:                                     # noqa: BLE001
-        print(f"[queue] треклист {task_id} не получен: {type(e).__name__}: {e}", flush=True)
-        return {"ok": True, "tracks": []}                      # без кэша — повторит при следующем раскрытии
-    _TRACKLIST_CACHE[task_id] = tracks
-    if len(_TRACKLIST_CACHE) > 500:                            # задачи уходят из очереди — кэш не копим
-        live = {t.get("id") for t in _queue}
-        for k in [k for k in _TRACKLIST_CACHE if k not in live]:
-            _TRACKLIST_CACHE.pop(k, None)
+    tracks = task.get("tracks") or []
+    if not tracks:
+        from ripster import metadata as _md
+        try:
+            await _md.ensure_tracks(task)
+        except Exception as e:                                     # noqa: BLE001
+            print(f"[queue] треклист {task_id} не получен: {type(e).__name__}: {e}", flush=True)
+        tracks = task.get("tracks") or []
     return {"ok": True, "tracks": tracks}
 
 
@@ -185,17 +162,34 @@ async def add_to_queue(body: dict, request: Request):
 
     svc     = _detect_service(url) if _detect_service else "apple"
 
-    # След для разбора «просил один сервис, поехало в другой». 01.08.2026 задача
-    # приехала с качеством Qobuz (`27`) на Apple-ссылке, и восстановить, откуда
-    # она пришла, было уже нечем: в журнале постановки не оставалось ничего.
-    # Пишем ровно нужное для разбора и только когда качество ЯВНО чужое сервису,
-    # чтобы не засорять журнал на каждой загрузке.
+    # Guard against the exact defect that made the owner's Spotify→Qobuz/Tidal
+    # downloads silently misfile: an Apple link queued with a foreign service's
+    # quality code. Pure-digit quality ("27", "21"…) is Qobuz's Hi-Res ladder —
+    # Apple only ever speaks alac/atmos/aac, so a digit on an Apple URL means a
+    # caller paired one service's link with another's quality. The old code only
+    # LOGGED this and let the task through (it landed in downloads/apple/alac-*
+    # while the UI said "downloaded"). Refuse it loudly instead: no caller can
+    # repeat the mistake, and the honest error beats a file in the wrong place.
     try:
         _q = str((body or {}).get("quality") or "")
-        if (svc == "apple" and _q.isdigit()) or (svc != "apple" and _q.startswith("alac")):
-            print(f"[queue] MISMATCH: link service '{svc}', quality '{_q}' "
+        if svc == "apple" and _q.isdigit():
+            print(f"[queue] REJECTED mismatch: link service 'apple', quality '{_q}' "
                   f"(source: {(body or {}).get('source') or 'unset'}) - {url[:110]}",
                   flush=True)
+            raise HTTPException(409, imsg(
+                "err.queue_service_quality_mismatch",
+                f"Ссылка на Apple с качеством «{_q}» — это код чужого сервиса. "
+                "Поставьте в очередь ссылку того сервиса, что выбрали, и его "
+                "качество."))
+        if svc != "apple" and _q.startswith("alac"):
+            # Reverse direction: an Apple quality on a non-Apple link. Folded to
+            # that service's own default below (see _APPLE_ONLY guard) — log it so
+            # the substitution is visible rather than silent.
+            print(f"[queue] MISMATCH (corrected): link service '{svc}', quality '{_q}' "
+                  f"(source: {(body or {}).get('source') or 'unset'}) - {url[:110]}",
+                  flush=True)
+    except HTTPException:
+        raise
     except Exception:
         pass
 

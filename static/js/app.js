@@ -3,7 +3,6 @@
 // ── STATE ──────────────────────────────────────────────────────
 const S = { config:{}, queue:[], running:false, paused:false, guestMode:false, lang:'ru' };
 let ws = null;
-let _wsRetries = 0;   // consecutive failed reconnects — drives the topbar pulse state
 const QUALITIES = [];
 
 // ── i18n ───────────────────────────────────────────────────────
@@ -20,6 +19,27 @@ const t = key => {
 // raw key if missing (same as `t`) — callers that need a fallback should check
 // the dict for the key first (see case 'log').
 const ti = (key, params) => { let s = t(key); if (params) for (const k in params) s = s.replaceAll('{'+k+'}', params[k]); return s; };
+// Множественная форма по числу. В словаре значение — формы через '|':
+//   ru: '{n} трек|{n} трека|{n} треков'   (1 / 2–4 / 5+, включая 11–14)
+//   en: '{n} track|{n} tracks'             (одна / множественная)
+// Языки с одной формой (hi/ja/zh) просто не содержат '|', и для них берётся всё
+// значение целиком. Правила в проекте до этого не было: `q.n_tracks` = «{n}
+// треков» печаталось и про один трек, потому что каждую вилку выбирали на
+// месте (`tc > 1 ? ... : t('q.one_track')`).
+function tplural(key, n, params) {
+  const raw = String(t(key));
+  const p = Object.assign({n}, params || {});
+  if (!raw.includes('|')) return _tiRaw(raw, p);
+  const f = raw.split('|');
+  const a = Math.abs(Number(n) || 0), d10 = a % 10, d100 = a % 100;
+  const i = (S.lang === 'ru' && f.length >= 3)
+    ? (d100 >= 11 && d100 <= 14 ? 2 : d10 === 1 ? 0 : (d10 >= 2 && d10 <= 4 ? 1 : 2))
+    : (a === 1 ? 0 : f.length - 1);
+  return _tiRaw(f[i], p);
+}
+// Подстановка в уже выбранную форму: `ti` умеет искать только по ключу, а здесь
+// текст пришёл из переменной.
+function _tiRaw(s, params) { if (params) for (const k in params) s = s.replaceAll('{'+k+'}', params[k]); return s; }
 
 // ── HTML escaping ──────────────────────────────────────────────
 // Every innerHTML template in this app interpolates data from external
@@ -64,6 +84,22 @@ function setLang(lang) {
   try { if(typeof digsRender === 'function' && _digsData) digsRender(); } catch {}
   try { if(typeof renderAlbumPage   === 'function' && (typeof Detail !== 'undefined') && Detail.currentAlbum) renderAlbumPage(); } catch {}
   try { if(typeof renderArtistPage  === 'function' && (typeof Detail !== 'undefined') && Detail.currentArtist) renderArtistPage(); } catch {}
+  // Обзор аккаунтов собирается целиком из t() в момент отрисовки (название
+  // страны, «N акк.», срок подписки). Без перерисовки панель оставалась русской
+  // при lang=en, пока её не закроешь и не откроешь заново.
+  try { if(typeof renderAccountsOverview === 'function') renderAccountsOverview(); } catch {}
+  // Качество: подписи приезжают с сервера, переводится пара *_key — см. localizeQualities.
+  try { _relocalizeQualities(); } catch {}
+  // Вишлист и история собираются целиком через innerHTML в момент отрисовки и
+  // мимо applyLang(): атрибутов data-i18n на этих узлах нет вовсе. Поэтому после
+  // смены языка в DOM оставалось всё, что было на экране при загрузке, — 953
+  // кириллических узла на 22.09.2026 (300 кнопок «↺ Повторить», 423 «последний:
+  // …», 142 всплывающих подсказки у кнопок лейблов). Рисуются из кэша (_wlItems,
+  // _histItems, _wlSug), так что это перерисовка, а не повторный поход в сеть.
+  try { if(typeof wlRenderList === 'function') wlRenderList(); } catch {}
+  try { if(typeof wlPopulateSvc === 'function') wlPopulateSvc(); }   catch {}
+  try { if(typeof _wlSugRender  === 'function') _wlSugRender(); }    catch {}
+  try { if(typeof _histRender   === 'function') _histRender(); }     catch {}
 }
 
 const _LANG_ORDER = ['ru','en','hi','ja','zh'];
@@ -84,6 +120,9 @@ function applyLang() {
   document.querySelectorAll('[data-i18n]').forEach(el => { const v=_tx(el.dataset.i18n); if(v!=null) el.textContent = v; });
   document.querySelectorAll('[data-i18n-ph]').forEach(el => { const v=_tx(el.dataset.i18nPh); if(v!=null) el.placeholder = v; });
   document.querySelectorAll('[data-i18n-title]').forEach(el => { const v=_tx(el.dataset.i18nTitle); if(v!=null) el.title = v; });
+  // aria-label читает скринридер, и он переводится так же, как title: без этого
+  // слепому пользователю достанется русский «Громкость» в английском интерфейсе.
+  document.querySelectorAll('[data-i18n-aria]').forEach(el => { const v=_tx(el.dataset.i18nAria); if(v!=null) el.setAttribute('aria-label', v); });
   document.querySelectorAll('[data-i18n-html]').forEach(el => { const v=_tx(el.dataset.i18nHtml); if(v!=null) el.innerHTML = v; });
   const codeEl = document.getElementById('lang-code');
   if(codeEl) codeEl.textContent = lang.toUpperCase();
@@ -166,8 +205,6 @@ function connectWS() {
       location.reload();
       return;
     }
-    _wsRetries = 0;
-    setStatus('live');
     appendLog('WebSocket connected — ready', 'success');
     pullQueue();   // resync queue from the authoritative REST on every (re)connect —
                    // a long-lived socket that silently missed queue_update events
@@ -175,11 +212,7 @@ function connectWS() {
   };
   ws.onclose = () => {
     // A dropped socket is not the same thing as a dead server: we retry every 2s
-    // and normally reconnect on the first try. Show the amber "reconnecting" beat
-    // for the first few attempts and only flatline once it's genuinely not coming
-    // back — otherwise a routine blip looks like an outage.
-    _wsRetries++;
-    setStatus(_wsRetries <= 3 ? 'wait' : 'off');
+    // and normally reconnect on the first try.
     setTimeout(connectWS, 2000);
   };
   ws.onerror = () => ws.close();
@@ -243,7 +276,7 @@ function handleMessage(msg) {
       // message fires on every WS reconnect, not just first load, and would
       // otherwise silently drop guest-only prefs (see _applyPlayerPrefsToUI).
       try { _applyPlayerPrefsToUI?.(); } catch {}
-      applyConfig(); renderQueue(); updateTransport(); updatePills(); renderQualityGrid(); renderConfig(); _syncReleasesSettingsTab();
+      applyConfig(); renderQueue(); updateTransport(); renderQualityGrid(); renderConfig(); _syncReleasesSettingsTab();
       // Радар мог открыться ДО прихода конфига (восстановленный вид, ранний клик):
       // тогда он загрузился с источниками по умолчанию (только Spotify) и считал
       // эту ленту свежей. Конфиг пришёл — перепроверяем набор источников.
@@ -533,19 +566,18 @@ function handleMessage(msg) {
           Object.assign(S.config, cfg);
           const bEl = document.getElementById('t-bearer');
           if(bEl) bEl.value = S.config['authorization-token'] || '';
-          updatePills();
         } catch(e) { console.warn('bearer_updated refetch failed:', e); }
       })();
       break;
     case 'config_update':
-      if(msg.config){ Object.assign(S.config, msg.config); applyConfig(); updatePills(); } break;
+      if(msg.config){ Object.assign(S.config, msg.config); applyConfig(); } break;
     case 'engine_changed':
       S.config['engine'] = msg.engine;
-      if(msg.qualities){ QUALITIES.length=0; QUALITIES.push(...msg.qualities);
+      if(msg.qualities){ QUALITIES.length=0; QUALITIES.push(...localizeQualities(msg.qualities));
         const sel2=document.getElementById('url-quality');
         if(sel2) sel2.innerHTML=QUALITIES.map(q=>`<option value="${esc(q.id)}">${esc(q.label)} — ${esc(q.sub)}</option>`).join('');
       }
-      updateEngineUI(msg.engine); renderQualityGrid(); updatePills(); break;
+      updateEngineUI(msg.engine); renderQualityGrid(); break;
     // ── Setup ──────────────────────────────────────────────────
     case 'install_log':
       appendSetupLog(msg.entry);
@@ -580,7 +612,7 @@ function handleMessage(msg) {
       break;
     }
     case 'wrapper_status':
-      updateWrapperUI(msg.running, msg.port||S.config['decrypt-port']||'127.0.0.1:10020', msg.docker, msg.docker_msg);
+      updateWrapperUI(msg.running, msg.docker, msg.docker_msg);
       break;
     case 'wrapper_log':
       appendWrapperLog(msg.text);
@@ -758,10 +790,39 @@ function errKeyText(key, args) {
   return (s && s !== key) ? s : '';
 }
 
+// Движок описывает качество парой: `label`/`sub` — русский текст (его читают
+// бот, CLI и healthcheck, и сняв его мы сломали бы чужих потребителей), а
+// `label_key`/`sub_key` — ключ i18n. UI обязан показывать ПЕРЕВОД КЛЮЧА: иначе
+// в английский интерфейс приезжает «audio-alac-stereo (до 24/192)» и бейдж
+// «AAC-LC 320 · эфир». Тот же контракт, что `error`/`error_key` в api() выше.
+// Оригинал прячется в `*_raw`, чтобы повторная локализация после смены языка не
+// подставила перевод вместо уже переведённой строки.
+function _localizeQField(q, field) {
+  const key = q[field + '_key'];
+  if (!key) return;
+  if (q[field + '_raw'] === undefined) q[field + '_raw'] = q[field];
+  const s = errKeyText(key);
+  if (s) q[field] = s;
+}
+function localizeQualities(list) {
+  (Array.isArray(list) ? list : []).forEach(q => {
+    if (q && typeof q === 'object') { _localizeQField(q, 'label'); _localizeQField(q, 'sub'); }
+  });
+  return list;
+}
+
+// Пересобрать всё, что рисует качество, после локализации под новый язык.
+function _relocalizeQualities() {
+  localizeQualities(QUALITIES);
+  try { if (typeof _localizeCachedEngineQualities === 'function') _localizeCachedEngineQualities(); } catch {}
+  populateQualitySelect();
+  renderQualityGrid();
+}
+
 async function loadQualities() {
   const q = await api('GET','/api/qualities');
   QUALITIES.length = 0;
-  QUALITIES.push(...q);
+  QUALITIES.push(...localizeQualities(q));
   populateQualitySelect();
   renderQualityGrid();
 }
@@ -799,16 +860,13 @@ window.addEventListener('load', async () => {
   applyStoredPrefs();
   loadAppInfo();
   // Apply initial engine state after qualities load
-  setTimeout(()=>{ updateEngineUI(S.config['engine']||'zhaarey'); updatePills(); }, 1200);
+  setTimeout(()=>{ updateEngineUI(S.config['engine']||'zhaarey'); }, 1200);
   setTimeout(checkTools, 900);
-  // Wrapper status polling every 10 seconds
+  // Wrapper status polling every 10 seconds — drives the Settings banners,
+  // the wrapper-mode radios and the start/stop buttons (no topbar lamp since
+  // 21.09.2026, but the probe itself is still the source for all of those).
   checkWrapperStatus();
   setInterval(checkWrapperStatus, 10000);
-  // Public Apple wrapper (wm.wol.moe) health — shown even when the LOCAL wrapper
-  // is the active engine, so a public-wrapper outage is visible. Heavier gRPC
-  // check → poll it less often than the local one.
-  setTimeout(checkPublicWrapperStatus, 2000);
-  setInterval(checkPublicWrapperStatus, 90000);
 });
 
 // Wrapper management UI → moved to its own module file (see index.html).
@@ -860,6 +918,9 @@ function showView(name, el) {
 // ── QUALITY SELECT POPULATE ────────────────────────────────────
 function populateQualitySelect() {
   const sel = document.getElementById('url-quality');
+  if (!sel) return;   // селектор живёт в views/queue.html, который приезжает
+                      // асинхронно: setLang() до окончания загрузки вёл бы к
+                      // исключению и обрывал остальную перечистку
   sel.innerHTML = QUALITIES.map(q=>`<option value="${esc(q.id)}">${esc(q.label)} — ${esc(q.sub)}</option>`).join('');
   sel.value = resolveQuality('apple');
 }
@@ -986,10 +1047,89 @@ async function _chooseSpTargetDirect(url, quality, target) {
     detectUrlService('');
     toast('+ '+r.target.title, _svcColor(target));
   } else {
-    // Conversion failed — show a friendly toast with the option to pick
-    // a different service, since the remembered one couldn't find the track.
-    toast(t('t.not_found_on')+_svcLabel(target)+' — '+t('t.pick_other'), 'var(--orange)', r.error||'');
-    _showSpotifyChoiceToast(url, quality);
+    // Not on the service we asked for — say so plainly and offer the services
+    // that actually have it. Never queue a stand-in under a foreign quality.
+    handleSpotifyNotFound(r, quality);
+  }
+}
+
+// ── Spotify → target: honest "not on <service>, here's where it is" ────────
+// The converter no longer substitutes another service and claims success. When
+// the requested service has no confident match it returns ok:false with
+// available_on:[{service,url,title,...}]. Offer those as explicit, per-service
+// choices — the owner picks, and each choice is queued with ITS OWN service's
+// quality (resolveQuality(service)), never the quality of the service that
+// failed to find it.
+const _convertOfferData = new Map();
+
+function handleSpotifyNotFound(r, quality) {
+  const svc   = r.requested || r.not_found_on || '';
+  const label = svc ? _svcLabel(svc) : svc;
+  const avail = Array.isArray(r.available_on) ? r.available_on : [];
+  // Ещё не вышедший релиз — не «не найдено»: витрины наполняются в день выхода.
+  const head = _spNotFoundHead(r, label);
+  if(!avail.length) {
+    toast(head, 'var(--orange)', r.upcoming ? '' : (r.error||''));
+    return;
+  }
+  _showConvertOfferToast(svc, avail, quality, head);
+}
+
+function _spNotFoundHead(r, label) {
+  if(r && r.upcoming && r.release_date) {
+    let d = r.release_date;
+    try { const dd = new Date(r.release_date + 'T12:00:00'); if(!isNaN(dd)) d = dd.toLocaleDateString(); } catch(e) {}
+    return t('t.sp_upcoming_on').replace('{svc}', label).replace('{date}', d);
+  }
+  return t('t.sp_not_found_on').replace('{svc}', label);
+}
+
+function _showConvertOfferToast(requested, avail, quality, head) {
+  const stack = document.getElementById('notif-stack');
+  if(!stack) return;
+  const id = 'conv_offer_' + Date.now();
+  _convertOfferData.set(id, { avail, quality });
+  const label     = requested ? _svcLabel(requested) : requested;
+  const listNames = avail.map(a => _svcLabel(a.service)).join(', ');
+  const btns = avail.map(a => {
+    const c = _svcColor(a.service);
+    return `<button data-svc="${esc(a.service)}" data-url="${esc(a.url)}" data-title="${esc(a.title||'')}"
+      style="padding:5px 10px;background:rgba(255,255,255,.06);border:1px solid ${c};border-radius:8px;font-size:11px;font-weight:700;color:${c};cursor:pointer;font-family:var(--font);white-space:nowrap">${esc(_svcLabel(a.service))}</button>`;
+  }).join('');
+  const el = document.createElement('div');
+  el.className = 'notif notif-enter'; el.id = id; el.style.maxWidth = '360px';
+  el.innerHTML = `
+    <div class="notif-dot" style="background:var(--orange);color:var(--orange)"></div>
+    <div class="notif-body">
+      <div class="notif-msg">${esc(head || t('t.sp_not_found_on').replace('{svc}', label))}</div>
+      <div class="notif-sub">${esc(t('t.sp_available_on'))}${esc(listNames)}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:8px">${btns}</div>
+    </div>
+    <div class="notif-close" onclick="_closeNotif('${id}')">✕</div>`;
+  el.querySelectorAll('.notif-body button').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _queueConvertedOffer(btn.dataset.svc, btn.dataset.url, btn.dataset.title);
+      _closeNotif(id);
+    });
+  });
+  stack.appendChild(el);
+  requestAnimationFrame(()=>requestAnimationFrame(()=>el.classList.remove('notif-enter')));
+  _notifTimers.set(id, setTimeout(()=>_closeNotif(id), 20000));
+}
+
+async function _queueConvertedOffer(svc, url, title) {
+  const q = resolveQuality(svc);   // THIS service's quality — never a foreign one
+  try {
+    const r = await api('POST','/api/queue/add', { url, quality: q, title });
+    if(r && r.ok) {
+      const inp = document.getElementById('url-input'); if(inp) inp.value = '';
+      try { detectUrlService && detectUrlService(''); } catch(e) {}
+      toast('+ '+_svcLabel(svc)+' → '+t('q.queue_word'), _svcColor(svc));
+    } else {
+      toast(t('t.error_c')+((r && r.detail) || ''),'var(--red)');
+    }
+  } catch(e) {
+    toast(t('t.error_c')+e.message, 'var(--red)');
   }
 }
 
@@ -1443,162 +1583,9 @@ function _showSavedChip(el) {
 
 // Console log view → moved to its own module file (see index.html).
 
-// ── PILLS ─────────────────────────────────────────────────────
-function updatePills() {
-  const c      = S.config;
-  const engine = c['engine'] || 'zhaarey';
-  // The global QUALITIES is the Apple list — fine for the Apple-side display,
-  // and if we're on Deezer/Qobuz that pane of the popover just shows the
-  // service name instead of a quality tag.
-  const q      = QUALITIES.find(x=>x.id===c['quality']) || QUALITIES[0] || {};
-
-  // ─ Engine-specific readiness dot ─
-  // green = ready to download, orange = needs attention, red = missing a critical prereq
-  let dotColor = 'var(--muted)';
-  const rows   = [];
-
-  const engineLabels = {
-    zhaarey: 'zhaarey (Go)',
-    gamdl:   'gamdl (Python)',
-    amd:     'AMD v2 (Python)',
-    deezer:  'Deezer (deemix)',
-  };
-
-  rows.push(_detailRow(t('dt.engine'),  engineLabels[engine] || engine, '#0a84ff'));
-
-  if(engine === 'amd') {
-    rows.push(_detailRow('Instance', c['amd-instance-url'] || 'wm.wol.moe', 'var(--green)'));
-    dotColor = 'var(--green)';  // AMD v2 works via public instance, so OK by default
-  } else if(engine === 'gamdl') {
-    rows.push(_detailRow('Cookies', (c['gamdl-cookies-path'] ? '✓ '+t('dt.configured') : '✗ '+t('dt.not_configured')),
-                         c['gamdl-cookies-path'] ? 'var(--green)' : 'var(--danger)'));
-    dotColor = c['gamdl-cookies-path'] ? 'var(--green)' : 'var(--red)';
-  } else if(engine === 'zhaarey') {
-    // Apple Music with zhaarey needs both tokens
-    const mut    = c['media-user-token'];
-    const bearer = c['authorization-token'];
-    rows.push(_detailRow('MUT',    mut    ? '✓ '+t('dt.set_word') : '✗ '+t('dt.missing_word'), mut    ? 'var(--green)' : 'var(--danger)'));
-    rows.push(_detailRow('Bearer', bearer ? '✓ '+t('dt.set_word') : '⏳ '+t('dt.not_received'),  bearer ? 'var(--green)' : 'var(--orange)'));
-    if(mut && bearer)       dotColor = 'var(--green)';
-    else if(mut || bearer)  dotColor = 'var(--orange)';
-    else                    dotColor = 'var(--red)';
-  } else if(engine === 'deezer') {
-    const arl = c['deezer-arl'];
-    rows.push(_detailRow('ARL', arl ? '✓ '+t('dt.set_word') : '✗ '+t('dt.missing_word'), arl ? 'var(--green)' : 'var(--danger)'));
-    dotColor = arl ? 'var(--green)' : 'var(--red)';
-  }
-
-  if(q && q.label) rows.push(_detailRow(t('dt.quality'), q.label, q.color || '#0a84ff'));
-  if(c['storefront']) rows.push(_detailRow('Storefront', (c['storefront']||'').toUpperCase(), '#0a84ff'));
-
-  // Quick-link shortcuts inside the popover
-  rows.push('<div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">' +
-    `<button class="btn-ghost btn-sm" onclick="closeDetailsPopover();showView('settings',document.querySelector('[data-view=settings]'))">Settings</button>` +
-    `<button class="btn-ghost btn-sm" onclick="closeDetailsPopover();showView('tokens',  document.querySelector('[data-view=tokens]'))">Tokens</button>` +
-    `<button class="btn-ghost btn-sm" onclick="closeDetailsPopover();showView('quality', document.querySelector('[data-view=quality]'))">Quality</button>` +
-  '</div>');
-
-  const body = document.getElementById('tb-details-body');
-  if(body) body.innerHTML = rows.join('');
-  const dot  = document.getElementById('tb-details-dot');
-  if(dot) dot.style.background = dotColor;
-}
-
-function _detailRow(label, value, color) {
-  return `<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 0;border-bottom:1px solid var(--border)">
-    <span style="color:var(--muted);font-size:11px">${esc(label)}</span>
-    <span style="color:${esc(color)||'var(--text)'};font-weight:600;font-size:12px">${esc(value)}</span>
-  </div>`;
-}
-
-function toggleDetailsPopover(ev) {
-  ev?.stopPropagation();
-  const pop = document.getElementById('tb-details-pop');
-  if(!pop) return;
-  const visible = pop.style.display !== 'none';
-  if(visible) { pop.style.display = 'none'; return; }
-  updatePills();  // refresh contents before showing
-  pop.style.display = '';
-  // Close on outside click
-  setTimeout(() => {
-    document.addEventListener('click', _detailsOutsideClick, { once: true });
-  }, 0);
-}
-function closeDetailsPopover(){
-  const pop = document.getElementById('tb-details-pop');
-  if(pop) pop.style.display = 'none';
-}
-function _detailsOutsideClick(e) {
-  const pop = document.getElementById('tb-details-pop');
-  const btn = document.getElementById('tb-details-btn');
-  if(!pop || !btn) return;
-  if(pop.contains(e.target) || btn.contains(e.target)) {
-    // re-arm listener because popover wasn't actually closed
-    document.addEventListener('click', _detailsOutsideClick, { once: true });
-    return;
-  }
-  closeDetailsPopover();
-}
 function pill(type, text){ return `<div class="pill pill-${type}"><div class="dot"></div>${text}</div>`; }
 
 // ── HELPERS ───────────────────────────────────────────────────
-// ── Topbar pulse: periodic "the line gathers into a raccoon" morph ──────────
-// Timing matters more than the geometry here. The morph is started on an
-// `animationiteration` event rather than whenever the timer happens to fire:
-// at that instant the travelling trace is exactly at phase zero, so the face
-// assembles from a line that is standing still instead of one caught mid-stride.
-const PULSE_MORPH_EVERY = 17000;   // ms between morphs
-const PULSE_FACE_HOLD   = 2100;    // ms the face stays assembled
-let _pulseMorphBusy = false;
-
-function pulseMorphTick() {
-  const el = document.getElementById('tb-status');
-  if(!el || _pulseMorphBusy) return;
-  if(el.dataset.state !== 'live') return;          // only while the line is running
-  if(document.hidden) return;                      // don't animate a hidden tab
-  if(window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
-  // Listen on the element that actually carries the travel animation. It moved to
-  // the wrapping <g> (one promoted layer instead of two), and a listener left on
-  // the path never fires again — which silently stopped the morph happening at all.
-  const wave = el.querySelector('.tb-pulse-run');
-  if(!wave) return;
-  _pulseMorphBusy = true;
-  const begin = () => {
-    wave.removeEventListener('animationiteration', begin);
-    el.dataset.morph = 'face';
-    setTimeout(() => {
-      // Release: `d` transitions back first, and travel only resumes once the
-      // line is a line again — otherwise it would start sliding mid-morph.
-      el.dataset.morph = 'out';
-      setTimeout(() => { delete el.dataset.morph; _pulseMorphBusy = false; }, 900);
-    }, PULSE_FACE_HOLD);
-  };
-  wave.addEventListener('animationiteration', begin);
-  // If the animation isn't running for any reason, don't leave the flag stuck.
-  setTimeout(() => {
-    if(_pulseMorphBusy && !el.dataset.morph) {
-      wave.removeEventListener('animationiteration', begin);
-      _pulseMorphBusy = false;
-    }
-  }, 5000);
-}
-setInterval(pulseMorphTick, PULSE_MORPH_EVERY);
-
-// Connection state for the topbar pulse: 'live' | 'wait' | 'off'.
-// Takes a state, not a label — the indicator is deliberately wordless, and the
-// only surviving text is the tooltip (kept for accessibility and hover).
-function setStatus(state) {
-  const el = document.getElementById('tb-status');
-  if(!el) return;
-  const st = (state === 'live' || state === 'wait') ? state : 'off';
-  el.dataset.state = st;
-  const key = st === 'live' ? 'tb.ws_live' : st === 'wait' ? 'tb.ws_wait' : 'tb.ws_off';
-  el.dataset.i18nTitle = key;
-  const label = t(key);
-  el.title = label;
-  el.setAttribute('aria-label', label);
-}
-
 
 
 // ── Contextual field help ("?" icon + tap/click popover) ──────────────────
@@ -2061,7 +2048,7 @@ async function switchEngine(engine) {
   if(!r.ok){ toast('Error switching engine','var(--red)'); return; }
   // Update qualities list
   QUALITIES.length = 0;
-  QUALITIES.push(...(r.qualities||[]));
+  QUALITIES.push(...localizeQualities(r.qualities||[]));
   // Rebuild quality select
   const sel = document.getElementById('url-quality');
   if(sel) sel.innerHTML = QUALITIES.map(q=>`<option value="${esc(q.id)}">${esc(q.label)} — ${esc(q.sub)}</option>`).join('');
@@ -2074,7 +2061,6 @@ async function switchEngine(engine) {
   }
   updateEngineUI(engine);
   renderQualityGrid();
-  updatePills();
   updateQualitySelector('apple');
   const _msgs = {zhaarey:'🔵 zhaarey engine', gamdl:'🐍 gamdl engine', amd:'✨ '+t('t.amd_v2_msg')};
   const _clrs = {zhaarey:'var(--blue)', gamdl:'var(--blue)', amd:'var(--green)'};
@@ -2299,165 +2285,10 @@ function _relMaybeShowXsvc() {
   if (n) n.style.display = (S.config?.['show-radar-xsvc-note'] === false) ? 'none' : '';
 }
 
-async function loadReleases(force = false) {
-  _renderRelActiveSvcs();
-  _relMaybeShowXsvc();
-
-  const days  = document.getElementById('rel-days')?.value  || (S.config?.['releases-days'] || '90');
-  const grid  = document.getElementById('releases-grid');
-  const st    = document.getElementById('rel-status');
-  const empty = document.getElementById('rel-empty');
-  const btn   = document.getElementById('rel-refresh-btn');
-
-  // Always fetch a superset of release types so the client-side chip filter
-  // has data to work with (appears_on stays opt-in — it makes the scan heavy).
-  const cfgTypes = (S.config?.['releases-types'] || 'album,single');
-  let spTypes = 'album,single,compilation';
-  if (cfgTypes.includes('appears_on')) spTypes += ',appears_on';
-
-  if (force) {
-    _relCache.data = null;
-    _relCache.ts   = 0;
-    try { localStorage.removeItem(_REL_LS_KEY); } catch(e) {}
-  }
-
-  const hasPrev = !!_relCache.data?.length;
-
-  if (!hasPrev) {
-    if(grid)  grid.innerHTML = '';
-    if(empty) empty.style.display = 'none';
-  }
-  if(st) { st.textContent = hasPrev ? t('su.updating') : t('w.loading_rel'); st.style.display = 'block'; }
-  if(btn) btn.disabled = true;
-
-  const activeSvcs = _relActiveSvcs();
-  // Ключ того набора источников, что РЕАЛЬНО запрошен: конфиг может прийти,
-  // пока ждём ответы, и штамп «после» выдал бы неполную ленту за полную.
-  const _fetchKey  = _relCacheKey();
-  const useSpotify = activeSvcs.includes('spotify');
-  const useQobuz   = activeSvcs.includes('qobuz');
-  const useTidal   = activeSvcs.includes('tidal');
-
-  const fetches = [];
-  if(useSpotify) fetches.push(
-    fetch(`/api/spotify/releases?days=${days}&types=${encodeURIComponent(spTypes)}${force ? '&force=1' : ''}`)
-      .then(r => r.json()).catch(e => ({ok: false, releases: [], error: e.message}))
-  );
-  if(useQobuz) fetches.push(
-    fetch(`/api/releases/qobuz?days=${days}`)
-      .then(r => r.json()).catch(e => ({ok: false, releases: [], error: e.message}))
-  );
-  if(useTidal) fetches.push(
-    fetch(`/api/releases/tidal?days=${days}`)
-      .then(r => r.json()).catch(e => ({ok: false, releases: [], error: e.message}))
-  );
-  // BBC shows / SoundCloud channels / Apple artists — same feed shape, so they
-  // merge into the same list and obey the same filters and chips.
-  ['bbc','soundcloud','apple','deezer'].forEach(svc => {
-    if(!activeSvcs.includes(svc)) return;
-    fetches.push(
-      fetch(`/api/releases/${svc}?days=${days}${force ? '&force=1' : ''}`)
-        .then(r => r.json()).catch(e => ({ok: false, releases: [], error: e.message}))
-    );
-  });
-
-  // Лейблы из вишлиста — отдельный источник, потому что лейбл не артист: у него
-  // нет id, xref его не резолвит, и в списки артистов сервисов он не попадает.
-  // ВЫКЛЮЧЕН по умолчанию: пока `show-radar-labels` не выставлен в true, этой
-  // ветки не существует, лишнего запроса нет, и лента радара ровно та же.
-  if (S.config?.['show-radar-labels'] === true) {
-    fetches.push(
-      fetch(`/api/releases/labels?days=${days}${force ? '&force=1' : ''}`)
-        .then(r => r.json()).catch(e => ({ok: false, releases: [], error: e.message}))
-    );
-  }
-
-  if(!fetches.length) {
-    if(st) st.style.display = 'none';
-    if(btn) btn.disabled = false;
-    if(!hasPrev && empty) {
-      empty.textContent = t('t.no_services');
-      empty.style.display = '';
-    }
-    return;
-  }
-
-  const settled = await Promise.allSettled(fetches);
-
-  let allReleases = [];
-  const errors = [];
-  let anyScanning = false;
-  for(const r of settled) {
-    if(r.status === 'fulfilled') {
-      if(r.value?.releases?.length) allReleases.push(...r.value.releases);
-      if(!r.value?.ok && r.value?.error) errors.push(r.value.error);
-      if(r.value?.scanning) anyScanning = true;
-    }
-  }
-
-  if(st) st.style.display = 'none';
-  if(btn) btn.disabled = false;
-
-  // Backend is running a background scan — WS will push results when done.
-  // We also start a poll fallback in case the WS message is lost (slow client,
-  // tab in background, broker drop, tunnel cut).
-  if(anyScanning && !allReleases.length && !hasPrev) {
-    if(st) { st.textContent = t('t.scanning'); st.style.display = 'block'; }
-    _relStartPoll();
-    return;
-  }
-  _relStopPoll();
-
-  // Deduplicate by title+artist+year across services
-  const seen = new Map();
-  allReleases = allReleases.filter(rel => {
-    const key = `${(rel.title||'').toLowerCase()}|${(rel.artist||'').toLowerCase()}|${(rel.year||rel.date||'').slice(0,4)}`;
-    const kept = seen.get(key);
-    if(kept) {
-      // Один и тот же релиз приходит и от артиста, за которым следим, и от его
-      // лейбла. Дубля быть не должно, но и повод терять нельзя: оставляем ПЕРВУЮ
-      // карточку (у неё сервис, где релиз уже отдаётся — ради этого весь
-      // кросс-сервисный радар и затевался, ссылку на Spotify скачать нельзя),
-      // и переносим на неё лейбловую метку. Карточка одна и стоит в блоке
-      // лейблов — там повод виден, а путь скачивания остаётся ранним.
-      if(rel.via_label && !kept.via_label) {
-        kept.via_label = true;
-        kept.label = kept.label || rel.label || '';
-      }
-      return false;
-    }
-    seen.set(key, rel);
-    return true;
-  });
-  allReleases.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
-
-  if(errors.length) {
-    const has403 = errors.some(e => e && e.toLowerCase().includes('not registered'));
-    if(has403) {
-      toast(t('t.sp_403'), 'var(--orange)', 8000);
-    } else {
-      toast('⚠ ' + errors.slice(0, 2).join('; '), 'var(--orange)', 4000);
-    }
-  }
-
-  if(!allReleases.length) {
-    // No new results — keep previous data visible if available
-    if(hasPrev) {
-      toast(t('t.no_new_rel'), 'var(--muted)', 3000);
-    } else {
-      if(empty) empty.style.display = '';
-    }
-    return;
-  }
-
-  // New results found — update cache + localStorage + render
-  _relCache.data = allReleases;
-  _relCache.ts   = Date.now();
-  _relCache.key  = _fetchKey;
-  _relSaveLS(allReleases, _fetchKey);
-
-  if(empty) empty.style.display = 'none';
-  _applyRelFilter();
+function loadReleases(force = false) {
+  // Реализация переехала в sc_tab.js (поток: каждый источник рисует, как
+  // только ответил). Фолбэк на прежний код, если sc_tab не загрузился.
+  if (typeof _radarLoadReleases === 'function') return _radarLoadReleases(force);
 }
 
 // kept for compatibility — Spotify-specific redirect to choice toast

@@ -75,7 +75,7 @@ class SoundcloudWidevineEngine(EngineBase):
 
     _QUALITIES = [
         {"id": "hq",  "label": "AAC 256 (CDM)", "engine": "sc_widevine",
-         "sub": "AAC 256 kbps, расшифровка через pywidevine L3 CDM",
+         "sub": "AAC 256 kbps, расшифровка через pywidevine L3 CDM", "sub_key": "qual.sc_widevine.hq.sub", "sub_args": {"codec": "AAC 256 kbps", "cdm": "pywidevine L3 CDM"},
          "badge": "HQ-DRM", "color": "#ff5500", "bitrate": "256 kbps",
          "ext": "m4a", "req": "wvd"},
     ]

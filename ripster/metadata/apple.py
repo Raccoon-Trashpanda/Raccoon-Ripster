@@ -200,20 +200,78 @@ async def _fetch_catalog(sf: str, api_type: str, api_id: str, bearer: str, mut: 
     return r.json()
 
 
-async def _itunes_lookup(api_id: str, sf: str) -> Optional[dict]:
-    """iTunes public Lookup API — no auth required. Returns first result for the given ID."""
+async def _catalog_album_tracks(sf: str, api_id: str) -> list:
+    """Треклист альбома из каталога Apple — когда iTunes Lookup треков не дал.
+
+    23.09.2026: у DJ-миксов (Hospital30: Laurence Guy) iTunes отдаёт ТОЛЬКО сам
+    альбом, `resultCount: 1`, ни одной песни — а загрузчик в ту же минуту видел
+    12 треков через каталог. Карточка при этом получала пустой список с
+    пометкой «полный». Каталог отдаёт `relationships.tracks` у альбома сам.
+    Никогда не бросает: треклист — украшение, не повод ронять метаданные."""
+    try:
+        bearer = (_cfg.get("authorization-token") or "").strip() or (await auto_fetch_bearer() or "")
+        if not bearer:
+            return []
+        data = await _fetch_catalog(sf, "albums", api_id, bearer,
+                                    (_cfg.get("media-user-token") or "").strip())
+        item = (data.get("data") or [{}])[0]
+        rows = ((item.get("relationships") or {}).get("tracks") or {}).get("data") or []
+        out = []
+        for t in rows:
+            a = t.get("attributes") or {}
+            out.append({
+                "num":    a.get("trackNumber") or len(out) + 1,
+                "title":  a.get("name") or "",
+                "artist": a.get("artistName") or "",
+                "dur":    int((a.get("durationInMillis") or 0) / 1000),
+            })
+        return out
+    except Exception as e:                              # noqa: BLE001
+        print(f"[meta:apple] треклист из каталога не получен: {type(e).__name__}", flush=True)
+        return []
+
+
+async def _itunes_lookup_raw(api_id: str, sf: str) -> list:
+    """iTunes public Lookup API — no auth required. Все результаты запроса.
+
+    `entity=song` добавлен ради дерева очереди: тот же самый ответ, что кормит
+    карточку, содержит и поимённый треклист альбома (номер, название, исполнитель,
+    длительность) — второй запрос за тем же не нужен. Без `limit` iTunes отдаёт
+    только первые 25 записей."""
     try:
         async with _HTTP.ashared() as c:
             r = await c.get("https://itunes.apple.com/lookup", params={
                 "id":      api_id,
                 "country": sf,
+                "entity":  "song",
+                "limit":   200,
             })
         if r.status_code != 200:
-            return None
-        results = r.json().get("results") or []
-        return results[0] if results else None
+            return []
+        return (r.json().get("results") or [])
     except Exception:
-        return None
+        return []
+
+
+async def _itunes_lookup(api_id: str, sf: str) -> Optional[dict]:
+    """Первый результат публичного Lookup — это сам релиб (или трек для /song/)."""
+    results = await _itunes_lookup_raw(api_id, sf)
+    return results[0] if results else None
+
+
+def _tracks_from_itunes(results: list) -> list:
+    """Треклист альбома из того же ответа iTunes, что и карточка."""
+    out = []
+    for i, t in enumerate(results, 1):
+        if t.get("wrapperType") != "track":
+            continue
+        out.append({
+            "num":     t.get("trackNumber") or len(out) + 1,
+            "title":   t.get("trackName") or "",
+            "artist":  t.get("artistName") or "",
+            "dur":     int((t.get("trackTimeMillis") or 0) / 1000),
+        })
+    return out
 
 
 def _art_from_itunes(item: dict, size: int = 600) -> str:
@@ -233,7 +291,8 @@ async def fetch_meta(url: str) -> Optional[dict]:
     print(f"[meta:apple] {sf}/{api_type}/{api_id}", flush=True)
 
     # ── Primary: iTunes public Lookup (no auth) ───────────────────────────────
-    item = await _itunes_lookup(api_id, sf)
+    results = await _itunes_lookup_raw(api_id, sf)
+    item = results[0] if results else None
     if item:
         is_track = item.get("wrapperType") == "track"
         title    = item.get("trackName") if is_track else item.get("collectionName", "")
@@ -244,6 +303,8 @@ async def fetch_meta(url: str) -> Optional[dict]:
         # and the post-download silent-partial guard cried "скачалось 1 из 10".
         # A single track is always 1 track.
         tc       = 1 if is_track else (item.get("trackCount") or 0)
+        _tl      = [] if is_track else (_tracks_from_itunes(results)
+                                        or await _catalog_album_tracks(sf, api_id))
         return {
             "id":          str(api_id),
             "type":        "songs" if is_track else "albums",
@@ -266,6 +327,12 @@ async def fetch_meta(url: str) -> Optional[dict]:
             "storefront":  sf,
             "duration":    item.get("trackTimeMillis"),
             "trackCount":  tc,
+            "tracks":      _tl,
+            # iTunes молча не отдаёт треки, закрытые в этом storefront, —
+            # 15 из заявленных 16 это полный ответ, а не обрезок: resolver
+            # спрашивает тот же iTunes и получит то же самое. Но НОЛЬ треков у
+            # альбома — не «полный ответ», а «iTunes этого не знает» (DJ-миксы).
+            "tracksComplete": bool(_tl) or is_track,
             "service":     "apple",
         }
 

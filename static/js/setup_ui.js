@@ -16,40 +16,40 @@
 const SETUP_COMPONENTS = [
   // ── Apple Music ───────────────────────────────────────────────────────────
   { key:'apple', icon:'🍎', label:'Apple Music (AMD v2)', tag:'рекомендуется', color:'#fc3c44', def:true,
-    desc:'Движок AppleMusicDecrypt — ALAC / AAC / Atmos через публичный wrapper (wm.wol.moe), БЕЗ Apple ID, БЕЗ Docker, БЕЗ токена. Для расшифровки нужны ещё ffmpeg и Bento4 (ниже).',
+    desc:'',   // текст только в i18n: setup.apple.desc
     endpoint:'/api/setup/component/apple', status:'apple' },
   { key:'ffmpeg', icon:'🎞️', label:'ffmpeg', tag:'для Apple', color:'#fc8a44', def:true,
-    desc:'Ремукс/перекодирование. Нужен для Apple ALAC и общей конвертации формата вывода.',
+    desc:'',   // текст только в i18n: setup.ffmpeg.desc
     endpoint:'/api/setup/component/ffmpeg', status:'ffmpeg' },
   { key:'mp4decrypt', icon:'🔓', label:'Bento4 (mp4decrypt)', tag:'для Apple', color:'#fc8a44', def:true,
-    desc:'Извлечение/декрипт MP4-фрагментов. Нужен для Apple ALAC и музыкальных видео.',
+    desc:'',   // текст только в i18n: setup.mp4decrypt.desc
     endpoint:'/api/setup/component/mp4decrypt', status:'mp4decrypt' },
   // ── SoundCloud ────────────────────────────────────────────────────────────
   { key:'node', icon:'🟩', label:'Node.js', tag:'для SoundCloud', color:'#3c873a', def:true,
-    desc:'Среда выполнения для Lucida. Ставится автоматически вместе с SoundCloud, но можно отдельно.',
+    desc:'',   // текст только в i18n: setup.node.desc
     endpoint:'/api/setup/component/node', status:'node' },
   { key:'soundcloud', icon:'🎧', label:'SoundCloud (Lucida)', color:'#ff5500', def:true,
-    desc:'Node.js + Lucida (клон исходников + npm-сборка, ~1–2 мин). Нужен только для скачивания с SoundCloud.',
+    desc:'',   // текст только в i18n: setup.soundcloud.desc
     endpoint:'/api/setup/component/soundcloud', status:'soundcloud' },
   { key:'wvd', icon:'🔐', label:'Widevine L3 (one-click)', tag:'опционально', color:'#c084e0',
-    desc:'Один клик ставит ВЕСЬ L3-тулчейн (JRE + Android SDK + эмулятор + system-image + AEHD-гипервизор + AVD) и сразу извлекает твой device.wvd → SoundCloud DRM. Один UAC на драйвер, ~5–15 мин, неск. ГБ. Нужно ТОЛЬКО для DRM-треков SoundCloud (миксы/приваты). Прогресс — в консоли ниже.',
+    desc:'',   // текст только в i18n: setup.wvd.desc
     endpoint:'/api/widevine/mint-auto', wsdone:'widevine_minted', status:'wvd' },
   { key:'wvd-manual', icon:'🔐', label:'Widevine L3 — manual mint (wizard)', tag:'fallback', color:'#c084e0', advanced:true,
     desc:'Фолбэк: если авто-минт застрял (KeyDive завис на приветствии Chrome) — интерактивный мастер в отдельном окне.',
     endpoint:'/api/widevine/mint-wizard', wizard:true, status:'wvd' },
   // ── Spotify / Beatport (OrpheusDL) ────────────────────────────────────────
   { key:'orpheus', icon:'🟢', label:'OrpheusDL (Spotify)', color:'#1db954', def:true,
-    desc:'База для Spotify и Beatport — клонирует OrpheusDL + модуль Spotify. БЕЗ секретов (вход настраивается потом в Настройки → Spotify). Нативный Spotify-декрипт требует ещё Spotify.dll (отдельно).',
+    desc:'',   // текст только в i18n: setup.orpheus.desc
     endpoint:'/api/setup/component/orpheus', status:'orpheus' },
   { key:'beatport', icon:'🎚️', label:'Beatport', color:'#01f49c', def:true,
-    desc:'Модуль orpheusdl-beatport поверх OrpheusDL. Если OrpheusDL не стоит — поставится автоматически.',
+    desc:'',   // текст только в i18n: setup.beatport.desc
     endpoint:'/api/setup/component/beatport', status:'beatport' },
   { key:'jiosaavn', icon:'🇮🇳', label:'JioSaavn', tag:'opt', color:'#2bc5b4',
     desc:'',   // text lives in i18n: setup.jiosaavn.desc / setup.jiosaavn.tag
     endpoint:'/api/setup/component/jiosaavn', status:'jiosaavn' },
   // ── Advanced ──────────────────────────────────────────────────────────────
   { key:'zhaarey', icon:'⚙️', label:'Apple wrapper (zhaarey)', tag:'продвинутое', color:'#af52de',
-    desc:'Go + Docker + ТВОЙ premium Apple ID (~71 МБ Go). Для ALAC/Atmos через локальный wrapper. Большинству НЕ нужно — публичного Apple Music выше достаточно для lossless.',
+    desc:'',   // текст только в i18n: setup.zhaarey.desc
     endpoint:'/api/setup/component/zhaarey', advanced:true, status:'go' },
 ];
 let setupCompState = {};   // key -> { checked, installed, running, pct, error }

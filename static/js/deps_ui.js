@@ -29,7 +29,7 @@ async function loadDeps() {
       return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid #ffffff11">
         <span style="color:var(--text);min-width:0;overflow:hidden;text-overflow:ellipsis">${esc(p.name)}
           <span style="color:var(--muted)">${esc(p.version)} → ${esc(p.latest)}</span></span>
-        <button onclick="updateDep('${esc(p.name)}')"
+        <button onclick="updateDep('${escJ(p.name)}')"
           style="flex-shrink:0;padding:4px 10px;border-radius:7px;border:1px solid var(--red);background:transparent;color:var(--text);cursor:pointer;font-size:12px">⬆</button>
       </div>`;
     }).join('');

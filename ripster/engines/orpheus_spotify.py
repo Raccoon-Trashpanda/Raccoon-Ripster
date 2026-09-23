@@ -132,7 +132,7 @@ def _ensure_playlist_patch() -> None:
 _QUALITIES = [
     {
         "id": "hifi",   "label": "HiFi",   "engine": "orpheus_spotify",
-        "sub": "Лучшее доступное (OGG ~320 kbps, Premium)",
+        "sub": "Лучшее доступное (OGG ~320 kbps, Premium)", "sub_key": "qual.orpheus_spotify.hifi.sub", "sub_args": {"codec": "OGG ~320 kbps", "tier": "Premium"},
         "badge": "HIFI",  "color": "#3ecfaa", "bitrate": "320 kbps",
         "ext": "ogg",  "req": "premium",
     },

@@ -41,6 +41,7 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Query
 
+from ripster import artist_identity as _ident
 from ripster import compilations as _comps
 
 router = APIRouter()
@@ -55,12 +56,19 @@ def install(app, ctx) -> None:
     _s.update({
         "config":    ctx.config,
         "watchlist": ctx.watchlist,
+        # Скрытое по идентичности помечается НА подписке — значит вишлист надо
+        # уметь сохранять и отсюда, иначе пометка живёт до ближайшего перезапуска.
+        "save_watchlist": getattr(ctx, "save_watchlist", None),
         "cache_file": ctx.base_dir / "radar_cache.json",
         "favs_file":  ctx.base_dir / "rel_favorites.json",
         "store_file": ctx.base_dir / "radar_store.json",
         # Отдельный файл: у грядущего релиза другой жизненный цикл —
         # он не «выпал из окна источника», он однажды ВЫХОДИТ.
         "upcoming_file": ctx.base_dir / "upcoming_store.json",
+        # Каталог «кто владеет этой работой» — он же резолвер имени для
+        # `name_claim_shows`: карточке лейбловой ленты нечем сказать, КТО она,
+        # кроме строки имени.
+        "base_dir": ctx.base_dir,
     })
     _load_cache()
     app.include_router(router)
@@ -176,11 +184,98 @@ def _durable_merge(source: str, fresh: list, days: int) -> list:
     cut = _cutoff(days)
     out = [r for r in bucket.values() if (r.get("date") or "") >= cut]
     out.sort(key=lambda x: x.get("date", ""), reverse=True)
+    out = _identity_filter(source, out)
     restored = len(out) - sum(1 for r in (fresh or []) if (r.get("date") or "") >= cut)
     if restored > 0:
         print(f"[radar] {source}: source gave {len(fresh or [])}, added from store "
               f"{restored} (window {days}d)", flush=True)
     return out
+
+
+def _identity_filter(source: str, rels: list) -> list:
+    """Самоизлечение при ЧТЕНИИ: склад не трогается, а в ленту не выходит то,
+    чью принадлежность нельзя подтвердить.
+
+    Ловит три беды прежних версий:
+      • карточки name-сшивки (`via_xref`) — их id никогда не подтверждался
+        общими работами, это и были чужие однофамильцы в ленте;
+      • карточки со склеенной Apple-страницы подписки, где релиз принадлежит
+        другому человеку с тем же именем;
+      • карточки лейбловой ленты (`via_label`), у которых на подписку указывает
+        ТОЛЬКО строка имени — их гейт по `via_xref` молча пропускал, и так в
+        подписке на рэпера «BOP» жил dnb-релиз Hospital Records (21.09.2026).
+
+    Ничего не удаляется: запись остаётся в складе (иначе мы теряем находку —
+    см. ripster-radar-persistence) и становится видна владельцу в /api/identity
+    как скрытая с причиной.
+    """
+    entries = _s.get("watchlist") or []
+    catalog = (_ident.load_catalog(_s["base_dir"])
+               if _s.get("base_dir") else {})
+    by_aid = {}
+    for e in entries:
+        aid = str(e.get("artist_id") or "")
+        if aid and e.get("kind") != "label":
+            by_aid.setdefault(aid, e)
+
+    touched, out = False, []
+    for r in rels:
+        if not _ident.stitch_shows(r, entries):
+            continue
+        if not _ident.name_claim_shows(r, entries, catalog)[0]:
+            continue
+        entry = None
+        if str(r.get("service") or "") == "apple":
+            entry = by_aid.get(str(r.get("artist_id") or ""))
+        if entry is not None:
+            ok, why = _ident.home_show(entry, r)
+            if not ok:
+                _ident.hidden_add(entry, r, why)
+                touched = True
+                continue
+        out.append(r)
+    if touched and _s.get("save_watchlist"):
+        _s["save_watchlist"](entries)
+    return out
+
+
+@router.get("/api/identity")
+async def identity_report():
+    """Кого радар считает кем и где он НЕ разобрался — отчёт для владельца.
+
+    «Не показал» — это решение, и оно должно быть объяснимо: у каждой подписки
+    лежат вердикты по витринам с числами (сколько общих работ, штрихкодов,
+    лейблов) и список скрытых релизов с причиной.
+    """
+    entries = _s.get("watchlist") or []
+    rep = _ident.summary(entries)
+    rep["ok"] = True
+    return rep
+
+
+@router.post("/api/identity/choice")
+async def identity_choice(body: dict):
+    """Кого из склеенных однофамильцев считать «своим» — решает владелец.
+
+    Данные показывают на id двух человек, но не показывают, какого из них он
+    хотел, когда подписывался. Скрываем ровно названные им лейбловые группы;
+    карточки не удаляются, а помечаются, и выбор переживает перезагрузку.
+    """
+    entries = _s.get("watchlist") or []
+    want = str(body.get("name") or "").strip()
+    aid = str(body.get("artist_id") or "").strip()
+    hit = [e for e in entries
+           if (aid and str(e.get("artist_id") or "") == aid)
+           or (want and str(e.get("name") or "").strip().lower() == want.lower())]
+    if not hit:
+        return {"ok": False, "error": "watchlist entry not found"}
+    for e in hit:
+        _ident.set_choice(e, hide=body.get("hide"),
+                          hide_titles=body.get("hide_titles"))
+    if _s.get("save_watchlist"):
+        _s["save_watchlist"](entries)
+    return {"ok": True, "updated": len(hit),
+            "profile": _ident.identity_of(hit[0]).get("profile") or {}}
 
 
 @router.get("/api/rel-favs")
@@ -797,7 +892,8 @@ async def collect_apple_mixes(client, entries: list, storefront: str = "us",
                         continue
                     ok, why = _apple_mix_verdict(a)
                     if ok:
-                        mixes.append(_apple_mix_item(a, entry, why))
+                        if _home_ok(entry, a):
+                            mixes.append(_apple_mix_item(a, entry, why))
                     elif not a["track_times"]:
                         todo.append(a)   # вердикт вслепую — добьем длительностями
                 for a in todo[:8]:              # ≤8 лукупов на артиста — окно и так узкое
@@ -805,6 +901,8 @@ async def collect_apple_mixes(client, entries: list, storefront: str = "us",
                         continue
                     a["track_times"] = await _apple_album_times(client, a["id"], storefront)
                     ok, why = _apple_mix_verdict(a)
+                    if ok and not _home_ok(entry, a):
+                        continue
                     (mixes if ok else rejected).append(
                         _apple_mix_item(a, entry, why) if ok
                         else {"artist": name, "title": a["name"], "date": a["date"],
@@ -821,6 +919,19 @@ async def collect_apple_mixes(client, entries: list, storefront: str = "us",
         uniq.append(r)
     uniq.sort(key=lambda x: x["date"], reverse=True)
     return {"mixes": uniq, "rejected": rejected[:200]}
+
+
+def _home_ok(entry: dict, rel: dict) -> bool:
+    """Пустить ли релиз со страницы подписки; скрытое — пометить, не стереть."""
+    ok, why = _ident.home_show(entry, rel)
+    if ok:
+        return True
+    _ident.hidden_add(entry, rel, why)
+    if _s.get("save_watchlist"):
+        _s["save_watchlist"](_s.get("watchlist") or [])
+    print(f"[radar] {entry.get('name')}: скрыт «{rel.get('name') or rel.get('title')}»"
+          f" — {why}", flush=True)
+    return False
 
 
 def _apple_mix_item(a: dict, entry: dict, why: str) -> dict:

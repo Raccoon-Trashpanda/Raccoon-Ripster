@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -35,6 +36,29 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Optional
+
+# ── общий reaper одноразовых браузеров (Tracker #44) ───────────────────────
+# Профиль входа именуется с МАРКЕРНЫМ префиксом, чтобы его мог опознать и
+# по дереву убить любой следующий прогон, даже если этот был убит наповал
+# (таймаут / OOM / Ctrl-C без finally). Нет модуля — работаем по-старому.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tools"))
+try:
+    from headless_reaper import reaper as _reaper
+except Exception:
+    _reaper = None
+
+
+def _kill_browser_tree(proc) -> None:
+    """Убить БРАУЗЕР ДРЕВОМ. terminate()/kill() снимают только родителя —
+    RENDERER'ы переживают его с занятым профилем; именно так нарождались
+    сотни сирот (#44)."""
+    if _reaper is not None:
+        _reaper.kill_tree(proc.pid)
+    else:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
 
 # ── что и откуда забираем ────────────────────────────────────────────────────
 # cookie   — имя куки, которая появляется ПОСЛЕ успешного входа
@@ -253,15 +277,11 @@ def _cleanup(service: str) -> None:
     sess = _sessions.get(service) or {}
     proc = sess.get("proc")
     if proc is not None:
+        _kill_browser_tree(proc)               # дерево, а не только родителя
         try:
-            if proc.poll() is None:
-                proc.terminate()
             proc.wait(timeout=8)          # пока браузер жив, файлы профиля заняты
         except Exception:
-            try:
-                proc.kill()
-            except Exception:
-                pass
+            pass
     prof = sess.get("profile")
     if prof:
         # Профиль одноразовый: в нём остаётся живая сессия сервиса, и оставлять
@@ -295,7 +315,17 @@ async def start(service: str) -> dict:
         return {"ok": False, "error_key": "err.no_browser_found", "error": "Не найден Chrome или Edge — вход открыть нечем"}
 
     port = _free_port()
-    profile = tempfile.mkdtemp(prefix=f"ripster_login_{service}_")
+    if _reaper is not None:
+        try:
+            _reaper.sweep_stale(reap=True)     # осиротевшие остатки прошлых прогонов
+        except Exception:
+            pass
+        _svc = re.sub(r"[^A-Za-z0-9._-]", "-", service)
+        profile = tempfile.mkdtemp(
+            prefix=f"{_reaper.PREFIX}-{os.getpid()}-"
+                   f"{time.strftime('%Y%m%d%H%M%S')}-login-{_svc}-")
+    else:
+        profile = tempfile.mkdtemp(prefix=f"ripster_login_{service}_")
     args = [
         browser,
         f"--remote-debugging-port={port}",
@@ -319,8 +349,9 @@ async def start(service: str) -> dict:
             break
         await asyncio.sleep(0.25)
     if not ready:
+        _kill_browser_tree(proc)
         try:
-            proc.terminate()
+            proc.wait(timeout=8)
         except Exception:
             pass
         shutil.rmtree(profile, ignore_errors=True)

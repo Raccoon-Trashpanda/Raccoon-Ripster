@@ -495,6 +495,18 @@ def load_config(config_file: _Path, tokens_dir: _Path) -> dict:
 
 _BACKUP_KEEP = 30
 
+# Ключи, которые пишутся сами по расписанию и ничего не говорят о настройках.
+_VOLATILE_SUFFIXES = ("-checked-at",)
+
+
+def _meaningful(path: _Path) -> Any:
+    """Содержимое конфига без служебных отметок времени — для сравнения копий."""
+    data = _yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    if isinstance(data, dict):
+        return {k: v for k, v in data.items()
+                if not str(k).endswith(_VOLATILE_SUFFIXES)}
+    return data
+
 
 def _backup_config(config_file: _Path) -> None:
     """Копия config.yaml в backups/ ПЕРЕД перезаписью; хвост подрезается.
@@ -522,6 +534,12 @@ def _backup_config(config_file: _Path) -> None:
         try:
             if made[-1].read_bytes() == config_file.read_bytes():
                 return              # ничего не изменилось — копия не нужна
+            # Отметки «когда проверяли учётку» меняются каждые 5 минут у
+            # каждого сервиса. 23.09.2026 из-за них 30 копий сменялись за
+            # ~12 минут: откатиться дальше четверти часа было нельзя, то есть
+            # страховка снова не страховала. Такая разница — не изменение.
+            if _meaningful(made[-1]) == _meaningful(config_file):
+                return
         except Exception:           # noqa: BLE001
             pass
     _sh.copy2(config_file, dst)

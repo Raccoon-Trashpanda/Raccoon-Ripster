@@ -116,7 +116,8 @@ async def resolve_available_url(url: str, config: dict):
     hit = _AVAIL_CACHE.get(aid)
     if hit and now - hit[0] < _AVAIL_TTL:
         return (hit[1] or url), ("" if not hit[1] or hit[1] == url else
-                                 f"⚠ пре-релиз: регион '{url_storefront(hit[1])}' (публичный wrapper)")
+                                 f"⚠ пре-релиз: в своей витрине не стримится, "
+                                 f"подобран регион '{url_storefront(hit[1])}'")
     url_sf = url_storefront(url) or (config.get("storefront") or "us").lower()
 
     async def _streamable(client, cc):
@@ -143,7 +144,8 @@ async def resolve_available_url(url: str, config: dict):
             if await _streamable(c, cc):
                 new = _rewrite_storefront(url, cc)
                 _AVAIL_CACHE[aid] = (now, new)
-                return new, f"⚠ недоступно в '{url_sf}' — беру регион '{cc}' (пре-релиз, публичный wrapper)"
+                return new, (f"⚠ недоступно в '{url_sf}' — беру регион '{cc}' "
+                             f"(пре-релиз; нужна учётка этой страны)")
     except Exception:
         pass
     _AVAIL_CACHE[aid] = (now, url)
@@ -185,9 +187,57 @@ def _cached(key: str, fn) -> bool:
 
 # Ответ `/status` публичного менеджера, разобранный. Пустой словарь = спросить
 # не удалось (а не «пул пуст»: это разные вещи и путать их нельзя).
-_pool_status: dict = {}
-_pool_status_ts: float = 0.0
+_pool_env: dict = {}
+_pool_env_ts: float = 0.0
 _POOL_TTL = 60.0
+
+
+def _pool_envelope(config: dict, timeout: float = 6.0) -> dict:
+    """Один дешёвый GET `{scheme}://{host}/status`, разобранный и запомненный.
+
+    Возвращает словарь вида::
+
+        {"status": int|None,   # HTTP-код; None — до сервера не достучались
+         "data":   dict,       # что под ключом "data" (или сам ответ-словарь)
+         "body":   dict,       # весь разобранный JSON, включая msg/code
+         "error":  str}        # текстовая причина транспортного сбоя
+
+    Разбираем ТЕЛО И ПРИ НЕУДАЧНОМ КОДЕ: конверт v2 (`wrapper-lite`) несёт
+    причину отказа именно там — на 401 сервер отвечает
+    `{"code":-1,"msg":"invalid or missing API key","bot":"wm_auth_bot",...}`,
+    и «сервер нас не пускает» это совсем не то же самое, что «сервера нет».
+
+    Кэш на ~60 с: вопрос задаётся и при маршрутизации задачи, и из интерфейса,
+    а дергать волонтёрский сервис каждую секунду — значит самим создавать себе
+    «слишком много запросов» там, где его нет.
+    """
+    global _pool_env, _pool_env_ts
+    host = (config.get("amd-instance-url") or "").strip()
+    if not host:
+        _pool_env, _pool_env_ts = {}, 0.0       # без хоста кэш прошлого хоста врёт
+        return {"status": None, "data": {}, "body": {}, "error": "no_host"}
+    now = time.time()
+    cached_host = _pool_env.get("host") if _pool_env else None
+    if _pool_env and cached_host == host and now - _pool_env_ts < _POOL_TTL:
+        return _pool_env
+    scheme = "https" if config.get("amd-instance-secure", True) else "http"
+    env = {"status": None, "data": {}, "body": {}, "error": "", "host": host}
+    try:
+        r = httpx.get(f"{scheme}://{host}/status", timeout=timeout)
+        env["status"] = r.status_code
+        try:
+            body = r.json() or {}
+        except Exception:                                      # noqa: BLE001
+            body = {}
+        if isinstance(body, dict):
+            env["body"] = body
+            data = body.get("data")
+            # Старая (v1) форма отдавала поля прямо в корне — принимаем и так.
+            env["data"] = data if isinstance(data, dict) else body
+    except Exception as e:                                     # noqa: BLE001
+        env["error"] = f"{type(e).__name__}: {e}"[:200]
+    _pool_env, _pool_env_ts = env, now
+    return env
 
 
 def public_pool_status(config: dict) -> dict:
@@ -220,23 +270,69 @@ def public_pool_status(config: dict) -> dict:
     его же браузерном клиенте amd.wol.moe; кода оттуда не взято ничего, только
     знание, КУДА спрашивать. См. CREDITS.md.
     """
-    global _pool_status, _pool_status_ts
+    return _pool_envelope(config)["data"]
+
+
+# ── ЧЕСТНОЕ СОСТОЯНИЕ ПУБЛИЧНОГО WRAPPER'А ────────────────────────────────────
+# Четыре разных положения дела, которые раньше сваливались в одно «здоров»:
+#   working        пул ответил и готов работать;
+#   refusing     сервер жив, но НАС не обслуживает (401 без API-ключа, пул пуст,
+#                формат ответа не понят) — здесь «< 500» врал особенно нагло:
+#                21.09.2026 wm.wol.moe отвечает 401 на любой путь, а проверка
+#                `status_code < 500` засчитывала это как «враппер работает»;
+#   unreachable  до сервера не достучались вообще (DNS, коннект, таймаут);
+#   not_configured адрес публичного инстанса не задан.
+# Каждое из них означает для владельца СВОЁ действие, поэтому и показывать надо
+# каждое отдельно, а не «зелёная точка».
+PUBLIC_WRAPPER_STATES = ("working", "refusing", "unreachable", "not_configured")
+
+
+def public_wrapper_probe(config: dict) -> dict:
+    """Состояние публичного враппера для интерфейса и роутера — по одному запросу.
+
+    {"state", "reason", "instance", "ready", "client_count", "regions", "detail"}.
+    `reason` — машинный ключ (api_key / pool_empty / no_status / transport /
+    http_500 / no_host), `detail` — человекочитаемо (сообщение сервера или текст
+    сетевого сбоя). Значений токенов здесь нет и быть не может.
+    """
     host = (config.get("amd-instance-url") or "").strip()
     if not host:
-        return {}
-    now = time.time()
-    if _pool_status and now - _pool_status_ts < _POOL_TTL:
-        return _pool_status
-    scheme = "https" if config.get("amd-instance-secure", True) else "http"
+        return {"state": "not_configured", "reason": "no_host", "instance": "",
+                "ready": False, "client_count": 0, "regions": [], "detail": ""}
+    env = _pool_envelope(config)
+    code, data, body = env["status"], env["data"], env["body"]
+    base = {"instance": host, "regions": [str(x) for x in (data.get("regions") or [])
+                                          if isinstance(data.get("regions"), list)]
+                            or (data.get("regions") or []),
+            "client_count": _as_int(data.get("clientCount") or data.get("client_count"))}
+    if code is None:
+        return {**base, "state": "unreachable", "reason": "transport", "ready": False,
+                "detail": env["error"] or "transport error"}
+    msg = str(body.get("msg") or data.get("msg") or "")[:160]
+    if code in (401, 403):
+        return {**base, "state": "refusing", "reason": "api_key", "ready": False,
+                "detail": msg or "invalid or missing API key"}
+    if code >= 400:
+        return {**base, "state": "refusing", "reason": f"http_{code}", "ready": False,
+                "detail": msg or f"HTTP {code}"}
+    if "ready" not in data:
+        # Живой HTTP-ответ без `ready` — это НЕ «здоров»: это мы перестали
+        # понимать протокол (upstream перешёл с gRPC на HTTP, см.
+        # docs/APPLE_WRAPPER_UPSTREAM.md). Промолчать тут — значит снова
+        # выставить зелёную точку за неизвестность.
+        return {**base, "state": "refusing", "reason": "no_status", "ready": False,
+                "detail": msg or "unexpected /status response"}
+    if not data.get("ready"):
+        return {**base, "state": "refusing", "reason": "pool_empty", "ready": False,
+                "detail": msg or "no ready instances"}
+    return {**base, "state": "working", "reason": "", "ready": True, "detail": msg}
+
+
+def _as_int(val) -> int:
     try:
-        r = httpx.get(f"{scheme}://{host}/status", timeout=6.0)
-        data = (r.json() or {}).get("data") or {}
-        if not isinstance(data, dict):
-            data = {}
-    except Exception:                                          # noqa: BLE001
-        data = {}
-    _pool_status, _pool_status_ts = data, now
-    return data
+        return int(val)
+    except (TypeError, ValueError):
+        return 0
 
 
 def public_pool_serves(config: dict, storefront: str = "") -> bool | None:
@@ -282,20 +378,20 @@ def public_pool_pick_region(config: dict, want: str = "") -> str:
 
 
 def _public_wrapper_ok(config: dict) -> bool:
-    # Honour the pool health gate first — the server can answer HTTP fine while
-    # its instance pool has nobody connected (see public_wrapper_healthy below).
+    """Публичный пул можно ИСПОЛЬЗОВАТЬ — то есть он нам реально отвечает.
+
+    Earlier version ended with `httpx.get(url).status_code < 500`, и это был не
+    тест враппера, а тест веб-сервера: 21.09.2026 wm.wol.moe отвечает 401
+    «invalid or missing API key» на любой путь, 401 < 500 — и роутер рапортовал
+    «здоров» ровно потому, что его вежливо не пускают. Теперь признак один:
+    состояние `working` из `public_wrapper_probe` (см. там же про `refusing` /
+    `unreachable` / `not_configured`).
+    """
+    # Health gate first — the server can answer HTTP fine while its instance
+    # pool has nobody connected (see public_wrapper_healthy below).
     if not public_wrapper_healthy():
         return False
-    host = (config.get("amd-instance-url") or "").strip()
-    if not host:
-        return False
-    st = public_pool_status(config)
-    if st:
-        # Спросили пул и получили ответ — верим ему, а не факту «сервер жив».
-        return bool(st.get("ready"))
-    scheme = "https" if config.get("amd-instance-secure", True) else "http"
-    url = f"{scheme}://{host}"
-    return _cached(f"pub:{url}", lambda: httpx.get(url, timeout=6.0).status_code < 500)
+    return public_wrapper_probe(config)["state"] == "working"
 
 
 # ── Local wrapper CKC health gate ─────────────────────────────────────────────
@@ -304,7 +400,9 @@ def _public_wrapper_ok(config: dict) -> bool:
 # error", the Go side dies with "decryptFragment: EOF"). When the zhaarey engine
 # sees such a decrypt failure it calls ``mark_local_wrapper_unhealthy()`` so the
 # router stops sending lossless work to a wrapper that only produces garbage —
-# it auto-routes to the public wrapper instead until the session is re-logged in.
+# until the session is re-logged in. Куда именно уйти вместо этого, решает
+# правило «публичный — только по явному выбору» (см. _decide ниже), а не этот
+# флажок.
 _local_unhealthy_until: float = 0.0
 
 

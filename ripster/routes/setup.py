@@ -55,6 +55,7 @@ from ripster.i18n_msg import imsg   # новые ручки отдают клю�
                                     # а не готовую русскую строку
 from ripster import setup as _setup
 from ripster import amd as _amd
+from ripster import apple_router as _router
 
 router = APIRouter()
 
@@ -397,11 +398,23 @@ async def amd_status_ep():
 
 @router.get("/api/amd/wrapper-status")
 async def amd_wrapper_status_ep():
-    instance = _cfg.get("amd-instance-url", "wm.wol.moe")
-    secure   = _cfg.get("amd-instance-secure", True)
-    result   = await _amd.amd_wrapper_status(instance, secure)
-    result["instance"] = instance
-    return result
+    """Публичный wrapper-manager — ЧЕТЫРЕ разных состояния, а не точка.
+
+    `working` / `refusing` (сервер жив, но нас не обслуживает: 401 без
+    API-ключа, пустой пул, непривычный ответ) / `unreachable` / `not_configured`.
+    Раньше здесь дергали только gRPC `Status()`, а wm.wol.moe перешёл на HTTP и
+    закрылся ключом — то есть ответ всегда был «ошибка», и из него нельзя было
+    сказать владельцу главное: сломано НЕ у нас, сервис просит ключ.
+    Рядом кладём и защёлку движка (`down`, `next_probe_in`, `fail_streak`) —
+    это память о РЕАЛЬНЫХ проваленных задачах, чего один дешёвый запрос не знает.
+    """
+    probe = await asyncio.to_thread(_router.public_wrapper_probe, _cfg)
+    probe.update(_router.public_wrapper_state())
+    if probe.get("state") != "working":
+        # `error` — для старых потребителей интерфейса (cookies_ui.js); без него
+        # они молча показали бы «не готово» без причины.
+        probe["error"] = f'{probe.get("state")}:{probe.get("reason") or "unknown"}'
+    return probe
 
 
 # ── Docker wrapper ────────────────────────────────────────────────────────────
@@ -514,6 +527,12 @@ async def wrapper_accounts_list():
             {"slot": i, "label": a["label"], "primary": i == 0,
              "priority": _pref(i, "priority", i),
              "enabled": bool(_pref(i, "enabled", True)),
+             # kind/country — чтобы настройки могли ЧЕСТНО сказать, что
+             # media-user-token-запись враппер не поднимает. Сам токен наружу не
+             # уходит никогда: ни в ответе, ни в журнал.
+             "kind": a.get("kind") or "login",
+             "country": a.get("country") or "",
+             "has_token": bool(a.get("token")),
              **status_by_slot.get(i, {"running": False, "busy": False})}
             for i, a in enumerate(accounts)
         ],
@@ -631,17 +650,77 @@ async def wrapper_accounts_prefs(body: dict):
     return {"ok": True, "changed": changed, "slots": n}
 
 
+async def _wrapper_account_add_token(token: str, country: str, label: str) -> dict:
+    """Запись аккаунта по media-user-token: сначала спросить Apple, потом писать.
+
+    Почему проверка обязательна: токен, который Apple не принимает, в списке
+    учёток выглядит как живая учётка, а вести себя будет как отказ на каждой
+    задаче. Дешевле один запрос здесь.
+
+    Ответ никогда не содержит токен — ни целиком, ни кусочками.
+    """
+    from ripster import apple_cookies
+
+    probe = await asyncio.to_thread(apple_cookies.probe_media_user_token, token)
+    state = probe.get("state") or "unknown"
+    if state != "ok":
+        # Каждое состояние называется отдельно, потому что советы у них
+        # взаимоисключающие: при 403 «вставь свежий токен», при 401 «токен мог
+        # быть цел, сломан запрос».
+        return {"ok": False, "state": state,
+                "msg": probe.get("reason") or "токен не проверен"}
+
+    cc = (probe.get("storefront") or country or "").lower()
+    existing = list(_cfg.get("wrapper-accounts") or [])
+    if any(str(a.get("token") or "") == token for a in existing if isinstance(a, dict)):
+        return {"ok": False, "state": "duplicate",
+                "msg": "Такой токен уже добавлен"}
+    entry = {"token": token, "country": cc,
+             "label": label or (f"token · {cc}" if cc else "token")}
+    existing.append(entry)
+    _cfg["wrapper-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "started": False, "state": "ok", "country": cc,
+            "label": entry["label"],
+            "msg": ("Аккаунт по токену сохранён. Враппер под него НЕ поднимается: "
+                    "media-user-token даёт каталог, тексты и AAC, но не ALAC/Atmos — "
+                    "для них нужен аккаунт с логином.")}
+
+
 @router.post("/api/wrapper/accounts/add")
 async def wrapper_accounts_add(body: dict):
     """Add an additional Apple account to the pool and start its wrapper.
-    Does NOT touch the primary wrapper-apple-id/wrapper-password (slot 0)."""
+    Does NOT touch the primary wrapper-apple-id/wrapper-password (slot 0).
+
+    Два входа: логин+пароль (годится врапперу — ALAC/Atmos) и media-user-token
+    (каталог, тексты, AAC-путь; расшифровать им нечем). Токен проверяется СРАЗУ
+    и честно: 403 — Apple отвергает сам токен, 401 — сломан наш запрос.
+    """
     apple_id = (body.get("id") or "").strip()
     password = (body.get("password") or "").strip()
-    label    = (body.get("label") or "").strip() or apple_id
+    token    = (body.get("token") or "").strip()
+    country  = str(body.get("country") or "").strip().lower()[:2]
+    label    = (body.get("label") or "").strip()
+
+    if token:
+        return await _wrapper_account_add_token(token, country, label)
+
     if not apple_id or not password:
         return {"ok": False, "msg": "Нужны id и password"}
+    # Токен, вставленный в поле «Apple ID», — не абстракция: до появления
+    # отдельного поля владелец записывал его именно так, и пул скармливал его
+    # врапперу как логин, сжигая слот устройства.
+    from ripster.wrapper_pool import _looks_like_media_user_token
+    if _looks_like_media_user_token(apple_id):
+        return {"ok": False, "msg": "Это похоже на media-user-token, а не на Apple ID — "
+                                    "вставьте его в поле «токен»"}
 
     existing = list(_cfg.get("wrapper-accounts") or [])
+    label = label or apple_id
     if any(a.get("id") == apple_id for a in existing):
         return {"ok": False, "msg": "Этот аккаунт уже добавлен"}
     existing.append({"id": apple_id, "password": password, "label": label})
@@ -771,6 +850,120 @@ async def deezer_accounts_remove(slot: int):
     return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
 
 
+# ── Spotify multi-account pool (librespot corridors + browser OAuth per slot) ──
+#   GET  /api/spotify/accounts             — список слотов (без секретов)
+#   POST /api/spotify/accounts/add         — забронировать следующий слот
+#   POST /api/spotify/accounts/{slot}/remove — убрать доп. учётку (не слот 0)
+#
+#   Вход в забронированный слот — тот же /api/spotify/auth/start, но с
+#   {"slot": i}; он пишет blob в коридор i, а основной (слот 0) не трогает.
+
+def _spotify_owner_ok(request: Request) -> bool:
+    """Только владелец, по куке сессии. Тот же закон, что у
+    routes/spotify.py::_owner_request: годная кука — владелец; пароль не задан и
+    туннеля нет — локальный владелец; голого loopback недостаточно — туннель
+    приходит как 127.0.0.1 и не является доказательством."""
+    try:
+        from ripster import auth as _auth
+        if _auth.verify_session_cookie(request.cookies.get("ripster-session", "")):
+            return True
+        if _auth.is_enabled():
+            return False
+    except Exception:                                    # noqa: BLE001
+        return False
+    return not bool(_cfg.get("remote-enabled", False))
+
+
+def _require_spotify_owner(request: Request) -> None:
+    if not _spotify_owner_ok(request):
+        raise HTTPException(401, imsg("err.owner_required", "Нужен вход владельца"))
+
+
+@router.get("/api/spotify/accounts")
+async def spotify_accounts_list(request: Request):
+    """Слоты Spotify: метка, есть ли blob, логин/страна (если известны),
+    здоровье из кэша. Секретов (сам blob) не отдаём."""
+    _require_spotify_owner(request)
+    from ripster import spotify_pool as _sp
+    out = []
+    primary_label = _cfg.get("spotify-account-label") or "primary"
+    if _sp.live_blob().exists():
+        out.append({
+            "slot": 0, "label": primary_label, "primary": True, "has_blob": True,
+            "login": _sp.read_login(_sp.live_blob()), "country": "",
+            "enabled": True,
+            "health": _sp.health_rank(_cfg.get("spotify-account-label") or primary_label),
+        })
+    accounts = _cfg.get("spotify-accounts") or []
+    for k, a in enumerate(accounts):
+        slot = k + 1
+        blob = _sp.corridor_blob(slot)
+        has_blob = blob.exists()
+        login = (a.get("login") or "").strip() or (_sp.read_login(blob) if has_blob else "")
+        out.append({
+            "slot": slot, "label": a.get("label") or f"account{slot}", "primary": False,
+            "has_blob": has_blob, "login": login, "country": a.get("country") or "",
+            "enabled": a.get("enabled", True),
+            "health": _sp.health_rank(login or a.get("label") or ""),
+        })
+    return {"accounts": out}
+
+
+@router.post("/api/spotify/accounts/add")
+async def spotify_accounts_add(request: Request, body: dict = None):
+    """Забронировать следующий слот: создать коридор и дописать запись в
+    ``spotify-accounts`` через штатный config-сервис (не прямой записью yaml).
+    Сам вход — за /api/spotify/auth/start {"slot": <вернувшийся слот>}."""
+    _require_spotify_owner(request)
+    from ripster import spotify_pool as _sp
+    body = body or {}
+    label = (body.get("label") or "").strip() or "account"
+    existing = list(_cfg.get("spotify-accounts") or [])
+    slot = len(existing) + 1                       # слот 0 — основной, доп. с 1
+    try:
+        _sp.ensure_corridor(slot)
+    except Exception as e:                         # noqa: BLE001
+        return {"ok": False, "msg": f"Не удалось создать коридор: {e}"}
+    existing.append({"label": label, "enabled": True, "priority": None})
+    _cfg["spotify-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:                     # noqa: BLE001
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    return {"ok": True, "slot": slot, "label": label,
+            "msg": f"Слот {slot} забронирован — войди в Spotify для этой учётки"}
+
+
+@router.post("/api/spotify/accounts/{slot}/remove")
+async def spotify_accounts_remove(request: Request, slot: int):
+    """Убрать доп. учётку: удалить запись и коридор. Слот 0 (основной вход
+    владельца) убирается через обычный «Выйти» в настройках Spotify, не здесь."""
+    _require_spotify_owner(request)
+    from ripster import spotify_pool as _sp
+    if slot < 1:
+        raise HTTPException(400, imsg(
+            "err.sp_slot0_primary",
+            "Слот 0 — основной аккаунт, убирается через обычные настройки Spotify"))
+    existing = list(_cfg.get("spotify-accounts") or [])
+    idx = slot - 1
+    if idx < 0 or idx >= len(existing):
+        return {"ok": False, "msg": "Нет такого аккаунта"}
+    removed = existing.pop(idx)
+    _cfg["spotify-accounts"] = existing
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:                     # noqa: BLE001
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+    try:                                           # коридор учётки — на диск не смотрим, жалеем место
+        import shutil
+        shutil.rmtree(_sp.corridor_dir(slot), ignore_errors=True)
+    except Exception:                              # noqa: BLE001
+        pass
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+
+
 # ── Tidal multi-account pool ───────────────────────────────────────────────────
 #   GET  /api/tidal/accounts         — список учёток Tidal в пуле (основной + доп.)
 #   POST /api/tidal/accounts/add     — добавить учётку по refresh-токену
@@ -783,7 +976,13 @@ async def tidal_accounts_list(probe: int = 0):
     from ripster import tidal_pool as _tp
     accts = _tp.configured_accounts(_cfg)
     out = {"pool": [{"slot": i,
-                     "label": a.get("label") or (f"основной" if i == 0 else f"слот {i}"),
+                     "label": a.get("label") or ("основной" if i == 0 else f"слот {i}"),
+                     # Название слота едет КЛЮЧОМ: бот и CLI читают русский выше,
+                     # а интерфейс обязан показать перевод — иначе в английском UI
+                     # стояло «слот 1» дословно. Свою метку не переводим.
+                     **({} if a.get("label") else
+                        ({"label_key": "acc.primary"} if i == 0
+                         else {"label_key": "acc.slot", "label_args": {"n": i}})),
                      "country": (a.get("tidal-country") or a.get("country") or "").upper(),
                      "primary": i == 0,
                      # Для перетаскивания порядка и выключателя: без них панель
@@ -1194,6 +1393,27 @@ async def orpheus_login_start():
     return {"ok": True, "url": auth_url}
 
 
+def _owner_at_the_machine(request: Request) -> bool:
+    """Владелец И физически за этой машиной — два условия, оба обязательны.
+
+    Раньше здесь стояла голая проверка `client.host == 127.0.0.1`, и она
+    авторизацией НЕ является: при включённом `remote-enabled` туннель приходит
+    на 127.0.0.1, а uvicorn работает без `proxy_headers`, поэтому ЛЮБОЙ запрос
+    с публичного адреса туннеля выглядел локальным. Гость по туннельной ссылке
+    мог заставить браузер владельца открыть произвольную страницу входа. Тот же
+    класс, что утечка учёток через `/api/pair/*` 18.09.2026.
+
+    «Владелец» переиспользуем у `_spotify_owner_ok` — второй почти такой же
+    гейт рядом неизбежно разъехался бы с первым. Петля добавляется сверху и
+    имеет собственный смысл: браузер открывается НА ЭТОЙ машине, поэтому
+    запрос с другой её открывать не должен, даже с годной кукой.
+    """
+    if not _spotify_owner_ok(request):
+        return False
+    host = (request.client.host if request.client else "") or ""
+    return host in ("127.0.0.1", "::1", "localhost")
+
+
 @router.post("/api/orpheus/login-open")
 async def orpheus_login_open(request: Request):
     """Открыть страницу входа Spotify системным браузером.
@@ -1206,8 +1426,7 @@ async def orpheus_login_open(request: Request):
     Открываем только URL, который сам же выдал login-start, и только если
     запрос пришёл с этой машины: через туннель браузер хозяина открывать нельзя.
     """
-    host = (request.client.host if request.client else "") or ""
-    if host not in ("127.0.0.1", "::1", "localhost"):
+    if not _owner_at_the_machine(request):
         return {"ok": False, "error": "Открыть браузер можно только на этой машине — "
                                       "скопируй ссылку входа вручную"}
     if not _oauth_url:
@@ -1850,8 +2069,10 @@ def _respawn_detached() -> bool:
         env   = {**os.environ, "RIPSTER_IS_RESTART": "1"}
         flags = 0
         if os.name == "nt":
-            flags = (subprocess.DETACHED_PROCESS
-                     | subprocess.CREATE_NEW_PROCESS_GROUP
+            # Без DETACHED_PROCESS: он отменяет CREATE_NO_WINDOW, и настоящий
+            # python.exe за перенаправителем венва открывает видимую консоль.
+            # Подробно — app.py::_spawn_restart.
+            flags = (subprocess.CREATE_NEW_PROCESS_GROUP
                      | getattr(subprocess, "CREATE_NO_WINDOW", 0))
         subprocess.Popen([sys.executable, str(_base_dir / "app.py")],
                          cwd=str(_base_dir), env=env, creationflags=flags,
@@ -1917,20 +2138,51 @@ _COUNTRY_TZ = {
     "SG": ("Asia/Singapore", "Сингапур", "🇸🇬"),
     "AE": ("Asia/Dubai", "ОАЭ", "🇦🇪"),
     "IN": ("Asia/Kolkata", "Индия", "🇮🇳"),
+    "IL": ("Asia/Jerusalem", "Израиль", "🇮🇱"),
+    "TR": ("Europe/Istanbul", "Турция", "🇹🇷"),
     "RU": ("Europe/Moscow", "Россия", "🇷🇺"),
     "ZA": ("Africa/Johannesburg", "ЮАР", "🇿🇦"),
     "DE": ("Europe/Berlin", "Германия", "🇩🇪"),
+    "AT": ("Europe/Vienna", "Австрия", "🇦🇹"),
+    "CH": ("Europe/Zurich", "Швейцария", "🇨🇭"),
     "FR": ("Europe/Paris", "Франция", "🇫🇷"),
     "IT": ("Europe/Rome", "Италия", "🇮🇹"),
+    "ES": ("Europe/Madrid", "Испания", "🇪🇸"),
+    "PT": ("Europe/Lisbon", "Португалия", "🇵🇹"),
+    "NL": ("Europe/Amsterdam", "Нидерланды", "🇳🇱"),
+    "BE": ("Europe/Brussels", "Бельгия", "🇧🇪"),
+    "IE": ("Europe/Dublin", "Ирландия", "🇮🇪"),
     "GB": ("Europe/London", "Великобритания", "🇬🇧"),
+    "SE": ("Europe/Stockholm", "Швеция", "🇸🇪"),
+    "NO": ("Europe/Oslo", "Норвегия", "🇳🇴"),
+    "DK": ("Europe/Copenhagen", "Дания", "🇩🇰"),
+    "FI": ("Europe/Helsinki", "Финляндия", "🇫🇮"),
+    "PL": ("Europe/Warsaw", "Польша", "🇵🇱"),
+    "CZ": ("Europe/Prague", "Чехия", "🇨🇿"),
+    "HU": ("Europe/Budapest", "Венгрия", "🇭🇺"),
+    "GR": ("Europe/Athens", "Греция", "🇬🇷"),
+    "BG": ("Europe/Sofia", "Болгария", "🇧🇬"),
+    "RO": ("Europe/Bucharest", "Румыния", "🇷🇴"),
+    "UA": ("Europe/Kyiv", "Украина", "🇺🇦"),
+    "RS": ("Europe/Belgrade", "Сербия", "🇷🇸"),
     "BR": ("America/Sao_Paulo", "Бразилия", "🇧🇷"),
+    "AR": ("America/Argentina/Buenos_Aires", "Аргентина", "🇦🇷"),
+    "MX": ("America/Mexico_City", "Мексика", "🇲🇽"),
     "US": ("America/New_York", "США", "🇺🇸"),
     "CA": ("America/Toronto", "Канада", "🇨🇦"),
-    "MX": ("America/Mexico_City", "Мексика", "🇲🇽"),
 }
 
 
-def _country_info(cc: str) -> dict:
+def _country_info(cc: str, reason: str = "") -> dict:
+    """Страна и часовой пояс — ДВА независимых факта.
+
+    Раньше они были склеены в один: клиент помечал строку «страна не
+    определена», если не посчитан offset (auth_ui.js: `known = a.offset !=
+    null`), а offset не считывался без IANA-базы на Windows. В итоге реально
+    известная страна (CA у Apple, NZ у Tidal) уходила с панели из-за сбоя
+    совсем другого шага. Здесь страна пишется ВСЕГДА, когда она известна, —
+    часовые данные её не перекрывают.
+    """
     from datetime import datetime, timezone as _tz
     cc = (cc or "").strip().upper()
     tz, name, flag = _COUNTRY_TZ.get(cc, (None, cc or "?", "🏳"))
@@ -1941,13 +2193,41 @@ def _country_info(cc: str) -> dict:
             now = datetime.now(ZoneInfo(tz))
             off_h = now.utcoffset().total_seconds() / 3600.0
             local = now.strftime("%a %H:%M")
-        except Exception:
+        except Exception:                                               # noqa: BLE001
+            # База таймзон недоступна (нет tzdata) — это ПРОБЕЛ В ПОЯСЕ, а не
+            # в стране. Честно говорим о поясе, страну сохраняем.
             pass
     # Название страны НЕ отдаём: раньше оно уезжало по-русски и в английском
     # интерфейсе так и оставалось русским. Сервер отдаёт код и флаг, название
     # подставляет клиент по ключу cc.<КОД>.
     return {"country": cc, "flag": flag,
-            "timezone": tz or "", "offset": off_h, "local_time": local}
+            "timezone": tz or "", "offset": off_h, "local_time": local,
+            "tz_known": off_h is not None,
+            "country_known": bool(cc),
+            "country_reason": "" if cc else (reason or "unknown"),
+            "tz_reason": "" if (not tz or off_h is not None) else "tz_unavailable"}
+
+
+def _breakdown(slots: list[dict]) -> dict:
+    from ripster import account_country as _ac
+    return _ac.breakdown(slots)
+
+
+def _schedule_country_heal(rows: list[dict]) -> None:
+    """Кто показан «без страны» — того переспросить в фоне.
+
+    Обзор читает только кэш (иначе он не дешёвый), поэтому без этого шага
+    «не определено» прилипало до ручного «Проверить». Сети здесь нет: потоковая
+    задачка догонит её сама, а следующий заход покажет уже измеренное.
+    """
+    from ripster import account_country as _ac
+    for o in rows:
+        svc = o.get("service") or ""
+        try:
+            _ac.schedule_heal(svc, o.get("slots") or [])
+        except Exception as e:                              # noqa: BLE001
+            # Один неудачный план не должен портить весь ответ.
+            print(f"[accounts] план починки {svc} не состоялся: {e!r}", flush=True)
 
 
 @router.get("/api/accounts/overview")
@@ -2001,67 +2281,103 @@ async def accounts_overview():
         Теперь сторож здоровья опрашивает все слоты и складывает ответ рядом с
         конфигом, так что здесь достаточно прочитать кэш. Сети не касаемся —
         обзор обязан оставаться дешёвым.
-        """
-        out: list[dict] = []
-        try:
-            if svc == "deezer":
-                from ripster import deezer_accounts as m, deezer_pool as pool
-                for i, a in enumerate(pool._configured_accounts(_cfg)):
-                    info = m.known(a["arl"]) or {}
-                    out.append({"slot": i, "label": a.get("label") or f"account{i}",
-                                "country": (info.get("country") or "").upper(),
-                                "plan": info.get("plan") or "",
-                                # Deezer даты окончания подписки не отдаёт: то, что
-                                # выглядело ею, — скользящий срок годности опций
-                                # (см. deezer_accounts). Пустое честнее выдумки.
-                                "sub_end": "",
-                                "alive": info.get("alive"),
-                                "lossless": info.get("lossless")})
-            elif svc == "qobuz":
-                from ripster import qobuz_accounts as m, qobuz_pool as pool
-                for i, a in enumerate(pool._configured_accounts(_cfg)):
-                    info = m.known(m.account_secret(a)) or {}
-                    out.append({"slot": i, "label": a.get("label") or f"account{i}",
-                                "country": (info.get("country") or "").upper(),
-                                "plan": info.get("plan") or "",
-                                "sub_end": str(info.get("expires") or "")[:10],
-                                "alive": info.get("alive"),
-                                "lossless": info.get("hires") or info.get("lossless")})
-            elif svc == "soundcloud":
-                from ripster import soundcloud_accounts as m, soundcloud_pool as pool
-                for i, a in enumerate(pool._configured_accounts(_cfg)):
-                    info = m.known(a["token"]) or {}
-                    out.append({"slot": i, "label": a.get("label") or f"account{i}",
-                                "country": (info.get("country") or "").upper(),
-                                "plan": info.get("plan") or "",
-                                "sub_end": "",          # SoundCloud срока не отдаёт
-                                "account": info.get("login") or "",
-                                "alive": info.get("alive"),
-                                "lossless": info.get("go_plus")})
-        except Exception as e:                          # noqa: BLE001
-            print(f"[accounts] измеренные слоты {svc} недоступны: {e!r}", flush=True)
-        return out
 
-    def _entry(svc, label, configured, accounts, cc):
-        # Страну мы знаем только у ОСНОВНОЙ учётки: пул хранит логин/ARL, но не
-        # страну, а у пулового аккаунта она вполне может быть другой — на этом и
-        # держится ранняя доступность. Помечаем, чтобы панель не выдавала страну
+        Apple и Tidal раньше в этот список не входили вовсе: у Tidal страна по
+        слотам измеряется (4 учётки — NZ, NO, GB, BR), у Apple витрина подписки
+        лежит в `slot_countries.json`. Панель про это не знала и показывала
+        одну строку на сервис.
+        """
+        from ripster import account_country as _ac
+        return _ac.slots(_cfg, svc)
+
+    def _tier_info(svc: str, slots: list[dict], row: dict) -> dict:
+        """Тариф учётки и ПОТОЛОК качества, который он покупает.
+
+        Маппинг тариф→потолок живёт на сервере (`ripster/quality_tiers.py`,
+        рядом с движками), а не в UI: две независимые оценки разъезжаются на
+        первом же изменении тарифной сетки. Источник тарифа — пробы
+        /api/test-auth/<svc> (запоминаются сюда же: `<svc>-tier`) и измеренные
+        план-кэши сторожа здоровья.
+
+        Честность: истёкшая или мёртвая учётка читается СЛОМАННОЙ, а не старым
+        тарифом. Показать «Go+» на аккаунте, у которого подписка кончилась
+        вчера, — обещание AAC 256, которого никто не получит.
+        """
+        from ripster import quality_tiers as _qt
+        dl = row.get("sub_days_left")
+        if row.get("sub_active") is False or (isinstance(dl, int) and dl < 0):
+            return {"tier": "", "ceiling": None, "tier_hidden": "expired"}
+        alive = [s.get("alive") for s in slots if s.get("alive") is not None]
+        if alive and all(a is False for a in alive):
+            return {"tier": "", "ceiling": None, "tier_hidden": "dead"}
+        tier = str(_cfg.get(f"{svc}-tier") or "").strip()
+        # Ручной пробы основной учётки могло и не быть — тогда говорим планом
+        # измеренного слота. Первым живым: мёртвый «Family» не обещает FLAC.
+        if not tier:
+            for s in slots:
+                p = str(s.get("plan") or "").strip()
+                if p and s.get("alive") is not False:
+                    tier = p
+                    break
+            else:
+                for s in slots:
+                    p = str(s.get("plan") or "").strip()
+                    if p:
+                        tier = p
+                        break
+        flags: dict = {}
+        for f in ("lossless", "hires"):
+            v = _cfg.get(f"{svc}-{f}")
+            if isinstance(v, bool):
+                flags[f] = v
+        q = str(_cfg.get(f"{svc}-quality") or "").strip()
+        if q:
+            flags["quality"] = q
+        if isinstance(row.get("sub_active"), bool):
+            flags["sub_active"] = row["sub_active"]
+        # Замеренные флаги слотов подмешиваются ТОЛЬКО к тем слотам, чей тариф на
+        # строке и показан. Пул владельца SoundCloud — «free», «free», «Go+»:
+        # строка с надписью «тариф free» и потолком «AAC 256» обещала бы то, чего
+        # эта учётка не покупает. Проба `svc-tier` описывает одну (основную)
+        # учётку — ей про потолок пула молчать вообще нечем.
+        # Что умеет каждый слот — честно показано деревом под строкой.
+        if not str(_cfg.get(f"{svc}-tier") or "").strip():
+            same = [s for s in slots if str(s.get("plan") or "").strip() == tier] or slots
+            meas = [s.get("lossless") for s in same if isinstance(s.get("lossless"), bool)]
+            if meas:
+                flags["lossless"] = bool(flags.get("lossless")) or any(meas)
+                if svc == "soundcloud":  # у слота lossless — это и есть go_plus
+                    flags["go_plus"] = any(meas)
+        return {"tier": tier, "ceiling": _qt.ceiling(svc, tier, flags)}
+
+    def _entry(svc, label, configured, accounts, cc, reason: str = ""):
+        # Страну мы знали только у ОСНОВНОЙ учётки: пул хранит логин/ARL, а у
+        # пулового аккаунта она вполне может быть другой — на этом и держится
+        # ранняя доступность. Помечаем, чтобы панель не выдавала страну
         # основной за страну всего пула.
         slots = _measured_slots(svc)
         row = {"service": svc, "label": label, "configured": configured,
                "accounts": accounts,
                "country_is_primary_only": accounts > 1,
-               **_country_info(cc), **_sub(svc)}
+               **_country_info(cc, reason), **_sub(svc)}
         if slots:
             row["slots"] = slots
+            # Разбивка ПО АККАУНТАМ: страны различаются — это и есть ответ на
+            # вопрос «где релиз появится раньше».
+            bd = _breakdown(slots)
+            row.update(bd)
             # Страна пула перестала быть загадкой: если измерены все слоты,
             # оговорка «только основная» больше не нужна.
-            row["country_is_primary_only"] = any(not s.get("country") for s in slots)
+            row["country_is_primary_only"] = any(
+                not s.get("country_known") for s in slots) or bd["varies"]
             # Срок берём ближайший из тех, что известны: именно он наступит
             # первым и именно о нём стоит предупредить.
             ends = sorted(s["sub_end"] for s in slots if s.get("sub_end"))
             if ends and not row.get("sub_end"):
                 row.update(_sub_from_date(ends[0]))
+        # Тариф и потолок — после всего, что влияет на срок подписки:
+        # истёкшая должна погасить тариф, а не показывать его по инерции.
+        row.update(_tier_info(svc, slots, row))
         return row
 
     def _sub_from_date(end: str) -> dict:
@@ -2076,38 +2392,77 @@ async def accounts_overview():
 
     out = []
 
-    # Apple — страна ПО ПРОБЕ, если она была: config storefront это то, что
+    # Apple — страна ПО ПРОБЕ, если она была: config `storefront` это то, что
     # человек вписал, а /v1/me/storefront отвечает, где учётка на самом деле
     # (у владельца было записано US, а аккаунт оказался CA).
-    apple_cc = (_cfg.get("apple-country") or _cfg.get("storefront") or "us").upper()
+    #
+    # «us» в конце — молчаливая выдумка: на свежей установке без пробы панель
+    # показала бы «США», которых нет. Неверная страна стоит дороже честного
+    # «не знаю»: под «us» мы будем ждать релиз, который уже вышел в НЗ.
+    apple_cc = (_cfg.get("apple-country") or "").upper()
     pool_n = len(_pool._configured_accounts(_cfg)) if hasattr(_pool, "_configured_accounts") else 1
-    out.append(_entry("apple", "Apple Music", True, pool_n, apple_cc))
+    out.append(_entry("apple", "Apple Music", True, pool_n, apple_cc,
+                      "" if apple_cc else "never_probe"))
 
     # Tidal — страна автоопределяется из аккаунта (tidal-country), ключевой для НЗ-форы
     if _has("tidal-token") or _has("tidal-country"):
+        t_cc = _cfg.get("tidal-country") or ""
         out.append(_entry("tidal", "Tidal", _has("tidal-token"), _pool_n("tidal"),
-                          _cfg.get("tidal-country") or ""))
+                          t_cc, "" if t_cc else "never_probe"))
 
     # Остальные: страну кладёт проба сервиса в <svc>-country (см.
     # routes/auth.py:_remember_probe). Пока человек ни разу не жал «проверить»,
     # страна честно неизвестна — выдумывать её неоткуда.
     if _has("deezer-arl"):
-        out.append(_entry("deezer", "Deezer", True, _pool_n("deezer"), _cfg.get("deezer-country") or ""))
+        d_cc = _cfg.get("deezer-country") or ""
+        out.append(_entry("deezer", "Deezer", True, _pool_n("deezer"),
+                          d_cc, "" if d_cc else "never_probe"))
     if _has("qobuz-auth-token") or (_has("qobuz-email") and _has("qobuz-password")):
-        out.append(_entry("qobuz", "Qobuz", True, _pool_n("qobuz"), _cfg.get("qobuz-country") or ""))
+        q_cc = _cfg.get("qobuz-country") or ""
+        out.append(_entry("qobuz", "Qobuz", True, _pool_n("qobuz"),
+                          q_cc, "" if q_cc else "never_probe"))
     if _has("spotify-client-id") or _has("spotify-sp-dc"):
+        # У Spotify страна аккаунта в профиле НЕ отдаётся — есть только market
+        # запроса. Раньше под ним подсовывали витрину, и панель врала.
+        s_cc = _cfg.get("spotify-country") or ""
         out.append(_entry("spotify", "Spotify", True, _pool_n("spotify"),
-                          _cfg.get("spotify-country") or _cfg.get("spotify-market") or ""))
+                          s_cc, "" if s_cc else "no_country_field"))
     if _has("soundcloud-oauth-token"):
+        sc_cc = _cfg.get("soundcloud-country") or ""
         out.append(_entry("soundcloud", "SoundCloud", True, _pool_n("soundcloud"),
-                          _cfg.get("soundcloud-country") or ""))
+                          sc_cc, "" if sc_cc else "never_probe"))
 
-    # ранняя доступность: чем больше offset, тем раньше входит в новый день
-    known = [o for o in out if o.get("offset") is not None]
-    known.sort(key=lambda o: o["offset"], reverse=True)
-    for i, o in enumerate(known):
-        o["early_rank"] = i + 1
-    earliest = known[0] if known else None
+    # ранняя доступность: чем больше offset, тем раньше входит в новый день.
+    # Считаем ПО КАЖДОМУ аккаунту, а не только по основной учётке сервиса:
+    # смысл панели в том, что релиз выходит в НЗ на полсуток раньше Европы, и
+    # ловить его должен конкретный слот, а не «Tidal вообще».
+    candidates = []
+    for o in out:
+        if o.get("offset") is not None:
+            candidates.append({"service": o["service"], "label": o["label"],
+                               "flag": o["flag"], "country": o["country"],
+                               "offset": o["offset"], "slot": None})
+        for s in o.get("slots") or []:
+            ci = _country_info(s.get("country") or "")
+            if ci["offset"] is not None:
+                # Метка обязательно с именем сервиса: «NO 201044403» без слова
+                # Tidal — загадка, а подсказка должна говорить, КАКОЙ слот КАКОГО
+                # сервиса входит в новый день первым.
+                candidates.append({"service": o["service"], "label": o["label"],
+                                   "account": s.get("label") or "",
+                                   "flag": ci["flag"], "country": ci["country"],
+                                   "offset": ci["offset"], "slot": s.get("slot")})
+    candidates.sort(key=lambda c: c["offset"], reverse=True)
+    seen: set = set()
+    for i, c in enumerate(candidates):
+        if c["slot"] is None:
+            if c["service"] in seen:
+                continue
+            o = next((x for x in out if x["service"] == c["service"]), None)
+            if o is not None:
+                o["early_rank"] = i + 1
+            seen.add(c["service"])
+    earliest = candidates[0] if candidates else None
     apple_off = next((o["offset"] for o in out if o["service"] == "apple"
                       and o["offset"] is not None), None)
     # Подсказку отдаём РАЗОБРАННОЙ, а не готовой фразой: собранный на сервере
@@ -2115,11 +2470,13 @@ async def accounts_overview():
     # английский интерфейс. Здесь — только числа и коды, фраза собирается из
     # ключа s.acc_hint.
     hint = None
-    if earliest and apple_off is not None and earliest["service"] != "apple":
-        dh = earliest["offset"] - apple_off
-        if dh > 0:
-            hint = {"flag": earliest["flag"], "label": earliest["label"],
-                    "country": earliest["country"], "hours": round(dh),
-                    "vs": "Apple"}
+    if earliest and apple_off is not None and earliest["offset"] > apple_off:
+        hint = {"flag": earliest["flag"], "label": earliest["label"],
+                "account": earliest.get("account") or "",
+                "country": earliest["country"],
+                "hours": round(earliest["offset"] - apple_off),
+                "vs": "Apple", "service": earliest["service"],
+                "slot": earliest["slot"]}
+    _schedule_country_heal(out)
     return {"ok": True, "accounts": out,
             "earliest": earliest["service"] if earliest else None, "hint": hint}

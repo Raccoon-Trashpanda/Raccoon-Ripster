@@ -1,6 +1,9 @@
-      <div style="padding:14px 16px">
+      <!-- padding-top здесь быть НЕ должно: sticky-полоса азбуки прилипает к
+           краю прокрутки НАД отступом, и карточки при скролле просвечивают в
+           этой щели (видно на светлых темах). Отступ верхнего ряда — маргином. -->
+      <div style="padding:0 16px 14px">
         <!-- Header row -->
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+        <div style="display:flex;align-items:center;gap:10px;margin:14px 0 10px;flex-wrap:wrap">
           <div style="font-size:14px;font-weight:700;color:var(--text)" data-i18n="v.releases">Радар релизов</div>
           <!-- Active service badges (read-only, from config) -->
           <div id="rel-active-svcs" style="display:flex;gap:5px;flex-wrap:wrap"></div>

@@ -258,6 +258,8 @@ def store_ingest(payload: dict, client_ip: str = "") -> dict:
     if want and (payload.get("token") or "").strip() != want:
         return {"ok": False, "error": "bad token"}
     iid = _safe_id(payload.get("instance_id"))
+    if not _instance_allowed(iid):
+        return {"ok": False, "error": "instance limit"}
     lines = payload.get("lines") or []
     if not isinstance(lines, list):
         return {"ok": False, "error": "bad lines"}
@@ -301,14 +303,34 @@ def _read_index() -> dict:
         return {}
 
 
+def _clean_label(s, n: int) -> str:
+    """Текст от тестера, который владелец увидит в интерфейсе. Экранирование в
+    UI есть, но 23.09.2026 имя подставлялось ВНУТРЬ onclick="…('имя')", где
+    HTML-сущности раскодируются до исполнения JS: имя `');alert(1)//` стало
+    бы кодом у владельца. Кавычки, угловые скобки и управляющие символы в
+    имени не нужны никому — режем на входе, второй рубеж к UI."""
+    s = re.sub(r"[\x00-\x1f\x7f<>\"'`\\]", "", str(s or ""))
+    return s.strip()[:n]
+
+
+# Потолок числа экземпляров: id задаёт клиент, и без потолка каждый запрос с
+# новым id создавал бы свои файлы — лимиты «на экземпляр» не держат диск.
+_MAX_INSTANCES = 200
+
+
+def _instance_allowed(iid: str) -> bool:
+    idx = _read_index()
+    return iid in idx or len(idx) < _MAX_INSTANCES
+
+
 def _update_index(iid: str, payload: dict, client_ip: str, n: int) -> None:
     idx = _read_index()
     rec = idx.get(iid) or {"instance_id": iid, "first_seen": int(time.time()),
                            "total": 0, "errors": 0}
     rec["last_seen"]   = int(time.time())
-    rec["name"]        = str(payload.get("name") or rec.get("name") or "")[:48]   # tester-chosen
-    rec["app_version"] = str(payload.get("app_version") or rec.get("app_version") or "")
-    rec["platform"]    = str(payload.get("platform") or rec.get("platform") or "")
+    rec["name"]        = _clean_label(payload.get("name") or rec.get("name"), 48)   # tester-chosen
+    rec["app_version"] = _clean_label(payload.get("app_version") or rec.get("app_version"), 32)
+    rec["platform"]    = _clean_label(payload.get("platform") or rec.get("platform"), 64)
     rec["ip"]          = (client_ip or rec.get("ip") or "")[:45]
     rec["total"]       = int(rec.get("total", 0)) + n
     rec["errors"]      = int(rec.get("errors", 0)) + sum(
@@ -400,6 +422,8 @@ def store_report(meta: dict, blob: bytes, client_ip: str = "") -> dict:
         return {"ok": False, "error": "not a zip"}
 
     iid  = _safe_id(meta.get("instance_id"))
+    if not _instance_allowed(iid):
+        return {"ok": False, "error": "instance limit"}
     code = _report_code()
     ts   = int(time.time())
     try:
@@ -409,8 +433,8 @@ def store_report(meta: dict, blob: bytes, client_ip: str = "") -> dict:
         idx = _read_index()
         rec = idx.get(iid) or {"instance_id": iid, "first_seen": ts, "total": 0, "errors": 0}
         rec["last_seen"] = ts
-        for k, src in (("name", "name"), ("app_version", "app_version"), ("platform", "platform")):
-            v = str(meta.get(src) or "")[:64]
+        for k, n in (("name", 48), ("app_version", 32), ("platform", 64)):
+            v = _clean_label(meta.get(k), n)
             if v:
                 rec[k] = v
         rec["ip"] = (client_ip or rec.get("ip") or "")[:45]

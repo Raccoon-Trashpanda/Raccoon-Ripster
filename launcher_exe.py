@@ -671,6 +671,9 @@ def _status_loop(hc, port: int, stack_done: threading.Event,
 
 UI_PREFS = {"overlay": True, "panel_open": True}   # панель; переключаются пунктом в трее
 WINDOW = None      # pywebview-окно, ставит open_window — в него рисуется панель
+PANEL_WIN = None   # отдельное OS-окно мобильной панели (трекер #37); hide, не destroy
+PANEL_PREFS = {"on_top": False}  # прибитость поверх всех окон — кнопкой 📌 в панели
+APP_URL = ""       # база адреса приложения, ставит open_window: из неё строится url панели
 TRAY_ICON = None   # pystray Icon — по нему обновляются пункты меню
 
 LOCK_FILE = None  # set in main(); single-instance lock holding our PID
@@ -755,6 +758,264 @@ def save_ui_prefs() -> None:
         f.write_text(json.dumps(d), encoding="utf-8")
     except Exception:
         pass
+
+
+# ── Мобильная панель: отдельное OS-окно (трекер #37) ─────────────────────────
+#
+# Почему окно, а не `<div>` внутри Ripster: панель обязана жить при свёрнутой
+# программе — DOM главного окна умирает вместе со скрытием в трей. И не
+# Document-PiP/window.open, как учил старый `floatPlayer()`: оба задушены в
+# WebView2 без всякого предупреждения. Окно, созданное Python-ом, этим не
+# ограничено.
+#
+# Always-on-top по умолчанию ВЫКЛ: это целый интерфейс (~420×800), а не
+# часовик; прибитое поверх всех окон розовое окно мешало бы игре и работе.
+# Требование «переживает сворачивание Ripster» выполняет само существование
+# отдельного окна. Пристегивается кнопкой 📌 в шапке панели, выбор запоминается.
+#
+# Крестик окна = hide, не destroy: повторный ⧉ открывает мгновенно и со своим
+# состоянием, а звук вообще не трогается — плеер живёт в главном окне, панель
+# только контроллер. Реальный выход (do_quit) обязан погасить панель:
+# webview.start() ждёт закрытия ВСЕХ окон, иначе приложение не выйдет.
+
+PANEL_DEFAULTS = {"width": 420, "height": 800}
+
+
+def _load_panel_state() -> dict:
+    """{geo:{x,y,width,height}, on_top:bool} из общего файла состояния окна."""
+    import json
+    out = {"geo": {}, "on_top": PANEL_PREFS["on_top"]}
+    try:
+        if WIN_STATE and WIN_STATE.exists():
+            d = json.loads(WIN_STATE.read_text(encoding="utf-8")) or {}
+            g = d.get("panel_geo")
+            if isinstance(g, dict):
+                w, h = g.get("width"), g.get("height")
+                if isinstance(w, int) and isinstance(h, int) and 280 <= w <= 4000 and 400 <= h <= 4000:
+                    out["geo"] = {"width": w, "height": h}
+                    x, y = g.get("x"), g.get("y")
+                    if isinstance(x, int) and isinstance(y, int) and -200 <= x <= 20000 and -200 <= y <= 20000:
+                        out["geo"]["x"], out["geo"]["y"] = x, y
+            if isinstance(d.get("panel_on_top"), bool):
+                out["on_top"] = d["panel_on_top"]
+    except Exception as e:
+        _log(f"[panel-win] state load skipped: {type(e).__name__}: {e}")
+    return out
+
+
+def _save_panel_state(geo: dict = None, on_top: bool = None) -> None:
+    """Только свои ключи: файл общий с геометрией главного окна и UI_PREFS."""
+    import json
+    try:
+        f = WIN_STATE
+        if not f:
+            return
+        f.parent.mkdir(parents=True, exist_ok=True)
+        d = {}
+        if f.exists():
+            try:
+                d = json.loads(f.read_text(encoding="utf-8")) or {}
+            except Exception:
+                d = {}
+        if geo is not None:
+            d["panel_geo"] = geo
+        if on_top is not None:
+            d["panel_on_top"] = bool(on_top)
+        f.write_text(json.dumps(d), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _panel_eval(js: str) -> None:
+    """evaluate_js в панельное окно, если оно живое."""
+    try:
+        if PANEL_WIN is not None:
+            PANEL_WIN.evaluate_js(js)
+    except Exception as e:
+        _log(f"[panel-win] eval failed: {type(e).__name__}: {e}")
+
+
+def _panel_host_say(kind: str) -> None:
+    """Сказать главному окну о судьбе панели, когда OS-события молчат.
+
+    SW_HIDE/SW_SHOW не меняют document.hidden в WebView2, поэтому panel.js со
+    своим visibilitychange молчит в обе стороны: хост считает спрятанную панель
+    живой (и следующий клик вместо показа прячет её снова), а показанной не
+    верит. Python знает фактическую видимость — он и передаёт рукопожатие.
+
+    evaluate_js ждёт ответ страницы и НИКОГДА не вызывается с GUI-потока:
+    closing-обработчик живёт именно на нём, и синхронный вызов отсюда вешает
+    весь оконный цикл webview (доказано живьём 22.09: «host say» не
+    возвращался, мост умирал, тики останавливались). Отправляем в свой поток."""
+    def go():
+        try:
+            if WINDOW is None or not CTX.get("win_open"):
+                _log(f"[panel-win] host say({kind}) SKIPPED: "
+                     f"window={'нет' if WINDOW is None else 'есть'} "
+                     f"win_open={bool(CTX.get('win_open'))}")
+                return
+            js = ("rpHostRecv({msg}); (typeof RP==='undefined') ? 'no-RP' : "
+                  "(RP.open + '|' + RP.ready + '|' + RP.transport)").format(
+                      msg=json.dumps(json.dumps({"rp": 1, "k": kind})))
+            res = WINDOW.evaluate_js(js)
+            _log(f"[panel-win] host say({kind}) → {res}")
+        except Exception as e:
+            _log(f"[panel-win] host say({kind}) failed: {type(e).__name__}: {e}")
+    try:
+        threading.Thread(target=go, daemon=True).start()
+    except Exception as e:
+        _log(f"[panel-win] host say({kind}) thread failed: {type(e).__name__}: {e}")
+
+
+class PanelApi:
+    """js_api окна панели. Мост панель↔главное окно идёт через Python:
+    host() перекладывает сообщения в WINDOW.rpHostRecv(), хост отвечает через
+    LauncherApi.panel_push → rpRecv(). Никакого сырого подстава: payload
+    проходит json.loads/dumps с обеих сторон."""
+
+    def host(self, payload):
+        try:
+            d = json.loads(str(payload))          # валидируем, что это вообще JSON
+        except Exception as e:
+            _log(f"[panel-win] bad host payload: {e}")
+            return "bad"
+        if not CTX.get("win_open") or WINDOW is None:
+            return "no-host"                      # главное окно ещё/уже не с нами
+        try:
+            WINDOW.evaluate_js(f"rpHostRecv({json.dumps(json.dumps(d, ensure_ascii=False))})")
+            return "ok"
+        except Exception as e:
+            _log(f"[panel-win] host forward failed: {type(e).__name__}: {e}")
+            return "fail"
+
+    def pin(self, on):
+        global PANEL_PREFS
+        on = bool(on)
+        PANEL_PREFS["on_top"] = on
+        _save_panel_state(on_top=on)
+        try:
+            if PANEL_WIN is not None:
+                PANEL_WIN.on_top = on
+        except Exception as e:
+            _log(f"[panel-win] pin failed: {type(e).__name__}: {e}")
+        return "ok"
+
+    def hide(self):
+        try:
+            if PANEL_WIN is not None:
+                PANEL_WIN.hide()
+                _panel_host_say("bye")
+        except Exception:
+            pass
+        return "ok"
+
+
+def _panel_destroy() -> None:
+    """Реальный выход: снять панель до уничтожения главного окна."""
+    global PANEL_WIN
+    try:
+        if PANEL_WIN is not None:
+            w, PANEL_WIN = PANEL_WIN, None
+            # closing-обработчик окна прячет его от любого закрытия; снимаем
+            # его только на время этого destroy — иначе выход не состоится.
+            try:
+                w._rp_quitting = True
+            except Exception:
+                pass
+            w.destroy()
+    except Exception as e:
+        _log(f"[panel-win] destroy failed: {type(e).__name__}: {e}")
+
+
+def _panel_toggle(show=None) -> str:
+    """Создать (первый раз) / показать / спрятать окно панели.
+    show=None — переключить; True/False — задать явно. Возвращает 'window'
+    (хост обязан отказаться от iframe-дока) или 'fail' (тогда док уместен)."""
+    global PANEL_WIN
+    try:
+        import webview
+        if PANEL_WIN is None:
+            st = _load_panel_state()
+            PANEL_PREFS["on_top"] = st["on_top"]
+            geo = {**PANEL_DEFAULTS, **st["geo"]}
+            url = (APP_URL or "http://127.0.0.1:8000").rstrip("/") + \
+                  "/static/panel/index.html?rpwin=1"
+            win = webview.create_window(
+                "Ripster — панель", url=url, js_api=PanelApi(),
+                width=geo["width"], height=geo["height"],
+                x=geo.get("x"), y=geo.get("y"),
+                on_top=PANEL_PREFS["on_top"], resizable=True, min_size=(340, 520))
+            _geo = dict(geo)
+            _tmr = [None]
+            def _sched():
+                try:
+                    if _tmr[0]:
+                        _tmr[0].cancel()
+                    t = threading.Timer(1.0, lambda: _save_panel_state(geo=dict(_geo)))
+                    t.daemon = True
+                    t.start()
+                    _tmr[0] = t
+                except Exception:
+                    pass
+            def _resized(w_, h_):
+                try:
+                    _geo["width"], _geo["height"] = int(w_), int(h_)
+                    _sched()
+                except Exception:
+                    pass
+            def _moved(x_, y_):
+                try:
+                    _geo["x"], _geo["y"] = int(x_), int(y_)
+                    _sched()
+                except Exception:
+                    pass
+            def _closing():
+                # Крестик = спрятать. Убить панель может только реальный выход.
+                # Но destroy() тоже проходит через этот обработчик: без флага
+                # он отменил бы выход, и webview завис бы в ожидании ЗАКРЫТИЯ
+                # ВСЕХ окон (тот самый «реальный выход» в проверке 4f).
+                if getattr(win, "_rp_quitting", False):
+                    _log("[panel-win] closing → destroy (реальный выход)")
+                    return True
+                _log("[panel-win] closing → hide (крестик)")
+                try:
+                    win.hide()
+                except Exception as e:
+                    _log(f"[panel-win] hide-on-close failed: {type(e).__name__}: {e}")
+                _panel_host_say("bye")
+                return False
+            win.events.resized += _resized
+            win.events.moved += _moved
+            win.events.closing += _closing
+            PANEL_WIN = win
+            _log(f"[panel-win] окно создано {geo} on_top={PANEL_PREFS['on_top']}")
+            return "window"
+        try:
+            visible = bool(PANEL_WIN.visible)
+        except Exception:
+            visible = False
+        if show is None:
+            show = not visible
+        if show:
+            PANEL_WIN.show()
+            try:
+                PANEL_WIN.restore()
+            except Exception:
+                pass
+            try:
+                PANEL_WIN.focus()
+            except Exception:
+                pass
+            _panel_host_say("hello")
+        else:
+            PANEL_WIN.hide()
+            _panel_host_say("bye")
+        return "window"
+    except Exception as e:
+        import traceback
+        _log(f"[panel-win] FAILED ({type(e).__name__}: {e}) — хосту сигнал док-режим")
+        _log(traceback.format_exc())
+        return "fail"
 
 
 def tray_enabled() -> bool:
@@ -1134,6 +1395,32 @@ def _poll_until_ready(window, url: str, port: int) -> None:
 
 
 class LauncherApi:
+    # ЧЕРЕПНОЕ подчёркивание обязательно: pywebview обходит dir() всего js_api
+    # и рекурсивно лезет в публичные не-вызываемые атрибуты. С публичным
+    # `window` он добирается до native (WinForms/.NET) и зависает/ломается на
+    # его обходе — из-за этого window.pywebview.api переставал появляться,
+    # и весь мост окна (кнопки оверлея, панель) молча отваливался.
+    _window = None   # навешивается после create_window: create_file_dialog живёт на окне
+
+    def pick_folder(self, directory=""):
+        """Нативный выбор папки (Tracker #9014): возвращает НАСТОЯЩИЕ пути,
+        которые бэкенд умеет сканировать сам. None в браузере (там нет моста) —
+        фронт по этому отличает оболочку от.bat-режима. Вызов блокирующий:
+        модальный диалог держит js-поток, окно отвечает (диалог — своё окно).
+        Свой try/except обязателен: без него отмена диалога прилетает в консоль
+        как необработанное исключение моста."""
+        try:
+            import webview
+            w = self._window
+            if w is None:
+                return None
+            paths = w.create_file_dialog(webview.FOLDER, directory=str(directory or ""),
+                                         allow_multiple=True)
+            return list(paths) if paths else []
+        except Exception as e:
+            _log(f"[panel] pick_folder: {type(e).__name__}: {e}")
+            return None
+
     def action(self, name, key=""):
         name, key = str(name), str(key)
         if not CTX.get("win_open"):
@@ -1173,6 +1460,30 @@ class LauncherApi:
             if not ok:
                 _log(f"[panel] autostart failed: {err}")
         render_panel()
+        return "ok"
+
+    # ── мобильная панель (трекер #37): главный окно → OS-окно панели ─────────
+    def mobile_panel(self, toggle="1"):
+        """Зовёт ⧉ в баре/сайдбаре. 'window' — OS-окно открыто/показано,
+        iframe-док не нужен; 'fail' — хост честно откатывается на док.
+        toggle='1' — переключить видимость, '0' — спрятать."""
+        return _panel_toggle(show=None if str(toggle) == "1" else False)
+
+    def main_show(self):
+        """Поднять главное окно: панель велела открыть вид (digs/bbc/settings),
+        а окно может быть спрятано в трей — показывать нечего."""
+        try:
+            if WINDOW is not None:
+                WINDOW.show()
+                WINDOW.restore()
+        except Exception:
+            pass
+        return "ok"
+
+    def panel_push(self, payload):
+        """Состояние/команды хоста → окну панели. Payload — строка JSON,
+        окно получает её как rpRecv(<str>) и парсит у себя."""
+        _panel_eval(f"rpRecv({json.dumps(str(payload))})")
         return "ok"
 
 
@@ -1216,20 +1527,34 @@ def open_window(url: str, port: int, win_open, title: str = "Ripster", ready: bo
             SPLASH.update(active=True, url=url)
             threading.Thread(target=_poll_until_ready, args=(window, url, port), daemon=True).start()
         state = {"quit": False, "tray": None, "notified": False}
+        min_to_tray = minimize_to_tray()
         use_tray = tray_enabled()
-        global WINDOW
+        global WINDOW, APP_URL
         WINDOW = window
+        APP_URL = url          # из неё строится адрес окна панели (_panel_toggle)
+        try:
+            LauncherApi._window = window   # для create_file_dialog из страницы (pick_folder)
+        except Exception as _e:
+            _log(f"[launcher] pick_folder bridge unavailable: {_e}")
         load_ui_prefs()
         _log(f"[launcher] панель: «запустить всё»+'{t('panel.start_all')}', чекбоксы="
              + ",".join(f"{k}:{'вкл' if ENABLED[k] else 'выкл'}" for k in COMPONENTS))
         # страница перезагружается (Ctrl+R, load_url после splash) — панель уезжает
         # вместе с DOM, вешаем её обратно на каждый loaded
         try:
-            window.events.loaded += lambda w: push_overlay(
+            # pywebview передаёт окно обработчику только если его первый
+            # аргумент назван «window» (webview/event.py); «w» молча ловит
+            # TypeError, и перезагрузка (Ctrl+R, splash→load_url) лишала
+            # оверлей — панель отъезжала обратно в iframe-док.
+            window.events.loaded += lambda window: push_overlay(
                 window, UI_PREFS["overlay"], STATUS.snapshot())
         except Exception as e:
             _log(f"[launcher] overlay reload hook unavailable: {type(e).__name__}: {e}")
-        push_overlay(window, UI_PREFS["overlay"], STATUS.snapshot())
+        # ЗДЕСЬ синхронного push_overlay быть не должно: до webview.start() окно
+        # не запущено, evaluate_js ждёт сигнала от страницы ровно 20 секунд и
+        # гарантированно падает («Main window failed to start») — это был
+        # двадцатисекундный провис на каждом холодном старте. Первый рисунок
+        # приносит hook loaded выше, он срабатывает и на первой загрузке.
 
         # Remember where/how big the user left the window and restore it next launch.
         _geo = {"width": geo.get("width", 1280), "height": geo.get("height", 860)}
@@ -1261,6 +1586,7 @@ def open_window(url: str, port: int, win_open, title: str = "Ripster", ready: bo
 
         def do_quit():
             state["quit"] = True
+            _panel_destroy()   # webview ждёт закрытия ВСЕХ окон: не погасить панель — выход зависнет
             try:
                 _save_win_state(dict(_geo))   # persist final geometry on real quit
             except Exception:
@@ -1278,6 +1604,7 @@ def open_window(url: str, port: int, win_open, title: str = "Ripster", ready: bo
         def on_closing():
             # Real quit (from tray) → allow the close. Otherwise fold to tray.
             if state["quit"] or not use_tray or state["tray"] is None:
+                _panel_destroy()   # главное окно гаснет по-настоящему — панель с ним
                 return True
             try:
                 window.hide()

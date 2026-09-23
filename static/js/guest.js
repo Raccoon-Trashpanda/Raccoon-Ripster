@@ -137,12 +137,12 @@ async function saveGuestTokens() {
   try {
     const r = await api('POST', '/api/guest/tokens', body);
     if (r.ok) {
-      if(msg) msg.textContent = '✓ Сохранено';
+      if(msg) msg.textContent = t('prot.saved');
       _refreshSearchSvcSelect();
     } else {
-      if(msg) msg.textContent = r.detail || 'Ошибка';
+      if(msg) msg.textContent = r.detail || t('dlg.err');
     }
-  } catch(e) { if(msg) msg.textContent = 'Ошибка сети'; }
+  } catch(e) { if(msg) msg.textContent = t('err.network'); }
 }
 
 // ── Per-guest live download lamp/bar helpers (admin links view) ────────────
@@ -252,7 +252,7 @@ async function loadAdminLinks() {
               <button onclick="showGuestActivity('${tok}')"
                 id="act-btn-${tok}"
                 style="padding:4px 9px;border-radius:7px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);font-size:11px;cursor:pointer">
-                ${t('act.show')||'▾ Активность'}
+                ${t('act.show')}
               </button>
               ${active?`<button onclick="revokeGuestLink('${tok}')"
                 style="padding:4px 9px;border-radius:7px;border:1px solid rgba(252,60,68,.25);background:rgba(252,60,68,.08);color:var(--red);font-size:11px;cursor:pointer">
@@ -281,11 +281,11 @@ async function showGuestActivity(token) {
   if (!panel) return;
   if (panel.style.display !== 'none') {
     panel.style.display = 'none';
-    if (btn) btn.textContent = t('act.show')||'▾ Активность';
+    if (btn) btn.textContent = t('act.show');
     return;
   }
   panel.style.display = 'block';
-  if (btn) btn.textContent = t('act.hide')||'▴ Скрыть';
+  if (btn) btn.textContent = t('act.hide');
   try {
     const r = await fetch(`/api/admin/links/${token}/activity`);
     const d = await r.json();

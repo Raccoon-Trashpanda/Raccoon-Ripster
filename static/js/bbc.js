@@ -5,6 +5,7 @@
 
 // ── BBC download progress ─────────────────────────────────────────────────────
 const _bbcDls = {};   // pid → {title, pct}
+const _bbcDlQ = {};   // pid → {source_kbps, target_kbps} — измеренные сервером до кодирования
 
 function _bbcDlStart(pid, title) {
   _bbcDls[pid] = { title, pct: 0 };
@@ -14,9 +15,14 @@ function _bbcDlProgress(pid, pct) {
   if (_bbcDls[pid]) { _bbcDls[pid].pct = pct; _bbcDlRender(); }
 }
 function _bbcDlDone(pid, title) {
+  const q = _bbcDlQ[pid] || {};
   delete _bbcDls[pid];
+  delete _bbcDlQ[pid];
   _bbcDlRender();
-  toast(t('b.done_c')+title);
+  // «320» в подписи не было бы правдой: BBC in-demand отдаёт не больше
+  // 102 кбит/с, и MP3 пишется по этой полосе. Пишем обе цифры — источник и цель.
+  toast(t('b.done_c') + title +
+        (q.source_kbps ? ti('b.done_kbps', {src: q.source_kbps, kbps: q.target_kbps}) : ''));
 }
 function _bbcDlRender() {
   const box = document.getElementById('bbc-dl-list');
@@ -54,12 +60,14 @@ const BBC = {
   duration:    0,
   inited:      false,
   searching:   false,
+  upcoming:    false,   // сетка показывает будущие эфиры (вход планировщика)
 };
 
 async function bbcInit() {
   if (BBC.inited) return;
   BBC.inited = true;
-  await _bbcLoadSched();   // какие эфиры уже запланированы — чтобы карточка это знала
+  bbcLoadChannels();       // список каналов для формы отложенной записи
+  await _bbcLoadSched();   // какие эфиры уже запланированы — чтобы знала и панель
   await bbcLoadBrands();
   bbcLoadEpisodes(true);
 }
@@ -107,7 +115,11 @@ async function bbcLoadEpisodes(reset) {
   if (more)   more.style.display = 'none';
   if (reset && grid) grid.innerHTML = '';
   try {
-    const data = await api('GET', `/api/bbc/episodes?brand_id=${BBC.activeBrand}&offset=${BBC.offset}&limit=${BBC.limit}`);
+    // Будущие эфиры — тот же вид карточки, что и у вышедших: планирование уже
+    // живёт в bbcCard, ему нужен только вход с avail_from в будущем.
+    const data = BBC.upcoming
+      ? await api('GET', `/api/bbc/upcoming?brand_id=${encodeURIComponent(BBC.activeBrand)}`)
+      : await api('GET', `/api/bbc/episodes?brand_id=${BBC.activeBrand}&offset=${BBC.offset}&limit=${BBC.limit}`);
     // api() returns the JSON body even on a non-2xx (e.g. 502 {"detail":"BBC API 400"}
     // or 401 {"error":...}) — so a missing `items` is really that upstream error.
     if (!data || !Array.isArray(data.items)) {
@@ -118,6 +130,10 @@ async function bbcLoadEpisodes(reset) {
     BBC.offset += data.items.length;
     if (grid) grid.innerHTML += data.items.map(bbcCard).join('');
     if (more) more.style.display = BBC.offset < BBC.total ? '' : 'none';
+    if (BBC.upcoming && !data.items.length && status) {
+      // Пустая сетка без объяснения выглядит как сломанная вкладка.
+      status.textContent = t('bbc.no_upcoming'); status.style.display = '';
+    }
     _bbcEnrichGrid();
     _bbcApplySchedBtns();
   } catch(e) {
@@ -131,6 +147,9 @@ function bbcLoadMore() { bbcLoadEpisodes(false); }
 async function bbcSearch() {
   const q = (document.getElementById('bbc-q')?.value || '').trim();
   if (!q) { bbcClearSearch(); return; }
+  // Поиск идёт по архиву BBC (там нет будущих передач) — режим «ближайшие
+  // эфиры» честно выключается, иначе подпись вкладки врала бы о содержимом.
+  if (BBC.upcoming) { BBC.upcoming = false; bbcModeButtons(); }
   BBC.searching = true;
   const status = document.getElementById('bbc-status');
   const grid   = document.getElementById('bbc-grid');
@@ -180,13 +199,13 @@ function bbcCard(ep) {
   const start = _bbcLiveFuture(ep);
   const keyAttr = start ? `data-key="${esc((ep.channel||'')+'|'+start)}"` : '';
   return `
-  <div id="bbccard-${pid}" data-bbc-pid="${pid}" data-bbc-title="${_esc(title)}" data-bbc-artist="${_esc(sub)}" data-bbc-img="${_esc(img)}" data-bbc-vpid="${_esc(vpid)}" data-bbc-brand="${_esc(brandLabel)}" data-bbc-date="${_esc(date)}"
+  <div id="bbccard-${pid}" data-bbc-pid="${pid}" data-bbc-upcoming="${ep.upcoming?1:''}" data-bbc-title="${_escA(title)}" data-bbc-artist="${_escA(sub)}" data-bbc-img="${_escA(img)}" data-bbc-vpid="${_escA(vpid)}" data-bbc-brand="${_escA(brandLabel)}" data-bbc-date="${_escA(date)}"
     style="background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:border-color .15s"
     onmouseenter="this.style.borderColor='var(--border2)'" onmouseleave="this.style.borderColor='var(--border)'">
     <div style="position:relative;cursor:pointer" onclick="_bbcOpenMix('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}',${ep.duration||0},'${_esc(date)}')" title="${t('b.open_mix')}">
       <img id="bbccard-img-${pid}" ${imgAttr} loading="lazy"
         style="width:100%;aspect-ratio:1/1;object-fit:cover;display:block;background:var(--surface2)"
-        onerror="this.removeAttribute('src')"/>
+        onerror="_bbcCoverFail(this)"/>
       ${start ? '' : `<div onclick="event.stopPropagation();bbcPlay('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}')" title="${t('btn.play')}" style="position:absolute;bottom:6px;right:6px;background:rgba(0,0,0,.72);border-radius:50%;width:32px;height:32px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#fff;cursor:pointer">▶</div>`}
       ${dur ? `<div style="position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,.72);border-radius:4px;font-size:10px;color:#fff;padding:2px 5px;font-family:var(--mono)">${dur}</div>` : ''}
       <div id="bbcmdb-badge-${pid}" style="display:none;position:absolute;top:6px;left:6px;background:rgba(175,82,222,.88);color:#fff;font-size:9px;padding:2px 7px;border-radius:4px;font-weight:700;backdrop-filter:blur(4px);cursor:pointer;user-select:none"
@@ -198,8 +217,9 @@ function bbcCard(ep) {
       ${date ? `<div style="font-size:10px;color:var(--muted2);margin-top:3px">${esc(date)}</div>` : ''}
       <div id="bbcmdb-tl-${pid}" style="display:none;margin-top:6px;max-height:120px;overflow-y:auto;font-size:10px;color:var(--muted);line-height:1.5;border-top:1px solid var(--border);padding-top:5px"></div>
       ${start ? `
+      ${_bbcQHTML(ep)}
       <div style="display:flex;gap:5px;margin-top:7px">
-        <button class="bbc-sched-btn" ${keyAttr} onclick="event.stopPropagation();bbcScheduleToggle(this,'${_esc(ep.channel||'')}','${_esc(start)}',${ep.duration||0},'${_esc(title)}','${_esc(sub)}','${_esc(img)}')"
+        <button class="bbc-sched-btn" ${keyAttr} data-pid="${esc(pid)}" onclick="event.stopPropagation();bbcScheduleToggle(this,'${_esc(ep.channel||'')}','${_esc(start)}',${ep.duration||0},'${_esc(title)}','${_esc(sub)}','${_esc(img)}')"
           style="flex:1;padding:5px 0;border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)"></button>
       </div>` : `
       <div style="display:flex;gap:5px;margin-top:7px">
@@ -242,7 +262,10 @@ function _bbcEnrichGrid() {
           if (badge) badge.style.display = '';
           if (d.artworkUrl) {
             const imgEl = document.getElementById(`bbccard-img-${pid}`);
-            if (imgEl) imgEl.src = d.artworkUrl;
+            if (imgEl) {
+              if (!imgEl.dataset.bbcFallback) imgEl.dataset.bbcFallback = imgEl.getAttribute('src') || '';
+              imgEl.src = d.artworkUrl;
+            }
           }
         }
       })
@@ -310,7 +333,49 @@ function _bbcShowCoverChoice(pid, vpid, title, artist, bbcImg, mdbImg) {
   document.body.appendChild(overlay);
 }
 
-function _esc(s) { return (s||'').replace(/'/g,"\\'").replace(/"/g,'&quot;').replace(/\n/g,' '); }
+// Значение для JS-строки ВНУТРИ HTML-атрибута (onclick="f('…')"). Два слоя:
+// браузер сначала раскодирует сущности атрибута, потом исполнит JS. Старый
+// вариант не трогал `\` и `&`: название с обратным слэшем или литеральным
+// `&#39;` выходило из строки и становилось кодом (23.09.2026).
+function _esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+    .replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/\r?\n/g,' ');
+}
+// Значение для data-атрибута: читается через dataset как ТЕКСТ, JS-слэши там
+// лишние (название с апострофом получало `\` в плеере).
+function _escA(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
+// ── Обложки ──────────────────────────────────────────────────────────────────
+// BBC-адреса приходит уже в 320×320 (размер сетки). Для зума и большого плеера
+// адрес переставляется на крупный через relCover: у ichef дискретная лесенка
+// и 1000×1000 среди них нет (403), живой потолок — 1024×1024.
+function _bbcCover(url, px) {
+  if (!url) return '';
+  return (typeof relCover === 'function') ? relCover(url, px) : url;
+}
+
+// Нет картинки / не грузится → нейтральная плашка 📻. Специально НЕ подставляем
+// чужой кадр: серый квадрат честнее обложки от другой передачи. Если сорвался
+// подставленный MixesDB-кадр, сначала возвращаем родную обложку BBC.
+function _bbcCoverFail(el) {
+  const orig = el.dataset.bbcFallback;
+  if (orig && el.getAttribute('src') !== orig) {
+    el.dataset.bbcFallback = '';
+    el.src = orig;
+    return;
+  }
+  const ph = document.createElement('div');
+  ph.textContent = '📻';
+  ph.setAttribute('aria-hidden', 'true');
+  ph.style.cssText = 'width:100%;aspect-ratio:1/1;display:flex;align-items:center;'
+    + 'justify-content:center;font-size:26px;background:var(--surface2);color:var(--muted2)';
+  el.replaceWith(ph);
+}
 function _bbcFmtDur(s) {
   s = Math.floor(+s);
   const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), ss = s%60;
@@ -319,26 +384,13 @@ function _bbcFmtDur(s) {
 }
 
 async function bbcPlay(pid, vpid, title, artist, art) {
-  // Stop any running service preview silently — BOTH paths:
-  //  • pp-audio (plain <audio> previews)
-  //  • the Web Audio buffer source (service streams play through the AudioContext,
-  //    NOT through pp-audio — pausing pp-audio alone leaves it running under the
-  //    BBC stream, causing double audio + its UI tick overwriting the player with
-  //    the streaming-service track). Hard-stop the source so it can't auto-advance.
-  // ALWAYS hard-stop pp-audio — not only when it's already playing. A service
-  // preview (esp. Tidal's segment-concat stream) can still be BUFFERING when the
-  // user hits a BBC mix: pp-audio is paused now but has a pending play() that
-  // fires when the stream fills → Tidal then plays OVER the BBC mix. Clearing the
-  // src cancels that pending load. (See the "Tidal plays together with BBC" report.)
-  const ppAudio = document.getElementById('pp-audio');
-  if (ppAudio) { try { ppAudio.pause(); } catch {} ppAudio.removeAttribute('src'); try { ppAudio.load(); } catch {} }
-  try {
-    if (typeof _WA !== 'undefined' && _WA.curSource) {
-      try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch {}
-      _WA.curSource = null;
-    }
-    if (typeof _waStopKeepalive === 'function') _waStopKeepalive();
-  } catch {}
+  // Единый владелец воспроизведения (см. `_silenceAllBut` в player.js): глушим
+  // ВЕСЬ главный плеер — pp-audio, Web Audio, свой тракт, FairPlay/HLS — и
+  // отменяем его незавершённый асинхронный старт, прежде чем зазвучит BBC.
+  // Раньше здесь лежала своя выборочная остановка (pp-audio + _WA.curSource),
+  // и она не знала про `_NA`/`_fpsEl` — переключение на радио оставляло их
+  // играть фоном. Теперь решение об «остальном» живёт в одном месте.
+  try { if (typeof _silenceAllBut === 'function') _silenceAllBut('bbc'); } catch {}
   Preview.queue = [];
   Preview.idx   = -1;
   Preview.mode  = 'bbc';
@@ -353,8 +405,15 @@ async function bbcPlay(pid, vpid, title, artist, art) {
   document.getElementById('pp-artist').textContent     = '📻 BBC Sounds';
   document.getElementById('pp-title-big').textContent  = titleStr;
   document.getElementById('pp-artist-big').textContent = '📻 BBC Sounds';
-  const coverHtml = art ? `<img src="${esc(art)}" style="width:100%;height:100%;object-fit:cover"/>` : '📻';
-  ['pp-art','pp-art-big'].forEach(id => { const el = document.getElementById(id); if(el) el.innerHTML = coverHtml; });
+  // Обложка в плеер: полосе хватает 320, развёрнутый плеер большой — там крупный
+  // кадр (1024; 1000×1000 ichef не отдаёт).
+  ['pp-art','pp-art-big'].forEach(id => {
+    const el = document.getElementById(id); if (!el) return;
+    const url = art ? _bbcCover(art, id === 'pp-art-big' ? 1000 : 320) : '';
+    el.innerHTML = url
+      ? `<img src="${esc(url)}" onerror="_bbcCoverFail(this)" style="width:100%;height:100%;object-fit:cover"/>`
+      : '📻';
+  });
   ['pp-fill','pp-fill-big'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = '0%'; });
   ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = (id==='pp-cur') ? '0:00.000' : '0:00'; });
   ['pp-dur','pp-dur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '0:00'; });
@@ -534,28 +593,38 @@ function _bbcLoadTracklistInto(pid, title, artist, dur, tl) {
   });
 }
 
+// Единая строка действий: у вышедшего выпуска — играть/качать/CUE, у будущего
+// — только план записи. Кнопка «▶ Play» над эфиром, которого ещё нет, была бы
+// обещанием; в доме это запрещено (см. agents.md «настройка, которая ничего не
+// меняет, хуже отсутствующей»).
+function _bbcDetailActions(schedBtn, pid, vpid, title, artist, art) {
+  const btn = (bg, bd, clr) => `flex:1;padding:8px 0;border:1px solid ${bd};background:${bg};border-radius:8px;font-size:12px;font-weight:600;color:${clr};cursor:pointer;font-family:var(--font)`;
+  const j = (s) => (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+  if (schedBtn) return `<div style="display:flex;gap:7px;margin-top:14px">${schedBtn}</div>`;
+  return `
+      <div style="display:flex;gap:7px;margin-top:14px">
+        <button onclick="bbcPlay('${j(pid)}','${j(vpid)}','${j(title)}','${j(artist)}','${j(art)}')" style="${btn('rgba(255,85,0,.14)','rgba(255,85,0,.25)','#ff7a33')}">▶ ${t('btn.play')}</button>
+        <button onclick="bbcDownloadSmart('${j(pid)}','${j(vpid)}','${j(title)}','${j(artist)}','${j(art)}')" style="${btn('rgba(255,255,255,.06)','var(--border)','var(--text)')}">⬇ MP3</button>
+        <button onclick="bbcGetCue('${j(pid)}','${j(title)}','${j(artist)}')" title="${t('b.dl_cue')}" style="padding:8px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);background:transparent;cursor:pointer;font-family:var(--font)">CUE</button>
+      </div>`;
+}
+
 // Unified mix-detail drawer for BBC — reuses the SoundCloud drawer (#sc-detail).
-function _bbcDetailHTML(pid, vpid, title, artist, art, dur, date) {
+function _bbcDetailHTML(pid, vpid, title, artist, art, dur, date, schedBtn) {
   const meta = [];
   if (date) meta.push(esc(date));
   if (dur)  meta.push(_bbcFmtDur(dur));
-  const btn = (bg, bd, clr) => `flex:1;padding:8px 0;border:1px solid ${bd};background:${bg};border-radius:8px;font-size:12px;font-weight:600;color:${clr};cursor:pointer;font-family:var(--font)`;
-  const j = (s) => (s || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
   return `
     <div class="scd-head" style="display:flex;align-items:center;justify-content:space-between;padding:14px 16px 10px;border-bottom:1px solid var(--border);flex:0 0 auto">
       <div style="font-size:13px;font-weight:700;color:var(--text)">📻 BBC · ${t('b.mix_card')}</div>
       <button class="scd-close" onclick="_scCloseMix()" title="${t('b.close_esc')}" style="width:30px;height:30px;border-radius:8px;border:1px solid var(--border);background:transparent;color:var(--muted);cursor:pointer;font-size:15px;flex:0 0 auto;display:flex;align-items:center;justify-content:center;line-height:1;padding:0">✕</button>
     </div>
     <div class="scd-body" style="overflow-y:auto;padding:16px 16px 168px;flex:1 1 auto">
-      ${art ? `<img class="scd-cover" src="${esc(art)}" onerror="this.removeAttribute('src')" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:12px;display:block;background:var(--surface2)"/>` : ''}
+      ${art ? `<img class="scd-cover" src="${esc(_bbcCover(art, 480))}" data-lightbox data-lightbox-src="${esc(_bbcCover(art, 1000))}" onerror="_bbcCoverFail(this)" style="width:100%;aspect-ratio:1;object-fit:cover;border-radius:12px;display:block;background:var(--surface2);cursor:zoom-in"/>` : `<div class="scd-cover" style="width:100%;aspect-ratio:1;display:flex;align-items:center;justify-content:center;font-size:54px;border-radius:12px;background:var(--surface2);color:var(--muted2)">📻</div>`}
       <div style="font-size:16px;font-weight:700;color:var(--text);margin-top:13px;line-height:1.3">${esc(title)}</div>
       <div style="font-size:13px;color:var(--muted);margin-top:3px">${esc(artist || '📻 BBC Sounds')}</div>
       ${meta.length ? `<div style="font-size:11px;color:var(--muted2);margin-top:7px">${meta.join('  ·  ')}</div>` : ''}
-      <div style="display:flex;gap:7px;margin-top:14px">
-        <button onclick="bbcPlay('${j(pid)}','${j(vpid)}','${j(title)}','${j(artist)}','${j(art)}')" style="${btn('rgba(255,85,0,.14)','rgba(255,85,0,.25)','#ff7a33')}">▶ ${t('btn.play')}</button>
-        <button onclick="bbcDownloadSmart('${j(pid)}','${j(vpid)}','${j(title)}','${j(artist)}','${j(art)}')" style="${btn('rgba(255,255,255,.06)','var(--border)','var(--text)')}">⬇ MP3</button>
-        <button onclick="bbcGetCue('${j(pid)}','${j(title)}','${j(artist)}')" title="${t('b.dl_cue')}" style="padding:8px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);background:transparent;cursor:pointer;font-family:var(--font)">CUE</button>
-      </div>
+      ${_bbcDetailActions(schedBtn, pid, vpid, title, artist, art)}
       <div style="font-size:11px;font-weight:700;color:var(--muted);margin:18px 0 8px;text-transform:uppercase;letter-spacing:.4px">${t('b.tl_word')}</div>
       <div id="scd-tl"></div>
     </div>`;
@@ -579,9 +648,15 @@ function _bbcOpenMix(pid, vpid, title, artist, art, dur, date) {
     document.body.appendChild(d);
     document.addEventListener('keydown', e => { if (e.key === 'Escape') _scCloseMix(); });
   }
-  d.innerHTML = _bbcDetailHTML(pid, vpid, title, artist, art, dur, date);
+  // Кнопка плана переезжает из карточки как есть: тот же обработчик, тот же
+  // data-key, та же подсветка — второго пути планировать не появляется.
+  const card = document.getElementById('bbccard-' + pid);
+  const schedBtn = (card && card.dataset.bbcUpcoming === '1')
+    ? (card.querySelector('.bbc-sched-btn')?.outerHTML || '') : '';
+  d.innerHTML = _bbcDetailHTML(pid, vpid, title, artist, art, dur, date, schedBtn);
   bd.style.display = 'block'; bd.classList.add('show');
   requestAnimationFrame(() => { d.classList.add('open'); d.style.transform = 'translateX(0)'; });
+  if (schedBtn) _bbcApplySchedLabels();
   _bbcLoadTracklistInto(pid, title, artist, dur, d.querySelector('#scd-tl'));
 }
 
@@ -637,10 +712,13 @@ function bbcVol(v) {
 async function bbcDownload(pid, vpid, title, artist, image_url, cover_url = '') {
   toast(t('b.dling_c')+title+'…');
   try {
-    await api('POST', '/api/bbc/download', {
+    const r = await api('POST', '/api/bbc/download', {
       pid, vpid: vpid || '', title, artist: artist || 'BBC Radio',
       image_url: image_url || '', cover_url: cover_url || ''
     });
+    // Ответ приходит раньше события bbc_dl_done: запоминаем полосы, чтобы
+    // «готово» сказало числом, чем файл является, а не просто «готово».
+    if (r && r.source_kbps) _bbcDlQ[pid] = r;
     toast('⬇ BBC: '+title+' — '+t('b.dl_started'));
   } catch(e) {
     toast(t('b.dl_err') + e.message);
@@ -680,14 +758,110 @@ function _bbcLiveFuture(ep) {
   return (s && new Date(s).getTime() > Date.now()) ? s : '';
 }
 
+// ── Честный прогноз качества ─────────────────────────────────────────────────
+// Что запись ЭТОГО эфира даст на самом деле — до нажатия, а не после. Числа
+// приходит с сервера (ripster/bbc_quality.py: живой промер лестницы live-потока,
+// first_broadcast_date и наши журналы); здесь только подписывает их словом.
+// Никакого «320» по умолчанию: если лестницу прочитать не удалось, так и сказано.
+
+function _bbcQualText(lv) {
+  if (!lv || !Object.keys(lv).length) return t('bbc.q_pending');
+  if (!lv.ok) return t('bbc.q_unknown');
+  const v = ti('bbc.q_value', {kbps: lv.best_kbps || 0, codec: lv.best_codec || '?'});
+  if (lv.has_320_lc) return '✓ ' + v;
+  // Ступени 320 в лесенке нет — это не авария, а потолок канала сегодня.
+  return '⚠ ' + v + ' · ' + t('bbc.q_no320');
+}
+
+function _bbcQualColor(lv) {
+  if (!lv || !lv.ok) return 'var(--orange)';
+  return lv.has_320_lc ? 'var(--green)' : 'var(--orange)';
+}
+
+function _bbcQualTitle(lv) {
+  if (!lv || !lv.ok) return t('bbc.q_unknown_t');
+  const when = lv.checked_utc ? new Date(lv.checked_utc).toLocaleString() : '';
+  const rungs = (lv.variants || []).map(v => v.kbps + ' ' + v.codec).join(' / ');
+  return ti('bbc.q_measured', {rungs, when}) + '\n' + (lv.url || '');
+}
+
+function _bbcQHTML(ep) {
+  const lv   = ep.live || {};
+  const bits = [`<span style="color:${_bbcQualColor(lv)}">${esc(_bbcQualText(lv))}</span>`];
+  if (ep.repeat)   bits.push(`<span style="color:var(--muted)">${t('bbc.tag_repeat')}</span>`);
+  if (ep.recorded) bits.push(`<span style="color:var(--yellow)">${t('bbc.tag_owned')}</span>`);
+  return `<div title="${esc(_bbcQualTitle(lv))}"
+    style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px;font-size:9.5px;font-family:var(--mono);letter-spacing:.2px">
+    ${bits.join('<span style="color:var(--border2)">·</span>')}
+  </div>`;
+}
+
+// Текст подтверждения записи: конкретный ответ про конкретный слот. Если
+// сервер не смог измерить поток, вопрос всё равно задаём — но с явной строкой
+// «неизвестно», а не молчаливым «320».
+function _bbcForecastAsk(fc, title, start) {
+  const when = (typeof _fmtSchedFor === 'function' ? _fmtSchedFor(start) : start);
+  const lines = ['📻 ' + (title || '') + ' · ' + when];
+  if (!fc) { lines.push('⚠ ' + t('bbc.fc_noanswer')); return lines.join('\n'); }
+  const lv = fc.live || {};
+  const ch = _bbcChLabel(fc.channel || '');
+  lines.push((lv.has_320_lc ? '✓ ' : '⚠ ') +
+             ti('bbc.fc_stream', {ch, kbps: lv.best_kbps || 0, codec: lv.best_codec || '?'}));
+  if (lv.ok && !lv.has_320_lc) lines.push('   ' + t('bbc.fc_nohi'));
+  if (!lv.ok) lines.push('   ' + t('bbc.q_unknown_t'));
+  lines.push('   ' + ti('bbc.fc_ondemand', {kbps: (fc.ondemand || {}).ceiling_kbps || 0}));
+  const rp = fc.repeat || {};
+  if (rp.state === 'repeat') {
+    lines.push('↻ ' + ti('bbc.fc_repeat',
+      {date: (rp.first_broadcast_utc || '').slice(0, 10), n: Math.abs(rp.days || 0)}));
+  } else if (rp.state === 'debut') {
+    lines.push('★ ' + t('bbc.fc_debut'));
+  } else {
+    lines.push('? ' + t('bbc.fc_repeat_unknown'));
+  }
+  const own = fc.own || {};
+  if (own.have) lines.push('💾 ' + ti('bbc.fc_own', {what: own.title || own.ts || ''}));
+  lines.push('');
+  lines.push(t('bbc.fc_commit'));
+  return lines.join('\n');
+}
+
+// Вердикт записанного файла — из строки плана (verdict ставит планировщик,
+// спрашивая ffprobe, а не шильдик задачи).
+function _bbcVerdictText(r) {
+  const v = r.verdict;
+  if (!v) return t('bbc.v_running');
+  const m = v.measured || {};
+  const num = ti('bbc.q_value', {kbps: v.kbps || 0, codec: v.codec || m.profile || '?'});
+  if (v.state === 'as_promised') return '✓ ' + num;
+  if (v.state === 'below') return '⚠ ' + num + ' · ' + ti('bbc.v_below', {promised: v.promised_kbps || 0});
+  if (v.state === 'failed') return '✕ ' + t('bbc.v_failed');
+  if (v.state === 'no_file') return '✕ ' + t('bbc.v_nofile');
+  return '? ' + t('bbc.v_unmeasured');
+}
+
+function _bbcVerdictColor(r) {
+  const s = ((r.verdict || {}).state) || 'running';
+  return s === 'as_promised' ? 'var(--green)'
+       : s === 'below'       ? 'var(--orange)'
+       : s === 'running'     ? 'var(--muted)' : 'var(--red)';
+}
+
+
 async function _bbcLoadSched() {
+  let items = [];
   try {
     const d = await api('GET', '/api/bbc/schedule');
-    _bbcSched.clear();
-    (d.items || []).forEach(r => {
-      if (r.status === 'pending') _bbcSched.set(r.channel + '|' + _bbcNormIso(r.start_utc), r.id);
-    });
+    items = (d && d.items) || [];
   } catch(_) {}
+  _bbcSched.clear();
+  items.forEach(r => {
+    if (r.status === 'pending') _bbcSched.set(r.channel + '|' + _bbcNormIso(r.start_utc), r.id);
+  });
+  // Одна выборка с сервера кормит и подсветку кнопок, и панель планов: иначе
+  // они неизбежно разъезжаются (план сняли крестиком в очереди — кнопка помнит).
+  _bbcSchedRenderList(items);
+  return items;
 }
 
 async function bbcScheduleToggle(btn, channel, start, dur, title, sub, img) {
@@ -698,9 +872,19 @@ async function bbcScheduleToggle(btn, channel, start, dur, title, sub, img) {
     catch(e) { toast(t('b.sched_err') + e.message, 'var(--red)'); return; }
   } else {
     if (!dur) { toast(t('b.sched_no_dur'), 'var(--red)'); return; }
+    const pid = (btn && btn.dataset && btn.dataset.pid) || '';
+    // Спрашиваем сервер ПЕРЕД постановкой: человек подтверждает конкретное
+    // измерение («320 AAC-LC, проверено сейчас»), а не красивое слово в кнопке.
+    let fc = null;
+    try {
+      fc = await api('GET', '/api/bbc/schedule/forecast?' + new URLSearchParams(
+        { channel, start_utc: start, duration: dur, pid }));
+    } catch(_) { fc = null; }
+    if (!confirm(_bbcForecastAsk(fc, sub || title, start))) { _bbcApplySchedBtns(); return; }
     try {
       const r = await api('POST', '/api/bbc/schedule',
-        { channel, start_utc: start, duration: dur, title: sub || title, subtitle: sub || '', cover: img || '' });
+        { channel, start_utc: start, duration: dur, title: sub || title,
+          subtitle: sub || '', cover: img || '', pid });
       if (r && r.ok && r.row) { _bbcSched.set(key, r.row.id); toast(ti('b.sched_set', { time: (typeof _fmtSchedFor==='function'?_fmtSchedFor(start):start) })); }
       else toast(((r && (r.detail || r.error)) || t('b.sched_err')), 'var(--red)');
     } catch(e) { toast(t('b.sched_err') + e.message, 'var(--red)'); }
@@ -726,6 +910,185 @@ function _bbcApplySchedLabels() {
     b.style.background   = on ? 'var(--surface2)' : 'rgba(228,0,59,.12)';
     b.title              = on ? t('b.sched_on_hint') : t('b.sched_rec_hint');
   });
+}
+
+// ── Панель планов и форма записи с живого канала ─────────────────────────────
+// Живой канал — второй вход планировщика (первый — будущие эфиры в сетке).
+// Ему неоткуда взять название: карточка строится из того, что ввёл человек.
+let _bbcChannels = [];
+
+function _bbcChLabel(id) {
+  if (!id) return '';
+  const k = 'bbc.ch.' + id, v = t(k);
+  if (v !== k) return v;
+  // Ключа нет (новый канал в каталоге) — читаемое имя из id, а не «bbc_radio_one».
+  return id.replace(/^bbc_/, '').replace(/_/g, ' ').replace(/\b\w/g, s => s.toUpperCase());
+}
+
+// datetime-local хочет локальное время в форме «ГГГГ-ММ-ДДЧЧ:ММ».
+function _bbcLocalInput(iso) {
+  const d = iso ? new Date(iso) : new Date();
+  if (isNaN(d)) return '';
+  const p = n => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function bbcLoadChannels() {
+  try {
+    const d = await api('GET', '/api/bbc/channels');
+    _bbcChannels = (d && d.channels) || [];
+  } catch(_) { _bbcChannels = []; }
+  const sel = document.getElementById('bbc-sch-channel');
+  if (sel) sel.innerHTML = _bbcChannels.map(c =>
+    `<option value="${esc(c.id)}">${esc(_bbcChLabel(c.id))}</option>`).join('');
+  const dur = document.getElementById('bbc-sch-dur');
+  if (dur) dur.innerHTML = [30, 60, 90, 120, 180, 240].map(m =>
+    `<option value="${m*60}"${m === 120 ? ' selected' : ''}>${ti('bbc.sch_min', {n: m})}</option>`).join('');
+}
+
+function bbcSchedForm(show) {
+  const f = document.getElementById('bbc-sched-form');
+  if (!f) return;
+  const open = show !== 'false' && show !== false;
+  f.style.display = open ? '' : 'none';
+  if (!open) return;
+  const start = document.getElementById('bbc-sch-start');
+  if (start && !start.value) {
+    // Ближайшие 15 минут — гарантированно не в прошлом к моменту отправки.
+    const d = new Date(Date.now() + 15 * 60000);
+    d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
+    start.value = _bbcLocalInput(d);
+  }
+  if (start) start.min = _bbcLocalInput(new Date());
+  try { start.focus(); } catch(_) {}
+}
+
+async function bbcSchedCreate() {
+  const channel = document.getElementById('bbc-sch-channel')?.value || '';
+  const startEl = document.getElementById('bbc-sch-start');
+  const dur     = parseInt(document.getElementById('bbc-sch-dur')?.value || '0', 10);
+  if (!channel || !startEl || !startEl.value) { toast(t('bbc.sch_need'), 'var(--red)'); return; }
+  const local = new Date(startEl.value);          // datetime-local — это локальное время
+  if (isNaN(local.getTime())) { toast(t('bbc.sch_need'), 'var(--red)'); return; }
+  const start_utc = local.toISOString().replace(/\.\d{3}Z$/, 'Z');
+  // Ручная форма — тот же вход в ту же запись, что и кнопка на карточке,
+  // поэтому и спрашивает она то же самое: чем будет файл.
+  let fc = null;
+  try {
+    fc = await api('GET', '/api/bbc/schedule/forecast?' + new URLSearchParams(
+      { channel, start_utc, duration: dur }));
+  } catch(_) { fc = null; }
+  if (!confirm(_bbcForecastAsk(fc, _bbcChLabel(channel), start_utc))) return;
+  try {
+    const r = await api('POST', '/api/bbc/schedule',
+      { channel, start_utc, duration: dur, title: '', subtitle: '', cover: '' });
+    if (r && r.ok && r.row) {
+      toast(ti('b.sched_set', { time: (typeof _fmtSchedFor === 'function' ? _fmtSchedFor(start_utc) : start_utc) }));
+      bbcSchedForm(false);
+    } else {
+      toast((r && (r.detail || r.error)) || t('b.sched_err'), 'var(--red)');
+      return;
+    }
+  } catch(e) { toast(t('b.sched_err') + e.message, 'var(--red)'); return; }
+  _bbcApplySchedBtns();   // он же перечитает план и перерисует панель
+}
+
+async function bbcSchedCancel(sid) {
+  if (!sid) return;
+  try {
+    const r = await api('DELETE', '/api/bbc/schedule/' + sid);
+    if (r && r.ok === false) throw new Error(r.detail || r.error || '');
+    toast(t('b.sched_cancelled'));
+  } catch(e) { toast(t('b.sched_err') + (e && e.message || ''), 'var(--red)'); return; }
+  _bbcApplySchedBtns();
+}
+
+function _bbcSchedTile(r) {
+  const art = r.cover ? _bbcCover(r.cover, 96) : '';
+  return art
+    ? `<img src="${esc(art)}" loading="lazy" onerror="_bbcCoverFail(this)" style="width:38px;height:38px;border-radius:7px;object-fit:cover;flex-shrink:0;background:var(--surface)"/>`
+    : `<div aria-hidden="true" style="width:38px;height:38px;border-radius:7px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:17px;background:var(--surface);color:var(--muted2)">📻</div>`;
+}
+
+function _bbcSchedWhen(r) {
+  const dur = r.duration ? ` · ${_bbcFmtDur(r.duration)}` : '';
+  return esc(_bbcChLabel(r.channel)) + ' · ' +
+    esc(typeof _fmtSchedFor === 'function' ? _fmtSchedFor(r.start_utc) : (r.start_utc || '')) + esc(dur);
+}
+
+function _bbcSchedPendingRow(r) {
+  return `
+    <div style="display:flex;align-items:center;gap:9px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:6px 8px">
+      ${_bbcSchedTile(r)}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:11.5px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.title || _bbcChLabel(r.channel))}</div>
+        <div style="font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_bbcSchedWhen(r)}</div>
+        <div style="font-size:9.5px;font-family:var(--mono);margin-top:2px;color:${esc(_bbcQualColor((r.forecast || {}).live))}">${esc(_bbcQualText((r.forecast || {}).live))}</div>
+      </div>
+      <button onclick="bbcSchedCancel('${esc(r.id)}')" title="${esc(t('bbc.sch_cancel_t'))}"
+        style="flex-shrink:0;width:26px;height:26px;border-radius:7px;background:transparent;border:1px solid var(--border);color:var(--muted);font-size:12px;cursor:pointer;font-family:var(--font)">✕</button>
+    </div>`;
+}
+
+// Записанное: вердикт файла, а не название качества. Планировщик измеряет
+// готовый файл ffprobe (ripster/bbc_schedule.settle_result) — здесь только то,
+// что он нашёл.
+function _bbcSchedDoneRow(r) {
+  const v = r.verdict || {};
+  const m = v.measured || {};
+  const detail = [ti('bbc.v_line', {got: _bbcVerdictText(r), promised: v.promised_kbps || 0})];
+  if (m.sample_rate) detail.push(esc(m.sample_rate / 1000 + ' кГц'));
+  if (m.duration)    detail.push(esc(_bbcFmtDur(m.duration)));
+  if (v.file)        detail.push(esc(v.file));
+  return `
+    <div style="display:flex;align-items:center;gap:9px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:6px 8px;opacity:.92">
+      ${_bbcSchedTile(r)}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:11.5px;font-weight:700;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.title || _bbcChLabel(r.channel))}</div>
+        <div style="font-size:10.5px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${_bbcSchedWhen(r)}</div>
+        <div style="font-size:9.5px;font-family:var(--mono);margin-top:2px;color:${_bbcVerdictColor(r)};white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${detail.join(' · ')}</div>
+      </div>
+      ${v.state ? `<button onclick="bbcSchedCancel('${esc(r.id)}')" title="${esc(t('bbc.v_forget_t'))}"
+        style="flex-shrink:0;width:26px;height:26px;border-radius:7px;background:transparent;border:1px solid var(--border);color:var(--muted);font-size:12px;cursor:pointer;font-family:var(--font)">✕</button>` : ''}
+    </div>`;
+}
+
+function _bbcSchedRenderList(items) {
+  const list  = document.getElementById('bbc-sched-list');
+  const empty = document.getElementById('bbc-sched-empty');
+  const count = document.getElementById('bbc-sched-count');
+  if (!list) return;
+  const all     = (items || []);
+  const pending = all.filter(r => r.status === 'pending')
+                     .sort((a, b) => String(a.start_utc).localeCompare(String(b.start_utc)));
+  // Идёт запись или уже кончилась — показываем хвост: человек должен увидеть
+  // результат планирования, а не потерять его в очередном обновлении очереди.
+  const fired   = all.filter(r => r.status !== 'pending')
+                     .sort((a, b) => String(b.start_utc).localeCompare(String(a.start_utc)))
+                     .slice(0, 12);
+  if (count) count.textContent = pending.length ? ti('bbc.sched_count', { n: pending.length }) : '';
+  if (empty) empty.style.display = (pending.length || fired.length) ? 'none' : '';
+  list.innerHTML = pending.map(_bbcSchedPendingRow).join('') +
+    (fired.length ? `<div style="font-size:10px;color:var(--muted2);text-transform:uppercase;letter-spacing:.4px;margin:8px 0 4px">${t('bbc.sched_done_title')}</div>` +
+                   fired.map(_bbcSchedDoneRow).join('') : '');
+}
+
+// Переключатель сетки: вышедшие выпуски ↔ ближайшие эфиры.
+function bbcModeButtons() {
+  document.querySelectorAll('#bbc-mode button').forEach(b => {
+    const act = b.dataset.mode === (BBC.upcoming ? 'up' : 'past');
+    b.style.background  = act ? 'rgba(228,0,59,.12)' : 'var(--surface)';
+    b.style.color       = act ? '#e4003b' : 'var(--muted)';
+    b.style.borderColor = act ? 'rgba(228,0,59,.45)' : 'var(--border)';
+  });
+}
+
+function bbcToggleUpcoming(on) {
+  const want = (on === 'true' || on === true);
+  if (want === BBC.upcoming) return;
+  BBC.upcoming = want;
+  bbcModeButtons();
+  if (BBC.searching) bbcClearSearch(); else bbcLoadEpisodes(true);
 }
 
 // ── Load app info

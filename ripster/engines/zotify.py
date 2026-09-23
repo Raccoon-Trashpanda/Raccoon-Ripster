@@ -65,7 +65,7 @@ _QUALITIES = [
     },
     {
         "id": "auto",      "label": "Auto",       "engine": "zotify",
-        "sub": "Лучшее доступное для аккаунта",
+        "sub": "Лучшее доступное для аккаунта", "sub_key": "qual.zotify.auto.sub",
         "badge": "AUTO",   "color": "#0a84ff", "bitrate": "auto",
         "ext": "ogg", "req": "none",
     },

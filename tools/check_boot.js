@@ -16,20 +16,19 @@
  * Осторожность (скилл ripster-headless-verify, оба правила из инцидентов):
  *  • порт приложения только ЧИТАЕМ. Ничего на нём не поднимаем: app.py умеет
  *    вытеснять «устаревший» экземпляр, и тестовый запуск убивал живой сервер;
- *  • свой Chrome — в отдельном user-data-dir и убивается на ЛЮБОМ выходе.
- *    Чужой chrome.exe ПО ИМЕНИ не трогаем никогда: там открытые вкладки человека.
+ *  • свой Chrome живёт в общем reaper (tools/headless_reaper): маркерный
+ *    user-data-dir, убивается ДРЕВОМ на любом выходе, осиротевшие процессы
+ *    прошлых убитых прогонов выметаются на старте. Чужой chrome.exe ПО ИМЕНИ
+ *    не трогаем никогда: там открытые вкладки человека.
  */
-const { spawn } = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
+const { launchOwnedChrome } = require(process.env.RIPSTER_REAPER_JS
+  || path.join(__dirname, 'headless_reaper', 'reaper.js'));
 
 const ROOT = path.resolve(__dirname, '..');
-const CHROME = process.env.CHROME_PATH
-  || 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
-const PORT = Number(process.env.CDP_PORT || 9333);
 const APP = process.env.RIPSTER_URL || 'http://127.0.0.1:7799';
-const UDD = path.join(os.tmpdir(), 'ripster-bootcheck-' + process.pid);
+let PORT = 0;                             // назначается reaper'ом (свободный)
 
 function cookie() {
   // Владельческая сессия из того же файла, которым пользуются curl-проверки.
@@ -41,15 +40,6 @@ function cookie() {
   } catch (_) {}
   return '';
 }
-
-const proc = spawn(CHROME, [
-  '--headless=new', '--disable-gpu', '--no-first-run', '--no-default-browser-check',
-  `--remote-debugging-port=${PORT}`, `--user-data-dir=${UDD}`, 'about:blank',
-], { stdio: 'ignore' });
-const kill = () => { try { proc.kill('SIGKILL'); } catch (_) {} };
-process.on('exit', kill);
-process.on('SIGINT', () => { kill(); process.exit(1); });
-process.on('uncaughtException', (e) => { kill(); console.error('УПАЛ:', e.message); process.exit(1); });
 
 const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
@@ -98,8 +88,12 @@ async function waitFor(ws, expr, ms) {
 }
 
 (async () => {
+  const chrome = await launchOwnedChrome({ extraArgs: ['--disable-gpu'] });
+  PORT = chrome.port;
+  let ws, fatal = true;
+  try {
   const wsUrl = await target();
-  const ws = new WebSocket(wsUrl);
+  ws = new WebSocket(wsUrl);
   await new Promise((res, rej) => { ws.onopen = res; ws.onerror = rej; });
 
   const errors = [];
@@ -181,8 +175,11 @@ async function waitFor(ws, expr, ms) {
   real.slice(0, 15).forEach(e => console.log('  ' + e.slice(0, 220)));
 
   ws.close();
-  kill();
-  await sleep(500);
-  const fatal = !ready || real.some(e => /is not defined|has already been declared|SyntaxError|Unexpected token/i.test(e));
+  fatal = !ready || real.some(e => /is not defined|has already been declared|SyntaxError|Unexpected token/i.test(e));
+  } catch (e) {
+    console.error('УПАЛ:', (e && e.stack) || e);
+  } finally {
+    await chrome.cleanup();   // tree kill + tolerant dir removal (reaper #44)
+  }
   process.exit(fatal ? 1 : 0);
 })();

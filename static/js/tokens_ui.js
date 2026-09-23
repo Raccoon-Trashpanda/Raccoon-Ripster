@@ -60,7 +60,6 @@ async function saveTokens() {
   if(mut)    S.config['media-user-token']    = mut;
   if(bearer) S.config['authorization-token'] = bearer;
   S.config['storefront'] = sf;
-  updatePills();
   toast('Tokens saved!');
   // also notify via WebSocket so server can use them immediately
   if(ws?.readyState===WebSocket.OPEN && (mut || bearer)) {
@@ -82,7 +81,6 @@ async function autoFetchBearer() {
       S.config['authorization-token'] = data.token;
       status.textContent = '✓ Got token: ' + data.token.slice(0,20) + '…';
       status.style.color = 'var(--green)';
-      updatePills();
       toast('Bearer token auto-fetched! 🎉', 'var(--green)');
     } else {
       status.textContent = data.detail || 'Failed';

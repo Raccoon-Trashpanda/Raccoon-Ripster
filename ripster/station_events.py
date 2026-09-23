@@ -131,10 +131,24 @@ def _rows(sql: str, args: tuple) -> list:
 
 
 def artist_stats(since_days: int = 90) -> dict:
-    """{артист: {plays, finished, skips, likes, dislikes, downloads, skip_rate}}.
+    """{артист: {plays, finished, skips, likes, dislikes, downloads, skip_rate,
+    depth, depth_n}}.
 
-    `skip_rate` считается только когда треков этого артиста было хотя бы три:
-    один скип из одного прослушивания — это не «не любит», это случайность.
+    Две доли, и они НЕ заменяют друг друга:
+    * `skip_rate` — доля строк-скипов. Считается только когда треков этого
+      артиста было хотя бы три: один скип из одного прослушивания — это не
+      «не любит», это случайность.
+    * `depth` — средняя ДОЛЯ трека, которую человек реально послушал
+      (`played_s/length_s` по всем окончаниям трека). Вот она и есть оценка по
+      глубине прослушивания, как у Яндекса (`totalPlayedSeconds/
+      trackLengthSeconds`), Spotify (`time_played_ms/track_length_ms`) и Apple
+      (`itemEndPosition/itemDuration`). Скип на 5-й секунде и переключение
+      после 295-й из 300 — противоположные сигналы, которые первым числом
+      сводятся к одному и тому же «100 % скипов».
+
+    Порог «не меньше трёх наблюдений» у обоих один и тот же; у `depth` он ещё и
+    по длине: строки без `length_s` («не знаем») в среднее не идут и не
+    тянут оценку вниз — «не знаю» не бывает отказом.
     """
     since = (datetime.now() - timedelta(days=max(1, since_days))).isoformat(timespec="seconds")
     out: dict[str, dict] = {}
@@ -148,19 +162,46 @@ def artist_stats(since_days: int = 90) -> dict:
                "like": "likes", "dislike": "dislikes", "download": "downloads"}.get(event)
         if key:
             d[key] += n
-    for d in out.values():
+    ratios: dict[str, list] = {}
+    for artist, played, length in _rows(
+            """SELECT artist, played_s, length_s FROM station_events
+               WHERE ts >= ? AND is_guest = 0 AND artist <> ''
+                 AND event IN ('track_finished','skip')
+                 AND played_s IS NOT NULL AND length_s > 0""", (since,)):
+        try:
+            ratios.setdefault(artist, []).append(max(0.0, min(1.0, float(played) / float(length))))
+        except (TypeError, ValueError):
+            continue
+    for artist, d in out.items():
         seen = d["finished"] + d["skips"]
         d["skip_rate"] = round(d["skips"] / seen, 3) if seen >= 3 else None
+        r = ratios.get(artist) or []
+        d["depth_n"] = len(r)
+        d["depth"] = round(sum(r) / len(r), 3) if len(r) >= 3 else None
     return out
 
 
 def recent_track_keys(days: int = 7) -> set:
     """Что уже звучало в станциях за N дней — чтобы не повторять (кулдаун)."""
+    return set(recent_track_history(days))
+
+
+def recent_track_history(days: int = 7) -> dict:
+    """{track_key: когда трек звучал В ПОСЛЕДНИЙ РАЗ} за N дней.
+
+    Время, а не просто множество: когда свежих кандидатов не хватает, станция
+    дозаполняет эфир ДАВНИМИ повторами, а не первыми попавшимися — для этого
+    нужно знать, кто из повторов отстоял дальше.
+    """
     since = (datetime.now() - timedelta(days=max(1, days))).isoformat(timespec="seconds")
-    return {r[0] for r in _rows(
-        """SELECT DISTINCT track_key FROM station_events
-           WHERE ts >= ? AND is_guest = 0 AND event IN ('track_started','track_finished')
-             AND track_key <> ''""", (since,)) if r[0]}
+    out: dict[str, str] = {}
+    for key, ts in _rows(
+            """SELECT track_key, ts FROM station_events
+               WHERE ts >= ? AND is_guest = 0 AND event IN ('track_started','track_finished')
+                 AND track_key <> '' ORDER BY ts""", (since,)):
+        if key:
+            out[key] = ts          # ORDER BY ts: последнее перекрывает прежнее
+    return out
 
 
 def banned_track_keys() -> set:
@@ -178,25 +219,69 @@ def banned_track_keys() -> set:
     return banned
 
 
-def session_feedback(session_id: str) -> dict:
+def _completion(played, length):
+    """Доля трека, которую послушали. None — длины не знаем, и выдумывать её
+    нельзя: «не знаю» не бывает ни «люблю», ни «отказ»."""
+    try:
+        if played is None or not length:
+            return None
+        return max(0.0, min(1.0, float(played) / float(length)))
+    except (TypeError, ValueError):
+        return None
+
+
+def _session_weight(event: str, played, length) -> float:
+    """Вес одного события внутри сессии. Формула — по ГЛУБИНЕ, а не по факту
+    нажатия: переключить трек на 295-й секунде из 300 и сбежать на 5-й —
+    разные вещи (исследование §1.6: сервер видит «скип на 7-й секунде из 312»).
+    """
+    d = _completion(played, length)
+    if event == "skip":
+        if d is None:
+            return -0.4                                  # «не знаю» — середина шкалы
+        if d >= 0.8:
+            return -0.05                                 # почти дослушал: трек не отвергнут
+        if d < 0.15 or float(played or 0) < 30:
+            return -0.6                                  # сбежал в первые полминуты
+        return -0.2
+    if event == "track_finished":
+        if d is None:
+            return 0.3
+        # «Дослушал» по часам, а не по названию события: оборвался на трети —
+        # треть и плюса.
+        return round(0.3 * max(0.0, min(1.0, (d - 0.3) / 0.5)), 3)
+    if event == "like":
+        return 0.6
+    if event == "download":
+        return 1.5                                       # самый сильный плюс, есть только у нас
+    if event == "dislike":
+        return -1.0
+    return 0.0
+
+
+def session_feedback(session_id: str, *, owner_only: bool = True) -> dict:
     """Что человек сказал ВНУТРИ этой сессии: {artist: вес}. Скип раньше 30 с —
     сильный минус, дослушанное (≥80 % длины) — плюс, скачивание — самый сильный.
-    Этим станция подстраивается на ходу, а не только между запусками."""
+    Этим станция подстраивается на ходу, а не только между запусками.
+
+    `owner_only` — гостевой барьер. Он обязателен для ВСЕХ читалок, которые
+    считают вкус ВДОЛЬ сессий (`artist_stats`, кулдаун, баны): чужие скипы не
+    должны переучивать станцию владельца. Внутри ОДНОЙ сессии барьер наоборот
+    мешал бы: `session_id` серверный и уника на одного слушателя, все строки
+    этой сессии — про того, кто её сейчас слушает, и гость тоже имеет право
+    увидеть следующую пачку, исправленную по СВОИМ скипам. Станция вызыват
+    функцию с `owner_only=False` ровно по этой причине.
+    """
     w: dict[str, float] = {}
+    where = "session_id = ? AND artist <> ''"
+    if owner_only:
+        where += " AND is_guest = 0"
     for artist, event, played, length in _rows(
-            """SELECT artist, event, played_s, length_s FROM station_events
-               WHERE session_id = ? AND artist <> ''""", (_norm(session_id),)):
-        if event == "skip":
-            w[artist] = w.get(artist, 0.0) + (-0.6 if (played or 0) < 30 else -0.2)
-        elif event == "track_finished":
-            if length and played and played >= 0.8 * length:
-                w[artist] = w.get(artist, 0.0) + 0.3
-        elif event == "like":
-            w[artist] = w.get(artist, 0.0) + 0.6
-        elif event == "download":
-            w[artist] = w.get(artist, 0.0) + 1.5
-        elif event == "dislike":
-            w[artist] = w.get(artist, 0.0) - 1.0
+            f"""SELECT artist, event, played_s, length_s FROM station_events
+                WHERE {where}""", (_norm(session_id),)):
+        v = _session_weight(event, played, length)
+        if v:
+            w[artist] = round(w.get(artist, 0.0) + v, 3)
     return w
 
 

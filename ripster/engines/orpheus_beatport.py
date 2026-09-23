@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import json
 import re
-import shutil
 import sys
 from pathlib import Path
 
@@ -172,7 +171,7 @@ def _corridor_config_dir(engine: str) -> Path:
     return _main_config_dir() / engine
 
 def _corridor_settings(engine: str) -> Path:
-    """settings.json КОНКРЕТНОГО движка Orpheus — копия общего конфига.
+    """settings.json КОНКРЕТНОГО движка Orpheus — СВОЙ файл, не зеркало общего.
 
     Качество и путь пишутся перед каждым прогоном, а полосы параллельности у
     очереди раздельные (ripster/runner.py::_lock_key: 'beatport' и 'jiosaavn' —
@@ -180,17 +179,80 @@ def _corridor_settings(engine: str) -> Path:
     означал, что второй прогон перезапишет качество и папку первого — а сам
     первый ещё и перечитает этот файл на старте. Принцип тот же, что у
     коридоров spotify_pool/tidal_pool.
+
+    Общий `orpheus/config/settings.json` — НЕ мастер предпочтений, а Scratchpad
+    движка Spotify: он пишет в него на финале каждого прогона и двигает mtime
+    (orpheus_spotify.py: `_settings_path()` жёстко = этот файл). Поэтому коридор
+    наследует общий конфиг ОДИН раз при создании (`_seed_corridor`), а далее
+    догоняет только СВОЙ раздел `modules.<engine>` (`_refresh_inherited_module`).
+    Прежний «полный перечитать по mtime» отдавал глобалы Beatport/JioSaavn
+    (качество, папку, конвертацию, обложки) на милость соседнего Spotify — той
+    же гонки, от которой Tidal уже лечится догоном одного раздела.
     """
     sp = _corridor_config_dir(engine) / "settings.json"
     base = _main_config_dir() / "settings.json"
-    try:
-        if base.is_file() and (not sp.is_file()
-                               or base.stat().st_mtime > sp.stat().st_mtime):
-            sp.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(base, sp)
-    except OSError:
-        pass
+    _seed_corridor(sp, base)
+    _refresh_inherited_module(sp, base, engine)
     return sp
+
+
+def _atomic_write_text(sp: Path, text: str) -> None:
+    """Временный файл рядом + os.replace: полфайла никто не прочтёт. Общий конфиг
+    пишет и сам OrpheusDL на финале прогона (`open(...,'w').write(...)`), и
+    пойманный на середине записи обрезок не должен осесть в коридоре."""
+    import os
+    tmp = sp.with_name(f"{sp.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, sp)
+    except Exception:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _seed_corridor(sp: Path, base: Path) -> None:
+    """Полная копия общего конфига — ровно ОДИН раз, пока коридора нет. Даёт
+    скелет (в т.ч. чужие `modules`, cover-правила) без ручной инициализации;
+    дальше коридором владеет сам движок."""
+    try:
+        if not base.is_file() or sp.exists():
+            return
+        text = base.read_text(encoding="utf-8")
+        cfg = json.loads(text)             # битый/обрезанный источник — не сеем
+        if not isinstance(cfg, dict) or not cfg:
+            return
+        sp.parent.mkdir(parents=True, exist_ok=True)
+        _atomic_write_text(sp, text)
+    except Exception:                      # noqa: BLE001
+        pass                               # без посева прогон возьмёт defaults OrpheusDL
+
+
+def _refresh_inherited_module(sp: Path, base: Path, engine: str) -> None:
+    """Догнать из общего конфига только `modules.<engine>` — раздел учётки этого
+    движка (правки владельца, переустановка OrpheusDL). Глобалы не трогаем: они
+    принадлежат коридору. Чужие модули не трогаем — в них живут ротированные
+    токены соседей, о которых общий файл не знает. У JioSaavn раздела нет — no-op."""
+    try:
+        if not base.is_file() or not sp.is_file():
+            return
+        shared = json.loads(base.read_text(encoding="utf-8"))
+        shared = shared.get("modules", {}).get(engine)
+        if not isinstance(shared, dict) or not shared:
+            return
+        cfg = json.loads(sp.read_text(encoding="utf-8"))
+        mods = cfg.get("modules")
+        mods = mods if isinstance(mods, dict) else {}
+        if mods.get(engine) == shared:
+            return                                       # и так всё на месте
+        mods[engine] = shared
+        cfg["modules"] = mods
+        _atomic_write_text(sp, json.dumps(cfg, indent=4, ensure_ascii=False))
+    except Exception:                                   # noqa: BLE001
+        pass                                             # читаем то, что есть
+
 
 def _settings_path() -> Path:
     return _corridor_settings("beatport")

@@ -131,19 +131,29 @@ async function convertSpotifyFromSearch() {
     await api('POST','/api/queue/add',{url: r.target.url, quality: resolveQuality(svc), title: r.target.title});
     toast(t('t.added_q_x'),'var(--green)');
   } else {
-    toast(t('t.not_found_c')+(r.error||''),'var(--red)');
+    handleSpotifyNotFound(r, resolveQuality(svc));
   }
 }
 
 // ══ HISTORY ══════════════════════════════════════════════════════
+// Список строится innerHTML-ом и не содержит ни одного data-i18n, поэтому
+// applyLang() до него не дотягивается. Последний ответ сервера держим здесь,
+// чтобы смена языка перерисовала вкладку из кэша, а не сходить за ним снова.
+var _histItems = [];
+
 async function loadHistory() {
   const svc       = document.getElementById('hist-filter')?.value || '';
-  const statusF   = document.getElementById('hist-status-filter')?.value || '';
+  const r = await api('GET', '/api/history?limit=300' + (svc?'&service='+svc:''));
+  _histItems = r.items || [];
+  _histRender();
+}
+
+function _histRender() {
   const list      = document.getElementById('history-list');
   const emp       = document.getElementById('history-empty');
   const cnt       = document.getElementById('hist-count');
-  const r = await api('GET', '/api/history?limit=300' + (svc?'&service='+svc:''));
-  let items = r.items || [];
+  const statusF   = document.getElementById('hist-status-filter')?.value || '';
+  let items = _histItems;
   if(statusF) items = items.filter(h => (h.status || 'done') === statusF);
   if(cnt) cnt.textContent = items.length;
   if(emp) emp.style.display = items.length ? 'none' : '';
@@ -158,10 +168,10 @@ async function loadHistory() {
   list.innerHTML = items.map(h => {
     const col = SVC_COLOR[h.service] || '#888';
     const lbl = SVC_LABEL[h.service] || '?';
-    const ts  = h.ts ? new Date(h.ts).toLocaleString('ru') : '';
+    const ts  = h.ts ? new Date(h.ts).toLocaleString(_dateLoc()) : '';
     const title = esc(h.title || _titleFromUrl(h.url));
     const artist = esc(h.artist || '');
-    const tracksInfo = h.tracks > 1 ? ' · '+ti('q.n_tracks',{n:h.tracks}) : '';
+    const tracksInfo = h.tracks > 0 ? ' · '+tplural('h.tracks', h.tracks) : '';
     const art = h.artworkUrl ? `<img src="${esc(h.artworkUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:6px" loading="lazy"/>` : lbl;
     return `
     <div class="hist-row" style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px">
@@ -211,6 +221,7 @@ async function clearHistory() {
 var _wlItems = [];
 var _wlKind  = 'all';
 var _wlFilterTimer = null;
+var _wlIdOpen  = null;
 
 async function loadWatchlist() {
   wlPopulateSvc();                       // выпадашка сервисов из настроенных токенов
@@ -253,41 +264,116 @@ function wlRenderList() {
 
   const cnt = document.getElementById('wl-count');
   if (cnt) {
+    // Склоняемое слово в счётчике — «лейбл»: форма выбирается по их количеству,
+    // а не по числу подписок.
     const labels = _wlItems.filter(w => w.kind === 'label').length;
     cnt.textContent = (items.length === _wlItems.length)
-      ? ti('wl.count_all',    {n: _wlItems.length, labels: labels})
+      ? tplural('wl.count_all', labels, {n: _wlItems.length, labels: labels})
       : ti('wl.count_shown',  {n: items.length,    total: _wlItems.length});
   }
   const nm = document.getElementById('wl-nomatch');
   if (nm) nm.style.display = (!items.length && _wlItems.length) ? '' : 'none';
 
+  // В строке ниже «последний» — это ПОСЛЕДНИЙ известный релиз (точка отсчёта),
+  // а не новинка: подпись «новый релиз» вводила в заблуждение, потому что запись
+  // только что создана, качать нечего, а выглядело как пропущенная загрузка.
   list.innerHTML = items.map(w => `
     <div style="display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px;margin-bottom:7px">
       <div style="flex:1;min-width:0">
         <div style="font-size:13px;font-weight:600;color:var(--text)${w.kind==='label'?';cursor:pointer':''}"
-          ${w.kind==='label'?`onclick="openLabelPage('${escJ(w.name||'')}')" title="${t('lbl.open_page')}" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"`:''}>${w.kind==='label'?'🏷 ':''}${esc(w.name||w.url)}</div>
+          ${w.kind==='label'?`onclick="openLabelPage('${escJ(w.name||'')}')" title="${esc(t('lbl.open_page'))}" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"`:''}>${w.kind==='label'?'🏷 ':''}${esc(w.name||w.url)}</div>
         <div style="font-size:11px;color:var(--muted);margin-top:2px">
           ${w.service||'apple'} · ${w.auto_download?t('wl.auto_dl'):t('wl.notify_only')}
-          ${w.last_check?' · '+t('wl.checked_at')+' '+new Date(w.last_check).toLocaleString('ru'):''}
+          ${w.last_check?' · '+t('wl.checked_at')+' '+new Date(w.last_check).toLocaleString(_dateLoc()):''}
+          ${_wlIdBadge(w)}
           ${w.last_release?'<span style="color:var(--muted2);margin-left:6px">' +
-             // Это ПОСЛЕДНИЙ известный релиз (точка отсчёта), а не новинка —
-             // подпись «новый релиз» здесь вводила в заблуждение: запись только
-             // что создана, качать нечего, а выглядело как пропущенная загрузка.
-             t('wl.last_known') + ': ' + esc(String(w.last_release).slice(0,38)) + '</span>':''}
+             esc(ti('wl.last_known_of', {v: String(w.last_release).slice(0,38)})) + '</span>':''}
         </div>
       </div>
-      ${w.kind==='label'?`<button onclick="wlDownloadLatest('${w.id}')" title="${t('wl.dl_latest_t')}"
+      ${w.kind==='label'?`<button onclick="wlDownloadLatest('${escJ(w.id)}')" title="${esc(t('wl.dl_latest_t'))}"
         style="padding:4px 9px;background:rgba(62,207,170,.14);border:1px solid rgba(62,207,170,.3);border-radius:6px;font-size:11px;cursor:pointer;color:var(--green);font-family:var(--font);white-space:nowrap">
-        ⬇ ${t('wl.dl_latest')}
+        ⬇ ${esc(t('wl.dl_latest'))}
       </button>`:''}
       <label style="display:flex;align-items:center;gap:5px;font-size:11px;color:var(--muted);cursor:pointer;white-space:nowrap">
-        <input type="checkbox" ${w.auto_download?'checked':''} onchange="wlToggleAuto('${w.id}',this.checked)"/> ${t('wl.auto_short')}
+        <input type="checkbox" ${w.auto_download?'checked':''} onchange="wlToggleAuto('${escJ(w.id)}',this.checked)"/> ${esc(t('wl.auto_short'))}
       </label>
-      <button onclick="wlRemove('${w.id}')"
+      <button onclick="wlRemove('${escJ(w.id)}')"
         style="padding:4px 8px;background:var(--surface);border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)">
         ✕
       </button>
-    </div>`).join('');
+    </div>${_wlIdPanel(w)}`).join('');
+}
+
+// Подписка на имя — это подписка на id, а Apple/Deezer склеивают в один id
+// разных людей. Радар их раскладывает по лейбловым группам (`artist_identity`),
+// но КТО из них тот, кого человек и имел в виду, данные не решают — обе личности
+// лежат на выбранном им id. Поэтому бейдж не удаляет карточки молча, а зовёт
+// владельца выбрать. См. ripster-cross-service-availability.
+function _wlIdBadge(w) {
+  const id = w.identity || {};
+  const prof = id.profile || {};
+  const hidden = (prof.hidden_titles || []).length;
+  if (!id.needs_owner && !hidden) return '';
+  const open = _wlIdOpen === w.id;
+  // `t()` принимает ТОЛЬКО ключ: вторая стрка аргументов тихо терялась, и
+  // счётчик на экране так и оставался литералом «{n}».
+  const label = id.needs_owner ? t('wl.id_merged') : ti('wl.id_hidden', {n: hidden});
+  return `<button onclick="wlIdToggle('${escJ(w.id)}')"
+    style="margin-left:6px;padding:1px 7px;border-radius:6px;font-size:10px;cursor:pointer;font-family:var(--font);
+           background:rgba(255,180,60,.14);border:1px solid rgba(255,180,60,.35);color:var(--amber,#e8a33d);white-space:nowrap">
+    ⚑ ${esc(label)}${open?' ▴':' ▾'}
+  </button>`;
+}
+
+function wlIdToggle(id) {
+  _wlIdOpen = (_wlIdOpen === id) ? null : id;
+  wlRenderList();
+}
+
+function _wlIdPanel(w) {
+  if (_wlIdOpen !== w.id) return '';
+  const id = w.identity || {};
+  const groups = (id.profile || {}).group_titles || {};
+  const hide = new Set((id.choice || {}).hide || []);
+  const names = Object.keys(groups);
+  const rows = names.map(lbl => `
+    <label style="display:flex;align-items:center;gap:7px;padding:3px 0;font-size:12px;color:var(--text);cursor:pointer">
+      <input type="checkbox" data-wlid="${esc(w.id)}" data-glbl="${esc(lbl)}" ${hide.has(lbl) ? 'checked' : ''}/>
+      <span style="flex:1;min-width:0">${esc(lbl)}</span>
+      <span style="color:var(--muted);font-family:var(--mono);font-size:11px">${(groups[lbl] || []).length}</span>
+    </label>`).join('');
+  return `<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;
+                      padding:10px 12px;margin:-2px 0 7px">
+    <div style="font-size:11px;color:var(--muted);margin-bottom:6px">${esc(t('wl.id_hint'))}</div>
+    ${rows || esc(t('wl.id_none'))}
+    <button onclick="wlIdSave('${esc(w.id)}')"
+      style="margin-top:8px;padding:5px 12px;background:var(--red);color:#fff;border:0;border-radius:7px;font-size:12px;cursor:pointer;font-family:var(--font)">
+      ${esc(t('wl.id_save'))}
+    </button>
+  </div>`;
+}
+
+async function wlIdSave(id) {
+  const hide = [...document.querySelectorAll(`input[data-wlid="${id}"]:checked`)]
+    .map(b => b.dataset.glbl);
+  const r = await api('POST', '/api/identity/choice', {artist_id: _wlAid(id), hide});
+  if (r && r.ok) {
+    const w = _wlItems.find(x => x.id === id);
+    if (w) {
+      w.identity = w.identity || {};
+      w.identity.choice = {hide};
+      const prof = w.identity.profile = w.identity.profile || {};
+      prof.merged = !!hide.length;
+      w.identity.needs_owner = !hide.length;
+    }
+    _wlIdOpen = null;
+    wlRenderList();
+  }
+}
+
+function _wlAid(wid) {
+  const w = _wlItems.find(x => x.id === wid) || {};
+  return w.artist_id || '';
 }
 
 // Лейбл отслеживается по названию, ссылка ему не нужна — прячем поле, чтобы
@@ -502,6 +588,14 @@ async function loadWlSuggestions() {
   try { r = await api('GET','/api/watchlist/suggestions?limit=12'); }
   catch(e){ box.style.display='none'; return; }
   _wlSug = (r && r.suggestions) || [];
+  _wlSugRender();
+}
+
+// Причина каждой подсказки приезжает с сервера КЛЮЧОМ (`wls.r_*`), а не текстом,
+// поэтому карточки перерисовываются из кэша и на смене языка, и после «+"/«✕».
+function _wlSugRender() {
+  const box = document.getElementById('wl-sug-box');
+  if(!box) return;
   if(!_wlSug.length){ box.style.display='none'; return; }
   box.style.display='';
 
@@ -514,9 +608,9 @@ async function loadWlSuggestions() {
         </div>
       </div>
       <span style="font-size:9px;color:var(--muted);border:1px solid var(--border);border-radius:5px;padding:2px 6px;white-space:nowrap">${esc(WL_SVC_LBL[s.service]||s.service)}</span>
-      <button onclick="wlSugAccept(${i})" data-i18n-title="wls.add_t" title="Следить"
+      <button onclick="wlSugAccept(${i})" data-i18n-title="wls.add_t"
         style="padding:4px 10px;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font)">+</button>
-      <button onclick="wlSugDismiss(${i})" data-i18n-title="wls.hide_t" title="Скрыть"
+      <button onclick="wlSugDismiss(${i})" data-i18n-title="wls.hide_t"
         style="padding:4px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:11px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>
     </div>`;
 
@@ -529,6 +623,8 @@ async function loadWlSuggestions() {
 
   document.getElementById('wl-sug-list').innerHTML =
     grp('top','wls.g_top') + grp('discovery','wls.g_discovery');
+  // Подсказки только что вставлены в DOM, а data-i18n-title на них applyLang()
+  // до этого момента не видел.
   applyLang();
 }
 

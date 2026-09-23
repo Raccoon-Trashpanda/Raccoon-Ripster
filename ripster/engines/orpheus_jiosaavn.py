@@ -83,10 +83,17 @@ _RE_PARSE_EXC   = re.compile(r'^(?:TypeError|KeyError|IndexError|AttributeError|
                              r'requests\.exceptions\.JSONDecodeError)\b', re.I | re.M)
 _RE_NO_MODULE   = re.compile(r'URL location "[^"]*jiosaavn[^"]*" is not found in modules', re.I)
 
-_GEO_VERDICT = ("JioSaavn: аудио недоступен в регионе этой машины (гео-блок) — метаданные "
-                "сервис отдал, а CDN на файл ответил 403 Access Denied (JioSaavn лицензирован "
-                "для Индии). Логина у JioSaavn нет, повтор с этого IP не поможет — нужен "
-                "индийский IP/прокси.")
+# Прежняя редакция этого вердикта утверждала, что нужен индийский IP или прокси.
+# Это оказалось неправдой: 21.09.2026 выяснилось, что JioSaavn раздаёт один и тот
+# же файл с двух хостов. Подписанный `web.saavncdn.com` (его выдаёт ручка
+# `song.generateAuthToken`) отбивает нас 403 всегда, а `aac.saavncdn.com`, куда
+# указывает расшифрованный `encrypted_media_url`, отдаёт всё без подписи — замер
+# 97/161/321 кбит/с AAC-LC. Движок теперь ходит на второй, и VPN не нужен вовсе.
+# Поэтому 403 сегодня означает не «страна не та», а «ушли не на тот хост».
+_GEO_VERDICT = ("JioSaavn: CDN ответил 403 Access Denied. Индийский IP для этого НЕ нужен — "
+                "так отвечает только подписанный хост web.saavncdn.com; файл лежит на "
+                "aac.saavncdn.com и отдаётся без подписи. Значит загрузка ушла на старый "
+                "хост — проверь getCdnURL в orpheus/modules/jiosaavn/interface.py.")
 _NET_VERDICT = ("JioSaavn: сеть недоступна (таймаут/обрыв соединения с jiosaavn.com или "
                 "saavncdn.com) — повторю. Это не гео-блок и не проблема аккаунта.")
 _CONTENT_VERDICT = ("JioSaavn: релиз не найден по ссылке — сервис вернул пустую карточку "
@@ -186,6 +193,7 @@ class OrpheusJioSaavnEngine(EngineBase):
         self._save_root: str = ""
         self._t0: float = 0.0
         self._net_seen = False
+        self._ffmpeg: str = "ffmpeg"
         #: Fake audio files (CDN error pages) found + removed by is_finished.
         self.junk_removed: list[str] = []
 
@@ -209,6 +217,10 @@ class OrpheusJioSaavnEngine(EngineBase):
         _update_orpheus_settings(orpheus_quality, save_path)
         self._save_root = save_path.rstrip("/\\") if save_path else ""
         self._t0 = time.time()
+        # ffprobe ищем рядом с настроенным ffmpeg — так же, как это делает
+        # раннер. Полагаться на PATH нельзя: он различается между оболочками,
+        # и замер молча превращался бы в «не знаю».
+        self._ffmpeg = (config.get("gamdl-ffmpeg-path") or "ffmpeg").strip() or "ffmpeg"
 
         # У JioSaavn входа нет — сессионный файл ему тоже не нужен общий,
         # пустой loginstorage лежит в его коридоре и к аккаунту Beatport не
@@ -270,6 +282,60 @@ class OrpheusJioSaavnEngine(EngineBase):
             pass
         self.junk_removed = removed
         return removed
+
+    def _measured_tier(self) -> str:
+        """Какую ступень мы получили НА САМОМ ДЕЛЕ, по файлу.
+
+        320 есть не у каждого трека: `getCdnURL` спускается по лестнице
+        320→160→96 до первой существующей. Папка при этом уже названа по
+        ЗАПРОШЕННОМУ качеству и молча врёт — ровно та же ловушка, что была у
+        Яндекса 28.07.2026. Возвращаем измеренное в штатном поле, раннер
+        перепишет им качество задачи, и карточка, история и бот скажут правду.
+        Пустая строка означает «не смог измерить» — это не то же самое, что
+        «получил запрошенное», и выдумывать вместо неё ничего нельзя.
+        """
+        root = Path(self._save_root) if self._save_root else None
+        if not root or not root.is_dir():
+            return ""
+        since = self._t0 - 5 if self._t0 else 0
+        newest, newest_mt = None, since
+        try:
+            for p in root.rglob("*"):
+                if p.suffix.lower() not in (".m4a", ".mp4", ".aac"):
+                    continue
+                try:
+                    mt = p.stat().st_mtime
+                except OSError:
+                    continue
+                if mt >= newest_mt:
+                    newest, newest_mt = p, mt
+        except Exception:  # noqa: BLE001
+            return ""
+        if newest is None:
+            return ""
+
+        import re as _re
+        import subprocess as _sp
+        ffprobe = _re.sub(r"ffmpeg(\.exe)?$",
+                          lambda m: "ffprobe" + (m.group(1) or ""),
+                          self._ffmpeg) if self._ffmpeg else "ffprobe"
+        try:
+            cp = _sp.run([ffprobe, "-v", "error", "-show_entries",
+                          "format=bit_rate", "-of", "default=nw=1:nk=1",
+                          str(newest)], capture_output=True, timeout=30,
+                         creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
+            kbps = int((cp.stdout or b"").decode("utf-8", "ignore").strip() or 0) // 1000
+        except Exception:  # noqa: BLE001
+            return ""
+        if kbps <= 0:
+            return ""
+        # Пороги стоят посередине между ступенями: замеры дают 97 / 161 / 321,
+        # так что запас в обе стороны большой и округление контейнера не вредит.
+        if kbps >= 240:
+            return "high"
+        if kbps >= 130:
+            return "medium"
+        return "low"
 
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
         log_text = log_text or ""

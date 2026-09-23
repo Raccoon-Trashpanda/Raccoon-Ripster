@@ -52,6 +52,15 @@ function relCover(url, px) {
       const suf = px <= 96 ? '_50' : (px <= 320 ? '_230' : (px <= 700 ? '_600' : '_org'));
       return url.replace(/_(?:\d+|max|org)\.(jpg|png|webp)/i, `${suf}.$1`);
     }
+    // BBC ichef: размер — НЕ произвольное число, а дискретная лесенка; на
+    // 600×600 и 1000×1000 CDN отвечает 403 (промер 21.09.2026, 42 значения).
+    // Поэтому «крупный» для BBC — 1024, а не 1000. Лесенка обязана совпадать с
+    // COVER_LADDER в ripster/metadata/bbc.py — править в обоих местах сразу.
+    if (url.includes('ichef.bbci.co.uk/images/ic/')) {
+      const LAD = [64, 128, 240, 320, 480, 640, 768, 1024];
+      const n = LAD.find(v => v >= px) || LAD[LAD.length - 1];
+      return url.replace(/\/\d+x\d+\//, `/${n}x${n}/`);
+    }
   } catch (e) { /* адрес незнакомого вида — отдаём как есть */ }
   return url;
 }
@@ -437,31 +446,51 @@ function _relLetter(s) {
   return '#';
 }
 
-// В единой сетке лента НЕ рвётся заголовками: у дня из одного-двух релизов
-// полноширинный разделитель отнимал остаток ряда, и справа оставалась пустая
-// полоса. Принадлежность карточки дню/букве живёт не в контейнере, а в её
-// атрибутах: data-gkey (то, на что отвечает плавающая метка: дата дня в
-// режиме дат, буква — в буквенном) и data-letter (в режиме дат — буква
-// артиста внутри дня; в буквенном совпадает с gkey). Липкую метку рисует
-// _relFloatSync по ПЕРВОЙ ВИДИМОЙ карточке, из этих атрибутов.
-function _relFeedHtml(list, keyOf, letterOf) {
-  let html = '';
+// ── РАДАР: секции по дням, внутри дня — буквы ──────────────────────────
+// Каждый день = <section> с полноширинной шапкой и СВОЕЙ сеткой карточек.
+// Группировка по датам — основа ленты: слитная сетка без разделов (как было
+// в попытке 20.09) владельцем отклонена. Порядок внутри дня — алфавитный
+// (tie-break в сортировке _applyRelFilterCore).
+//
+// Липкий уровень ОДИН — шапка дня. Оба уровня чтения живут В НЕЙ: дата и
+// текущая буква (span .rel-letter-cur, его пересчитывает _relHeadsSync по
+// первой видимой карточке дня). Почему не две отдельные липкие строки:
+// дата и буква конкурируют за одну полосу экрана, и нижняя из двух
+// неминуемо лезет под верхнюю. В одной строке конкуренции нет.
+//
+// Шапка стоит В ПОТОКЕ (position:sticky без height:0 и без absolute-копии):
+// она резервирует своё место, поэтому карточки ничем не закрыты, а прыжок
+// к букве доходит до цели, а не под полосу (scroll-margin-top в main.css).
+function _relGroupSecs(list, keyOf) {
+  let html = '', cur = null;
   for (const rel of list) {
     const gkey = keyOf(rel);
-    html += renderReleaseCard(rel,
-      ` data-gkey="${esc(gkey)}" data-letter="${esc(letterOf ? letterOf(rel) : gkey)}"`);
+    if (!cur || cur.gkey !== gkey) { if (cur) html += _relSecHtml(cur); cur = { gkey: gkey, items: [] }; }
+    cur.items.push(rel);
   }
-  if (!html) return '';
-  return `<div class="rel-group-float" aria-hidden="true"></div><div class="card-grid rel-feed">${html}</div>`;
+  if (cur) html += _relSecHtml(cur);
+  return html;
+}
+function _relSecHtml(sec) {
+  const isDate = _relGroupMode === 'date';
+  const cards = sec.items.map(r => renderReleaseCard(r,
+    ` data-gkey="${esc(sec.gkey)}" data-letter="${esc(isDate ? _relLetter(r.artist) : sec.gkey)}"`)).join('');
+  const title = isDate ? _relDateLabel(sec.gkey)
+                       : (sec.gkey === '#' ? t('rl.alpha_other') : sec.gkey);
+  return `<section class="rel-sec ${isDate ? 'rel-sec-date' : 'rel-sec-letter'}" data-gkey="${esc(sec.gkey)}">`
+    + '<div class="rel-date-head">'
+    +   `<span class="rel-group-title">${esc(title)}</span>`
+    +   (isDate ? '<span class="rel-letter-cur"></span>' : '')
+    +   `<span class="rel-group-count">${sec.items.length} ${esc(t('w.rel_abbr'))}</span>`
+    + '</div>'
+    + `<div class="card-grid rel-feed">${cards}</div>`
+    + '</section>';
 }
 function _renderRelGroups(list) {
-  // Порядок внутри дня — по алфавиту артиста (tie-break в сортировке
-  // _applyRelFilterCore), метка сверху показывает и день, и текущую букву:
-  // «16 дек · B». Два уровня: день, внутри — буквы.
-  return _relFeedHtml(list, r => r.date || '', r => _relLetter(r.artist));
+  return _relGroupSecs(list, r => r.date || '');
 }
 function _renderRelAlpha(list, byTitle) {
-  return _relFeedHtml(list, r => _relLetter(byTitle ? r.title : r.artist), null);
+  return _relGroupSecs(list, r => _relLetter(byTitle ? r.title : r.artist));
 }
 
 // Полоса-оглавление строится по ВСЕМУ отфильтрованному списку, а не по
@@ -500,14 +529,14 @@ function _relJumpLetter(letter) {
     _relShowing = Math.ceil((idx + 1) / _REL_PAGE_SIZE) * _REL_PAGE_SIZE;
     _applyRelFilterCore(false);
   }
-  const host = _relScroller();
   const grid = document.getElementById('releases-grid');
-  if (!host || !grid) return;
-  const card = grid.querySelector(`.rel-feed .rel-card[data-letter="${CSS.escape(letter)}"]`);
-  if (!card) return;
-  const bar = grid.querySelector('.rel-alpha-index');
-  host.scrollTop += card.getBoundingClientRect().top - host.getBoundingClientRect().top
-                  - (bar ? bar.offsetHeight : 0);
+  if (!grid) return;
+  const target = grid.querySelector(`.rel-sec-letter[data-gkey="${CSS.escape(letter)}"]`)
+              || grid.querySelector(`.rel-card[data-letter="${CSS.escape(letter)}"]`);
+  if (!target) return;
+  // scroll-margin-top у секции и карточки (main.css) уже учитывает липкую
+  // полосу: после прыжка цель встаёт ПОД полосой, а не под ней.
+  target.scrollIntoView({ block: 'start', behavior: 'auto' });
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -564,75 +593,50 @@ function _relKeepScroll(mutate) {
 }
 
 // ──────────────────────────────────────────────────────────────────────
-// Липкая метка над ОДНОЙ сплошной сеткой.
+// Текущая буква в липкой шапке дня — второй уровень чтения.
 //
-// В сетке заголовков больше нет — день меняется прямо внутри ряда. Метку
-// .rel-group-float строит по ПЕРВОЙ ВИДИМОЙ карточке: её день и, внутри
-// дня, букву артиста — «16 дек · B». Счётчик «N рел.» считает карточки
-// того же дня (в буквенном режиме — той же буквы) уже в показанной ленте;
-// «показать ещё» дописывает карточки в конец, и счётчик сам вырастает на
-// следующем sync, второй разметки не требуя.
+// Шапка дня прилипает ОДНОЙ строкой (см. _relGroupSecs): в ней дата, буква
+// и счётчик. Букву пересчитываем по ПЕРВОЙ КАРТОЧКЕ, чей нижний край ещё
+// не уехал за липкую полосу: пока день у верха экрана, это его первая
+// карточка, а по мере прокрутки буквы идут по алфавиту — ровно то, что
+// обещает порядок внутри дня.
+//
+// Никаких ручных отступов не нужно: шапка — обычный поток, своё место в
+// ленте она занимает всегда, а в прилипшем состоянии под неё уезжают только
+// карточки, уже закрытые к тому моменту наполовину — это и есть «липкость».
 // ──────────────────────────────────────────────────────────────────────
-let _relFloatRaf = 0;
-function _relFloatSync() {
-  _relFloatRaf = 0;
-  const grid  = document.getElementById('releases-grid');
-  const float = grid && grid.querySelector('.rel-group-float');
-  if (!float) return;
-  const feed = grid.querySelector('.rel-feed');
+let _relHeadsRaf = 0;
+function _relHeadsSync() {
+  _relHeadsRaf = 0;
+  const grid = document.getElementById('releases-grid');
+  const secs = grid && grid.querySelectorAll('.rel-sec-date');
+  if (!secs || !secs.length) return;
   const host = _relScroller();
-  const line = (host ? host.getBoundingClientRect().top : 0)
-             + (grid.querySelector('.rel-alpha-index') ? 29 : 0);
-  let cur = null;
-  if (feed) {
-    // Первая карточка, чей НИЖНИЙ край ещё ниже кромки прокрутки, — верхняя
-    // видимая карточка ленты. Карточки за пределами экрана лежат на оценочной
-    // высоте content-visibility, но порядок и границы прямоугольников это не
-    // портит: здесь нужно только сравнение.
-    for (const c of feed.children) {
-      if (c.getBoundingClientRect().bottom > line + 1) { cur = c; break; }
+  if (!host) return;
+  const line = host.getBoundingClientRect().top
+             + (grid.querySelector('.rel-alpha-index') ? 30 : 0);
+  for (const sec of secs) {
+    const cur = sec.querySelector('.rel-letter-cur');
+    if (!cur) continue;
+    const head = sec.querySelector('.rel-date-head');
+    const limit = line + (head ? head.getBoundingClientRect().height : 34);
+    let letter = '';
+    for (const c of sec.querySelectorAll('.rel-card')) {
+      if (c.getBoundingClientRect().bottom > limit) { letter = c.dataset.letter || ''; break; }
     }
+    if (cur.textContent !== letter) cur.textContent = letter;
   }
-  if (!cur) {
-    float.classList.remove('on');
-    float.dataset.key = '';
-    float.innerHTML = '';
-    return;
-  }
-  const gkey   = cur.dataset.gkey || '';
-  const letter = cur.dataset.letter || '';
-  const key = gkey + '\u0000' + letter;
-  if (float.dataset.key !== key) {
-    float.dataset.key = key;
-    const isDate = _relGroupMode === 'date';
-    float.classList.toggle('rel-by-date', isDate);
-    float.classList.toggle('rel-by-alpha', !isDate);
-    const title = isDate ? _relDateLabel(gkey)
-                         : (gkey === '#' ? t('rl.alpha_other') : gkey);
-    float.innerHTML = '<div class="rel-group-head">'
-      + '<span class="rel-group-title">' + esc(title) + '</span>'
-      + (isDate && letter ? '<span class="rel-float-letter">' + esc(letter) + '</span>' : '')
-      + '<span class="rel-group-count"></span></div>';
-  }
-  let n = 0;
-  for (const c of feed.children) if ((c.dataset.gkey || '') === gkey) n++;
-  const cnt = float.querySelector('.rel-group-count');
-  if (cnt) {
-    const txt = n + ' ' + t('w.rel_abbr');
-    if (cnt.textContent !== txt) cnt.textContent = txt;
-  }
-  float.classList.add('on');
 }
-function _relFloatScheduleSync() {
-  if (_relFloatRaf) return;
-  _relFloatRaf = requestAnimationFrame(_relFloatSync);
+function _relHeadsScheduleSync() {
+  if (_relHeadsRaf) return;
+  _relHeadsRaf = requestAnimationFrame(_relHeadsSync);
 }
 // Скролл не всплывает из произвольного контейнера — слушаем на окне с
 // capture: радар скроллится внутри .view, а не документа.
 window.addEventListener('scroll', () => {
   const v = document.getElementById('view-releases');
   if (!v || !v.classList.contains('active')) return;
-  _relFloatScheduleSync();
+  _relHeadsScheduleSync();
 }, {capture: true, passive: true});
 
 // Перерисовка «на той же странице» (звезда, «прочитано», догрузка с лейблами)
@@ -648,7 +652,12 @@ function _applyRelFilterCore(resetPage) {
   const grid  = document.getElementById('releases-grid');
   const empty = document.getElementById('rel-empty');
   if (!grid) return;
-  if (resetPage !== false) _relShowing = _REL_PAGE_SIZE;
+  if (resetPage !== false) {
+    // Сброс страницы законен для смены фильтра, но НЕ во время обхода:
+    // setLang() зовёт _applyRelFilter() без аргумента, и сброс срезал бы
+    // обратно до страницы уже долистанные потоком карточки.
+    if (!(_radarScan && _radarScan.done < _radarScan.total)) _relShowing = _REL_PAGE_SIZE;
+  }
 
   let data = (_relView === 'fav') ? _relFavs.slice() : (_relCache.data || []).slice();
 
@@ -682,9 +691,19 @@ function _applyRelFilterCore(resetPage) {
 
   if (!data.length) {
     grid.innerHTML = '';
+    _radarOkFull = true;   // пустой экран дописывается из потока без перестройки
     if (empty) {
+      const scanning = _radarScan && _radarScan.done < _radarScan.total;
       const totalData = (_relCache.data || []).length;
-      if (_relView === 'new' && totalData) {
+      if (scanning && (!totalData || q || _relTypeOff.size || _relSrcOff.size)) {
+        // Обход ещё идёт и что-то может прийти: пустой экран обязан выглядеть
+        // как поиск, а не как «ничего нет» — ровно на этом владелец и
+        // обжегся («найдено: 13», а сетка пуста и молчит).
+        empty.innerHTML = `<div style="display:flex;flex-direction:column;align-items:center;gap:6px">
+          <span class="rel-live-dot" style="margin-bottom:2px"></span>
+          <div>${esc(_rstr('rs.progress', {done: _radarScan.done, total: _radarScan.total, found: _radarScan.found}))}</div>
+        </div>`;
+      } else if (_relView === 'new' && totalData) {
         // Everything is marked seen — don't leave a dead screen. Offer recovery
         // (this is exactly the "accidentally pressed «прочитано»" case).
         const btn = (txt, fn, clr) => `<button onclick="${fn}" style="padding:6px 14px;border-radius:8px;border:1px solid ${clr};background:transparent;color:${clr};font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">${txt}</button>`;
@@ -696,14 +715,22 @@ function _applyRelFilterCore(resetPage) {
           </div></div>`;
       } else {
         const allSrcOff = _REL_SRCS.every(s => !_relSrcScanned(s) || _relSrcOff.has(s));
-        empty.textContent = allSrcOff ? t('rl.src_all_off')
-                          : _relView === 'fav' ? t('rl.no_fav')
-                          : _relView === 'new' ? t('rl.no_new')
-                          : t('rl.none_period');
+        if (allSrcOff)                                empty.textContent = t('rl.src_all_off');
+        else if (_relView === 'fav')                  empty.textContent = t('rl.no_fav');
+        else if (_relView === 'new')                  empty.textContent = t('rl.no_new');
+        // «Ничего нет» после законченного обхода — честный вердикт с периодом и
+        // фильтрами, а не безликая строка из разметки (требование п.4).
+        else if (!_radarScan || _radarScan.done >= _radarScan.total) empty.textContent = _radarEmptyMessage();
+        else                                          empty.textContent = t('rl.none_period');
       }
       empty.style.display = '';
+      // data-i18n на этих узлах приходится снимать: applyLang() возвращает
+      // разметочный текст поверх динамического (и «scanning», и вердикт
+      // «ничего нет» живут своим текстом, перевод у них свой и свежий).
+      empty.removeAttribute('data-i18n');
     }
     _relUpdateLoadMore(0);
+    _radarOkFull = true;   // пустой экран дописывается из потока без перестройки
     return;
   }
   if (empty) empty.style.display = 'none';
@@ -737,12 +764,15 @@ function _applyRelFilterCore(resetPage) {
     ? _relSliceHtml(visible)
     : _relAlphaIndexHtml(data, alphaTitle) + _relSliceHtml(visible);
   _relUpdateLoadMore(data.length);
+  // Поток дописывает в хвост только пока весь отфильтрованный список виден;
+  // за границей страницы «как пришла» уже не тот порядок, что на экране.
+  _radarOkFull = _relShowing >= data.length;
   _relHydrateQualitySelects();
   // Карточки BBC перерисованы — вернуть кнопкам планирования их состояние.
   if (typeof _bbcApplySchedBtns === 'function') _bbcApplySchedBtns();
-  // Лента перестроена целиком (новый .rel-group-float пуст) — а прокрутка
-  // могла и не дёрнуться, scroll-событие тогда не придёт.
-  _relFloatScheduleSync();
+  // Лента перестроена целиком — а прокрутка могла и не дёрнуться,
+  // scroll-событие тогда не придёт, и буква в шапке отстаёт от экрана.
+  _relHeadsScheduleSync();
 }
 
 // Разметка ОДНОЙ порции карточек в текущем режиме. Ею рисуется и первая
@@ -798,35 +828,17 @@ function _relShowMore() {
   // все уже показанные карточки вместе с их декодированными обложками.
   // Дописывание идёт внутри _relKeepScroll: даже «чистая» дозапись сдвигает
   // ленту, когда браузер уточняет высоту карточек с content-visibility.
+  // Тот же путь дописки, что у потока (_radarAppendDom): общий слиятель
+  // секций-хвостов, иначе две «дописки» разъехались бы разметкой.
   _relKeepScroll(() => {
-    const holder = document.createElement('div');
-    holder.innerHTML = _relSliceHtml(slice);
-
-    // Лента — ОДНА сетка, поэтому добавка не может встать рядом вторым гридом:
-    // её содержимое всасывается в существующий .rel-feed (или .card-grid в
-    // сплошном режиме). Заголовков-разделителей в сетке больше нет — день и
-    // буква живут в data-gkey/data-letter карточек, и липкая метка пересчитает
-    // счётчик сама, когда её позовёт _relFloatSync.
-    const feed  = grid.querySelector('.rel-feed');
-    const nfeed = holder.querySelector('.rel-feed');
-    if (feed && nfeed) {
-      while (nfeed.firstChild) feed.appendChild(nfeed.firstChild);
-    } else {
-      // Сплошной режим (сортировка по трекам): без слияния добавка становилась
-      // ВТОРОЙ сеткой, и ряд на стыке вставал вразнобой с остальными.
-      const into = grid.querySelector('.card-grid');
-      const from = holder.querySelector('.card-grid');
-      if (into && from && !from.classList.contains('rel-feed')) {
-        while (from.firstChild) into.appendChild(from.firstChild);
-      } else if (from && !into) {
-        grid.appendChild(from);   // страховка: не терять карточки
-      }
-    }
-    holder.innerHTML = '';
-    _relFloatScheduleSync();
+    _radarAppendDom(slice, _relGroupMode);
+    _relHeadsScheduleSync();
   });
 
   _relUpdateLoadMore(data.length);
+  // Страница вылезла за уже отрисованный поток — дальше «как пришла»
+  // дописывать нельзя, следующие пачки пойдут через перестройку.
+  if (_relShowing > _relFilteredData.length) _radarOkFull = false;
   _relHydrateQualitySelects();
   // Добавка к ленте — те же кнопки планирования, что и при полной перерисовке.
   if (typeof _bbcApplySchedBtns === 'function') _bbcApplySchedBtns();
@@ -1010,6 +1022,476 @@ function _renderCachedReleases() {
   if (st) st.style.display = 'none';
   _applyRelFilter();
 }
+
+// ══ РАДАР: ПОТОК (streaming) ═══════════════════════════════════════
+// Прежний loadReleases ждал Promise.allSettled по всем источникам и рисовал
+// всё разом: 287 артистов Tidal (≈110 с) держали пустой экран, хотя на
+// 15-й секунде сервер уже нашёл 13 релизов — прогресс «найдено: 13» стоял
+// над пустой сеткой (замер владельца 21.09.2026). Теперь каждый источник
+// попадает на экран в момент своего ответа; полная пересортировка — одна,
+// в конце досмара (или сразу, если выбран ненулевой порядок сортировки,
+// кудаNewItem'ам некуда дописываться без перетасовки).
+// Стоимость: дописка пачки через insertAdjacentHTML в секцию-хвост, без
+// перестройки грида; событийные строки словаря ниже уходят в i18n.js при
+// первом удобном случае (файл занят другой задачей), а t() уже отдаёт
+// приоритет словарю — локальная таблица остаётся запасным путём.
+const _RADAR_FLUSH_MS = 120;      // соседние ответы склеиваем в одну дописку
+const _RADAR_HOLD_MS  = 800;      // курсор над карточкой — откладываем дописку
+const _RADAR_SWEEP_TIMEOUT_MS = 360000;  // зависший источник не держит «сканируем» вечно
+const _RADAR_DONE_CLEAR_MS = 6000;
+const _RADAR_DATE_SORTS = new Set(['date_desc', 'date_asc']);
+
+// КЛЮЧ -> ru/en. Смысловая пара всего отчёта: «⟳ идём по источникам» против
+// «✓ ничего нет» — именно её отсутствие владелец прочёл как «радар не
+// показывает ничего».
+const _RADAR_STREAM_MSGS = {
+  'rs.progress':   {ru:'⟳ Идём по источникам · {done}/{total} · найдено: {found}',
+                    en:'⟳ Walking sources · {done}/{total} · found: {found}'},
+  'rs.found_word': {ru:'найдено', en:'found'},
+  'rs.done':       {ru:'✓ Обход закончен · {sources} источников · найдено: {found}',
+                    en:'✓ Sweep finished · {sources} sources · found: {found}'},
+  'rs.none':       {ru:'Ничего не найдено за {period}',
+                    en:'Nothing found within {period}'},
+  'rs.none_filters': {ru:' · фильтры: {filters}',
+                    en:' · filters: {filters}'},
+  'rs.none_search':  {ru:' · поиск «{q}»', en:' · search “{q}”'},
+  'rs.timeout':      {ru:'⏳ Источники не ответили за {sec} с — показываем найденное',
+                      en:'⏳ Sources did not answer within {sec}s — showing what was found'},
+  'rs.period_d7':    {ru:'7 дней',   en:'7 days'},
+  'rs.period_d14':   {ru:'14 дней',  en:'14 days'},
+  'rs.period_d30':   {ru:'30 дней',  en:'30 days'},
+  'rs.period_d90':   {ru:'3 месяца', en:'3 months'},
+  'rs.period_d180':  {ru:'6 месяцев', en:'6 months'},
+  'rs.period_d365':  {ru:'1 год',    en:'1 year'},
+  'rs.period_d730':  {ru:'2 года',   en:'2 years'},
+  'rs.period_d1825': {ru:'5 лет',    en:'5 years'},
+  'rs.period_dall':  {ru:'всё время', en:'all time'},
+};
+// Предпочитаем словарь LANG: когда ключи попадут в i18n.js (файл занят другой
+// задачей) язык переключится сам, локальная таблица останется запасной.
+function _rstr(key, params) {
+  const v = (LANG[S.lang || 'ru'] || LANG.en || LANG.ru || {})[key];
+  let s = (v !== undefined && v !== null && v !== key) ? v
+        : ((_RADAR_STREAM_MSGS[key] || {}).ru);
+  if (s === undefined) return key;
+  if (params) for (const p in params) s = s.replaceAll('{'+p+'}', params[p]);
+  return s;
+}
+
+let   _radarScan = null;   // {id, total, done, srcTotal, srcDone, found, started}
+let   _radarPend = [];
+let   _radarPendSeen = new Set();
+let   _radarFlushTimer = null;
+let   _radarHoldTries = 0;
+let   _radarOkFull = true;      // следующая пачка дописывается в DOM, а не перестраивает
+let   _radarHoverDepth = 0;
+let   _radarHoverLeftAt = 0;
+
+// «Не тасовать под курсором»: пока человек читает карточку, дописка
+// откладывается. Слушатели висячие на документе, навешиваются один раз.
+if (!window._radarHoverBound) {
+  window._radarHoverBound = true;
+  try {
+    document.addEventListener('pointerover', e => {
+      if (e.target && e.target.closest && e.target.closest('#releases-grid .rel-card')) _radarHoverDepth++;
+    }, {capture: true, passive: true});
+    document.addEventListener('pointerout', e => {
+      if (e.target && e.target.closest && e.target.closest('#releases-grid .rel-card') && _radarHoverDepth > 0) {
+        if (--_radarHoverDepth === 0) _radarHoverLeftAt = Date.now();
+      }
+    }, {capture: true, passive: true});
+  } catch (e) { /* старый движок без pointer-событий — держимся за mouseover ниже */ }
+}
+function _radarHovered() {
+  if (_radarHoverDepth > 0) return true;
+  try {
+    const el = document.querySelector('#releases-grid .rel-card:hover');
+    if (el) return true;
+  } catch (e) {}
+  return false;
+}
+
+// Тот же предикат, что и у _applyRelFilterCore (порядок сортировки там же не
+// нужен: дописка идёт в хвост своей секции).
+function _radarPasses(item) {
+  if (_relView === 'fav') return false;   // избранное живёт своим списком
+  if (_relView === 'new' && _relIsNew(item)) return false;
+  if (_relView === 'labels' && !_relIsLabelRel(item)) return false;
+  if (_relTypeOff.size && _relTypeOff.has(item.type || 'album')) return false;
+  if (_relSrcOff.size && _relSrcOff.has(_relSrcOf(item))) return false;
+  const q = (document.getElementById('rel-search')?.value || '').toLowerCase().trim();
+  if (q && !((item.title||'').toLowerCase().includes(q) || (item.artist||'').toLowerCase().includes(q))) return false;
+  return true;
+}
+
+function _radarGroupKey(item) {
+  if (_relGroupMode === 'date')   return item.date || '';
+  if (_relGroupMode === 'artist') return _relLetter(item.artist);
+  if (_relGroupMode === 'title')  return _relLetter(item.title);
+  return '';
+}
+
+// Единая дописка карточек в конец текущей ленты: и для «показать ещё», и для
+// потока. Секция того же дня, что и хвост, — дописывается В НЕЁ (шапка дня и
+// её счётчик остаются над своими карточками); иначе — новая секция ЦЕЛИКОМ
+// через _relSecHtml: голые .rel-card без .card-grid встали бы одной колонкой
+// на всю ширину (замер 22.09: так и вышло на первом же скриншоте потока).
+// Возвращает число реально добавленных карточек.
+function _radarAppendDom(items, mode) {
+  const grid = document.getElementById('releases-grid');
+  if (!grid || !items.length) return 0;
+  const isDate   = mode === 'date';
+  const isLetter = mode === 'artist' || mode === 'title';
+  const grouped  = isDate || isLetter;
+  const cardHtml = it => {
+    const gkey = _radarGroupKey(it);
+    const attrs = grouped
+      ? ` data-gkey="${esc(gkey)}" data-letter="${esc(isDate ? _relLetter(it.artist) : gkey)}"` : '';
+    return renderReleaseCard(it, attrs);
+  };
+  const holder = document.createElement('div');
+  holder.innerHTML = items.map(it => cardHtml(it)).join('');
+  const cards = [].slice.call(holder.children);
+  if (!cards.length) return 0;
+  // раскладываем готовые узлы по группам arrival-порядка
+  const groups = [];   // [{key, cls, cards:[], items:[]}]
+  const byKey  = new Map();
+  items.forEach((it, i) => {
+    const key = grouped ? _radarGroupKey(it) : '';
+    let g = byKey.get(key);
+    if (!g) { g = {key: key, cards: [], items: []}; byKey.set(key, g); groups.push(g); }
+    g.cards.push(cards[i]); g.items.push(it);
+  });
+  let added = 0;
+  for (const g of groups) {
+    if (!grouped) {
+      // сплошная сетка (сортировка по трекам): дописка в последнюю .card-grid,
+      // иначе ряд на стыке встанет вразнобой
+      const grids  = grid.querySelectorAll('.card-grid');
+      const target = grids.length ? grids[grids.length - 1] : _radarNewGrid(grid);
+      const frag = document.createDocumentFragment();
+      const n0 = g.cards.length;
+      g.cards.forEach(c => frag.appendChild(c));
+      target.appendChild(frag);
+      added += n0;
+      continue;
+    }
+    const secs = grid.querySelectorAll(':scope > .rel-sec');
+    const tail = secs.length ? secs[secs.length - 1] : null;
+    const tailFeed = tail && tail.dataset.gkey === g.key ? tail.querySelector('.rel-feed') : null;
+    if (tailFeed) {
+      const frag = document.createDocumentFragment();
+      const n0 = g.cards.length;
+      g.cards.forEach(c => frag.appendChild(c));
+      tailFeed.appendChild(frag);
+      const cnt = tail.querySelector('.rel-group-count');
+      if (cnt) cnt.textContent = tailFeed.querySelectorAll('.rel-card').length + ' ' + t('w.rel_abbr');
+      added += n0;
+      continue;
+    }
+    // новая секция — тем же кодом, что и первый показ
+    grid.insertAdjacentHTML('beforeend', _relSecHtml({gkey: g.key, items: g.items}));
+    added += g.items.length;
+  }
+  holder.innerHTML = '';
+  return added;
+}
+function _radarNewGrid(grid) {
+  if (grid.querySelector(':scope > .card-grid')) return grid.querySelector(':scope > .card-grid');
+  const d = document.createElement('div');
+  d.className = 'card-grid';
+  grid.appendChild(d);
+  return d;
+}
+
+function _radarScheduleFlush() {
+  if (_radarFlushTimer) return;
+  _radarFlushTimer = setTimeout(_radarFlush, _RADAR_FLUSH_MS);
+}
+
+function _radarFlush() {
+  _radarFlushTimer = null;
+  if (!_radarPend.length) { _radarHoldTries = 0; return; }
+  const grid = document.getElementById('releases-grid');
+  if (!grid) {                       // вид ещё не в DOM — пробуем позже, не теряя
+    if (++_radarHoldTries > 50) { _radarPend = []; _radarPendSeen.clear(); }
+    else _radarScheduleFlush();
+    return;
+  }
+  if (_radarHovered() && _radarHoldTries < 250) {
+    _radarHoldTries++;
+    _radarFlushTimer = setTimeout(_radarFlush, _RADAR_HOLD_MS);
+    return;
+  }
+  _radarHoldTries = 0;
+  const sort = document.getElementById('rel-sort')?.value || 'date_desc';
+  // Дописка в хвост законна там, где «пришло = в конец»: это «новые сверху»
+  // (день за днём) и сплошная сетка. Остальные порядки (старые, артист,
+  // название, треки) и избранное перестраивают ленту целиком — но не чаще
+  // пачки в 120 мс, а не на карточку.
+  if (_relView === 'fav' || (sort !== 'date_desc' && _relGroupMode !== 'flat')) {
+    _applyRelFilter(false);
+    _radarPend = []; _radarPendSeen.clear();
+    // после перестройки дописка снова законна, ПОКА показан весь список:
+    // стоит человеку нажать «показать ещё» за пределами отрисованного —
+    // и вставка «как пришла» перестала бы быть порядком.
+    _radarOkFull = _relShowing >= _relFilteredData.length;
+    return;
+  }
+  const batch = _radarPend;
+  _radarPend = []; _radarPendSeen.clear();
+  const shown = batch.filter(_radarPasses);
+  if (!shown.length) return;
+  // _radarCost — журнал стоимости дописок для замеров (каждая запись: во сколько,
+  // что за режим, сколько карточек, сколько миллисекунд основного потока).
+  const _t0 = performance.now();
+  const added = _radarAppendDom(shown, _relGroupMode);
+  if (!added) return;
+  // «Загружаю релизы…» — костыль пустой сетки; карточки есть — он мешает.
+  const stl = document.getElementById('rel-status');
+  if (stl) stl.style.display = 'none';
+  _relFilteredData = _relFilteredData.concat(shown);
+  _relShowing += shown.length;
+  _relUpdateLoadMore(_relFilteredData.length);
+  _relHeadsScheduleSync();
+  try { if (typeof tintVisibleCards === 'function') tintVisibleCards(); } catch (e) {}
+  if (typeof _bbcApplySchedBtns === 'function') _bbcApplySchedBtns();
+  try {
+    window._radarCost = window._radarCost || [];
+    if (window._radarCost.length < 5000) window._radarCost.push(
+      {t: Math.round(performance.now()), mode: 'append', n: added,
+       ms: +(performance.now() - _t0).toFixed(1)});
+  } catch (e) {}
+}
+
+function _radarStatusLine() {
+  const bar = document.getElementById('rel-status-bar');
+  if (!bar) return;
+  const txt = document.getElementById('rel-status-text');
+  if (txt) {
+    txt.removeAttribute('data-i18n');   // applyLang() не должен вернуть «Загрузка…» поверх потока
+    txt.textContent = _rstr('rs.progress',
+      {done: _radarScan.done, total: _radarScan.total, found: _radarScan.found});
+  }
+  const cnt = document.getElementById('rel-status-count');
+  if (cnt) cnt.textContent = `${_radarScan.srcDone}/${_radarScan.srcTotal}`;
+  bar.style.display = '';
+}
+function _radarClearStatusSoon() {
+  setTimeout(() => {
+    const bar = document.getElementById('rel-status-bar');
+    const st  = document.getElementById('rel-status');
+    if (bar && !(_radarScan && _radarScan.done < _radarScan.total)) bar.style.display = 'none';
+    if (st)  st.style.display = 'none';
+  }, _RADAR_DONE_CLEAR_MS);
+}
+function _radarSetFinishedLine() {
+  const bar = document.getElementById('rel-status-bar');
+  if (!bar) return;
+  const txt = document.getElementById('rel-status-text');
+  if (txt) { txt.removeAttribute('data-i18n');
+             txt.textContent = _rstr('rs.done', {sources: _radarScan.srcDone, found: _radarScan.found}); }
+  const cnt = document.getElementById('rel-status-count');
+  if (cnt) cnt.textContent = '';
+  const fill = document.getElementById('rel-status-fill');
+  if (fill) { fill.style.width = '100%'; fill.style.background = 'var(--green)'; }
+  bar.style.display = '';
+}
+
+// Ответ одного источника пришёл: дедуп по тому же ключу, что и раньше, — и в
+// очередь на дописку.
+function _radarMerge(name, list, err) {
+  if (!_radarScan || _radarScan.aborted) return;
+  _radarScan.done++;
+  _radarScan.srcDone++;
+  if (err) _radarScan.errors.push(err);
+  const fresh = Array.isArray(list) ? list : [];
+  if (!_relCache.data) _relCache.data = [];
+  _radarSyncIdx();
+  const added = [];
+  for (const rel of fresh) {
+    const k = _relDedupKey(rel);
+    if (_relCache._uidx.has(k)) {
+      // тот же релиз от лейбла, а не от артиста: повод переносим, дубль не плодим
+      if (rel.via_label) {
+        const kept = _relCache.data.find(r => _relDedupKey(r) === k);
+        if (kept && !kept.via_label) { kept.via_label = true; kept.label = kept.label || rel.label || ''; }
+      }
+      continue;
+    }
+    _relCache._uidx.add(k);
+    _relCache.data.push(rel);
+    added.push(rel);
+  }
+  _radarScan.found += added.length;
+  _radarScan.timeline.push({src: name, t: Math.round(Date.now() - _radarScan.started), got: added.length});
+  for (const rel of added) {
+    const u = _relUID(rel);
+    if (_radarPendSeen.has(u)) continue;
+    _radarPendSeen.add(u);
+    _radarPend.push(rel);
+  }
+  _radarStatusLine();
+  if (added.length) _radarScheduleFlush();
+  else if (_radarScan.done === _radarScan.total) _radarMaybeShowEmpty();
+  if (_radarScan.done === _radarScan.total) _radarDone();
+}
+
+function _radarPeriodLabel() {
+  const sel = document.getElementById('rel-days');
+  const key = {7:'rs.period_d7',14:'rs.period_d14',30:'rs.period_d30',90:'rs.period_d90',
+               180:'rs.period_d180',365:'rs.period_d365',730:'rs.period_d730',
+               1825:'rs.period_d1825',9999:'rs.period_dall'}[sel?.value || '90'] || 'rs.period_d90';
+  return _rstr(key);
+}
+function _radarFilterSummary() {
+  const views = {all: t('ck.f_all'), new: t('rl.new_word'), labels: t('rl.labels_block')};
+  const parts = [];
+  if (_relView !== 'all') parts.push(views[_relView] || _relView);
+  const off = [..._relSrcOff];
+  if (off.length) parts.push('✕ ' + off.map(s => _relSrcLabel(s)).join(', '));
+  if (_relTypeOff.size) parts.push('✕ ' + [..._relTypeOff].join(', '));
+  return parts.join(' · ');
+}
+// Пусто после честного досмара — отдельное сообщение с периодом и фильтрами.
+// «ещё сканируем» выглядит иначе: строка прогресса над сеткой живёт, а экран
+// пустоты молчит (требование владельца: не путать «не найдено» и «ищут»).
+function _radarNothingThere() {
+  if (_relView === 'fav') return !_relFavs.length;
+  return !(_relCache.data || []).length;
+}
+function _radarEmptyMessage() {
+  let msg = _rstr('rs.none', {period: _radarPeriodLabel()});
+  const filters = _radarFilterSummary();
+  if (filters) msg += _rstr('rs.none_filters', {filters});
+  const q = (document.getElementById('rel-search')?.value || '').trim();
+  if (q) msg += _rstr('rs.none_search', {q});
+  return msg;
+}
+function _radarMaybeShowEmpty() {
+  const empty = document.getElementById('rel-empty');
+  const grid  = document.getElementById('releases-grid');
+  if (!empty || !grid) return;
+  if (grid.querySelector('.rel-card')) return;
+  if (!_radarNothingThere()) return;
+  if (_radarScan && _radarScan.done < _radarScan.total) return;
+  empty.textContent = _radarEmptyMessage();
+  empty.style.display = '';
+}
+
+function _radarDone() {
+  const scan = _radarScan;
+  if (!scan || scan.finished) return;
+  scan.finished = true;
+  clearTimeout(_radarFlushTimer); _radarFlushTimer = null;
+  _radarPend = []; _radarPendSeen.clear();
+  if (_radarHoverDepth > 0) _radarHoverDepth = 0;
+  _relCache.ts  = Date.now();
+  _relCache.key = scan.key;
+  _relSaveLS(_relCache.data, scan.key);
+  _relStopPoll();
+  // Одна пакетная пересортировка в конце: дописанные «как пришли» карточки
+  // встают в выбранный порядок, прокрутка удерживается за верхнюю карточку.
+  _applyRelFilter(false);
+  if (_radarScan !== scan) return;           // за время перестройки стартовал новый досмар
+  _radarSetFinishedLine();
+  _radarClearStatusSoon();
+  _radarMaybeShowEmpty();
+  if (scan.errors.length) {
+    const has403 = scan.errors.some(e => e && String(e).toLowerCase().includes('not registered'));
+    if (has403) toast(t('t.sp_403'), 'var(--orange)', 8000);
+    else        toast('⚠ ' + scan.errors.slice(0, 2).join('; '), 'var(--orange)', 4000);
+  }
+}
+
+// Ключ дедупликации — прежний (title|artist|год): смысл ленты не меняется.
+function _relDedupKey(r) {
+  return `${(r.title||'').toLowerCase()}|${(r.artist||'').toLowerCase()}|${(r.year||r.date||'').slice(0,4)}`;
+}
+// Индекс дедупа живёт рядом с _relCache.data, но ленту правят и снаружи
+// (WS releases_scan_done, поллинг-фолбэк зовут _relMergeScan). Сверяем по
+// длине: рассогласование — перестраиваем молча, O(n) только после чужой правки.
+function _radarSyncIdx() {
+  const data = _relCache.data || [];
+  if (_relCache._uidx && _relCache._uidxLen === data.length) return;
+  _relCache._uidx = new Set();
+  _relCache._uidxLen = data.length;
+  for (const r of data) _relCache._uidx.add(_relDedupKey(r));
+}
+
+async function _radarLoadReleases(force = false) {
+  _relRestorePrefs();
+  _renderRelActiveSvcs();
+  _relMaybeShowXsvc();
+
+  const grid  = document.getElementById('releases-grid');
+  const st    = document.getElementById('rel-status');
+  const empty = document.getElementById('rel-empty');
+  const btn   = document.getElementById('rel-refresh-btn');
+  const days  = document.getElementById('rel-days')?.value || (S.config?.['releases-days'] || '90');
+
+  // Superset типов — клиентским чипам есть с чем работать (appears_on по-прежнему
+  // платный: только по явному включению).
+  const cfgTypes = (S.config?.['releases-types'] || 'album,single');
+  let spTypes = 'album,single,compilation';
+  if (cfgTypes.includes('appears_on')) spTypes += ',appears_on';
+
+  if (force) {
+    if (_radarScan && _radarScan.done < _radarScan.total) _radarScan.aborted = true;
+    _relCache.data = null;
+    _relCache._uidx = null;
+    _relCache.ts   = 0;
+    try { localStorage.removeItem(_REL_LS_KEY); } catch(e) {}
+  }
+  const hasPrev = !!(_relCache.data && _relCache.data.length);
+  const reqs = [];
+  const active = _relActiveSvcs();
+  if (active.includes('spotify'))
+    reqs.push(['spotify', `/api/spotify/releases?days=${days}&types=${encodeURIComponent(spTypes)}${force?'&force=1':''}`]);
+  for (const svc of ['qobuz','tidal','deezer','bbc','soundcloud','apple'])
+    if (active.includes(svc))
+      reqs.push([svc, `/api/releases/${svc}?days=${days}${force?'&force=1':''}`]);
+  if (S.config?.['show-radar-labels'] === true)
+    reqs.push(['labels', `/api/releases/labels?days=${days}${force?'&force=1':''}`]);
+
+  if (!reqs.length) {
+    if (st) st.style.display = 'none';
+    if (btn) btn.disabled = false;
+    if (empty && !hasPrev) { empty.textContent = t('t.no_services'); empty.style.display = ''; }
+    return;
+  }
+
+  _radarScan = {id: Symbol('radar'), key: _relCacheKey(), total: reqs.length, done: 0,
+                srcTotal: reqs.length, srcDone: 0, found: 0, errors: [], timeline: [],
+                started: Date.now(), finished: false, aborted: false};
+  const scan = _radarScan;
+  _radarPend = []; _radarPendSeen.clear();
+  _radarOkFull = true;
+  if (empty) empty.style.display = 'none';
+  if (!hasPrev) { if (grid) grid.innerHTML = ''; _relFilteredData = []; _radarOkFull = false; }
+  if (st) { st.textContent = hasPrev ? t('su.updating') : t('w.loading_rel'); st.style.display = 'block'; }
+  if (btn) btn.disabled = true;
+  _radarStatusLine();
+  if (hasPrev) _applyRelFilter(false);   // прежняя лента остаётся видимой, пока идёт новый обход
+
+  reqs.forEach(([name, url]) => {
+    fetch(url).then(r => r.json()).then(d => {
+      _radarMerge(name, d?.releases, (!d?.ok && (d?.error || d?.error_key)) || '');
+    }).catch(e => _radarMerge(name, [], String(e && e.message || e)));
+  });
+
+  // Зависший источник не оставляет радар в «сканируем» навсегда: по истечении
+  // потолка досмар считается законченным, показанное остаётся.
+  setTimeout(() => {
+    if (_radarScan === scan && !scan.finished) {
+      scan.aborted = true;
+      scan.done = scan.total;
+      toast(_rstr('rs.timeout', {sec: Math.round(_RADAR_SWEEP_TIMEOUT_MS/1000)}), 'var(--orange)', 5000);
+      _radarDone();
+    }
+  }, _RADAR_SWEEP_TIMEOUT_MS);
+}
+loadReleases = async function(force = false) { return _radarLoadReleases(force); };
 
 function _jwtExpired(token) {
   try {

@@ -8,14 +8,14 @@ from .registry import register
 from ripster.py_runtime import app_python
 
 _QUALITIES = [
-    {"id":"alac-hires",  "label":"ALAC Hi-Res","sub":"Hi-Res Lossless до 24/192 · публичный wrapper","badge":"HI-RES",  "color":"#ffd60a","bitrate":"≤9216 kbps",    "ext":"m4a","req":"public"},
-    {"id":"alac",        "label":"ALAC",       "sub":"Lossless · публичный wrapper (нет Apple ID!)", "badge":"LOSSLESS","color":"#c084a0","bitrate":"≤1411 kbps",    "ext":"m4a","req":"public"},
-    {"id":"atmos",       "label":"Atmos EC-3", "sub":"Dolby Atmos · публичный wrapper",              "badge":"SPATIAL", "color":"#9090c8","bitrate":"2448–2768 kbps","ext":"m4a","req":"public"},
-    {"id":"ac3",         "label":"Dolby AC-3", "sub":"AC-3 spatial audio · публичный wrapper",       "badge":"SPATIAL", "color":"#9090c8","bitrate":"~640 kbps",     "ext":"m4a","req":"public"},
-    {"id":"aac",         "label":"AAC 256",    "sub":"Без wrapper, без Apple ID",                    "badge":"LOSSY",   "color":"#EF9F27","bitrate":"256 kbps",      "ext":"m4a","req":"none"},
-    {"id":"aac-legacy",  "label":"AAC Legacy", "sub":"Старый AAC формат",                            "badge":"LOSSY",   "color":"#EF9F27","bitrate":"~256 kbps",     "ext":"m4a","req":"none"},
-    {"id":"aac-binaural","label":"Binaural",   "sub":"Бинауральный стерео",                          "badge":"3D",      "color":"#9090c8","bitrate":"~256 kbps",     "ext":"m4a","req":"public"},
-    {"id":"aac-downmix", "label":"Downmix",    "sub":"Downmix стерео",                               "badge":"STEREO",  "color":"#6a6a8a","bitrate":"~256 kbps",     "ext":"m4a","req":"public"},
+    {"id":"alac-hires",  "label":"ALAC Hi-Res","sub":"Hi-Res Lossless до 24/192 · публичный wrapper", "sub_key": "qual.amd.alac-hires.sub", "sub_args": {"codec":"Hi-Res Lossless","limit":"24/192"},"badge":"HI-RES",  "color":"#ffd60a","bitrate":"≤9216 kbps",    "ext":"m4a","req":"public"},
+    {"id":"alac",        "label":"ALAC",       "sub":"Lossless · публичный wrapper (нет Apple ID!)", "sub_key": "qual.amd.alac.sub", "sub_args": {"codec":"Lossless"}, "badge":"LOSSLESS","color":"#c084a0","bitrate":"≤1411 kbps",    "ext":"m4a","req":"public"},
+    {"id":"atmos",       "label":"Atmos EC-3", "sub":"Dolby Atmos · публичный wrapper", "sub_key": "qual.amd.atmos.sub", "sub_args": {"codec":"Dolby Atmos"},              "badge":"SPATIAL", "color":"#9090c8","bitrate":"2448–2768 kbps","ext":"m4a","req":"public"},
+    {"id":"ac3",         "label":"Dolby AC-3", "sub":"AC-3 spatial audio · публичный wrapper", "sub_key": "qual.amd.ac3.sub", "sub_args": {"codec":"AC-3 spatial audio"},       "badge":"SPATIAL", "color":"#9090c8","bitrate":"~640 kbps",     "ext":"m4a","req":"public"},
+    {"id":"aac",         "label":"AAC 256",    "sub":"Без wrapper, без Apple ID", "sub_key": "qual.amd.aac.sub",                    "badge":"LOSSY",   "color":"#EF9F27","bitrate":"256 kbps",      "ext":"m4a","req":"none"},
+    {"id":"aac-legacy",  "label":"AAC Legacy", "sub":"Старый AAC формат", "sub_key": "qual.amd.aac-legacy.sub", "sub_args": {"codec":"AAC"},                            "badge":"LOSSY",   "color":"#EF9F27","bitrate":"~256 kbps",     "ext":"m4a","req":"none"},
+    {"id":"aac-binaural","label":"Binaural",   "sub":"Бинауральный стерео", "sub_key": "qual.amd.aac-binaural.sub",                          "badge":"3D",      "color":"#9090c8","bitrate":"~256 kbps",     "ext":"m4a","req":"public"},
+    {"id":"aac-downmix", "label":"Downmix",    "sub":"Downmix стерео", "sub_key": "qual.amd.aac-downmix.sub",                               "badge":"STEREO",  "color":"#6a6a8a","bitrate":"~256 kbps",     "ext":"m4a","req":"public"},
 ]
 
 _CODEC_MAP = {

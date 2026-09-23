@@ -351,6 +351,13 @@ async def test_auth(service: str, body: dict | None = None):
 def _remember_probe(svc: str, user: dict) -> None:
     """Запомнить страну и срок подписки, которые вернула проба сервиса."""
     import time as _time
+    # Перевход — повод перестать прятаться за старое «не определено»: часовой
+    # интервал самопочинки после свежей пробы не действует.
+    try:
+        from ripster import account_country as _ac
+        _ac.forget_heal(svc)
+    except Exception:                                       # noqa: BLE001
+        pass
     changed = {}
     cc = str(user.get("country") or "").strip().upper()
     if len(cc) == 2 and cc.isalpha():
@@ -365,6 +372,20 @@ def _remember_probe(svc: str, user: dict) -> None:
         # Apple даты окончания не отдаёт вовсе — только «активна/нет». Это тоже
         # ответ, и он должен доезжать до обзора.
         changed[f"{svc}-sub-active"] = user["sub_active"]
+    # Тариф и измеренные флаги качества. Без них обзор не мог сказать, что
+    # подписка ПОКУПАЕТ: проба знает «Go+», «Premium (OGG)», hires=True —
+    # а строка умирала вместе с кнопкой «проверить» (22.09.2026: владелец
+    # принимал AAC 160 за баг, потому что нигде не было видно потолка Go+).
+    tier = str(user.get("subscription") or user.get("plan")
+               or user.get("offer") or "").strip()
+    if tier and tier != "?":
+        changed[f"{svc}-tier"] = tier
+    for f in ("lossless", "hires"):
+        if isinstance(user.get(f), bool):
+            changed[f"{svc}-{f}"] = user[f]
+    qual = str(user.get("quality") or "").strip()
+    if qual:
+        changed[f"{svc}-quality"] = qual
     if changed:
         changed[f"{svc}-checked-at"] = int(_time.time())
         for k, v in changed.items():

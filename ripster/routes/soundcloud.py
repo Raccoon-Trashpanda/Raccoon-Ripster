@@ -423,6 +423,143 @@ async def sc_tracklist(track_id: str):
     }
 
 
+# ── Потолок конкретного релиза ───────────────────────────────────────────────
+#
+# Повод (22.09.2026): владелец получил 160 kbps с «RA.1057 Marina Herlop» при
+# живом Go+ и принял это за баг. Им не был: Go+ покупает доступ к `aac_hq`
+# (AAC 256), но транскод есть только у части релизов — у этого listing'
+# закрывался зоной `aac_160k`. Строка «тариф: потолок AAC 256» без ответа на
+# вопрос «а что отдаст ИМЕННО ЭТА запись» оставляла тот же самый вопрос
+# открытым. Здесь — честный ответ по факту: список транскодов, снятый ТЕМ ЖЕ
+# токеном, которым пойдёт загрузка.
+
+# Имена пресетов SoundCloud и что за ними стоит. Маппинг тарифа учётки
+# живёт отдельно — ripster/quality_tiers.py (рядом с движками, не в UI).
+_SC_PRESETS = {
+    "aac_hq":   {"codec": "AAC", "kbps": 256},
+    "aac_160k": {"codec": "AAC", "kbps": 160},
+    "abr_sq":   {"codec": "AAC", "kbps": 128},
+    "mp3_1_0":  {"codec": "MP3", "kbps": 128},
+    "mp3_0_0":  {"codec": "MP3", "kbps": 128},
+    "aac_96k":  {"codec": "AAC", "kbps": 96},
+}
+
+_sc_formats_cache: dict = {}          # track_id → (ts, payload)
+_SC_FORMATS_TTL = 300.0               # 5 мин: листинг стабильнее, чем жизнь URL
+
+
+def _sc_release_quality(trans: list) -> dict:
+    """Что релиз отдаёт сам: лучший распознанный транскод и полный список.
+
+    Неизвестные пресеты НЕ участвуют в «лучшем» (мы не знаем их битрейт —
+    выдумывать потолок запрещено) и уезжают в `unknown` как есть: панель
+    честна и когда показать нечего.
+    """
+    named, unknown = [], []
+    for t in trans or []:
+        p = t.get("preset") or ""
+        if not p:
+            continue
+        if p in _SC_PRESETS:
+            e = {"preset": p, **_SC_PRESETS[p]}
+            if not any(x["preset"] == p for x in named):
+                named.append(e)
+        elif p not in unknown:
+            unknown.append(p)
+    named.sort(key=lambda e: -e["kbps"])
+    return {"best": (named[0] if named else None),
+            "formats": named, "unknown": unknown}
+
+
+def _sc_quality_out(rel: dict, acct: dict | None, title: str = "") -> dict:
+    """Вердикт «что скачается с этого релиза этим аккаунтом». Чистая функция:
+    ни релиза, ни тарифа в сети не требует — тест кормит её подлинными
+    формами ответов."""
+    best = rel["best"]
+    cap = acct
+    if cap is None:
+        delivered, why = None, ("tier_unknown" if best else "no_streams")
+    elif best is None:
+        delivered, why = None, "no_streams"
+    elif cap["kbps"] < best["kbps"]:
+        delivered = next((f for f in rel["formats"] if f["kbps"] <= cap["kbps"]), None)
+        why = "tier_limited" if delivered else "no_streams"
+    else:
+        delivered = best
+        why = "ok"
+        if cap["kbps"] >= 256 and not any(f["preset"] == "aac_hq" for f in rel["formats"]):
+            why = "no_hq"       # Go+ есть, а треку он ничего не даёт
+    return {"ok": True, "formats": rel["formats"], "unknown_formats": rel["unknown"],
+            "release_best": best, "account_ceiling": cap, "delivered": delivered,
+            "why": why, "title": str(title or "")[:120]}
+
+
+@router.get("/api/soundcloud/formats/{track_id}")
+async def sc_formats(track_id: str):
+    """Потолок ЭТОГО релиза: транскоды из `media.transcodings` (resolve трека)
+    плюс что реально скачается с текущим аккаунтом.
+
+    Ответ: {ok, formats[], release_best, account_ceiling, delivered, why}.
+    `why` объясняет понижение: 'no_hq' — у релиза нет aac_hq даже для Go+;
+    'tier_limited' — релиз умеет больше, чем покупает тариф; 'tier_unknown' —
+    потолок тарифа не определён, обещать нечего; 'no_streams' — трек без
+    транскодов вовсе.
+    """
+    now = time.time()
+    hit = _sc_formats_cache.get(track_id)
+    if hit and now - hit[0] < _SC_FORMATS_TTL:
+        return hit[1]
+    cid = await _get_client_id()
+    if not cid:
+        return {"ok": False, "error_key": "err.sc_no_client_id_retry",
+                "error": "Не удалось получить client_id SoundCloud — попробуй позже."}
+    # Токен берём у пула: загрузка пойдёт тем же, чем платит active_token.
+    token = (_cfg.get("soundcloud-oauth-token") or "").strip()
+    try:
+        from ripster import soundcloud_pool as _scp
+        token = (_scp.active_token(_cfg) or "").strip() or token
+    except Exception:
+        pass
+    headers = {"User-Agent": _UA}
+    if token:
+        headers["Authorization"] = (token if token.lower().startswith("oauth ")
+                                    else f"OAuth {token}")
+    try:
+        async with httpx.AsyncClient(timeout=10, headers=headers) as c:
+            r = await c.get(f"{_API}/tracks/{track_id}", params={"client_id": cid})
+    except Exception as e:
+        return {"ok": False, "error": f"SoundCloud: {e}"}
+    if r.status_code in (401, 403):
+        # Список транскодов зависит от учётки: снять его без токена — значит
+        # соврать про «HQ у релиза нет». Честнее «не определено».
+        return {"ok": False, "error_key": "err.sc_formats_auth",
+                "error": "SoundCloud отверг учётку — потолок релиза не определён"}
+    if r.status_code != 200:
+        return {"ok": False, "error": f"SoundCloud API {r.status_code}"}
+    try:
+        track = r.json() or {}
+    except Exception:
+        return {"ok": False, "error": "SoundCloud ответил не-JSON"}
+
+    rel = _sc_release_quality((track.get("media") or {}).get("transcodings") or [])
+    # Потолок аккаунта — из тех же измеренных данных, что и строка обзора.
+    tier = str(_cfg.get("soundcloud-tier") or "").strip()
+    flags: dict = {}
+    try:
+        from ripster import soundcloud_accounts as _sa
+        info = _sa.known(token) if token else {}
+        if isinstance(info.get("go_plus"), bool):
+            flags["go_plus"] = info["go_plus"]
+        tier = tier or str(info.get("plan") or "").strip()
+    except Exception:
+        pass
+    from ripster import quality_tiers as _qt
+    acct = _qt.ceiling("soundcloud", tier, flags)
+    out = _sc_quality_out(rel, acct, track.get("title") or "")
+    _sc_formats_cache[track_id] = (now, out)
+    return out
+
+
 @router.post("/api/soundcloud/tracklist-1001")
 async def sc_tracklist_1001(request: Request):
     """Authoritative tracklist (with cue times) from 1001Tracklists, verified

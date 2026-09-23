@@ -15,18 +15,25 @@ const _Pre = { idx: -1, url: '', resolving: false };
 // запуском» — сессия закрывается. Секунды играют берутся из живых аудио-часов
 // (currentTime / _waCurrentTime), а длительность — только из карточки того же
 // трека (_stevLen), не из того, что сейчас стоит в <audio>; не из таймера.
-// Событие — на момент
-// (старт/конец/скип/лайк/остановка), не на каждый кадр. Отправка
-// «выстрелил и забыл»: статистика не смеет тормозить или ломать игру.
-const _StEv = { session: '', source: '', queue: null };
-
-function _stevUuid() {
-  try { if (crypto.randomUUID) return crypto.randomUUID(); } catch (_) {}
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
-    const r = Math.random() * 16 | 0;
-    return (c === 'x' ? r : (r & 3) | 8).toString(16);
-  });
-}
+//
+// ГЛУБИНА (`played_s`/`length_s`) — на КАЖДОМ событии про трек, а не только на
+// скипе. Лайк, дизлайк и «скачал» происходят на конкретной секунде конкретной
+// записи, и молчать об этом значит терять ровно тот сигнал, из-за которого
+// петля и затевалась: и Яндекс (`totalPlayedSeconds`), и Spotify
+// (`time_played_ms` + `track_length_ms`) считают интерес по секундам, а не по
+// флагу «понравилось». Нет длительности — поля нет вовсе: «не знаю» честнее
+// вранья и не должно наказываться как «не слушали».
+//
+// ТРАНСПОРТ. Событие копится в `_StEv.pending` и уезжает ТЕЛОМ следующего
+// `/api/station/session/{id}/next` — ровно как `feedbacks` у Яндекса: сервер
+// пересобирает остаток пула уже ЗНАЯ, что человек сказал, и одной пачкой
+// вместо десяти одиночных POST. Не успевшее уехать (станцию остановили, вкладку
+// закрыли) дописывается напрямую в `/api/stations/event`. Без этого второго
+// пути «слушал 4 минуты из 6 и ушёл» не узнает никто — раньше, кстати, именно
+// так и было: ручная пауза и закрытие вкладки не писали ничего.
+//
+// Отправка «выстрелил и забыл»: статистика не смеет тормозить или ломать игру.
+const _StEv = { session: '', batch: '', source: '', queue: null, pending: [] };
 
 /** Позиция воспроизведения в секундах с того движка, что сейчас играет. */
 function _stevPos() {
@@ -70,35 +77,95 @@ function _stevActive() {
   return !!_StEv.session && Preview.queue === _StEv.queue && !!Preview.queue[Preview.idx];
 }
 
+/** Глубина прослушивания ИМЕННО этого трека: сколько звучало и каков он цели-
+ *  ком. Любое из чисел может отсутствовать — поля тогда просто нет. */
+function _stevDepth(item, played) {
+  const d = {};
+  const p = played === undefined ? _stevPos() : played;
+  if (p != null && isFinite(p)) d.played_s = Math.max(0, Math.round(p * 10) / 10);
+  const l = _stevLen(item);
+  if (l != null) d.length_s = l;
+  return d;
+}
+
+/** Текущий трек станции или null (чужая очередь — не событие станции). */
+function _stevItem() {
+  return _stevActive() ? Preview.queue[Preview.idx] : null;
+}
+
 function _stevSend(ev) {
+  if (!_StEv.session) return;
   try {
-    fetch('/api/stations/event', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
-      body: JSON.stringify(Object.assign({ session_id: _StEv.session, source: _StEv.source }, ev)),
-    }).catch(() => {});
+    _StEv.pending.push(Object.assign({ session_id: _StEv.session,
+                                       batch_id: _StEv.batch,
+                                       source: _StEv.source }, ev));
+    // Буфер обязан оставаться коротким: зависший `next` не имеет права
+    // разрастать память до размеров эфира.
+    if (_StEv.pending.length > 80) _StEv.pending.splice(0, _StEv.pending.length - 80);
+    // Любое событие значит, что слушатель сдвинулся по очереди, — заодно
+    // проверяем резерв. Дозаказ начинается за 3 трека, не за один.
+    if (typeof stRefillIfLow === 'function') stRefillIfLow();
   } catch (_) {}
 }
 
-/** Запуск станции — общую точку зовёт stations.js::stQueue. */
-function _stevStationStart(source) {
-  if (_StEv.session) _stevSend({ event: 'station_stopped', extra: { reason: 'replaced' } });
-  _StEv.session = _stevUuid();
+/** Забрать накопленное телом `/session/{id}/next`. */
+function _stevTakePending() {
+  const rows = _StEv.pending; _StEv.pending = [];
+  return rows;
+}
+
+/** `next` не дошёл — события возвращаются в буфер, а не исчезают. */
+function _stevReturnPending(rows) {
+  if (rows && rows.length) _StEv.pending = rows.concat(_StEv.pending);
+}
+
+/** Остаток буфера уходит в базу напрямую: стоп станции, закрытая вкладка. */
+function _stevFlushDirect() {
+  _StEv.pending.forEach(ev => {
+    try {
+      fetch('/api/stations/event', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify(ev),
+      }).catch(() => {});
+    } catch (_) {}
+  });
+  _StEv.pending = [];
+}
+
+/**
+ * Станция открыта: `session` и `batch` выдаёт СЕРВЕР (сессия станции живёт в
+ * `station_sessions.py`), фронт только шьёт их в каждое событие. До этого
+ * `session_id` придумывался здесь и не значил ничего, а `batch_id` не шлёт
+ * никто — сервер не знал, какая именно выдача сработала.
+ * Вызывается и при тихой ротации: резерв кончился, новая волна доклеивается к
+ * играющему эфиру — старая сессия закрывается, новая начинается, звук не
+ * прерывается.
+ */
+function _stevStationStart(source, session, batch) {
+  if (_StEv.session) _stevStationStop({ reason: 'replaced' });
+  _StEv.session = String(session || '');
+  _StEv.batch = String(batch || '');
   _StEv.source = String(source || '');
   _StEv.queue = Preview.queue;
   _stevSend({ event: 'station_started' });
 }
 
-function _stevStationStop() {
+/** Следующая пачка той же сессии: все новые события шьются её `batch_id`. */
+function _stevBatch(batch) { _StEv.batch = String(batch || ''); }
+
+function _stevStationStop(extra) {
   if (!_StEv.session) return;
   const item = _StEv.queue === Preview.queue ? Preview.queue[Preview.idx] : null;
-  _stevSend(Object.assign({ event: 'station_stopped' }, _stevMeta(item)));
-  _StEv.session = ''; _StEv.queue = null;
+  _stevSend(Object.assign({ event: 'station_stopped' }, _stevMeta(item),
+                          _stevDepth(item),
+                          extra ? { extra } : {}));
+  _stevFlushDirect();
+  _StEv.session = ''; _StEv.batch = ''; _StEv.queue = null;
 }
 
 function _stevTrackStarted(item) {
-  // length_s: null → JSON.stringify выкинет ключ: поля нет вовсе, если длительность неизвестна.
-  _stevSend(Object.assign({ event: 'track_started', played_s: 0,
-                            length_s: _stevLen(item) }, _stevMeta(item)));
+  _stevSend(Object.assign({ event: 'track_started' }, _stevMeta(item),
+                           _stevDepth(item, 0)));
 }
 
 /** Естественный конец трека. gapless=true — бесшовный стык: буфер доигран
@@ -107,11 +174,9 @@ function _stevEnded(gapless) {
   if (Preview._suppressEnded) return;        // фантомный «end» при смене источника
   if (!_stevActive()) return;
   const item = Preview.queue[Preview.idx];
-  const pos = _stevPos();
-  const len = _stevLen(item);
   _stevSend(Object.assign({ event: 'track_finished',
-                            played_s: gapless ? len : pos, length_s: len,
-                            extra: { end_reason: 'natural' } }, _stevMeta(item)));
+                            extra: { end_reason: 'natural' } }, _stevMeta(item),
+                          _stevDepth(item, gapless ? _stevLen(item) : _stevPos())));
 }
 
 /** Ручной переход вперёд/назад. Авто-переход после «end» сюда не попадает —
@@ -119,15 +184,39 @@ function _stevEnded(gapless) {
 function _stevSkip(dir) {
   if (!_stevActive()) return;
   const item = Preview.queue[Preview.idx];
-  _stevSend(Object.assign({ event: 'skip', played_s: _stevPos(), length_s: _stevLen(item),
-                            extra: { end_reason: dir } }, _stevMeta(item)));
+  _stevSend(Object.assign({ event: 'skip', extra: { end_reason: dir } },
+                          _stevMeta(item), _stevDepth(item)));
 }
 
-/** «В любимые» из плеера по треку станции — это плюс (кнопка dislike есть,
- *  поэтому минусов не шлём). */
-function _stevLike() {
-  if (!_stevActive()) return;
-  _stevSend(Object.assign({ event: 'like' }, _stevMeta(Preview.queue[Preview.idx])));
+/** «В любимые» из плеера — плюс, и с секундами: «полюбилось на 40-й из 200-й»
+ *  и «полюбилось в первые пять» для ранкера разные вещи. */
+function _stevLike(item) {
+  item = item || _stevItem();
+  if (!item || !_stevActive()) return;
+  _stevSend(Object.assign({ event: 'like' }, _stevMeta(item), _stevDepth(item)));
+}
+
+/**
+ * Минус по треку станции — единственная отрицательная обратная связь в живом
+ * эфире, и до сих пор её не шлёт никто: кнопки не было, события не было, а из-за
+ * этого механизм бана трека на сервере (`banned_track_keys`) оставался мёртвым
+ * кодом. `on=false` — сняли минус: тем же `undislike` бан снимается, иначе
+ * «навсегда» оказалось бы ловушкой для одной промашной кнопки.
+ */
+function _stevDislike(item, on) {
+  item = item || _stevItem();
+  if (!item || !_stevActive()) return;
+  _stevSend(Object.assign({ event: on ? 'dislike' : 'undislike' },
+                          _stevMeta(item), _stevDepth(item)));
+}
+
+/** Скачал = любит, и это самый сильный наш плюс (вес 1.5), которого у сервисов
+ *  нет вовсе. Раньше его не шлёт никто, и строка `downloads` в профиле артиста
+ *  на живых данных всегда ноль. */
+function _stevDownload(item) {
+  item = item || _stevItem();
+  if (!item || !_stevActive()) return;
+  _stevSend(Object.assign({ event: 'download' }, _stevMeta(item), _stevDepth(item)));
 }
 
 // Новый трек станции стартует через ту же разметку, что и подсветка очереди:
@@ -135,12 +224,32 @@ function _stevLike() {
 document.addEventListener('ripster:track-start', (e) => {
   if (!_StEv.session) return;
   if (Preview.queue !== _StEv.queue) {           // чужая очередь — станцию сменили
-    _stevSend({ event: 'station_stopped', extra: { reason: 'queue_change' } });
-    _StEv.session = ''; _StEv.queue = null;
+    _stevStationStop({ reason: 'queue_change' });
     return;
   }
   _stevTrackStarted((e.detail && e.detail.item) || Preview.queue[Preview.idx]);
 });
+
+// Вкладку закрыли: всё, что человек уже сказал этой пачке, обязано дойти до
+// базы. Без этого «слушал 4 минуты из 6 и ушёл» не узнает никто никогда.
+window.addEventListener('pagehide', () => {
+  if (_StEv.session) _stevStationStop({ reason: 'pagehide' });
+});
+
+/**
+ * Станция не имеет права кончаться тишиной. Очередь дошла до края, а резерв на
+ * сервере ещё есть (или пора открыть новую волну) — просим пачку СЕЙЧАС и
+ * продолжаем, когда она придёт: пауза в пару сотен миллисекунд лучше пустоты
+ * в колонках на остаток вечера. true — значит «тишину брать не нужно».
+ */
+function _stevExtendQueue() {
+  if (!_stevActive() || typeof stRefillNow !== 'function') return false;
+  stRefillNow().then(n => {
+    if (n > 0 && Preview.idx < Preview.queue.length - 1) previewNext(1);
+    else if (typeof closePreview === 'function') closePreview();
+  }).catch(() => { if (typeof closePreview === 'function') closePreview(); });
+  return true;
+}
 
 // Spotify items carry _streamService/_streamId — the ISRC-matched Deezer/Qobuz
 // copy the backend resolved, since Spotify has no /api/stream proxy of its own.
@@ -520,7 +629,7 @@ async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
       Preview._fpsEl = null;
       if (!Preview._suppressEnded) {
         if (Preview.idx >= 0 && Preview.idx < Preview.queue.length - 1) previewNext(1);
-        else closePreview?.();
+        else if (!_stevExtendQueue()) closePreview?.();
       }
     }, { once: true });
     fpsEl.addEventListener('error', () => {
@@ -1101,6 +1210,39 @@ function _plainStopIfPlaying() {
   } catch (_) {}
 }
 
+// ЕДИНЫЙ ВЛАДЕЛЕЦ ВОСПРОИЗВЕДЕНИЯ. В приложении два независимых звука: главный
+// плеер (pp-audio + Web Audio + свой тракт _NA + FairPlay/HLS) и BBC-радио
+// (отдельный <audio id="bbc-audio"> со своим HLS). Раньше каждый ПУСК глушил
+// только то, о чём сам догадывался: WA- и _na-ветки `_playPreviewAt` не трогали
+// BBC, поэтому Deezer/Tidal начинали играть ПОВЕРХ включённого радио — двойной
+// звук (замер 2026-09: pp-audio и bbc-audio оба не на паузе). Теперь перед ЛЮБЫМ
+// новым звуком вызывается эта функция, и она глушит ВСЁ, кроме того источника,
+// который сейчас сам стартует (`keep`). Ни один вызывающий код не принимает
+// решение о том, что заглушить, — решение живёт в одном месте.
+function _silenceAllBut(keep) {
+  if (keep !== 'main') {
+    // Отменяем незавершённый асинхронный старт главного плеера: резолв стрима
+    // идёт в `await`, и без this gen-гарда он доиграл бы бы старый трек.
+    Preview._playGen = (Preview._playGen || 0) + 1;
+    const a = document.getElementById('pp-audio');
+    // Снимаем src ПОЛНОСТЬЮ, а не только pause: поток в состоянии буферизации
+    // сам дёргает play() когда накопится — иначе Tidal «выстреливает» уже после
+    // того, как мы ушли на другой источник.
+    if (a) { try { a.pause(); } catch (_) {} a.removeAttribute('src'); try { a.load(); } catch (_) {} }
+    _waStopIfPlaying();
+    try { _waStopKeepalive(); } catch (_) {}
+    if (_NA.active) { try { _naStop(); } catch (_) {} }
+    if (Preview._hls) { Preview._hls.destroy(); Preview._hls = null; }
+    if (Preview._fpsEl) { Preview._fpsEl.pause(); Preview._fpsEl.src = ''; Preview._fpsEl = null; }
+  }
+  if (keep !== 'bbc') {
+    const b = document.getElementById('bbc-audio');
+    if (b) { try { b.pause(); } catch (_) {} b.removeAttribute('src'); try { b.load(); } catch (_) {} }
+    try { if (typeof BBC !== 'undefined' && BBC.hls) { BBC.hls.destroy(); BBC.hls = null; } } catch (_) {}
+    if (Preview.mode === 'bbc') Preview.mode = 'spotify';
+  }
+}
+
 async function _waPlay(idx, startAtSec = 0) {
   await _waInit();
   const item = Preview.queue[idx];
@@ -1404,7 +1546,7 @@ function _waAttachEnded(src, idx) {
       try { _stevEnded(); } catch (_) {}     // трек станции доиграл; дальше — обычный добор
       _waPlay(idx + 1, 0);
     }
-    else _WA.curSource = null;
+    else if (!_stevExtendQueue()) _WA.curSource = null;
   };
 }
 /* ══ СВОЙ ТРАКТ ДЛЯ ЛОКАЛЬНЫХ ФАЙЛОВ ═══════════════════════════════════════
@@ -2143,7 +2285,7 @@ function _setupAudioEvents() {
       return;   // don't auto-advance
     }
     if (Preview.idx >= 0 && Preview.idx < Preview.queue.length - 1) previewNext(1);
-    else closePreview();
+    else if (!_stevExtendQueue()) closePreview();
   });
   audio.addEventListener('error', () => {
     // MEDIA_ERR_ABORTED (code 1) = we changed src ourselves (a track switch). Never
@@ -2208,6 +2350,12 @@ async function _playPreviewAt(idx) {
   Preview._suppressEnded = true;
   clearTimeout(Preview._suppressEndedTimer);
   Preview._suppressEndedTimer = setTimeout(() => { Preview._suppressEnded = false; }, 250);
+  // Гасим ЛЮБОЙ чужой звук до развилки движков. Это тот же единственный
+  //chokepoint, что зовёт BBC: раньше `_playPreviewAt` глушил BBC только в
+  // обычном <audio>-пути ниже, а WA- и _na-ветки возвращались раньше и оставляли
+  // радио играть. `keep:'main'` — значит «оставь главный плеер в покое, он сам
+  // перезапустит свой источник», «заглуши остальное» (BBC).
+  _silenceAllBut('main');
   // Kill any SC DRM stream immediately — must happen before WA/audio path branching
   // so HLS.js / FairPlay video don't keep playing in parallel with the new track.
   if (Preview._hls) { Preview._hls.destroy(); Preview._hls = null; }
@@ -2272,13 +2420,9 @@ async function _playPreviewAt(idx) {
   const main  = document.querySelector('.main');
   if (!audio || !bar) return;
 
-  // Stop BBC if it was playing
-  if (Preview.mode === 'bbc') {
-    const bbcAudio = document.getElementById('bbc-audio');
-    if (BBC.hls) { BBC.hls.destroy(); BBC.hls = null; }
-    if (bbcAudio) { bbcAudio.pause(); bbcAudio.src = ''; }
-    Preview.mode = 'spotify';
-  }
+  // BBC здесь больше не глушим — это делает `_silenceAllBut('main')` в начале
+  // функции, до развилки движков. Две точки «остановить радио» однажды бы
+  // разошлись, и WA-ветка снова оставила бы её без присмотра.
 
   ['pp-fill','pp-fill-big'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = '0%'; });
   ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = (id==='pp-cur') ? '0:00.000' : '0:00'; });
@@ -2616,6 +2760,11 @@ function previewNext(auto) {
     if (!auto) { try { _stevSkip('skip_forward'); } catch (_) {} }
     Preview.idx++;
     _playPreviewAt(Preview.idx);
+  } else if (!auto) {
+    // «Дальше» на последнем треке станции — не тишина, а дозаказ: трек
+    // оборвали (это skip), эфира больше нет (просим пачку).
+    try { _stevSkip('skip_forward'); } catch (_) {}
+    _stevExtendQueue();
   }
 }
 
@@ -2651,9 +2800,29 @@ function previewSeek(event) {
     return;
   }
   const audio = document.getElementById('pp-audio');
-  if (!audio || !audio.duration || !isFinite(audio.duration)) return;
-  try { audio.currentTime = frac * audio.duration; }
-  catch (e) { console.warn('seek failed:', e.message); }
+  if (!audio) return;
+  // Перемотка была МЁРТВА молча: если <audio> ещё не знал длительности (поток с
+  // Accept-Ranges:none, HLS-лайв, метаданные не успели разрезолвиться), старый код
+  // делал `if (!isFinite(duration)) return;` и клик по полосе просто пропадал —
+  // «перетаскиваю, а ничего не происходит». Берём длину из того же источника,
+  // которым живёт сама полоса (`_stevLen`: метаданные очереди или движок,
+  // играющий ЭТОТ трек) и мотаем по ней; если и так нечем — честно говорим
+  // причину вместо немого возврата.
+  let dur = (isFinite(audio.duration) && audio.duration) ? audio.duration : null;
+  if (!dur) dur = _stevLen(Preview.queue[Preview.idx]);
+  if (!dur) { _seekUnsupported(); return; }
+  try { audio.currentTime = frac * dur; }
+  catch (e) { console.warn('seek failed:', e.message); _seekUnsupported(); }
+}
+
+// Одно сообщение на серию кликов: поток без Range-поддержки перемотать нельзя,
+// и молча игнорировать полосу — хуже, чем сказать это вслух.
+let _seekUnsupportedAt = 0;
+function _seekUnsupported() {
+  const now = Date.now();
+  if (now - _seekUnsupportedAt < 3000) return;
+  _seekUnsupportedAt = now;
+  try { toast(t('pp.seek_unsupported'), 'var(--orange)', '', 4000); } catch (_) {}
 }
 
 // ── YouTube-style chapters + buffered (cache) bar + per-service progress colour ──
@@ -2743,6 +2912,105 @@ function _pqSyncChapters() {
   }
 }
 
+// ── Контраст меток глав (#9011) ─────────────────────────────────────────────
+// Полоса проигрывания — слоёная: `--player-bg` дока, поверх — пустой рельс
+// `--pp-track` и сыгранная полоса `--pp-svc` при 24%. Раньше метка красилась
+// хардкодным `rgba(0,0,0,.55)`: на тёмных темах это читалось, а на светлых и
+// сепии чёрный по чёрноподобному фону пропадал. Метка маленькая и не несёт
+// текста, поэтому требуем WCAG 3:1 (UI-components), подобранную ВСЕГДУ по двум
+// подложкам — пустому рельсу и сыгранной полосе.
+function _stParseColor(str) {
+  if (!str) return null;
+  str = String(str).trim();
+  let m = /^rgba?\(([^)]+)\)$/i.exec(str);
+  if (m) {
+    const p = m[1].split(/[,\s/]+/).filter(Boolean).map(parseFloat);
+    return { r: p[0] || 0, g: p[1] || 0, b: p[2] || 0, a: p.length > 3 ? p[3] : 1 };
+  }
+  m = /^#([0-9a-f]{3,8})$/i.exec(str);
+  if (m) {
+    let h = m[1];
+    if (h.length === 3 || h.length === 4) h = h.replace(/./g, c => c + c);
+    const n = parseInt(h.slice(0, 6), 16);
+    const a = h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a };
+  }
+  return null;
+}
+function _stOver(fg, bg) {           // foreground над подложкой — итоговый RGB
+  const a = fg.a == null ? 1 : fg.a;
+  return { r: fg.r * a + bg.r * (1 - a), g: fg.g * a + bg.g * (1 - a), b: fg.b * a + bg.b * (1 - a) };
+}
+function _stLum(c) {
+  const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+}
+function _stCR(a, b) {
+  const la = _stLum(a), lb = _stLum(b), hi = Math.max(la, lb), lo = Math.min(la, lb);
+  return (hi + 0.05) / (lo + 0.05);
+}
+function _stMix(a, b, p) {           // color-mix(in srgb, A P%, B)
+  return { r: a.r + (b.r - a.r) * p, g: a.g + (b.g - a.g) * p, b: a.b + (b.b - a.b) * p,
+           a: a.a + (b.a - a.a) * p };
+}
+
+/** Цвет метки главы, подобранный под ТЕКУЩУЮ тему. Возвращает CSS-цвет. */
+function _stTickColor(bar) {
+  try {
+    const rootStyle = getComputedStyle(document.documentElement);
+    const tok = n => _stParseColor(rootStyle.getPropertyValue(n)) ||
+                    _stParseColor(getComputedStyle(bar).backgroundColor);
+    // Прозрачность проверяется у ПЕРЕДНЕГО цвета, а не у подложки. С обратной
+    // проверкой `over(--text, dock)` возвращал цвет дока вместо цвета текста,
+    // из-за чего мягкие кандидаты («текст», «приглушённый») схлопывались в фон,
+    // проваливали порог контраста, и всегда побеждал чистый белый или чёрный —
+    // замер показывал 18–21:1 вместо нужных ~3–6.
+    const over = (c, bg) => (c.a == null || c.a >= 0.999 ? c : _stOver(c, bg));
+    const raw = n => _stParseColor(rootStyle.getPropertyValue(n));
+    const dock = over(tok('--player-bg'), tok('--bg'));
+    const empty = over(tok('--pp-track'), dock);
+    // `--pp-svc` ставится только когда что-то играет (_applyServiceColor).
+    // Пока её нет, ВЫДУМЫВАТЬ проигранную полосу нельзя: подставной цвет
+    // отравлял выбор и метка получалась белой на светлой теме. Нет цвета —
+    // считаем по одному пустому рельсу, и это честно.
+    const svc = raw('--pp-svc');
+    const backs = [empty];
+    if (svc) {
+      backs.push(over(_stMix(over(svc, dock),
+                             { r: dock.r, g: dock.g, b: dock.b, a: 1 }, 0.76), dock));
+    }
+    const cands = [
+      _stParseColor('#ffffff'), _stParseColor('#000000'),
+      over(tok('--text'), dock), over(tok('--muted'), dock),
+      // Полутона между текстом и рельсом: именно из них обычно выходит мягкая
+      // метка на 3–6:1, которой не хватало в списке.
+      _stMix(over(tok('--text'), dock), empty, 0.35),
+      _stMix(over(tok('--text'), dock), empty, 0.55),
+      _stMix(over(tok('--muted'), dock), empty, 0.4),
+    ].filter(Boolean);
+    // Берём САМОГО МЯГКОГО из проходящих порог, а не самого контрастного.
+    // Максимизация всегда выдавала чистый белый (тёмные темы) или чистый
+    // чёрный (светлые) — замер показал 18–21:1, и тонкая метка превращалась в
+    // жёсткую полосу поперёк шкалы, которую владелец назвал идеальной. Порог
+    // 3:1 (WCAG для элементов интерфейса) — это то, что нужно ВЫПОЛНИТЬ, а не
+    // то, что нужно перекрыть втрое.
+    const NEED = 3.0;
+    let best = null, fallback = null;
+    cands.forEach(c => {
+      const worst = Math.min.apply(null, backs.map(b => _stCR(c, b)));
+      if (!fallback || worst > fallback.worst) fallback = { c: c, worst: worst };
+      if (worst >= NEED && (!best || worst < best.worst)) best = { c: c, worst: worst };
+    });
+    // Ни один кандидат не дотянул — тогда уже берём самый контрастный: лучше
+    // резкая метка, чем невидимая.
+    best = best || fallback;
+    if (!best) return 'rgba(0,0,0,.55)';
+    const hex = '#' + [best.c.r, best.c.g, best.c.b]
+      .map(v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
+    return hex;
+  } catch (_) { return 'rgba(0,0,0,.55)'; }
+}
+
 function _renderChapterTicks() {
   const chapters = Preview._chapters || [];
   const dur = _playerDuration();
@@ -2750,13 +3018,14 @@ function _renderChapterTicks() {
     const bar = document.getElementById(barId); if (!bar) return;
     bar.querySelectorAll('.pp-tick').forEach(t => t.remove());
     if (!dur || !chapters.length) return;
+    const tickColor = _stTickColor(bar);   // theme-aware; было rgba(0,0,0,.55) — невидим на светлых темах
     chapters.forEach(ch => {
       if (ch.seconds <= 0 || ch.seconds >= dur) return;
       const d = document.createElement('div');
       d.className = 'pp-tick';
       // Thin centred marker (not full-height) so the seek bar stays a clean line
       // instead of a row of tall blocks on the fullscreen player.
-      d.style.cssText = `position:absolute;top:50%;transform:translateY(-50%);height:10px;width:2px;left:${(ch.seconds/dur*100).toFixed(2)}%;background:rgba(0,0,0,.55);pointer-events:none;z-index:2`;
+      d.style.cssText = `position:absolute;top:50%;transform:translateY(-50%);height:10px;width:2px;left:${(ch.seconds/dur*100).toFixed(2)}%;background:${tickColor};pointer-events:none;z-index:2`;
       bar.appendChild(d);
     });
   });
@@ -2797,7 +3066,12 @@ function previewSeekTo(seconds) {
   if (_waEnabled() && _WA.curBuffer) { _waSeek(seconds); return; }
   if (Preview._fpsEl && isFinite(Preview._fpsEl.duration)) { try { Preview._fpsEl.currentTime = seconds; } catch (_) {} return; }
   const a = document.getElementById('pp-audio');
-  if (a && isFinite(a.duration)) { try { a.currentTime = seconds; } catch (_) {} }
+  // Цель уже задана в секундах (клик по треку списка), так что известная
+  // длительность для вычисления не нужна — нужен только сам элемент. Старый
+  // `isFinite(duration)` молча отбрасывал переход по главам на HLS/лайв-потоках,
+  // где duration === Infinity, но currentTime писать можно. Пишем и глушим
+  // ошибку честным тостом, а не пустотой.
+  if (a) { try { a.currentTime = seconds; } catch (_) { _seekUnsupported(); } }
 }
 
 function previewMute() {
@@ -3590,7 +3864,7 @@ window.addEventListener('load', () => {
 
 function closePreview() {
   // Станция кончилась вместе с плеером — закрываем сессию ДО сброса очереди.
-  try { _stevStationStop(); } catch (_) {}
+  try { _stevStationStop({ reason: 'closed' }); } catch (_) {}
   // Invalidate any in-flight _playPreviewAt (a stream URL still resolving) so it
   // can't start playback after we've closed — the "closed but still playing" bug.
   Preview._playGen = (Preview._playGen || 0) + 1;

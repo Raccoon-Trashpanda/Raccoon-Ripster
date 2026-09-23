@@ -66,9 +66,9 @@ class SoundcloudEngine(EngineBase):
     # сказать это прямо, чем изображать выбор.
     _QUALITIES = [
         {
-            "id": "best", "label": "Лучшее доступное", "engine": "soundcloud",
-            "sub": "AAC 256 на Go+ треках, иначе AAC 160 или MP3 128 — что отдаст сервис",
-            "badge": "BEST", "color": "#ff5500", "bitrate": "до 256 kbps",
+            "id": "best", "label": "Лучшее доступное", "label_key": "qual.soundcloud.best.label", "engine": "soundcloud",
+            "sub": "AAC 256 на Go+ треках, иначе AAC 160 или MP3 128 — что отдаст сервис", "sub_key": "qual.soundcloud.best.sub", "sub_args": {"hi": "AAC 256", "mid": "AAC 160", "lo": "MP3 128"},
+            "badge": "BEST", "color": "#ff5500", "bitrate": "до 256 kbps", "bitrate_key": "qual.soundcloud.best.bitrate", "bitrate_args": {"rate": "256 kbps"},
             "ext": "m4a", "req": "none",
         },
     ]

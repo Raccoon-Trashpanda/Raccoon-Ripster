@@ -9,7 +9,7 @@ from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_
 from .registry import register
 
 _QUALITIES = [
-    {"id":"alac-hires","label":"ALAC Hi-Res","sub":"audio-alac-stereo (до 24/192)","badge":"HI-RES","color":"#ffd60a","bitrate":"≤9216 kbps","ext":"m4a","req":"wrapper","flag":""},
+    {"id":"alac-hires","label":"ALAC Hi-Res","sub":"audio-alac-stereo (до 24/192)","sub_key":"qual.zhaarey.alac-hires.sub","sub_args":{"codec":"audio-alac-stereo","limit":"24/192"},"badge":"HI-RES","color":"#ffd60a","bitrate":"≤9216 kbps","ext":"m4a","req":"wrapper","flag":""},
     {"id":"alac",    "label":"ALAC",    "sub":"audio-alac-stereo",    "badge":"LOSSLESS","color":"#c084a0","bitrate":"≤1411 kbps",    "ext":"m4a","req":"wrapper","flag":""},
     {"id":"atmos",   "label":"Atmos",   "sub":"audio-atmos / EC-3",   "badge":"SPATIAL", "color":"#9090c8","bitrate":"2448–2768 kbps","ext":"m4a","req":"wrapper","flag":"--atmos"},
     {"id":"aac",     "label":"AAC 256", "sub":"audio-stereo",         "badge":"LOSSY",   "color":"#EF9F27","bitrate":"256 kbps",      "ext":"m4a","req":"token",  "flag":"--aac"},
@@ -154,15 +154,21 @@ class ZhaereyEngine(EngineBase):
     def iter_events(self, line: str, *, progress: tuple[int, int]):
         clean = _strip_ansi(line)
         if _RE_DECRYPT_FAIL.search(clean):
-            # «Invalid CKC» ≠ «сессия умерла». Второй, куда более частый случай —
-            # у контента просто нет прав в регионе аккаунта враппера. Раньше мы
-            # не различали: помечали враппер нездоровым на 15 минут и уводили ВСЮ
-            # lossless-загрузку на публичный wrapper (который регулярно лежит), а
-            # владельцу советовали перелогиниться — совет не просто бесполезный,
-            # а вредный: лишние логины жгут device-lease и загоняют аккаунт в
-            # throttle. 28.07.2026 так и вышло на альбоме, изданном только в
-            # tr/ru, при канадском аккаунте — в те же минуты этот же враппер
-            # расшифровал соседний альбом целиком.
+            # «Invalid CKC» ≠ «сессия умерла». Второй частый случай — у контента
+            # нет прав в регионе аккаунта враппера. Раньше мы не различали:
+            # помечали враппер нездоровым на 15 минут и уводили ВСЮ lossless-
+            # загрузку на публичный wrapper (который регулярно лежит), а владельцу
+            # советовали перелогиниться — совет не просто бесполезный, а вредный:
+            # лишние логины жгут device-lease и загоняют аккаунт в throttle.
+            # 28.07.2026 так и вышло на альбоме, изданном только в tr/ru, при
+            # канадском аккаунте — в те же минуты этот же враппер расшифровал
+            # соседний альбом целиком.
+            #
+            # 22.09.2026 добавился ТРЕТИЙ случай, и он врал уже в обратную
+            # сторону: «сессия ЖИВА» проверялась у основного контейнера, а ключ
+            # запрашивал закреплённый за задачей слот, у которого внутри стоял
+            # device-limit. Поэтому здесь мы больше не выводим из живости сессии
+            # «нет прав в регионе» — права проверяет раннер по каталогу.
             alive = False
             try:
                 from ripster.apple_router import (mark_local_wrapper_unhealthy,
@@ -176,10 +182,10 @@ class ZhaereyEngine(EngineBase):
                 yield Event(
                     kind=EventKind.FATAL,
                     message="✗ Apple не выдал ключ на этот альбом (Invalid CKC), "
-                            "но сессия wrapper'а ЖИВА — значит у контента нет прав "
-                            "в регионе аккаунта. Перелогин НЕ поможет: возьми "
-                            "релиз через AMD (публичный wrapper держит несколько "
-                            "регионов) или ссылкой из другой витрины.",
+                            "но сессия wrapper'а ЖИВА — значит перелогин не поможет "
+                            "и руками ничего делать не надо: Ripster перебирает "
+                            "остальные свои Apple-аккаунты и по каждому назовёт "
+                            "причину (витрина, лимит устройств, права).",
                     level=LineLevel.ERROR,
                 )
             else:
@@ -187,8 +193,8 @@ class ZhaereyEngine(EngineBase):
                     kind=EventKind.FATAL,
                     message="✗ Локальный wrapper не выдаёт ключ (Invalid CKC) и "
                             "аккаунт-API молчит — Apple-сессия протухла/без "
-                            "подписки. Перелогинь wrapper или качай через AMD. "
-                            "Следующие lossless-задачи уйдут на AMD автоматически.",
+                            "подписки. Перелогинь wrapper в Setup → Apple → "
+                            "Wrapper (другие свои учётки тоже будут опрошены).",
                     level=LineLevel.ERROR,
                 )
             return
@@ -500,7 +506,8 @@ class ZhaereyEngine(EngineBase):
                 # result.error or f"Exit code {rc}").
                 return EngineResult(False, tracks_ok=0, tracks_err=total, error=(
                     "Apple: трек недоступен в этом регионе/качестве (Unavailable) — "
-                    "смени storefront (регион) или качай через AMD (публичный wrapper)."))
+                    "у этой учётки нет прав на него. Поможет ссылка из той витрины, "
+                    "где релиз есть, или другое качество."))
             if ok == 0:
                 # Ноль из N БЕЗ распознанной причины. Раньше сюда попадал
                 # `EngineResult` с пустым `error`, и runner рендерил его как
@@ -515,26 +522,32 @@ class ZhaereyEngine(EngineBase):
                 return EngineResult(False, tracks_ok=0, tracks_err=total,
                                     error=_last_reason(log_text, total))
             return EngineResult(success=ok > 0, tracks_ok=ok, tracks_err=total-ok)
-        # Local docker wrapper couldn't mint a content key — the wrapper's saved
-        # Apple SESSION is expired/unsubscribed (logs "Invalid CKC"). This is the
-        # decrypt path, NOT the gamdl cookies (cookies feed AAC/video/metadata and
-        # can be perfectly valid here). is_finished is what the card / bot / guest
-        # actually display, so surface the REAL, cookies-vs-wrapper-distinct reason
-        # instead of the useless "unknown finish state". (iter_events already shows
-        # this live and flags the wrapper unhealthy; this mirrors it for the final
-        # result so non-console surfaces see it too.)
+        # Local docker wrapper couldn't mint a content key (logs "Invalid CKC").
+        # This is the decrypt path, NOT the gamdl cookies (those feed
+        # AAC/video/metadata and can be perfectly valid here), and is_finished is
+        # what the card / bot / guest actually display — so it has to say
+        # something better than "unknown finish state".
+        #
+        # What it must NOT do is name a CAUSE. The engine sees one process log and
+        # cannot tell an expired session from a device-lease refusal from a slot
+        # with no account inside. 22.09.2026 this line asserted "сессия протухла
+        # или без активной подписки" while slot 0's session was verifiably alive
+        # and the pinned slot was sitting on `response type 6`; the owner acted on
+        # the wrong diagnosis. The per-slot reason belongs to the runner's ladder,
+        # which asks each wrapper container and reports slot by slot.
         if _RE_DECRYPT_FAIL.search(log_text):
             return EngineResult(False, error=(
-                "Локальный wrapper не выдал ключ (Invalid CKC) — сессия wrapper'а "
-                "протухла или без активной подписки Apple Music. Куки тут ни при "
-                "чём (они для AAC/видео/метаданных). Перелогинь wrapper в "
-                "Setup → Apple → Wrapper или переключись на AMD (публичный wrapper)."))
+                "Локальный wrapper не выдал ключ (Invalid CKC). Куки тут ни при "
+                "чём (они для AAC/видео/метаданных). Почему именно — говорит "
+                "перебор своих учёток: он спрашивает каждый слот враппера и "
+                "называет причину по каждому (сессия, лимит устройств, права "
+                "витрины)."))
         if _RE_DECRYPT_NA.search(log_text):
             return EngineResult(False, error=(
                 "Apple: декрипт недоступен для этих треков — wrapper не смог их "
-                "расшифровать (локальная Apple-сессия wrapper'а протухла/без подписки, "
-                "либо публичный wm.wol.moe перегружен). Файлы НЕ сохранены. "
-                "Перелогинь wrapper (Setup → Apple → Wrapper) или повтори позже."))
+                "расшифровать. Файлы НЕ сохранены. Причина не в куках; её называет "
+                "перебор своих учёток (по каждому слоту). Повтори позже или "
+                "перелогинь wrapper в Setup → Apple → Wrapper."))
         if _RE_NO_LOSSLESS.search(log_text):
             m = re.search(r"no (?:lossless \(ALAC\)|ALAC) stream[^\n]*", log_text, re.I)
             detail = (m.group(0).strip() if m else "нет ALAC-потока")
@@ -557,7 +570,8 @@ class ZhaereyEngine(EngineBase):
             if _RE_UNAVAIL.search(log_text):
                 return EngineResult(False, error=(
                     "Apple: трек недоступен в этом регионе/качестве (Unavailable) — "
-                    "смени storefront (регион) или качай через AMD (публичный wrapper)."))
+                    "у этой учётки нет прав на него. Поможет ссылка из той витрины, "
+                    "где релиз есть, или другое качество."))
             return EngineResult(success=True)
         return EngineResult(False, error="unknown finish state")
 

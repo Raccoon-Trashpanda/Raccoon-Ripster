@@ -20,7 +20,9 @@
 <script src="/static/vendor/hls.min.js?v=1520"></script>
 <link rel="preconnect" href="https://fonts.googleapis.com"/>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&family=Atkinson+Hyperlegible:wght@400;700&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
-<link rel="stylesheet" href="/static/css/main.css?v=130"/>
+<link rel="stylesheet" href="/static/css/main.css?v=138"/>
+<link rel="stylesheet" href="/static/css/player_dnd.css?v=1"/>
+<link rel="stylesheet" href="/static/panel/host.css?v=2"/>
 </head>
 <body>
 <div id="net-progress"></div>
@@ -59,13 +61,10 @@
     </div>
     <button id="mobile-menu-btn" onclick="toggleMobileDrawer()" data-i18n-title="tb.menu" title="Меню"
       style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:32px;height:32px;font-size:17px;cursor:pointer;align-items:center;justify-content:center;flex-shrink:0;color:var(--text);padding:0;line-height:1">☰</button>
-    <!-- Wrapper status pill stays visible — it's the only one that signals an actionable problem -->
-    <div id="wrapper-pill" class="pill pill-warn" style="cursor:pointer;margin-left:auto"
-         onclick="showView('settings',document.querySelector('[data-view=settings]'))"
-         title="Wrapper decryption service status">
-      <div class="dot"></div>Wrapper: ?
-    </div>
-    <span id="tb-details-dot" style="display:none"></span>
+    <!-- Статусные лампы (Wrapper / Public wrapper) и кардиограмма-индикатор
+         убраны по решению владельца, 21.09.2026. Спаннер — чтобы правый угол
+         (язык + тема) прижался к краю, как это делал margin-left:auto на лампе. -->
+    <div style="flex:1;min-width:0"></div>
     <button class="glob-btn" id="lang-switcher" onclick="cycleLang(event)" data-i18n-title="tb.lang_t" title="Следующий язык (клик по точке — выбрать конкретный)">
       <span class="gi">🌐</span><span class="code" id="lang-code">RU</span>
       <span class="dots" id="lang-dots">
@@ -78,40 +77,6 @@
     </button>
     <button id="theme-btn" onclick="toggleTheme()" class="tb-icon-btn"
             data-i18n-title="tb.theme_t" title="Тема оформления">🌙</button>
-    <!-- Live-connection indicator. Wordless on purpose: a "● Connected" label in the
-         chrome reads as a debug widget, not as product. State lives in data-state
-         (live / wait / off) and the wording survives only in the tooltip.
-         Framed as its own little instrument window in the corner, at double size. -->
-    <div class="tb-pulse tb-pulse-framed" id="tb-status" data-state="off" role="status" aria-live="polite"
-         onclick="toggleDetailsPopover(event)"
-         data-i18n-title="tb.ws_off" title="Нет связи с сервером">
-      <!-- No SVG <mask> here on purpose. An SVG mask over a moving element forces
-           a full raster re-composite every frame — that, not the drop-shadow, was
-           the remaining source of the stutter. The edge feather is now a CSS
-           mask-image on the <svg> (compositor-only), and the travel animation
-           moves ONE group instead of two separate paths, so there is a single
-           promoted layer and nothing to keep in sync. -->
-      <svg viewBox="0 0 56 34" preserveAspectRatio="xMidYMid meet" aria-hidden="true" focusable="false">
-        <g>
-          <path class="tb-pulse-base" d="M0 24 H56"/>
-          <g class="tb-pulse-run">
-            <!-- The glow is a second, thicker copy of the trace rather than a CSS
-                 drop-shadow: a filter on an animated element is recomputed every
-                 frame and drops out of GPU compositing. Both copies carry the same
-                 `d`, set from CSS so the morph can transition it. -->
-            <path class="tb-pulse-glow"/>
-            <path class="tb-pulse-wave"/>
-          </g>
-          <!-- Raccoon detail (eye + mask stripe): invisible while the trace runs,
-               fades in only once the line has settled into the face. -->
-          <g class="tb-pulse-face-detail">
-            <path class="tb-pulse-mask" d="M19.4 11.2 C23.4 10.2, 28.4 12.6, 33.2 16.8 C30.4 19.2, 24.2 17.0, 20.6 14.4 Z"/>
-            <circle class="tb-pulse-eye" cx="24.6" cy="13.5" r="1.9"/>
-            <circle class="tb-pulse-nose" cx="37.6" cy="22.2" r="1.8"/>
-          </g>
-        </g>
-      </svg>
-    </div>
     <button class="tb-restart owner-only" id="tb-restart-btn" onclick="restartServer()" data-i18n-title="tb.restart_t" title="Перезапустить сервер" style="display:none">↺</button>
   </header>
   <div id="restart-overlay" style="display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.7);align-items:center;justify-content:center;flex-direction:column;gap:12px">
@@ -119,11 +84,8 @@
     <div style="color:var(--muted);font-size:13px" data-i18n="tb.reload_auto">Страница обновится автоматически</div>
   </div>
 
-  <!-- Details popover — lives outside topbar (which has overflow:hidden) so it
-       can visually extend into the main area when open -->
-  <div id="tb-details-pop" style="display:none;position:fixed;top:60px;right:16px;z-index:9999;min-width:280px;background:var(--surface2);border:1px solid var(--border2);border-radius:12px;padding:14px 16px;box-shadow:0 14px 40px rgba(0,0,0,.6);font-size:12px">
-    <div id="tb-details-body"></div>
-  </div>
+  <!-- Details popover removed together with the pulse: the pulse window was
+       its only opener. -->
 
   <!-- ── SIDEBAR ── -->
   <nav class="sidebar">
@@ -134,6 +96,11 @@
     </div>
     <div class="nav-item" data-view="search" onclick="showView('search',this)">
       <span class="icon">🔍</span> <span data-i18n="nav.search">Поиск</span>
+    </div>
+    <!-- Панель — не вью, а оверлей поверх любого экрана: кнопка в баре плеера
+         живёт только во время игры, этот вход доступен всегда (трекер #37). -->
+    <div class="nav-item" id="nav-panel-btn" onclick="rpPanelToggle()" data-i18n-title="panel.btn_hint">
+      <span class="icon">⧉</span> <span data-i18n="nav.panel">Панель</span>
     </div>
     <div class="nav-item" data-view="history" onclick="showView('history',this);loadHistory()">
       <span class="icon">◷</span> <span data-i18n="nav.history">История</span>
@@ -351,12 +318,12 @@
         <!-- Volume: mute icon + inline horizontal slider (flat, centred, consistent with the rest of the bar) -->
         <div id="pp-vol-wrap" style="display:flex;align-items:center;gap:7px;flex-shrink:0">
           <button id="pp-mute" onclick="previewMute()" data-i18n-title="pp.mute" data-i18n-title="pp.mute" title="Без звука" style="width:28px;height:28px;border-radius:50%;background:transparent;color:var(--text);border:none;cursor:pointer;font-size:14px;padding:0">🔊</button>
-          <input id="pp-vol" type="range" min="0" max="1" step="0.05" value="1" oninput="previewVolume(this.value)" data-i18n-title="pp.volume" title="Громкость" aria-label="Громкость"/>
+          <input id="pp-vol" type="range" min="0" max="1" step="0.05" value="1" oninput="previewVolume(this.value)" data-i18n-title="pp.volume" title="Громкость" data-i18n-aria="pp.volume" aria-label="Громкость"/>
         </div>
         <!-- extras — tight Win10-tile cluster -->
         <div style="display:flex;align-items:center;gap:3px;flex-shrink:0">
           <button onclick="togglePlayerExpanded()" id="pp-expand-btn" data-i18n-title="pp.expand_collapse" data-i18n-title="pp.expand_collapse" title="Развернуть / Свернуть" class="pp-extra">⌃</button>
-          <button onclick="floatPlayer()" id="pp-float-btn" data-i18n-title="pp.float_hint" data-i18n-title="pp.float_hint" title="Открыть в плавающем окне (работает даже когда браузер свернут)" class="pp-extra">⧉</button>
+          <button onclick="rpPanelToggle()" id="pp-float-btn" data-i18n-title="panel.btn_hint" title="Мобильная панель внутри окна ПК" class="pp-extra">⧉</button>
           <button id="pp-local-btn" onclick="document.getElementById('pp-local-input').click()" data-i18n-title="pp.local_file" data-i18n-title="pp.local_file" title="Слушать локальный файл" class="pp-extra">📂</button>
           <button onclick="closePreview()" data-i18n-title="pp.close_player" data-i18n-title="pp.close_player" title="Закрыть плеер" class="pp-extra">✕</button>
         </div>
@@ -377,9 +344,9 @@
 
     <!-- Top bar -->
     <div class="fp-top">
-      <button class="fp-icon-btn" onclick="fpClose()" data-i18n-title="fp.dock" title="Свернуть в док" aria-label="Свернуть">⌄</button>
+      <button class="fp-icon-btn" onclick="fpClose()" data-i18n-title="fp.dock" title="Свернуть в док" data-i18n-aria="digs.less" aria-label="Свернуть">⌄</button>
       <div class="fp-top-label" id="fp-source" data-i18n="fp.now_playing">Сейчас играет</div>
-      <button class="fp-icon-btn" onclick="fpMenu(event)" data-i18n-title="fp.menu" title="Меню" aria-label="Меню">⋯</button>
+      <button class="fp-icon-btn" onclick="fpMenu(event)" data-i18n-title="fp.menu" title="Меню" data-i18n-aria="fp.menu" aria-label="Меню">⋯</button>
     </div>
 
     <!-- Cover -->
@@ -400,7 +367,7 @@
     <!-- Seek -->
     <div class="fp-seek-wrap">
       <div id="fp-progress" class="fp-seek" onclick="previewSeek(event)" role="slider"
-           aria-label="Перемотка" data-i18n-title="pp.seek" title="Перемотка">
+           data-i18n-aria="pp.seek" aria-label="Перемотка" data-i18n-title="pp.seek" title="Перемотка">
         <!-- Волна = полоса перемотки (референс neon-reference-mobile.png).
              pointer-events:none — клик и протяжка достаются полосе, перемотка штатная. -->
         <canvas id="fp-wave" aria-hidden="true"></canvas>
@@ -416,9 +383,9 @@
 
     <!-- Big controls -->
     <div class="fp-controls">
-      <button class="fp-ctrl" onclick="previewPrev()" data-i18n-title="pp.prev" title="Предыдущий" aria-label="Предыдущий">⏮</button>
-      <button id="fp-play" class="fp-ctrl fp-play" onclick="previewToggle()" aria-label="Воспроизведение/Пауза">▶</button>
-      <button class="fp-ctrl" onclick="previewNext()" data-i18n-title="pp.next" title="Следующий" aria-label="Следующий">⏭</button>
+      <button class="fp-ctrl" onclick="previewPrev()" data-i18n-title="pp.prev" title="Предыдущий" data-i18n-aria="pp.prev" aria-label="Предыдущий">⏮</button>
+      <button id="fp-play" class="fp-ctrl fp-play" onclick="previewToggle()" data-i18n-aria="pp.play_pause" aria-label="Воспроизведение/Пауза">▶</button>
+      <button class="fp-ctrl" onclick="previewNext()" data-i18n-title="pp.next" title="Следующий" data-i18n-aria="pp.next" aria-label="Следующий">⏭</button>
     </div>
 
     <!-- Extra row: speed / sleep / queue -->
@@ -471,21 +438,22 @@
   <button type="button" onclick="closeLightbox()" style="position:absolute;top:16px;right:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:none;cursor:pointer;font-size:16px;backdrop-filter:blur(4px)">✕</button>
 </div>
 
-<script src="/static/js/i18n.js?v=10175"></script>
+<script src="/static/js/i18n.js?v=10196"></script>
 <script src="/static/js/boot_splash.js?v=2"></script>
-<script src="/static/js/views.js?v=10105"></script>
+<script src="/static/js/views.js?v=10112"></script>
 <script src="/static/js/scrolltop.js?v=1"></script>
-<script src="/static/js/cover_tint.js?v=3"></script>
-<script src="/static/js/dlorb.js?v=3"></script>
-<script src="/static/js/artist_follow.js?v=1"></script>
+<script src="/static/js/cover_tint.js?v=5"></script>
+<script src="/static/js/dlorb.js?v=5"></script>
+<script src="/static/js/artist_follow.js?v=2"></script>
 <script src="/static/js/render_perf.js?v=2"></script>
-<script src="/static/js/nudges.js?v=2"></script>
-<script src="/static/js/app.js?v=10137"></script>
-<script src="/static/js/wrapper.js?v=7"></script>
-<script src="/static/js/coder.js?v=9"></script>
-<script src="/static/js/queue_tree.js?v=2"></script>
-<script src="/static/js/guest.js?v=1"></script>
-<script src="/static/js/setup_ui.js?v=9"></script>
+<script src="/static/js/nudges.js?v=4"></script>
+<script src="/static/js/app.js?v=10145"></script>
+<script src="/static/js/telemetry_consent.js?v=1"></script>
+<script src="/static/js/wrapper.js?v=8"></script>
+<script src="/static/js/coder.js?v=10"></script>
+<script src="/static/js/queue_tree.js?v=3"></script>
+<script src="/static/js/guest.js?v=2"></script>
+<script src="/static/js/setup_ui.js?v=10"></script>
 <script src="/static/js/selfupdate_ui.js?v=8"></script>
 <!-- search.js was merged into cookies_ui.js locally but stayed behind in the
      mirror. Both declare `let _srchItems`, so with search.js loaded first the
@@ -500,34 +468,36 @@
 <script src="/static/js/stats_ui.js?v=5"></script>
 <script src="/static/js/orpheus_ui.js?v=10"></script>
 <script src="/static/js/service_login.js?v=6"></script>
-<script src="/static/js/sc_tab.js?v=46"></script>
-<script src="/static/js/stations.js?v=6"></script>
-<script src="/static/js/cookies_ui.js?v=25"></script>
-<script src="/static/js/lightbox.js?v=18"></script>
-<script src="/static/js/urlbar_detect.js?v=23"></script>
-<script src="/static/js/auth_ui.js?v=30"></script>
-<script src="/static/js/digs.js?v=22"></script>
-<script src="/static/js/player_lib.js?v=50"></script>
+<script src="/static/js/sc_tab.js?v=51"></script>
+<script src="/static/js/stations.js?v=9"></script>
+<script src="/static/js/cookies_ui.js?v=26"></script>
+<script src="/static/js/lightbox.js?v=21"></script>
+<script src="/static/js/urlbar_detect.js?v=24"></script>
+<script src="/static/js/auth_ui.js?v=35"></script>
+<script src="/static/js/digs.js?v=23"></script>
+<script src="/static/js/player_lib.js?v=51"></script>
 <script src="/static/js/remote_ui.js?v=5"></script>
-<script src="/static/js/service_colors_ui.js?v=17"></script>
-<script src="/static/js/deps_ui.js?v=5"></script>
-<script src="/static/js/tokens_ui.js?v=1"></script>
+<script src="/static/js/service_colors_ui.js?v=20"></script>
+<script src="/static/js/deps_ui.js?v=6"></script>
+<script src="/static/js/tokens_ui.js?v=2"></script>
 <script src="/static/js/config_yaml_ui.js?v=2"></script>
 <script src="/static/js/player_wave.js?v=1"></script>
-<script src="/static/js/player.js?v=10064"></script>
+<script src="/static/js/player.js?v=10070"></script>
 <script src="/static/js/digs_radio.js?v=4"></script>
 <script src="/static/js/digs_tour.js?v=4"></script>
-<script src="/static/js/player_queue.js?v=16"></script>
+<script src="/static/js/player_queue.js?v=19"></script>
+<script src="/static/js/player_dnd.js?v=3"></script>
 <script src="/static/js/player_fps.js?v=13"></script>
-<script src="/static/js/bbc.js?v=10012"></script>
-<script src="/static/js/sc.js?v=10023"></script>
+<script src="/static/js/bbc.js?v=10018"></script>
+<script src="/static/js/sc.js?v=10024"></script>
 <script src="/static/js/fx_ui.js?v=9"></script>
+<script src="/static/js/panel_host.js?v=3"></script>
 
 <!-- Mobile sidebar drawer overlay -->
 <div id="drawer-overlay" class="drawer-overlay" onclick="closeMobileDrawer()"></div>
 
 <!-- Mobile bottom tab bar -->
-<nav class="mobile-tabbar" id="mobile-tabbar" role="navigation" aria-label="Навигация">
+<nav class="mobile-tabbar" id="mobile-tabbar" role="navigation" aria-label="Навигация" data-i18n-aria="nav.aria_main">
   <button class="mobile-tab active" id="mt-queue"
     onclick="showView('queue',document.querySelector('[data-view=queue]'));setMobileTab(this)">
     <span class="mt-icon">⬇</span><span data-i18n="nav.queue">Очередь</span>

@@ -1,5 +1,10 @@
 """
-BBC Sounds integration — browse programmes, stream via HLS, download as MP3 320kbps.
+BBC Sounds integration — browse programmes, stream via HLS, download as MP3.
+
+Честность по качеству (21.09.2026): «MP3 320kbps» в этой строке было ложью.
+On-demand у BBC Sounds — не больше 102 кбит/с HE-AAC, поэтому цель перекодировки
+считается из фактической лесенки потока (``ripster.bbc_quality``), а не пишется
+константой. Настоящие 320 — только в live-потоке (``engines/bbc_live.py``).
 
 Stream flow (no yt-dlp needed):
   1. GET bbc.co.uk/programmes/{pid}.json  → versions[0].pid = VPID
@@ -12,6 +17,7 @@ import json
 import re
 import subprocess
 from asyncio.subprocess import PIPE
+from datetime import datetime, timezone
 from pathlib import Path
 
 import httpx
@@ -22,6 +28,9 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from ripster.metadata.mixesdb import fetch_mix_detail, search_mixesdb
+from ripster.metadata import bbc as _md_bbc
+from ripster import bbc_quality as _Q
+from ripster.i18n_msg import imsg
 
 router = APIRouter(prefix="/api/bbc")
 
@@ -73,8 +82,16 @@ def install(app, ctx) -> None:
 
 
 def _img(template: str, sz: int = 320) -> str:
-    """BBC image_url has '{recipe}' placeholder → replace with e.g. '320x320'."""
-    return template.replace("{recipe}", f"{sz}x{sz}") if template else ""
+    """BBC image_url has '{recipe}' placeholder → replace with a LIVE ichef size.
+
+    Размер берётся из лесенки ripster.metadata.bbc: ichef отвечает 403 на
+    произвольное число (600×600 и 1000×1000 — из них), поэтому «крупнее» здесь
+    означает не 600, а 640, и не 1000, а 1024.
+    """
+    if not template:
+        return ""
+    n = _md_bbc.cover_px(sz)
+    return re.sub(r'\{recipe\}|\d+x\d+', f"{n}x{n}", template)
 
 
 def yt_dlp_cmd() -> list[str]:
@@ -158,6 +175,19 @@ async def get_brands():
     return {"brands": BRANDS}
 
 
+@router.get("/channels")
+async def get_channels():
+    """Каталог живых эфиров — то, с чего ставится отложенная запись
+    (ripster/bbc_schedule.py пишет эфир именно с live-потока канала).
+
+    Только id: название канала — текст интерфейса, и строит его клиент по
+    ключу i18n (скилл ripster-i18n: в ответе API не должно быть ни одного
+    слова, которое человек прочтёт как текст).
+    """
+    from ripster import bbc_live_channels as _chl
+    return {"channels": [{"id": c["id"]} for c in _chl.CHANNELS]}
+
+
 # ── Episodes ──────────────────────────────────────────────────────────────────
 
 @router.get("/episodes")
@@ -181,6 +211,397 @@ async def get_episodes(
         "offset": offset,
         "items":  [_parse_ep(ep) for ep in data.get("data", [])],
     }
+
+
+# ── Будущие эфиры — вход для планировщика ────────────────────────────────────
+#
+# Почему этот маршрут вообще нужен: RMS /programmes/playable отдаёт ТОЛЬКО
+# вышедшее в эфир. Промер 21.09.2026 (Essential Mix, 3 первых выпуска):
+# availability.from = 05.09 / 12.09 / 19.09 — всё в прошлом. Значит
+# `_bbcLiveFuture()` в bbc.js не срабатывал ни разу, и кнопка «записать эфир»,
+# написанная вместе с планировщиком, не появлялась ни на одной карточке:
+# провод был цел, тока по нему не было.
+#
+# Начало будущего эфира берём из машиныльной разметки (schema.org RadioSeries)
+# первой же страницы BBC — /programmes/<brand>/episodes/guide. Это домен bbc.co.uk,
+# без авторизации. Ответ кэшируем: страница грузится ~2 с, а расписание меняется
+# редко; без кэша каждая перекладка сетки била бы по BBC.
+_GUIDE_TTL = 900
+_guide_cache: dict[str, tuple[float, list]] = {}
+_brand_meta:  dict[str, dict] = {}
+
+
+def _ldjson_blocks(html: str) -> list:
+    out: list = []
+    for raw in re.findall(r'<script type="application/ld\+json"[^>]*>(.*?)</script>',
+                          html or "", re.S):
+        try:
+            d = json.loads(raw)
+        except Exception:
+            continue
+        out.extend(d if isinstance(d, list) else [d])
+    return out
+
+
+def _iso(s: str):
+    """BBC отдаёт «+00:00», но страница — не контракт: на дату без смещения
+    сравнивали бы aware с naive и падали. Нормализуем всё к UTC."""
+    try:
+        d = datetime.fromisoformat((s or "").replace("Z", "+00:00"))
+    except Exception:
+        return None
+    return d.astimezone(timezone.utc) if d.tzinfo else d.replace(tzinfo=timezone.utc)
+
+
+async def _brand_meta_of(brand_id: str, c) -> dict:
+    """Канал live-потока и картинка бренда — из первой же страницы JSON.
+    Картинка бренда — это честный запасной вариант, когда у выпуска своей нет."""
+    meta = _brand_meta.get(brand_id)
+    if meta is not None:
+        return meta
+    meta = {"channel": "", "image": ""}
+    try:
+        r = await c.get(f"{_PROG_API}/{brand_id}.json", headers={"Accept": "application/json"})
+        if r.status_code == 200:
+            prog = (r.json() or {}).get("programme") or {}
+            meta["channel"] = ((prog.get("ownership") or {}).get("service") or {}).get("id") or ""
+            meta["image"]   = _md_bbc.ichef((prog.get("image") or {}).get("pid") or "")
+    except Exception:
+        pass
+    _brand_meta[brand_id] = meta
+    return meta
+
+
+def _guide_rows(data: list, brand_id: str, meta: dict, now) -> list[dict]:
+    """Радио-эпизоды ld+json → карточки того же вида, что отдаёт /episodes.
+    `publication` у повторов — список; берём ближайший будущий показ."""
+    from ripster import bbc_live_channels as _chl
+    from ripster import bbc_schedule as _bs
+    max_dur = _bs.MAX_LIVE_MINUTES * 60
+    rows: list[dict] = []
+    for block in data:
+        if not isinstance(block, dict) or block.get("@type") != "RadioSeries":
+            continue
+        eps = block.get("episode") or []
+        for ep in (eps if isinstance(eps, list) else [eps]):
+            if not isinstance(ep, dict):
+                continue
+            pubs = ep.get("publication") or []
+            pubs = pubs if isinstance(pubs, list) else [pubs]
+            # Из всех показов ищем ближайший БУДУЩИЙ. Полагаться на «конец ещё
+            # не наступил» нельзя: у уже вышедших выпусков publicationEnd — это
+            # окно доступности в Sounds (у июльского Essential Mix он сентябрьский,
+            # «длительность» 77 суток), а не границы эфира.
+            start = end = None
+            for p in pubs:
+                if not isinstance(p, dict):
+                    continue
+                s, e = _iso(p.get("startDate") or ""), _iso(p.get("endDate") or "")
+                if not s or not e or s <= now or e <= s:
+                    continue
+                if start is None or s < start:
+                    start, end = s, e
+            if not start:
+                continue
+            duration = int((end - start).total_seconds())
+            # Планировщик пишет с live-потока и дольше 8 часов не пишет вовсе
+            # (bbc_schedule.MAX_LIVE_MINUTES) — карточка с таким эфиром была бы
+            # обещанием, которое сервер всегда отклонит.
+            if duration <= 0 or duration > max_dur:
+                continue
+            channel = meta.get("channel") or ""
+            pid = ep.get("identifier") or ""
+            # У будущих выпусков BBC имя в этой разметке — часто дата эфира
+            # («17/10/2026»); тогда людьми читается description.
+            name = (ep.get("name") or "").strip()
+            desc = (ep.get("description") or "").strip()
+            dated = _looks_like_date(name)
+            rows.append({
+                "pid":      pid,
+                "vpid":     "",                      # версии ещё нет — качать нельзя
+                "title":    name or pid,
+                "subtitle": desc if dated else "",
+                "synopsis": desc,
+                "date":     start.strftime("%Y-%m-%d"),
+                "duration": duration,
+                "image":    _md_bbc.resize(ep.get("image") or "", _md_bbc.CARD_PX)
+                            or meta.get("image") or "",
+                "channel":     channel,
+                "avail_from":  _bs.fmt_utc(start),
+                "published":   (ep.get("datePublished") or "")[:10],
+                # Повтор на сетке виден БЕСПЛАТНО: дата публикации раньше слота
+                # значит, что выпуск уже существовал. Промер 21.09.2026 по 35
+                # будущим выпускам пяти брендов: у премьер datePublished равна
+                # дате эфира (или +1 день из-за летнего времени), у повторов —
+                # на 7…53 дня раньше. Порог в 2 дня разделяет все 35 случаев.
+                "repeat":      _repeat_from_published(start, ep.get("datePublished")),
+                "schedulable": _chl.known(channel),
+                "upcoming":    True,
+            })
+    rows.sort(key=lambda r: r["avail_from"])
+    return rows
+
+
+def _repeat_from_published(slot: datetime, published: str) -> bool:
+    """Повтор ли это — по datePublished из сетки (без запроса к BBC).
+
+    Отрицательный ответ здесь не значит «точно премьера»: это быстрый признак
+    для сетки, а точный — first_broadcast_date в прогнозе записи.
+    """
+    p = _iso(published or "")
+    return bool(p) and (slot.date() - p.date()).days >= 2
+
+
+
+_DATE_RE = re.compile(r'^\d{1,2}[./-]\d{1,2}[./-]\d{2,4}$')
+
+
+def _looks_like_date(s: str) -> bool:
+    return bool(_DATE_RE.match((s or "").strip()))
+
+
+@router.get("/upcoming")
+async def get_upcoming(brand_id: str = Query("b006wkfp")):
+    """Будущие передачи бренда — то, что можно поставить на отложенную запись."""
+    now = datetime.now(timezone.utc)
+    hit = _guide_cache.get(brand_id)
+    if hit and hit[0] > now.timestamp():
+        return {"items": hit[1]}
+    async with _HTTP.ashared() as c:
+        meta = await _brand_meta_of(brand_id, c)
+        try:
+            r = await c.get(f"{_PROG_API}/{brand_id}/episodes/guide",
+                            headers={"Accept": "text/html"})
+        except Exception:
+            r = None
+    items: list[dict] = []
+    if r is not None and r.status_code == 200:
+        items = _guide_rows(_ldjson_blocks(r.text or ""), brand_id, meta, now)
+    else:
+        raise HTTPException(502, detail=imsg("err.bbc_upstream", "BBC не отдал расписание",
+                                             code=(r.status_code if r is not None else 0)))
+    _guide_cache[brand_id] = (now.timestamp() + _GUIDE_TTL, items)
+    ladders = await _live_ladders({r["channel"] for r in items if r.get("channel")})
+    owned   = await asyncio.to_thread(_own_pids)
+    for r in items:
+        r["live"]     = ladders.get(r.get("channel") or "", {})
+        r["recorded"] = bool(r.get("pid")) and r["pid"] in owned
+    return {"items": items}
+
+
+# ── Прогноз: чем ЭТОТ эфир будет на самом деле ───────────────────────────────
+#
+# Вопрос, ради которого всё это: прежде чем ставить запись, человек должен
+# увидеть не шильдик «320», а ответ про конкретный слот — с какого потока пишем,
+# что он отдаёт прямо сейчас, повтор ли это и есть ли у нас уже копия. Всё это
+# числа и флаги; текст рисует фронт (скилл ripster-i18n).
+
+_LADDER_TTL = 900
+_ladder_cache: dict[str, tuple[float, dict]] = {}
+
+
+async def _live_ladders(channels) -> dict:
+    """Лестница live-потока каждого канала — с тем же кэшем, что и сетка.
+
+    Меряется ОБЫЧНЫЙ HTTP-запрос к мастеру Akamai: «320» в названии движка —
+    намерение, а факт — список вариантов, который канал отдаёт сейчас.
+    """
+    from ripster import bbc_live_channels as _chl
+    now = datetime.now(timezone.utc).timestamp()
+    out: dict = {}
+    todo = []
+    for ch in channels:
+        hit = _ladder_cache.get(ch)
+        if hit and hit[0] > now:
+            out[ch] = hit[1]
+        elif _chl.known(ch):
+            todo.append(ch)
+    if not todo:
+        return out
+    async with _HTTP.ashared() as c:
+        for ch in todo:
+            res = await _Q.live_ladder(ch, c)
+            _ladder_cache[ch] = (now + _LADDER_TTL, res)
+            out[ch] = res
+    return out
+
+
+async def _first_broadcast(pid: str, c) -> datetime | None:
+    """Точная дата первой публикации выпуска (programmes JSON). None — данных нет."""
+    try:
+        r = await c.get(f"{_PROG_API}/{pid}.json", headers={"Accept": "application/json"})
+        if r.status_code != 200:
+            return None
+        return _iso(((r.json() or {}).get("programme") or {}).get("first_broadcast_date") or "")
+    except Exception:
+        return None
+
+
+def _own_pids() -> set:
+    """pid всего, что у нас уже записано или скачано: планы планировщика,
+    история загрузок и манифест. Один проход на страницу сетки, а не на карточку.
+
+    Журналы вращаются (history.json — последние 500 задач), поэтому отсутствие
+    pid здесь означает «в наших журналах не видно», а не «такой записи нет».
+    """
+    pids: set = set()
+    try:
+        from ripster import bbc_schedule as _bs
+        for row in _bs.get_store().all():
+            if row.get("pid"):
+                pids.add(row["pid"])
+    except Exception:
+        pass
+    for path in _own_journals():
+        try:
+            rows = json.loads(path.read_text(encoding="utf-8")) or []
+        except Exception:
+            continue
+        if isinstance(rows, dict):
+            rows = list(rows.values())
+        for h in rows:
+            if isinstance(h, dict):
+                pids.update(_URL_PID.findall(str(h.get("url") or "")))
+    pids.update(_cue_pids())
+    return pids
+
+
+_CUE_PID = re.compile(r"^REM BBC_PID (\S+)", re.MULTILINE)
+_OWN_TTL = 300
+_cue_cache: tuple[float, set] = (0.0, set())
+
+
+def _cue_pids() -> set:
+    """pid из sidecar-CUE в папках BBC: веб-вкладка качает мимо очереди, и в
+    журналах её загрузок нет — зато рядом с файлом лежит его паспорт."""
+    global _cue_cache
+    now = datetime.now(timezone.utc).timestamp()
+    if _cue_cache[0] > now:
+        return _cue_cache[1]
+    found: set = set()
+    try:
+        for cue in _save_dir().glob("*/*.cue"):
+            try:
+                found.update(_CUE_PID.findall(cue.read_text(encoding="utf-8",
+                                                             errors="replace")))
+            except OSError:
+                pass
+    except Exception:
+        pass
+    _cue_cache = (now + _OWN_TTL, found)
+    return found
+
+
+# pid встречается в сохранённом адресе задачи в двух формах: страница выпуска
+# и псевдо-ссылка live-записи планировщика.
+_URL_PID = re.compile(r"/(?:sounds/play|programmes)/([a-z0-9]{6,12})")
+
+
+def _own_copy(pid: str) -> dict:
+    """Есть ли у нас уже запись этого выпуска — по нашим же файлам, без запроса
+    к BBC: планы планировщика, история загрузок и манифест.
+
+    Отрицательный ответ честен лишь настолько, насколько живы эти журналы:
+    история держит последние 500 задач, поэтому «не нашли» не означает «нет».
+    """
+    if not pid:
+        return {"checked": False}
+    try:
+        from ripster import bbc_schedule as _bs
+        for row in _bs.get_store().all():
+            if row.get("pid") == pid:
+                v = row.get("verdict") or {}
+                return {"checked": True, "have": True, "source": "schedule",
+                        "title": row.get("title") or "", "ts": row.get("start_utc") or "",
+                        "status": row.get("status") or "",
+                        "verdict_state": v.get("state") or "",
+                        "kbps": v.get("kbps") or 0, "codec": v.get("codec") or ""}
+    except RuntimeError:
+        pass
+    except Exception:
+        pass
+    for path in _own_journals():
+        try:
+            rows = json.loads(path.read_text(encoding="utf-8")) or []
+        except Exception:
+            continue
+        if isinstance(rows, dict):
+            rows = list(rows.values())
+        for h in rows:
+            if not isinstance(h, dict):
+                continue
+            if pid in str(h.get("url") or "") or pid == str(h.get("pid") or ""):
+                return {"checked": True, "have": True,
+                        "source": path.name, "title": h.get("title") or "",
+                        "ts": str(h.get("ts") or h.get("start_utc") or ""),
+                        "quality": h.get("quality") or "",
+                        "folder": h.get("_save_dir") or h.get("dir") or ""}
+    return {"checked": True, "have": False}
+
+
+def _own_journals() -> list[Path]:
+    """history.json и downloads_manifest.json — оба рядом с bbc_scheduled.json."""
+    try:
+        from ripster import bbc_schedule as _bs
+        base = _bs.get_store().path.parent
+    except Exception:
+        return []
+    return [base / "history.json", base / "downloads_manifest.json"]
+
+
+async def _forecast(channel: str, start_utc: str, duration: int, pid: str) -> dict:
+    """Что даст запись этого эфира — измерено сейчас, а не написано в шильдике."""
+    from ripster import bbc_live_channels as _chl
+    from ripster import bbc_schedule as _bs
+    live = (await _live_ladders([channel])).get(channel) or {}
+    repeat: dict = {"state": "unknown"}
+    slot = _iso(start_utc)
+    if pid:
+        async with _HTTP.ashared() as c:
+            first = await _first_broadcast(pid, c)
+        if first is not None:
+            # Промер 21.09.2026 (35 будущих выпусков): премьере BBC ставит
+            # first_broadcast_date равной слоту, повтору — его прежнюю дату,
+            # 7…53 дня назад. Два дня запаса — на часовые пояса разметки.
+            gap = (slot.date() - first.date()).days if slot else None
+            repeat = {"state": ("repeat" if (gap or 0) >= 2 else "debut"),
+                      "days": gap,
+                      "first_broadcast_utc": _bs.fmt_utc(first)}
+    return {
+        "channel":   channel,
+        "stream":    live.get("url") or _chl.stream_url(channel),
+        "duration":  int(duration or 0),
+        "start_utc": start_utc,
+        "pid":       pid,
+        "live":      live,
+        "ondemand":  {"ceiling_kbps": _Q.ONDEMAND_CEILING},
+        "repeat":    repeat,
+        "own":       await asyncio.to_thread(_own_copy, pid),
+        "promised_kbps": _chl.BITRATE // 1000,
+    }
+
+
+@router.get("/schedule/forecast")
+async def schedule_forecast(
+    channel:   str = Query(...),
+    start_utc: str = Query(""),
+    duration:  int = Query(0, ge=0),
+    pid:       str = Query(""),
+):
+    """Прогноз записи — до того, как её поставили.
+
+    Отвечаем только тем, что измерили прямо сейчас. Если лестницу канала не
+    удалось прочитать (сеть, 404 пула) — в ответе будет ok=false с причиной, а не
+    молчаливое «320»: человек планирует запись на окно в две ночи, и выдуманное
+    обещание стоит ему этой записи.
+    """
+    from ripster import bbc_live_channels as _chl
+    if not _chl.known(channel):
+        raise HTTPException(400, detail=imsg("err.bbc_live_unknown_channel",
+                                             f"Неизвестный канал эфира: {channel}",
+                                             channel=channel))
+    return await _forecast(channel, start_utc, duration, pid)
+
 
 
 # ── Search ────────────────────────────────────────────────────────────────────
@@ -219,6 +640,7 @@ class ScheduleReq(BaseModel):
     title:     str = ""
     subtitle:  str = ""
     cover:     str = ""
+    pid:       str = ""     # выпуск, чей эфир пишем (для повторов и «есть ли копия»)
 
 
 @router.get("/schedule")
@@ -241,13 +663,24 @@ async def schedule_live(req: ScheduleReq, request: Request):
     from ripster import bbc_schedule as _bs
     from ripster import bbc_live_channels as _chl
     if not _chl.known(req.channel):
-        raise HTTPException(400, f"Неизвестный канал эфира: {req.channel}")
+        raise HTTPException(400, detail=imsg("err.bbc_live_unknown_channel",
+                                             f"Неизвестный канал эфира: {req.channel}",
+                                             channel=req.channel))
     try:
         start = _bs.parse_utc(req.start_utc)
+        start_utc = _bs.fmt_utc(start)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    # Прогноз считаем ЗДЕСЬ и храним свой: план должен показывать то, что мы
+    # измерили в момент постановки, а не то, что принёс клиент (и чтобы через
+    # неделю в списке было видно, каким обещанием это записывали).
+    fc = await _forecast(req.channel, start_utc, req.duration, req.pid)
+    try:
         row = _bs.schedule_recording(channel=req.channel, start_utc=start,
                                      duration=req.duration,
                                      title=req.title, subtitle=req.subtitle,
-                                     cover=req.cover)
+                                     cover=req.cover,
+                                     pid=req.pid, forecast=fc)
     except ValueError as e:
         raise HTTPException(400, str(e))
     if _broadcast and _queue_snapshot:
@@ -326,7 +759,7 @@ async def get_stream(request: Request, pid: str = Query(...), vpid: str = Query(
     return {"url": url, "vpid": vpid}
 
 
-# ── Download (HLS → MP3 320 kbps, per-episode folder + cover 1000×1000) ──────
+# ── Download (HLS → MP3 по фактической лестнице потока) ──────────────────────
 
 class DownloadReq(BaseModel):
     pid:       str
@@ -366,6 +799,11 @@ async def download_episode(req: DownloadReq, request: Request):
     async with _HTTP.ashared() as c:
         vpid = req.vpid or await _get_vpid(req.pid, c)
         hls  = await _get_hls_url(vpid, c)
+        # Сколько в потоке на самом деле. Поле «bitrate» у MediaSelector умеет
+        # говорить 320 и про 51-килобитный вариант, поэтому смотрим на список
+        # вариантов самого плейлиста (ripster/bbc_quality.py).
+        ladder = await _Q.probe_url(hls, c)
+    target   = _Q.mp3_target_kbps(ladder.get("best_kbps") or 0)
 
     try:
         ytdlp = yt_dlp_cmd()
@@ -376,7 +814,7 @@ async def download_episode(req: DownloadReq, request: Request):
         "--quiet",
         "--downloader", "ffmpeg",
         "--hls-use-mpegts",
-        "-x", "--audio-format", "mp3", "--audio-quality", "320K",
+        "-x", "--audio-format", "mp3", "--audio-quality", f"{target}K",
         "--add-metadata",
         "--ignore-errors",
         "-o", out,
@@ -398,12 +836,18 @@ async def download_episode(req: DownloadReq, request: Request):
             BBC_DURATION_MAP[req.pid] = int(dur_raw)
 
     asyncio.create_task(_bg_download(cmd, req.pid, req.title, req.artist,
-                                     req.image_url, ep_dir, req.cover_url, sid))
-    return {"status": "started", "pid": req.pid, "dir": str(ep_dir)}
+                                     req.image_url, ep_dir, req.cover_url, sid,
+                                     out=out, target=target,
+                                     source_kbps=int(ladder.get("best_kbps") or 0)))
+    return {"status": "started", "pid": req.pid, "dir": str(ep_dir),
+            "source_kbps": int(ladder.get("best_kbps") or 0),
+            "target_kbps": target,
+            "source_codec": ladder.get("best_codec") or ""}
 
 
 async def _bg_download(cmd: list, pid: str, title: str, artist: str,
-                       image_url: str, ep_dir: Path, cover_url: str = "", sid: str = ""):
+                       image_url: str, ep_dir: Path, cover_url: str = "", sid: str = "",
+                       out: str = "", target: int = 0, source_kbps: int = 0):
     async def _bcast(msg: dict):
         if _broadcast:
             try:
@@ -437,61 +881,122 @@ async def _bg_download(cmd: list, pid: str, title: str, artist: str,
         pass
 
     fallback_q = f"{artist} {title}".strip() if (artist or title) else ""
-    await _save_cover(image_url, ep_dir, _safe(title or pid),
+    await _save_cover(image_url, ep_dir,
                       fallback_query=fallback_q, cover_override=cover_url)
-    await _try_write_cue(pid, title, artist, ep_dir)
+    # Готовый файл спрашиваем, а не повторяем то, что заказывали: полоса MP3-цели
+    # ничего не говорит об источнике, а вот перекодировка вверх — говорит, и
+    # человек должен видеть и то, и другое.
+    measured = 0
+    state = ""
+    if out:
+        try:
+            v = await asyncio.to_thread(_Q.verdict, out, target)
+            measured = int(v.get("kbps") or 0)
+            state = v.get("state") or ""
+        except Exception:
+            pass
+    await _try_write_cue(pid, title, artist, ep_dir,
+                         kbps=measured or target, source_kbps=source_kbps)
     await _bcast({"type": "bbc_dl_done", "pid": pid, "title": title,
-                  "dir": str(ep_dir)})
+                  "dir": str(ep_dir), "source_kbps": source_kbps,
+                  "target_kbps": target, "kbps": measured, "state": state})
 
 # pid → episode duration in seconds (stored when download is queued)
 BBC_DURATION_MAP: dict[str, int] = {}
 
 
-async def _save_cover(image_url: str, ep_dir: Path, stem: str,
+# Имя, которое читают все потребители обложки папки: routes/library.py:538 и
+# mixcue.py:212 ищут cover.jpg/cover.png/folder.jpg/cover.jpeg. Раньше BBC клал
+# `{Title}.jpg` — несовпадающее имя, поэтому обложки скачанного BBC-выпуска не
+# видел ни список библиотеки, ни «кодер».
+COVER_FILENAME = "cover.jpg"
+
+
+async def _fetch_image(url: str) -> bytes:
+    """Только настоящая картинка: 200 + магические байты. Ошибка сети/403/
+    огрылок HTML — пустая строка, чтобы вызывающий честно перешёл к следующему
+    источнику, а не записал битый файл."""
+    if not url:
+        return b""
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30),
+                                     follow_redirects=True) as c:
+            r = await c.get(url)
+    except Exception:
+        return b""
+    if r.status_code != 200:
+        return b""
+    data = r.content or b""
+    if data[:3] == b"\xff\xd8\xff" or data[:8] == b"\x89PNG\r\n\x1a\n" \
+       or (data[:4] == b"RIFF" and data[8:12] == b"WEBP"):
+        return data
+    return b""
+
+
+def _embed_cover(ep_dir: Path, data: bytes) -> int:
+    """Обложка в теги каждого аудиофайла папки. Возвращает число успешно
+    помеченных файлов — у остальных сервисов она внутри файла, и без этого BBC
+    звучало в библиотеке без визуала даже при лежащем рядом cover.jpg."""
+    if not data:
+        return 0
+    from ripster.tagger import embed_cover
+    n = 0
+    try:
+        files = [p for p in ep_dir.iterdir()
+                 if p.is_file() and p.suffix.lower() in
+                 (".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus")]
+    except OSError:
+        return 0
+    for p in files:
+        try:
+            if embed_cover(p, data):
+                n += 1
+        except Exception as e:
+            print(f"[bbc] embed cover {p.name}: {e}", flush=True)
+    return n
+
+
+async def _save_cover(image_url: str, ep_dir: Path,
                      fallback_query: str = "", cover_override: str = "") -> str:
-    """Download cover to ep_dir/{stem}.jpg. Returns final artwork URL used (or "")."""
-    cover_path = ep_dir / f"{stem}.jpg"
+    """Обложка выпуска → cover.jpg в папку + в теги аудио. Возвращает путь к
+    cover.jpg, либо "" если достать картинку не удалось (тогда интерфейс
+    покажет нейтральную иконку, а не серый квадрат от битого URL)."""
+    cover_path = ep_dir / COVER_FILENAME
+    data = b""
+    src = ""
 
-    # 0) Explicit user-chosen override (e.g. picked from MixesDB in UI)
+    # 0) Явный выбор пользователя (например обложка из MixesDB в UI)
     if cover_override:
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30), follow_redirects=True) as c:
-                r = await c.get(cover_override)
-            if r.status_code == 200:
-                cover_path.write_bytes(r.content)
-                return str(cover_path)
-        except Exception:
-            pass
+        data, src = await _fetch_image(cover_override), "override"
 
-    # 1) BBC image
-    if image_url:
-        url = re.sub(r'\{recipe\}|\d+x\d+', "1200x1200", image_url)
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as c:
-                r = await c.get(url)
-            if r.status_code == 200:
-                cover_path.write_bytes(r.content)
-                return str(cover_path)
-        except Exception:
-            pass
+    # 1) BBC — размер из живой лесенки ichef (600×600 CDN не отдаёт)
+    if not data and image_url:
+        data, src = await _fetch_image(_img(image_url, _md_bbc.EMBED_PX)), "bbc"
 
-    # 2) MixesDB fallback
-    if fallback_query:
+    # 2) MixesDB
+    if not data and fallback_query:
         try:
             results = await search_mixesdb(fallback_query, limit=3)
             for hit in results:
                 detail = await fetch_mix_detail(hit["page_title"])
                 if detail and detail.get("artworkUrl"):
-                    async with httpx.AsyncClient(timeout=httpx.Timeout(30)) as c:
-                        r = await c.get(detail["artworkUrl"])
-                    if r.status_code == 200:
-                        cover_path.write_bytes(r.content)
-                        print(f"[bbc] cover from mixesdb: {hit['page_title']}", flush=True)
-                        return str(cover_path)
+                    data = await _fetch_image(detail["artworkUrl"])
+                    if data:
+                        src = f"mixesdb:{hit['page_title']}"
+                        break
         except Exception as e:
             print(f"[bbc] mixesdb cover fallback failed: {e}", flush=True)
 
-    return ""
+    if not data:
+        return ""
+    if _config.get("save-cover-to-folder", True):
+        try:
+            cover_path.write_bytes(data)
+        except OSError as e:
+            print(f"[bbc] write cover: {e}", flush=True)
+    embedded = _embed_cover(ep_dir, data)
+    print(f"[bbc] cover src={src} bytes={len(data)} embedded={embedded}", flush=True)
+    return str(cover_path) if cover_path.exists() else ""
 
 
 async def _cue_tracks(pid: str, title: str, artist: str,
@@ -508,13 +1013,15 @@ async def _cue_tracks(pid: str, title: str, artist: str,
             for t in best["tracks"] if t.get("seconds") is not None and not t.get("is_with")]
 
 
-async def _try_write_cue(pid: str, title: str, artist: str, ep_dir: Path):
+async def _try_write_cue(pid: str, title: str, artist: str, ep_dir: Path,
+                        kbps: int = 0, source_kbps: int = 0):
     try:
         tracks = await _cue_tracks(pid, title, artist)
         if not tracks:
             return
         stem = _safe(title or pid)
-        cue  = _build_cue(title or pid, artist or "BBC Radio", tracks)
+        cue  = _build_cue(title or pid, artist or "BBC Radio", tracks,
+                         pid=pid, kbps=kbps, source_kbps=source_kbps)
         (ep_dir / f"{stem}.cue").write_text(cue, encoding="utf-8")
     except Exception:
         pass
@@ -1006,20 +1513,34 @@ async def download_cue(
     tracks = await _cue_tracks(pid, title, artist, net_1001=not _is_guest(request))
     if not tracks:
         raise HTTPException(404, "No tracklist found for this episode")
-    safe = re.sub(r'[\\/:*?"<>|]', '_', title)
+    safe = _safe(title) or "bbc-cue"
     return Response(
-        content=_build_cue(title, artist, tracks).encode("utf-8"),
+        content=_build_cue(title, artist, tracks, pid=pid).encode("utf-8"),
         media_type="text/plain; charset=utf-8",
         headers={"Content-Disposition": f'attachment; filename="{safe}.cue"'},
     )
 
 
-def _build_cue(title: str, artist: str, tracks: list[dict]) -> str:
+def _build_cue(title: str, artist: str, tracks: list[dict], *, pid: str = "",
+               kbps: int = 0, source_kbps: int = 0) -> str:
+    # Имя файла в CUE — то, которое реально легло на диск: заголовок выпуска
+    # чистится от запрещённых символов тем же _safe, что и при скачивании,
+    # иначе cue-плеер искал бы файл, которого нет.
+    #
+    # REM-строки — паспорт записи: по ним планировщик и прогноз видят, что этот
+    # выпуск уже скачан, и каким битрейтом его действительно кодировали
+    # (название папки и расширения об этом молчат).
     lines = [
         f'TITLE "{title}"',
         f'PERFORMER "{artist}"',
-        f'FILE "{title}.mp3" MP3',
     ]
+    if pid:
+        lines.append(f"REM BBC_PID {pid}")
+    if kbps:
+        lines.append(f"REM BBC_KBPS {kbps}")
+    if source_kbps:
+        lines.append(f"REM BBC_SOURCE_KBPS {source_kbps}")
+    lines.append(f'FILE "{_safe(title) or title}.mp3" MP3')
     for i, t in enumerate(tracks, 1):
         s  = t.get("offset", 0)
         mm = s // 60

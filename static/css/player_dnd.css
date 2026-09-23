@@ -1,0 +1,44 @@
+/* Трек-лист: перетаскивание файлов/папок и выбор папки (Tracker #9014).
+   Отдельный файл, а не строки в main.css: main.css занят другой правкой.
+
+   ОДИН СЛОТ ДЛЯ ДВУХ СОСТОЯНИЙ. Баннер «отпустите — добавим» и полоса прогресса
+   появляются на одном и том же месте над плеером: вместе они не бывают, а
+   прыгающие по экрану подсказки читаются как два разных события. */
+
+/* приёмник: рамка на трек-листе, пока в окно тащат файлы */
+#pp-queue.pq-drag{outline:2px dashed var(--red);outline-offset:-2px}
+
+.pq-head-btns{display:flex;gap:6px;align-items:center}
+
+#pp-queue .pq-folder{background:none;border:1px solid var(--border);border-radius:6px;
+  color:var(--muted);font-size:9px;letter-spacing:.5px;text-transform:uppercase;
+  cursor:pointer;font-family:var(--font);padding:3px 8px;white-space:nowrap}
+#pp-queue .pq-folder:hover{color:var(--text);border-color:var(--muted)}
+#pp-queue .pq-folder[hidden]{display:none}
+
+#pp-queue .pq-empty-hint{padding:0 20px 16px;text-align:center;
+  font-size:10.5px;color:var(--muted2);opacity:.85}
+
+/* баннер дропа и полоса прогресса */
+#pq-dropzone,#pq-dnd{position:fixed;left:50%;bottom:104px;transform:translateX(-50%);
+  z-index:9600;max-width:min(560px,92vw);display:flex;align-items:center;gap:10px;
+  flex-direction:column;padding:10px 16px;border-radius:12px;
+  background:var(--surface);border:1px solid var(--red);
+  box-shadow:0 14px 44px rgba(0,0,0,.5);font-family:var(--font);pointer-events:auto}
+#pq-dropzone{border-style:dashed}
+#pq-dropzone .dnd-hint,#pq-dnd .dnd-count{font-size:12px;color:var(--text);
+  font-weight:600;text-align:center}
+#pq-dropzone .dnd-sub{font-size:10px;color:var(--muted);text-align:center}
+
+/* отмена обязана быть кликабельной: баннер ловит drop, но не должен мешать кнопке */
+#pq-dnd .dnd-cancel{background:none;border:1px solid var(--border);border-radius:6px;
+  color:var(--muted);font-size:9px;letter-spacing:.5px;text-transform:uppercase;
+  cursor:pointer;font-family:var(--font);padding:3px 10px}
+#pq-dnd .dnd-cancel:hover{color:var(--red);border-color:var(--red)}
+
+:root[data-theme="light"] #pq-dropzone,
+:root[data-theme="light"] #pq-dnd{box-shadow:0 14px 44px rgba(0,0,0,.18)}
+
+@media (max-width:640px){
+  #pq-dropzone,#pq-dnd{bottom:150px;flex-direction:row;flex-wrap:wrap;justify-content:center}
+}

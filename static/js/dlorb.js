@@ -42,24 +42,31 @@
 (function () {
   'use strict';
 
-  const VARIANTS   = ['neon', 'aurora', 'vinyl', 'mono'];
+  const VARIANTS   = ['neon', 'aurora', 'vinyl', 'mono', 'ember', 'halo', 'pulse'];
   // Варианты отличаются в том числе СПОСОБОМ брать цвет: доминирующий тон
   // против среднего. Спор решается глазами, а не описанием.
-  const COLOR_MODE = { neon: 'dominant', aurora: 'average', vinyl: 'average', mono: 'dominant' };
+  const COLOR_MODE = { neon: 'dominant', aurora: 'average', vinyl: 'average', mono: 'dominant',
+                       ember: 'dominant', halo: 'average', pulse: 'dominant' };
   const DEF_VARIANT = 'neon';
 
   const MAX_GHOSTS = 3;      // потолок видимых силуэтов, дальше «+N»
-  const ORB   = 44;          // диаметр круга, px (совпадает с main.css)
+  const MAX_CALLOUTS = 3;    // сколько выносных карточек показываем одновременно
+  const ORB   = 56;          // диаметр круга, px (совпадает с main.css)
   const GAP   = 13;          // сдвиг силуэта в стопке
-  const OFF_L = -76;         // стартовая точка выката (за левым краем)
-  const OFF_R = 76;          // точка уката (за правым краем, но под overflow:hidden)
+  const OFF_L = -92;         // стартовая точка выката (за левым краем)
+  const OFF_R = 92;          // точка уката (за правым краем, но под overflow:hidden)
   const RAD   = 17.5;        // радиус кольца в системе viewBox 0 0 40 40
   const CIRC  = 2 * Math.PI * RAD;
   const EXIT_MS = 720;
   const DOCK_W_FALLBACK = 198;   // ширина панели 220 минус padding 2×10
-  const PAD_R    = 6;        // отступ припаркованного круга от правого края дока
+  const PAD_R    = 22;       // отступ припаркованного круга от правого края дока:
+                             // >= видимого радиуса света, чтобы ореол не срезался стеной (#9012)
   const META_GAP = 10;       // зазор между полем метаданных и стопкой кругов
   const META_MIN = 56;       // уже этого поле не сжимаем — читать станет нечего
+  const CALL_GAP = 8;        // зазор между верхней кромкой полоски кругов и низом стека карточек
+  const CALL_VGAP = 6;       // вертикальный зазор между карточками в стеке (см. .dlcallouts{gap})
+  const ORB_BAND = 132;      // высота дока с кругами = .dlorb-dock:has(.dlorb){height:132px}
+  const CALL_TOP = 8;        // отступ от верхнего края панели, выше которого стек не растёт
 
   const ACTIVE   = { queued: 1, running: 1, pending: 1 };
   const TERMINAL = { done: 1, error: 1, cancelled: 1 };
@@ -71,12 +78,14 @@
   let host    = null;
   let moreEl  = null;
   let metaEl  = null;        // { root, label, title, sub } — поле слева от круга
+  let calloutHost = null;    // стек карточек: прибит к <body>, но прямоугольником = колонка панели
   let enabled = true;
   let variant = DEF_VARIANT;
   let overflow = 0;
   let queueProvider = null;
 
   const orbs = new Map();          // id → { el, skin, arc, pct, cnt, slot, exiting }
+  const callouts = new Map();      // id → { el, title, artist, meta, pct, exiting }
   const colorCache = new Map();    // 'mode|url' → colour bag
 
   // ── мелкие утилиты, все с глушителями: индикатор не имеет права ронять UI ──
@@ -112,16 +121,45 @@
     return 'hsl(' + Math.round(h) + ' ' + Math.round(s * 100) + '% ' + Math.round(l * 100) + '%)';
   }
 
+  // HSL → [r,g,b] 0..255. Нужен, чтобы собрать rgba() для света: color-mix()/
+  // hsl(... / a) на старой WebView2 не тянутся, а rgba() — самый широкий консенсус.
+  function hslToRgb(h, s, l) {
+    h = ((h % 360) + 360) % 360 / 360;
+    if (s <= 0) { const v = Math.round(l * 255); return [v, v, v]; }
+    const q = l < 0.5 ? l * (1 + s) : l + s - l * s;
+    const p = 2 * l - q;
+    const f = (t) => {
+      if (t < 0) t += 1; if (t > 1) t -= 1;
+      if (t < 1 / 6) return p + (q - p) * 6 * t;
+      if (t < 1 / 2) return q;
+      if (t < 2 / 3) return p + (q - p) * (2 / 3 - t) * 6;
+      return p;
+    };
+    return [Math.round(f(h + 1 / 3) * 255), Math.round(f(h) * 255), Math.round(f(h - 1 / 3) * 255)];
+  }
+
+  function rgba(h, s, l, a) {
+    const c = hslToRgb(h, s, l);
+    return 'rgba(' + c[0] + ',' + c[1] + ',' + c[2] + ',' + a + ')';
+  }
+
   // Один тон → набор производных. Так варианты обходятся без color-mix(),
   // который в старой WebView2 просто не поддерживается и даёт прозрачное ничто.
   function mkCol(h, s, l) {
     const sat = Math.min(0.74, Math.max(0.32, s));
     const lig = Math.min(0.68, Math.max(0.44, l));
+    const h2 = (h + 148) % 360;
     return {
       c:  hsl(h, sat, lig),
       lt: hsl(h, Math.min(0.9, sat + 0.12), Math.min(0.82, lig + 0.16)),
       dk: hsl(h, sat, Math.max(0.22, lig - 0.20)),
-      c2: hsl((h + 148) % 360, sat, Math.min(0.72, lig + 0.06))
+      c2: hsl(h2, sat, Math.min(0.72, lig + 0.06)),
+      // Свет ( ореол ): ДВЕ стопы одного тона с сильной завязкой на прозрачность —
+      // ядро поярче, середина глуше; наружу градиент в CSS доводит до transparent.
+      glow:     rgba(h, sat, Math.min(0.72, lig + 0.08), 0.50),
+      glowMid:  rgba(h, sat, lig, 0.22),
+      glow2:    rgba(h2, sat, Math.min(0.72, lig + 0.08), 0.46),
+      glow2Mid: rgba(h2, sat, lig, 0.20)
     };
   }
 
@@ -275,6 +313,23 @@
     } catch (_) { return ''; }
   }
 
+  // Год и лейбл — из того же enriched-meta (ripster/metadata/__init__.py), что и
+  // title/artist. Ни додумывать, ни подставлять нечем: нет значения — пустая
+  // строка, и наверху строка «год · лейбл» честно сожмётся до того, что есть.
+  function yearOf(task) {
+    try {
+      const y = task && task.meta && task.meta.year;
+      return (typeof y === 'string' ? y : String(y || '')).trim();
+    } catch (_) { return ''; }
+  }
+
+  function labelOf(task) {
+    try {
+      const l = task && task.meta && task.meta.label;
+      return (typeof l === 'string') ? l.trim() : '';
+    } catch (_) { return ''; }
+  }
+
   function pctOf(task) {
     const p = Number(task && task.progress) || 0;
     return Math.max(0, Math.min(100, Math.round(p)));
@@ -328,6 +383,7 @@
 
   function buildOrb() {
     const root = el('div', 'dlorb');
+    root.appendChild(el('div', 'dlorb-glow'));   // рассеивающийся свет — ПЕРВЫМ, под всем
     root.appendChild(el('div', 'dlorb-body'));
     const skin = el('div', 'dlorb-skin');
     root.appendChild(skin);
@@ -344,6 +400,13 @@
     arc.setAttribute('stroke-dasharray', CIRC.toFixed(2));
     arc.setAttribute('stroke-dashoffset', CIRC.toFixed(2));
     svg.appendChild(trk); svg.appendChild(arc);
+    // Бегущая точка на конце дуги (варианты ember/halo). Стоим на «12 часах»
+    // системы 0 0 40 40, вращаем атрибутом rotate(angle 20 20) — svg уже повёрнут
+    // на -90, так что нулевой прогресс = верх, и точка совпадает с концом дуги.
+    const head = svgEl('circle');
+    head.setAttribute('class', 'dlorb-head');
+    head.setAttribute('cx', '20'); head.setAttribute('cy', String(20 - RAD)); head.setAttribute('r', '2.6');
+    svg.appendChild(head);
     root.appendChild(svg);
 
     const txt = el('div', 'dlorb-txt');
@@ -352,7 +415,7 @@
     txt.appendChild(pct); txt.appendChild(cnt);
     root.appendChild(txt);
 
-    return { el: root, skin: skin, arc: arc, pct: pct, cnt: cnt, slot: -1, exiting: false, colorKey: '' };
+    return { el: root, skin: skin, arc: arc, head: head, pct: pct, cnt: cnt, slot: -1, exiting: false, colorKey: '' };
   }
 
   function ensureOrb(id) {
@@ -410,6 +473,10 @@
       o.el.style.setProperty('--orb-c-lt', col.lt);
       o.el.style.setProperty('--orb-c-dk', col.dk);
       o.el.style.setProperty('--orb-c2',   col.c2);
+      o.el.style.setProperty('--orb-glow',     col.glow);
+      o.el.style.setProperty('--orb-glow-mid', col.glowMid);
+      o.el.style.setProperty('--orb-glow2',     col.glow2);
+      o.el.style.setProperty('--orb-glow2-mid', col.glow2Mid);
     } catch (_) {}
     o.colorKey = col.c;
   }
@@ -441,6 +508,7 @@
   function setProgress(o, p, cntTxt) {
     try {
       o.arc.setAttribute('stroke-dashoffset', (CIRC * (1 - p / 100)).toFixed(2));
+      if (o.head) o.head.setAttribute('transform', 'rotate(' + (p * 3.6).toFixed(1) + ' 20 20)');
       o.pct.textContent = p + '%';
       o.cnt.textContent = cntTxt || '';
     } catch (_) {}
@@ -564,6 +632,144 @@
     }
   }
 
+  // ── карточки о загрузке над кругом (#9012) ──────────────────────────────
+  //
+  // Живут НЕ в доке, а прибиты к <body>, но прямоугольник у них — КОЛОНКА ПАНЕЛИ:
+  // левый край и ширина берутся от дока, низ — от верхней кромки полоски кругов.
+  // До 22.09.2026 стек прибивали СПРАВА от панели, поверх контент-области, и
+  // карточки ложились на сетку релизов, закрывая её (отмена владельца). Теперь
+  // на контент не наехать нечем: контейнер заданной ширины с overflow:hidden,
+  // он и его карточки физически внутри колонки. «Нфс-приезд» остался, но едет
+  // ТОЛЬКО от левой стенки колонки (см. .dlcall): правая стенка — граница
+  // контента, и даже мимолётный прямоугольник поперёк неё читался бы как прежний
+  // дефект. Стек растёт вверх от круга; что не влезло по высоте — не показывается
+  // вовсе, а не обрезается пополам.
+
+  function buildCallout() {
+    const root = el('div', 'dlcall');
+    const title = el('div', 'dlcall-title');
+    const artist = el('div', 'dlcall-artist');
+    const meta = el('div', 'dlcall-meta');
+    const pct = el('div', 'dlcall-pct');
+    root.appendChild(title); root.appendChild(artist); root.appendChild(meta); root.appendChild(pct);
+    return { el: root, title: title, artist: artist, meta: meta, pct: pct, exiting: false };
+  }
+
+  function ensureCallout(id) {
+    let c = callouts.get(id);
+    if (c && !c.exiting) return c;
+    if (c) { try { c.el.remove(); } catch (_) {} callouts.delete(id); }
+    c = buildCallout();
+    c.el.setAttribute('data-call-id', id);
+    try { calloutHost.appendChild(c.el); } catch (_) {}
+    callouts.set(id, c);
+    return c;
+  }
+
+  function fillCallout(c, task, current) {
+    const name = titleOf(task);
+    c.title.textContent = name || _t('dlmeta.unknown_title');
+    const art = artistOf(task);
+    c.artist.textContent = art;                       // нет артиста — строки нет (не выдумываем)
+    c.artist.style.display = art ? '' : 'none';
+    const y = yearOf(task), lb = labelOf(task);
+    const bits = []; if (y) bits.push(y); if (lb) bits.push(lb);
+    c.meta.textContent = bits.join(' · ');            // нет года и лейбла — строки нет вовсе
+    c.meta.style.display = bits.length ? '' : 'none';
+    if (current) { c.pct.textContent = pctOf(task) + '%'; c.pct.style.display = ''; }
+    else { c.pct.textContent = ''; c.pct.style.display = 'none'; }
+  }
+
+  function exitCallout(id) {
+    const c = callouts.get(id);
+    if (!c || c.exiting) return;
+    c.exiting = true;
+    try { c.el.classList.remove('is-in'); } catch (_) {}
+    setTimeout(function () {
+      try { c.el.remove(); } catch (_) {}
+      if (callouts.get(id) === c) callouts.delete(id);
+    }, EXIT_MS);
+  }
+
+  function rectOf(node) {
+    try { return node && node.getBoundingClientRect ? node.getBoundingClientRect() : null; } catch (_) { return null; }
+  }
+
+  // Прямоугольник стека = колонка панели над полоской кругов. Возвращает
+  // высоту, доступную карточкам (0 — показывать нечего и негде).
+  function layoutCallouts() {
+    if (!calloutHost) return 0;
+    const dr = rectOf(host);
+    const sr = rectOf(document.querySelector('.sidebar'));
+    const w = dr ? dr.width : 0;
+    if (!dr && !sr) return 0;
+    // Док скрыт медиазапросом (узкое окно) или панель сложена — стеку не от чего
+    // считаться, и на контент он бы уехал: убираем целиком.
+    if (!dr || w < 40 || dr.bottom <= 0) { calloutHost.style.display = 'none'; return 0; }
+    const vh = window.innerHeight || (document.documentElement && document.documentElement.clientHeight) || 0;
+    // Полоска кругов стабильна по высоте: док анимирует её от 0 до 132, и брать
+    // текущее dr.height значило бы, что на раскате стек карточек едет следом.
+    const bandTop = dr.bottom - Math.max(dr.height, ORB_BAND);
+    const stackBottomY = bandTop - CALL_GAP;
+    const top = CALL_TOP + (sr ? Math.max(0, sr.top) : 0);
+    const avail = Math.max(0, Math.round(stackBottomY - top));
+    calloutHost.style.display = '';
+    calloutHost.style.left = Math.round(dr.left) + 'px';
+    calloutHost.style.width = Math.round(w) + 'px';
+    calloutHost.style.bottom = Math.round(vh - stackBottomY) + 'px';
+    calloutHost.style.maxHeight = avail + 'px';
+    return avail;
+  }
+
+  // Сколько низовых карточек помещается в доступную высоту. Стек растёт ВВЕРХ от
+  // круга, поэтому считаем снизу вверх: обрезанная пополам карточка читается
+  // дефектом, а не показанная — честное «не влезла». В «+N» над кругами она при
+  // этом не учитывается: там счёт только силуэтов кругов.
+  function fitCallouts(list, avail) {
+    let used = 0, shown = 0;
+    for (let i = 0; i < list.length; i++) {
+      const c = callouts.get(list[i].id);
+      if (!c || c.exiting) continue;
+      try { c.el.style.display = ''; } catch (_) {}
+      const h = Math.round(c.el.offsetHeight || 0);
+      const need = used + (shown ? CALL_VGAP : 0) + h;
+      if (need > avail) {
+        try { c.el.style.display = 'none'; c.el.classList.remove('is-in'); } catch (_) {}
+        continue;
+      }
+      used = need; shown++;
+    }
+    return shown;
+  }
+
+  function renderCallouts(vis) {
+    if (typeof document === 'undefined') return;
+    if (!calloutHost) {
+      calloutHost = el('div', 'dlcallouts');
+      try { document.body.appendChild(calloutHost); } catch (_) { calloutHost = null; return; }
+    }
+    const avail = layoutCallouts();
+    const show = enabled && !queueTabActive();
+    const list = show ? (vis || []).slice(0, MAX_CALLOUTS) : [];
+    const live = {};
+    for (let i = 0; i < list.length; i++) live[list[i].id] = i;
+    callouts.forEach(function (c, id) { if (live[id] == null) exitCallout(id); });
+    for (let i = 0; i < list.length; i++) {
+      const task = list[i], current = i === 0;
+      const c = ensureCallout(task.id);
+      fillCallout(c, task, current);
+      const o = orbs.get(task.id);
+      if (current && o && o.colorKey) { try { c.el.style.setProperty('--call-c', o.colorKey); } catch (_) {} }
+      else { try { c.el.style.removeProperty('--call-c'); } catch (_) {} }
+    }
+    fitCallouts(list, avail);
+    for (let i = 0; i < list.length; i++) {
+      const c = callouts.get(list[i].id);
+      if (!c || c.el.style.display === 'none') continue;   // не влезла — не показываем
+      nextFrame(function () { try { c.el.classList.add('is-in'); } catch (_) {} });
+    }
+  }
+
   // ── сборка сцены ────────────────────────────────────────────────────────
 
   function mount() {
@@ -617,6 +823,10 @@
           o.el.style.removeProperty('--orb-c-lt');
           o.el.style.removeProperty('--orb-c-dk');
           o.el.style.removeProperty('--orb-c2');
+          o.el.style.removeProperty('--orb-glow');
+          o.el.style.removeProperty('--orb-glow-mid');
+          o.el.style.removeProperty('--orb-glow2');
+          o.el.style.removeProperty('--orb-glow2-mid');
         } catch (_) {}
         o.colorKey = '';
         setProgress(o, 0, '');
@@ -625,6 +835,7 @@
     }
     if (vis.length > 1) warm(vis[1]);
     renderMore(w);
+    renderCallouts(vis);
     // Ширину считаем по ЧИСЛУ ЖИВЫХ УЗЛОВ, а не по vis: укатывающийся круг ещё
     // 0.72s едет по доку, и поле, успевшее развернуться на всю ширину, оказывалось
     // под ним — текст на эти доли секунды перечёркивало кругом.
@@ -639,6 +850,8 @@
     if (!task) { sync(); return; }
     if (!isEligible(task)) { sync(); return; }
     setProgress(o, pctOf(task), countOf(task));
+    const c = callouts.get(msg.id);
+    if (c && !c.exiting) { try { c.pct.textContent = pctOf(task) + '%'; } catch (_) {} }
   }
 
   // ── настройки ───────────────────────────────────────────────────────────
@@ -745,7 +958,20 @@
         title:   metaEl.title.textContent,
         sub:     metaEl.sub.textContent,
         state:   pickMeta().state
-      } : null
+      } : null,
+      callouts: (function () {
+        const out = [];
+        callouts.forEach(function (c, id) {
+          if (c.exiting) return;
+          out.push({
+            id: id, shown: c.el.classList.contains('is-in'),
+            title: c.title.textContent, artist: c.artist.textContent,
+            meta: c.meta.textContent, pct: c.pct.textContent
+          });
+        });
+        out.sort(function (a, b) { return on.map(function (x) { return x.id; }).indexOf(a.id) - on.map(function (x) { return x.id; }).indexOf(b.id); });
+        return out;
+      })()
     };
   }
 
@@ -754,6 +980,8 @@
     moreEl = null;
     metaEl = null;
     orbs.clear();
+    callouts.clear();
+    if (calloutHost) { try { calloutHost.remove(); } catch (_) {} calloutHost = null; }
     if (host) host.setAttribute('data-orb-variant', variant);
     return host;
   }
@@ -761,6 +989,9 @@
   function reset() {
     orbs.forEach(function (o) { try { o.el.remove(); } catch (_) {} });
     orbs.clear();
+    callouts.forEach(function (c) { try { c.el.remove(); } catch (_) {} });
+    callouts.clear();
+    if (calloutHost) { try { calloutHost.remove(); } catch (_) {} calloutHost = null; }
     if (moreEl) { try { moreEl.remove(); } catch (_) {} moreEl = null; }
     if (metaEl) { try { metaEl.root.remove(); } catch (_) {} metaEl = null; }
     colorCache.clear();
@@ -783,6 +1014,9 @@
     VARIANTS: VARIANTS,
     COLOR_MODE: COLOR_MODE,
     MAX_GHOSTS: MAX_GHOSTS,
+    MAX_CALLOUTS: MAX_CALLOUTS,
+    ORB: ORB,
+    PAD_R: PAD_R,
     FALLBACK: FALLBACK
   };
 

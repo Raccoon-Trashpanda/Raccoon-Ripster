@@ -8,6 +8,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
 
@@ -246,3 +247,151 @@ def test_bad_duration_rejected(ctx):
                   duration=bs.MAX_LIVE_MINUTES * 60 + 1)
     with pytest.raises(ValueError):
         store.add(channel="", start_utc=_future(), duration=60)
+
+
+# ── Вердикт по записанному файлу: он лежит РЯДОМ с планом ─────────────────────
+#
+# Планировщик обязан не только снять эфир, но и сказать, чем он вышел: план
+# доживает до history, а «live320» в названии задачи — намерение. Поэтому
+# спрашиваем файл (ffprobe в settle_result), а храним ответ — в строке плана.
+
+import ripster.bbc_quality as _Q                          # noqa: E402
+
+
+def _fired(ctx, tmp_path, *, forecast=None, duration=3600, status="done",
+           audio="mix.m4a", error=""):
+    """План в статусе fired + его задача в очереди + папка, где лежит файл.
+
+    Возвращает (store, sid, save_dir, момент-после-конца-эфира)."""
+    store, queue = ctx[0], ctx[1]
+    row = bs.schedule_recording(channel="bbc_radio_one", start_utc=bs.utcnow(),
+                                duration=duration, title="Essential Mix",
+                                pid="m00315gp", forecast=forecast or {})
+    sid = row["id"]
+    store.mark(sid, status="fired")
+    d = tmp_path / "out"; d.mkdir(exist_ok=True)
+    if audio:
+        (d / audio).write_bytes(b"\0" * 4096)
+    task = {"id": sid, "status": status, "_save_dir": str(d), "quality": "live320"}
+    if error:
+        task["error"] = error
+    queue[:] = [t for t in queue if t.get("id") != sid] + [task]
+    end = bs.utcnow() + timedelta(seconds=duration + bs._SETTLE_GRACE + 5)
+    return store, sid, d, end
+
+
+def test_recorded_file_gets_a_verdict_beside_the_plan(ctx, tmp_path, monkeypatch):
+    store, sid, d, end = _fired(ctx, tmp_path)
+    monkeypatch.setattr(_Q, "verdict", lambda p, k: {
+        "state": "as_promised", "promised_kbps": k, "kbps": 320, "codec": "AAC-LC",
+        "measured": {"profile": "AAC-LC", "avg_kbps": 320, "sample_rate": 48000,
+                     "channels": 2, "duration": 3600.0},
+        "measured_utc": bs.fmt_utc(end)})
+    assert bs.settle_finished(now=end) == 1
+    row = store.get(sid)
+    assert row["status"] == "recorded"
+    v = row["verdict"]
+    assert (v["state"], v["kbps"], v["codec"]) == ("as_promised", 320, "AAC-LC")
+    # имя файла — тоже часть вердикта: человеку надо знать, что именно мерили
+    assert v["file"] == "mix.m4a" and str(d) not in v["file"]
+    # и это доживает до перезапуска: вердикт в JSON-е, а не только в памяти
+    on_disk = json.loads(store.path.read_text(encoding="utf-8"))["recordings"][0]
+    assert on_disk["verdict"]["state"] == "as_promised"
+    assert on_disk["verdict"]["measured"]["channels"] == 2
+
+
+def test_the_promise_is_what_the_ladder_measured_not_the_live320_label(ctx, tmp_path,
+                                                                       monkeypatch):
+    """Обещание для сверки — best_kbps из прогноза, снятого ДО записи. Канал, у
+    которого вечером не было ступени 320, нельзя судить по ярлыку «live320» —
+    иначе честная запись на 128 выглядела бы провалом."""
+    asked = []
+    store, sid, d, end = _fired(ctx, tmp_path, forecast={"best_kbps": 128})
+    monkeypatch.setattr(_Q, "verdict", lambda p, k: asked.append(k) or {
+        "state": "as_promised", "promised_kbps": k, "kbps": 128, "codec": "AAC-LC",
+        "measured": {}, "measured_utc": bs.fmt_utc(end)})
+    bs.settle_finished(now=end)
+    assert asked == [128]
+    # без прогноза (план ставили со старого фронта) — спрашиваем про 320, как и писали
+    asked2 = []
+    store2, sid2, _d2, end2 = _fired(ctx, tmp_path, duration=60)
+    monkeypatch.setattr(_Q, "verdict", lambda p, k: asked2.append(k) or {
+        "state": "below", "promised_kbps": k, "kbps": 96, "codec": "HE-AAC",
+        "measured": {}, "measured_utc": bs.fmt_utc(end2)})
+    bs.settle_finished(now=end2)
+    assert asked2 == [320]
+
+
+def test_a_thin_file_stays_thin_after_settling(ctx, tmp_path, monkeypatch):
+    """Ниже обещания — не «recorded». План остаётся в списке с другим статусом и
+    с числом, которое человек увидит в карточке: 96 из 320 — это дефект ночи,
+    а не успех с плохим названием."""
+    store, sid, d, end = _fired(ctx, tmp_path)
+    monkeypatch.setattr(_Q, "verdict", lambda p, k: {
+        "state": "below", "promised_kbps": 320, "kbps": 96, "codec": "HE-AAC",
+        "ratio": 0.3, "measured": {"profile": "HE-AAC", "avg_kbps": 96},
+        "measured_utc": bs.fmt_utc(end)})
+    assert bs.settle_finished(now=end) == 1
+    row = store.get(sid)
+    assert row["status"] == "finished"
+    assert row["verdict"]["state"] == "below" and row["verdict"]["kbps"] == 96
+    assert row["verdict"]["ratio"] == 0.3
+
+
+def test_a_failed_recording_keeps_the_reason(ctx, tmp_path):
+    store, sid, d, end = _fired(ctx, tmp_path, status="error", audio="",
+                                error="эфир «Radio 1» не открылся")
+    assert bs.settle_finished(now=end) == 1
+    v = store.get(sid)["verdict"]
+    assert v["state"] == "failed" and "не открылся" in v["reason"]
+    assert store.get(sid)["status"] == "finished"
+
+
+def test_a_finished_task_without_a_file_is_no_file_not_unmeasured(ctx, tmp_path):
+    """Разница важна человеку: «файла нет» — запись не дошла до диска,
+    «померить не удалось» — дошла, но ffprobe её не читает. Смешивать их в одну
+    строку значит отправлять владельца смотреть не туда."""
+    store, sid, d, end = _fired(ctx, tmp_path, audio="")
+    assert bs.settle_finished(now=end) == 1
+    v = store.get(sid)["verdict"]
+    assert v["state"] == "no_file" and "save-dir" in v["reason"]
+
+
+def test_settle_waits_for_a_recording_that_is_still_running(ctx, tmp_path, monkeypatch):
+    """Рано — значит тихо промолчать, а не выставить вердикт. Пока задача ещё
+    пишется, плана это не касается; «unmeasured» планировщик напишет лишь через
+    6 часов молчания — когда ждать уже бессмысленно."""
+    store, sid, d, end = _fired(ctx, tmp_path, duration=3600, status="running")
+    called = []
+    monkeypatch.setattr(_Q, "verdict",
+                        lambda p, k: called.append((p, k)) or {
+                            "state": "as_promised", "promised_kbps": k, "kbps": 320,
+                            "codec": "AAC-LC", "measured": {},
+                            "measured_utc": bs.fmt_utc(end)})
+    assert bs.settle_finished(now=end - timedelta(hours=1)) == 0
+    assert store.get(sid).get("verdict") is None and called == []
+    assert bs.settle_finished(now=end + timedelta(minutes=5)) == 0
+    assert called == []                              # эфир кончился, но запись идёт
+    card = next(t for t in ctx[1] if t.get("id") == sid)
+    card["status"] = "done"
+    assert bs.settle_finished(now=end + timedelta(minutes=20)) == 1
+    v = store.get(sid)["verdict"]
+    assert v["state"] == "as_promised" and Path(v["file"]).name == "mix.m4a"
+
+
+def test_a_vanished_task_is_eventually_admitted_not_left_pending(ctx, tmp_path):
+    """Очередь могли почистить, а план живёт в своём файле. Через 6 часов после
+    конца эфира планировщик обязан сдаться и сказать «unmeasured» числом, а не
+    держать строку вечно «в работе»."""
+    store, sid, d, end = _fired(ctx, tmp_path, duration=60)
+    ctx[1][:] = []                                  # задача исчезла
+    assert bs.settle_finished(now=end + timedelta(hours=1)) == 0
+    assert store.get(sid).get("verdict") is None
+    assert bs.settle_finished(now=end + timedelta(hours=7)) == 1
+    row = store.get(sid)
+    v = row["verdict"]
+    assert v["state"] == "unmeasured" and v["reason"] == "no task"
+    # строка закрыта и больше не перепроверяется (иначе цикл будет тыкать ffprobe
+    # в несуществующую задачу вечно)
+    assert row["status"] == "finished"
+    assert bs.settle_finished(now=end + timedelta(hours=8)) == 0

@@ -70,6 +70,28 @@ async def _oembed_fallback(url: str) -> Optional[dict]:
         return None
 
 
+def _spot_tracks(d: dict) -> list:
+    """Список треков альбома/плейлиста Spotify в форме карточки очереди.
+
+    Плейлист вкладывает трек в `item`/`track`, альбом отдаёт сами треки.
+    Больше 50 (альбом) / 100 (плейлист) за один запрос Spotify не даёт —
+    берём то, что есть, недоставшееся дерево дочитывает нумерацией."""
+    out = []
+    for i, raw in enumerate(((d.get("tracks") or {}).get("items") or []), 1):
+        if not isinstance(raw, dict):
+            continue
+        t = raw.get("track") or raw.get("item") or raw
+        if not isinstance(t, dict) or not (t.get("name") or t.get("title")):
+            continue
+        out.append({
+            "num":    t.get("track_number") or i,
+            "title":  t.get("name") or t.get("title") or "",
+            "artist": ", ".join(a.get("name", "") for a in (t.get("artists") or []) if a.get("name")),
+            "dur":    int((t.get("duration_ms") or 0) / 1000),
+        })
+    return out
+
+
 async def _request_meta(client, kind: str, item_id: str, token: str) -> tuple[Optional[dict], int]:
     """One Spotify Web API call for *kind*/*item_id* with *token*.
 
@@ -102,7 +124,10 @@ async def _request_meta(client, kind: str, item_id: str, token: str) -> tuple[Op
         }, 200
 
     elif kind == "album":
-        r = await client.get(f"{api}/albums/{item_id}", headers=headers)
+        # limit=50 — потолок Spotify для вложенных треков альбома; всё, что
+        # дальше, одним запросом не взять.
+        r = await client.get(f"{api}/albums/{item_id}",
+                             headers=headers, params={"limit": 50})
         if r.status_code != 200:
             return None, r.status_code
         d = r.json()
@@ -117,6 +142,7 @@ async def _request_meta(client, kind: str, item_id: str, token: str) -> tuple[Op
             "date":        d.get("release_date", ""),
             "trackCount":  d.get("total_tracks", 0),
             "totalTracks": d.get("total_tracks", 0),
+            "tracks":      _spot_tracks(d),
             "label":       d.get("label", ""),
             "type":        d.get("album_type", "album"),
             "service":     "spotify",
@@ -127,7 +153,8 @@ async def _request_meta(client, kind: str, item_id: str, token: str) -> tuple[Op
         r = await client.get(
             f"{api}/playlists/{item_id}",
             headers=headers,
-            params={"fields": "name,owner,images,tracks.total"},
+            params={"fields": "name,owner,images,tracks.total,tracks.items",
+                    "limit": 100},
         )
         if r.status_code != 200:
             return None, r.status_code
@@ -138,6 +165,7 @@ async def _request_meta(client, kind: str, item_id: str, token: str) -> tuple[Op
             "artist":     (d.get("owner") or {}).get("display_name", ""),
             "artworkUrl": images[0]["url"] if images else None,
             "trackCount": (d.get("tracks") or {}).get("total", 0),
+            "tracks":     _spot_tracks(d),
             "type":       "playlist",
             "service":    "spotify",
         }, 200

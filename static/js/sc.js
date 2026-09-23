@@ -926,6 +926,7 @@ function _scDetailHTML(it) {
       <div style="font-size:16px;font-weight:700;color:var(--text);margin-top:13px;line-height:1.3">${esc(it.title)}</div>
       <div style="font-size:13px;color:var(--muted);margin-top:3px">${esc(it.artist)}</div>
       ${meta.length ? `<div style="font-size:11px;color:var(--muted2);margin-top:7px">${meta.join('  ·  ')}</div>` : ''}
+      <div id="scd-quality" style="font-size:11px;color:var(--muted2);margin-top:6px">${t('sc2.q_loading')}</div>
       <div style="display:flex;gap:7px;margin-top:14px">
         <button onclick="${playCall}" style="${btn('rgba(255,85,0,.14)','rgba(255,85,0,.25)','#ff7a33')}">▶ ${t('btn.play')||'Играть'}</button>
         <button onclick="scDownload('${it.id}')" style="${btn('rgba(255,255,255,.06)','var(--border)','var(--text)')}">${t('btn.download')}</button>
@@ -968,6 +969,55 @@ function _scOpenMix(id) {
   }
   _scLoadTracklistInto(id, d.querySelector('#scd-tl'));
   _scRenderCoverPicker(id);
+  _scLoadQuality(id);
+}
+
+// ── Потолок качества ЭТОГО релиза ────────────────────────────────────────────
+// Снимается с /api/soundcloud/formats — транскоды, видимые тому же токену,
+// которым пойдёт загрузка. Только при открытии карточки: в списке карточек
+// каждый такой запрос сжёг бы по round-trip на трек, а список листают глазами.
+// Маппинг тарифов на сервере (ripster/quality_tiers.py); здесь — только текст.
+const _scQCache = new Map();
+
+function _scQFmt(c) {
+  return (typeof qFmtLabel === 'function') ? qFmtLabel(c) : '';
+}
+
+function _scQText(d) {
+  if (!d || !d.ok) {
+    // Сервер назвал причину отказа кодом (`err.sc_formats_auth` — учётка
+    // разлогинена). «не определено» без причины отправляет владельца проверять
+    // тариф вслепую; но и ключом вместо слова панель не пугает — если перевода
+    // нет, остаёмся при честном «не определено».
+    const why = d && d.error_key ? t(d.error_key) : '';
+    return (why && why !== d.error_key) ? why : t('sc2.q_unknown');
+  }
+  const list = ((d.formats || []).map(f => f.preset)
+                .concat(d.unknown_formats || [])).join(', ');
+  const tail = list ? ' · ' + ti('sc2.q_streams', {list}) : '';
+  const why  = d.why || 'ok';
+  if (why === 'no_streams')  return t('sc2.q_nostreams');
+  if (why === 'no_hq')
+    return ti('sc2.q_no_hq', {label: _scQFmt(d.delivered || d.release_best)}) + tail;
+  if (why === 'tier_limited')
+    return ti('sc2.q_tier_limited', {rel: _scQFmt(d.release_best),
+                                     label: _scQFmt(d.delivered)}) + tail;
+  if (why === 'tier_unknown')
+    return ti('sc2.q_tier_unknown', {label: _scQFmt(d.release_best)}) + tail;
+  return ti('sc2.q_will', {label: _scQFmt(d.delivered)}) + tail;
+}
+
+async function _scLoadQuality(id) {
+  const box = document.getElementById('scd-quality');
+  if (!box) return;
+  const key = String(id);
+  if (_scQCache.has(key)) { box.textContent = _scQText(_scQCache.get(key)); return; }
+  let d = null;
+  try { d = await api('GET', `/api/soundcloud/formats/${encodeURIComponent(key)}`); }
+  catch (e) { d = null; }
+  _scQCache.set(key, d || {ok: false});
+  const live = document.getElementById('scd-quality');   // drawer мог закрыться
+  if (live) live.textContent = _scQText(d);
 }
 
 function _scCloseMix() {

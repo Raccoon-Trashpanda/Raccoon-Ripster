@@ -83,6 +83,25 @@ function ngOpenArtist(name) {
     const ty = document.getElementById('search-type');
     if (q) q.value = name;
     if (ty) ty.value = 'album';
+    // Каталоги дефолтного сервиса и Apple разные: если артиста там нет, подсказка
+    // открыла бы пустую выдачу. Откат именно на Apple — и только после нулевой
+    // проверки этим же запросом (type=album, limit=1). Не провернулось — ищем как есть.
+    const sel = document.getElementById('search-svc');
+    const svc = sel?.value || 'apple';
+    if (sel && svc !== 'apple' && [...sel.options].some(o => o.value === 'apple')) {
+      try {
+        const r = await fetch(`/api/search?q=${encodeURIComponent(name)}&service=${svc}&type=album&limit=1`);
+        const d = r.ok ? await r.json() : null;
+        if (d && !d.error && !(d.results || []).length) {
+          sel.value = 'apple';
+          if (typeof onSearchSvcChange === 'function') onSearchSvcChange();
+          if (typeof toast === 'function' && typeof ti === 'function') {
+            const lbl = typeof _svcLabel === 'function' ? _svcLabel(svc) : svc;
+            toast(ti('nudge.fallback_apple', {svc: lbl}), 'var(--muted)');
+          }
+        }
+      } catch (_) {}
+    }
     if (typeof doSearch === 'function') doSearch();
   }, 400);
 }
@@ -100,7 +119,7 @@ function _ngRender(d) {
   el.setAttribute('role', 'status');
 
   if (d.kind === 'artist') {
-    const enc = encodeURIComponent(d.name || '');
+    const enc = encodeURIComponent(d.name || '').replace(/'/g, '%27');
     el.innerHTML = `
       <div class="ng-head">${t('nudge.known_title')}</div>
       <div class="ng-body" onclick="ngOpenArtist(decodeURIComponent('${enc}'))" title="${t('nudge.open_disco')}">

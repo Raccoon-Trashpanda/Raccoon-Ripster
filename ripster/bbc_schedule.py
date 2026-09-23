@@ -121,7 +121,7 @@ class ScheduledStore:
 
     def add(self, *, channel: str, start_utc: datetime, duration: int,
             title: str = "", subtitle: str = "", cover: str = "",
-            task_id: str = "") -> dict:
+            task_id: str = "", pid: str = "", forecast: dict | None = None) -> dict:
         """Поставить план. Дубликат (тот же канал и то же время эфира, ещё не
         записанный) — ValueError: вторая запись того же эфира была бы просто
         вторым экземпляром файла."""
@@ -154,6 +154,12 @@ class ScheduledStore:
             "title":      title,
             "subtitle":   subtitle,
             "cover":      cover,
+            "pid":        pid,
+            # Что мы ОБЕЩАЛИ человеку до нажатия «записать» (ripster/bbc_quality:
+            # фактическая лестница live-потока, признак повтора, есть ли копия).
+            # Храним серверная сторона и свой ответ, а не то, что принёс фронт,
+            # иначе план обещал бы то, что нарисовал кривой клиент.
+            "forecast":   forecast or {},
             "task_id":    task_id,
             "status":     "pending",
             "created_utc": fmt_utc(utcnow()),
@@ -234,19 +240,22 @@ def task_for(store: ScheduledStore, row: dict) -> dict:
         "artworkUrl": row.get("cover") or "",
         "duration": int(row.get("duration") or 0),
         "channel":  channel,
+        "pid":      row.get("pid") or "",
         "scheduled_for": row["start_utc"],
     }
     return task
 
 
 def schedule_recording(*, channel: str, start_utc: datetime, duration: int,
-                       title: str = "", subtitle: str = "", cover: str = "") -> dict:
+                       title: str = "", subtitle: str = "", cover: str = "",
+                       pid: str = "", forecast: dict | None = None) -> dict:
     """Создать план и задачу-«ожидание» в очереди (один вызов — обе записи)."""
     store = get_store()
     if store is None:
         raise RuntimeError("bbc_schedule.install() has not run yet")
     rows = store.add(channel=channel, start_utc=start_utc, duration=duration,
-                     title=title, subtitle=subtitle, cover=cover)
+                     title=title, subtitle=subtitle, cover=cover,
+                     pid=pid, forecast=forecast)
     try:
         _queue.append(task_for(store, rows))
     except Exception as e:
@@ -338,14 +347,149 @@ async def fire(row: dict) -> bool:
     return True
 
 
+# ── Сверка записанного файла с обещанием ─────────────────────────────────────
+
+_AUDIO_EXT = (".m4a", ".mp3", ".aac", ".opus", ".ogg", ".wav", ".flac", ".alac")
+# Между концом эфира и появлением записи в истории: буфер на хвост перепаковки
+# и на то, что часы чуть расходятся.
+_SETTLE_GRACE = 180
+# Как часто переспрашивать историю, пока вердикта нет (сек). Цикл — 5 с, а
+# перечитывать history.json каждые пять секунд два часа подряд — просто шум.
+_SETTLE_POLL = 60
+_next_check: dict[str, float] = {}    # sid → unix-время следующей пробы
+
+
+def _history_path() -> Path | None:
+    """history.json лежит в той же папке, что и bbc_scheduled.json (оба — рядом
+    с config.yaml: см. BASE_DIR в app.py)."""
+    store = get_store()
+    p = store.path.parent / "history.json"
+    return p if p.is_file() else None
+
+
+def _finished_task(sid: str) -> dict | None:
+    """Задача записи после конца эфира: ещё жива в очереди — берём оттуда,
+    иначе читаем history.json (очередь чистят, история остаётся)."""
+    for t in _queue:
+        if t.get("id") == sid and t.get("status") in ("done", "error", "cancelled"):
+            return t
+    path = _history_path()
+    if path is None:
+        return None
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8")) or []
+    except Exception:
+        return None
+    if isinstance(rows, dict):
+        rows = rows.get("history") or rows.get("items") or []
+    return next((h for h in rows if isinstance(h, dict) and h.get("id") == sid), None)
+
+
+def _newest_audio(save_dir) -> Path | None:
+    if not save_dir:
+        return None
+    d = Path(save_dir)
+    if d.is_file():
+        return d if d.suffix.lower() in _AUDIO_EXT else None
+    try:
+        files = [f for f in d.iterdir()
+                 if f.is_file() and f.suffix.lower() in _AUDIO_EXT]
+    except OSError:
+        return None
+    return max(files, key=lambda f: f.stat().st_size) if files else None
+
+
+def settle_result(row: dict, task: dict | None) -> dict:
+    """Вердикт по записанному файлу — числами, без доверия к шильдику.
+
+    Спрашиваем САМ файл (ffprobe), а не поле `quality` задачи: история и папка
+    называются по ЗАПРОШЕННОМУ качеству (проверено на другом сервисе — 28.07.2026
+    при запросе FLAC приехал AAC 268 kbps в папке «FLAC»). Обещание планировщика —
+    320 кбит/с AAC-LC live-потока; живой поток тем и отличается от файла, что
+    ступень может измениться в середине ночи, поэтому «live320» в названии плана
+    ничего не гарантирует.
+
+    Профиль и полоса берутся из `.measured` (см. ripster/bbc_quality.py): у copy-
+    записи из варианта LC они ровно те, что в потоке, — перекодировки нет, так что
+    за апконверт здесь отвечает не спектр, а запрет на него до кодирования.
+    """
+    promised = int((row.get("forecast") or {}).get("best_kbps") or 0) or 320
+    status = (task or {}).get("status") or ""
+    if status in ("error", "cancelled"):
+        return {"state": "failed", "promised_kbps": promised,
+                "reason": str((task or {}).get("error") or status)[:300],
+                "measured_utc": fmt_utc(utcnow())}
+    sd = (task or {}).get("_save_dir") or ""
+    audio = _newest_audio(sd)
+    if audio is None:
+        return {"state": "no_file", "promised_kbps": promised,
+                "reason": "save-dir пуст" if sd else "папка задачи не записана",
+                "measured_utc": fmt_utc(utcnow())}
+    try:
+        from ripster import bbc_quality as _q
+        v = _q.verdict(audio, promised)
+    except Exception as e:
+        return {"state": "unmeasured", "promised_kbps": promised,
+                "reason": type(e).__name__, "measured_utc": fmt_utc(utcnow())}
+    v["file"] = audio.name
+    return v
+
+
+def settle_finished(now: datetime | None = None) -> int:
+    """Довести каждую запись «fired» до вердикта. Число новых вердиктов."""
+    store = get_store()
+    now = now or utcnow()
+    n = 0
+    for row in store.all():
+        if row.get("status") != "fired" or row.get("verdict"):
+            continue
+        sid = row.get("id") or ""
+        started = _dt(row)
+        end = started.timestamp() + int(row.get("duration") or 0) + _SETTLE_GRACE
+        if now.timestamp() < end:
+            continue
+        if now.timestamp() < _next_check.get(sid, 0):
+            continue
+        _next_check[sid] = now.timestamp() + _SETTLE_POLL
+        task = _finished_task(sid)
+        if task is None:
+            # Задача ещё идёт (или пропала): ждём, не выдумываем вердикт.
+            if now.timestamp() > end + 6 * 3600:
+                # Сдались: вердикт «не померили» — тоже вердикт, и он закрывает
+                # строку. Не засчитать его здесь значит соврать счётчику
+                # «сколько планов получили ответ», который возвращает цикл.
+                store.mark(sid, verdict={"state": "unmeasured", "reason": "no task",
+                                         "measured_utc": fmt_utc(now)},
+                           status="finished", finished_utc=fmt_utc(now))
+                _next_check.pop(sid, None)
+                n += 1
+            continue
+        v = settle_result(row, task)
+        store.mark(sid, verdict=v, finished_utc=v.get("measured_utc") or fmt_utc(now),
+                   status="recorded" if v.get("state") == "as_promised" else "finished")
+        _next_check.pop(sid, None)
+        n += 1
+        print(f"[bbc-schedule] {sid}: эфир записан — {v.get('state')} "
+              f"{v.get('kbps', '')}{' кбит/с' if v.get('kbps') else ''} "
+              f"{v.get('codec') or v.get('reason') or ''}".strip(), flush=True)
+    return n
+
+
 async def run_loop(period: float = 5.0) -> None:
     store = get_store()
+    tick = 0
     while True:
         try:
             for row in due_rows(store):
                 await fire(row)
+            # Раз в ~30 с: сверить законченные записи с обещанием. ffprobe и
+            # чтение истории — блокирующие, уводим в поток, чтобы не тормозить
+            # очередь и ведро соккетов.
+            if tick % max(1, int(30 / period)) == 0:
+                await asyncio.to_thread(settle_finished)
         except asyncio.CancelledError:
             raise
         except Exception as e:
             print(f"[bbc-schedule] cycle error: {type(e).__name__}: {e}", flush=True)
+        tick += 1
         await asyncio.sleep(period)

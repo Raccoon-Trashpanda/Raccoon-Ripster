@@ -1013,7 +1013,7 @@ function renderAlbumPage(){
               ${t.artist && t.artist!==album.artist ? `<div style="font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.artist)}</div>` : ''}
             </div>
             <div style="color:var(--muted);font-size:11px;font-family:var(--mono);flex-shrink:0">${fmtDur(t.duration)}</div>
-            <button onclick="albumAddTrack('${esc(t.url||t.id)}','${esc(t.title)}','${esc(t.artist||album.artist||'')}')" style="padding:4px 10px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;font-family:var(--font);flex-shrink:0" title="${_TT.q}">⬇</button>
+            <button onclick="albumAddTrack('${escJ(t.url||t.id)}','${escJ(t.title)}','${escJ(t.artist||album.artist||'')}')" style="padding:4px 10px;background:transparent;color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;font-family:var(--font);flex-shrink:0" title="${_TT.q}">⬇</button>
           </div>`).join('')}
       </div>`;
 

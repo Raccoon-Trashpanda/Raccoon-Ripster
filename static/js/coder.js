@@ -681,9 +681,14 @@ function updateQueueItem(task, el) {
   el = el || document.querySelector(`.qi[data-id="${task.id}"]`);
   if(!el) return;
   const _partial = String(!!(task.partial || task._partial));
+  // Дерево появляется и сворачивается вместе с метаданными: на момент
+  // построения карточки треклиста ещё может не быть, а номер строки и
+  // раскрытость меняются, когда он приходит. Различия в дереве — тоже полный
+  // пересбор, та же сохранённая панель журнала.
+  const _tree = (typeof _qtSig === 'function') ? _qtSig(task) : '';
   // A status (or partial) change alters the action set + layout → full rebuild,
   // preserving an open log panel. Resume-in-place keeps the SAME card (same id).
-  if(el.dataset.st !== task.status || el.dataset.partial !== _partial) {
+  if(el.dataset.st !== task.status || el.dataset.partial !== _partial || el.dataset.tree !== _tree) {
     const logOpen = el.querySelector('.qi-log-panel')?.style.display === 'block';
     const fresh = buildQueueItem(task);
     if(logOpen){

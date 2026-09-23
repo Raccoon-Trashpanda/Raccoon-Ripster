@@ -49,7 +49,6 @@ function stGradient(seed, a1, a2) {
 
 let _stHome = null;          // ответ /api/stations/home
 let _stBusy = false;
-let _stSeed = 0;             // растёт на «ещё раз» — тот же жанр, другой эфир
 
 async function stationsInit(force) {
   if (_stBusy) return;
@@ -148,6 +147,7 @@ function stRender() {
     t('st.footer').replace('{0}', c.plays || 0).replace('{1}', c.downloads || 0))}</div>`);
 
   box.innerHTML = parts.join('');
+  stRenderKnobs();
   stWarmPreviews();
 }
 
@@ -231,78 +231,435 @@ function stSection(title, hint, inner) {
 
 /** Кавычки для onclick — отдельно от escJ, чтобы не зависеть от чужого файла. */
 function escJ2(s) {
-  return "'" + String(s == null ? '' : s).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+  // Два слоя, как у escJ: результат стоит внутри onclick="…", и `"` в имени
+  // артиста закрывал атрибут (23.09.2026) — сначала HTML-сущности, потом JS.
+  return "'" + String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    .replace(/\\/g, '\\\\').replace(/'/g, "\\'").replace(/\r?\n/g, ' ') + "'";
 }
 
-async function stPlay(id) {
-  _stSeed = (_stSeed + 1) | 0;
-  await stRun(`/api/station?id=${encodeURIComponent(id)}&limit=30&seed=${Date.now() & 0xffff}`,
-              id);
-}
-
-async function stPlayArtist(name) {
-  if (!name) return;
-  await stRun(`/api/station/artist?name=${encodeURIComponent(name)}&limit=25&seed=${Date.now() & 0xffff}`,
-              name);
-}
-
-/**
- * Собрать эфир и поставить его в плеер.
+/* ══ СЕССИЯ: ПАЧКИ, ДОЗАКАЗ, РУЧКИ ═════════════════════════════════════════
  *
- * Отдельная функция на оба случая, потому что различаются они только адресом,
- * а вот отчёт человеку обязан быть одинаковым: и пустой ответ, и отказ должны
- * ЧТО-ТО сказать. Молчащая кнопка — тот самый врущий контрол.
+ * Станция больше НЕ запрашивается одним выстрелом. Сервер держит эфир в
+ * `station_sessions.py`: открываем сессию — это ЕДИНСТВЕННЫЙ запрос, который
+ * ходит в витрины и MusicBrainz (секунды), — получаем короткую пачку, а когда
+ * очередь тает, просим следующую. `next` по построению не трогает сеть и
+ * приходит за миллисекунды, поэтому начинаем его ЗА ТРИ трека, а не когда
+ * колонки уже молчат. Так эфир перестаёт кончаться на тридцатом треке и
+ * начинает учитывать то, что человек сказал внутри этих тридцати.
+ *
+ * Запас (`reserve_min`) и размер пачки читаются с сервера, а не заводятся
+ * здесь константой: решение «когда дозаказывать» принимает тот, кто держит
+ * пул.
+ *
+ * СОБЫТИЯ уезжают не по одному, а ТЕЛОМ запроса `next` (см. `_stevTakePending`
+ * в player.js) — ровно как `feedbacks` у Яндекса: сервер пересобирает остаток
+ * пула уже зная, что человек сделал с прошлой пачкой.
  */
-async function stRun(url, label) {
-  const bar = document.getElementById('st-status');
-  if (bar) bar.textContent = t('st.building').replace('{0}', label);
+const ST_BATCH = 10;
+
+/*
+ * ИГРАЕМОСТЬ — честный ответ на «треть выдачи выбрасывается в браузере».
+ *
+ * Плеер стримит ровно три сервиса: на сервере есть /api/stream/qobuz|tidal|
+ * deezer/{id}. У строк apple и yandex такого пути нет вовсе, soundcloud есть,
+ * но это то, чем станцию лучше НЕ кормить: чарт приносит часовые DJ-сеты под
+ * «артистом»-лейблом (docs/STATIONS_GAP.md, Р2), а Apple отдаёт 30-секундное
+ * превью. И то и другое отравило бы ровно тот сигнал глубины, который мы
+ * сейчас чиним: превью считалось бы скипом на 15% длины, сет — часовым
+ * прослушиванием чужого имени.
+ *
+ * Поэтому ВЫБРАНО НЕ «починить играбельность», а «перестать платить за то, что
+ * не звучит»: фронт СКАЗЫВАЕТ серверу, какие сервисы он способен сыграть
+ * (`services` в теле открытия сессии), и пул собирается только из них. Раньше
+ * браузер молча выбрасывал эти строки ПОСЛЕ того, как сервер заплатил за них
+ * сетевыми запросами и сверкой жанра, а `reserve` врал: считал то, что никогда
+ * не заиграет, и дозаказ начинался позже, чем надо.
+ *
+ * Фильтр ниже оставлен как страховка — и он НЕ молчит: если сервер всё-таки
+ * пришлёт неигрубельное, человек это увидит.
+ */
+const ST_PLAYABLE = ['deezer', 'qobuz', 'tidal'];
+
+const ST_KNOB_NEUTRAL = { diversity: 'default', energy: 'all', language: 'any' };
+
+/** Значения — СЕРВЕРНЫЕ (`stations.DIVERSITIES/ENERGIES/LANGUAGES`): ручка с
+ *  набором значений, которых бэкенд не знает, это та самая подмена. */
+const ST_KNOBS = [
+  { key: 'diversity', title: 'st.knob_diversity', values: [
+    ['favorite', 'st.div_favorite'], ['default', 'st.div_default'],
+    ['discover', 'st.div_discover'], ['popular', 'st.div_popular']] },
+  { key: 'energy', title: 'st.knob_energy', values: [
+    ['calm', 'st.en_calm'], ['all', 'st.en_all'], ['active', 'st.en_active']] },
+  { key: 'language', title: 'st.knob_language', values: [
+    ['any', 'st.lg_any'], ['russian', 'st.lg_russian'],
+    ['not-russian', 'st.lg_not_russian']] },
+];
+
+let _stSess = null;         // живой эфир: {id, stationId, label, title, batchId, …}
+let _stReport = null;       // последний `knob_report` сервера
+let _stKnobs = stKnobLoad();
+
+function stKnobLoad() {
+  const out = { diversity: 'default', energy: 'all', language: 'any' };
   try {
-    const r = await api('GET', url);
-    if (!r || !r.ok || !(r.tracks || []).length) {
-      if (bar) bar.textContent = (r && r.reason) ? r.reason : t('st.empty');
-      return;
-    }
-    stQueue(r.tracks, label);
-    const from = r.from_artists ? ` · ${t('st.from_artists').replace('{0}', r.from_artists)}` : '';
-    if (bar) bar.textContent = `${t('st.playing').replace('{0}', r.title || label)} · ${r.tracks.length}${from}`;
-  } catch (e) {
-    if (bar) bar.textContent = `${t('st.load_failed')}: ${String(e)}`;
-  }
+    const raw = JSON.parse(localStorage.getItem('st.knobs') || '{}');
+    Object.keys(out).forEach(k => { if (typeof raw[k] === 'string') out[k] = raw[k]; });
+  } catch (_) {}
+  return out;
 }
 
-/**
- * Отдать собранное существующему плееру.
- *
- * Играем ТОЛЬКО то, у чего есть сервис и идентификатор: без них стрим-адрес не
- * собрать, и такая строка в очереди была бы кнопкой без действия.
- *
- * Через `_playPreviewAt`, а не `playStreamTrack`: последний после своего await
- * присваивал `Preview.queue` ОДНОЭЛЕМЕНТНЫЙ массив и молча съедал остальные
- * треки эфира у Qobuz/Tidal (у Deezer путь синхронный — поэтому и не замечали).
- * `_playPreviewAt` резолвит стрим сама по каждой строке очереди — тем же путём
- * идёт плейлист.
- *
- * Очередь помечается в плеере (`_stevStationStart`): по этой метке плеер
- * отличает станцию от любого другого запуска и шлёт события прослушивания.
- */
-function stQueue(tracks, label) {
-  const playable = tracks.filter(x => x.service && x.id &&
-                                 ['qobuz', 'tidal', 'deezer'].includes(x.service));
-  if (!playable.length) {
-    const bar = document.getElementById('st-status');
-    if (bar) bar.textContent = t('st.nothing_playable');
-    return;
-  }
-  if (typeof _setupAudioEvents !== 'function' || typeof _playPreviewAt !== 'function') return;
-  Preview.queue = playable.map(x => ({
+function stKnobSave() {
+  try { localStorage.setItem('st.knobs', JSON.stringify(_stKnobs)); } catch (_) {}
+}
+
+function stUuid() {
+  try { if (crypto.randomUUID) return crypto.randomUUID(); } catch (_) {}
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 3) | 8).toString(16);
+  });
+}
+
+function stStatus(msg) {
+  const b = document.getElementById('st-status');
+  if (b) b.textContent = msg;
+}
+
+/** Сколько треков осталось до конца очереди, считая играющий. */
+function stRemaining() {
+  if (typeof Preview === 'undefined' || !Preview.queue) return 0;
+  return Preview.queue.length - 1 - Preview.idx;
+}
+
+/** Станция играет и очередь всё ещё наша (чужой запуск снимает метку в
+ *  player.js — по идентичности массива). */
+function stSessionLive() {
+  return !!(_stSess && typeof _StEv !== 'undefined' && _StEv.session === _stSess.id);
+}
+
+function stCard(x) {
+  return {
     url: '', service: x.service, id: String(x.id),
     title: x.title || '', artist: x.artist || '', cover: x.cover || '', full: true,
     // Длительность с сервера: события прослушивания берут length_s отсюда,
     // а не из того, что в этот момент стоит в <audio>.
     duration: Number(x.duration) || 0,
-  }));
+    // Ссылка на карточку сервиса — она нужна кнопке «скачать» (постановка в
+    // очередь понимает только ссылку). В `url` её класть нельзя: туда плеер
+    // ждёт аудиопуть, и адрес сайта играл бы тишиной.
+    dl: x.url || '',
+  };
+}
+
+/** Оставить только то, что этот плеер физически способен сыграть. */
+function stPlayable(tracks) {
+  const items = [], dropped = {};
+  (tracks || []).forEach(x => {
+    const svc = String(x.service || '').toLowerCase();
+    if (x.id && ST_PLAYABLE.indexOf(svc) >= 0) items.push(stCard(x));
+    else dropped[svc || '?'] = (dropped[svc || '?'] || 0) + 1;
+  });
+  return { items: items, dropped: dropped };
+}
+
+/** Неигрубельные строки НЕ исчезают молча: раньше треть выдачи просто
+ *  проходила мимо `r.tracks.length`, и человек не мог отличить «столько и
+ *  собрали» от «столько нашли, остальное нечем играть». */
+function stTellDropped(dropped) {
+  const names = Object.keys(dropped || {});
+  if (!names.length) return;
+  const n = names.reduce((a, k) => a + dropped[k], 0);
+  stStatus(ti('st.dropped', { n: n, svc: names.slice(0, 3).join(', ') }));
+}
+
+function stShowLive(extra) {
+  const s = _stSess;
+  if (!s) return;
+  const bits = [t('st.playing').replace('{0}', s.title || s.label),
+                ti('st.in_queue', { n: Math.max(0, stRemaining() + 1) }),
+                ti('st.reserve', { n: s.reserve })];
+  if (extra) bits.push(extra);
+  stStatus(bits.join('  ·  '));
+}
+
+/**
+ * Открыть сессию. Вся сеть — здесь; `next` ниже её не трогает.
+ */
+function stSessionRequest(id) {
+  return api('POST', '/api/station/session',
+             { id: id, batch: ST_BATCH, knobs: _stKnobs, services: ST_PLAYABLE,
+               seed: Date.now() & 0xffff });
+}
+
+async function stPlay(id) {
+  const tile = (((_stHome || {}).tiles) || []).filter(x => x.id === id)[0];
+  const label = (tile && tile.title) || id;
+  stStatus(t('st.building').replace('{0}', label));
+  let r = null;
+  try { r = await stSessionRequest(id); } catch (e) {
+    stStatus(t('st.load_failed') + ': ' + String(e)); return;
+  }
+  if (!r || !r.ok || !(r.tracks || []).length) {
+    stShowEmpty(r);
+    _stSess = null; stRenderKnobs();
+    return;
+  }
+  const got = stPlayable(r.tracks);
+  if (!got.items.length) {
+    stStatus(t('st.nothing_playable')); stTellDropped(got.dropped); return;
+  }
+  if (typeof _setupAudioEvents !== 'function' || typeof _playPreviewAt !== 'function') return;
+  // НОВЫЙ массив = новый эфир: плеер по идентичности отличает станцию от
+  // любого другого запуска (`_stevActive` в player.js).
+  Preview.queue = got.items;
   Preview.idx = 0;
+  _stSess = { id: r.session_id, stationId: r.station_id || id, label: label,
+              title: r.title || label, batchId: r.batch_id || '', seq: r.sequence || 1,
+              reserve: Number(r.reserve) || 0, reserveMin: Number(r.reserve_min) || 3,
+              suggest: r.suggest || 'next_batch', exhausted: !!r.exhausted, waiting: null };
+  _stReport = r.knob_report || null;
   _setupAudioEvents();
-  if (typeof _stevStationStart === 'function') { try { _stevStationStart(label); } catch (_) {} }
+  if (typeof _stevStationStart === 'function') {
+    try { _stevStationStart(label, r.session_id, r.batch_id); } catch (_) {}
+  }
+  stRenderKnobs();
+  stShowLive();
   _playPreviewAt(0);
+  if (got.dropped && Object.keys(got.dropped).length) stTellDropped(got.dropped);
+}
+
+/** Пустой эфир обязан СКАЗАТЬ почему — не «проверьте связь» и не молчание. */
+function stShowEmpty(r) {
+  stStatus((r && (r.reason || r.error)) ? t('st.empty_reason') : t('st.empty'));
+}
+
+/**
+ * Принять пачку: доклеить к ТОМУ ЖЕ массиву очереди и перевести учёт на неё.
+ * Новый массив здесь обнулил бы весь учёт эфира на середине вечера.
+ */
+function stAdopt(r, fresh) {
+  const s = _stSess;
+  if (!s) return 0;
+  const got = stPlayable(r.tracks);
+  if (got.items.length) Array.prototype.push.apply(Preview.queue, got.items);
+  s.id = r.session_id || s.id;
+  s.batchId = r.batch_id || '';
+  s.seq = r.sequence || (s.seq + 1);
+  s.reserve = Number(r.reserve) || 0;
+  if (r.reserve_min) s.reserveMin = Number(r.reserve_min);
+  s.suggest = r.suggest || 'next_batch';
+  s.exhausted = !!r.exhausted;
+  if (r.knob_report) { _stReport = r.knob_report; stRenderKnobs(); }
+  if (fresh && typeof _stevStationStart === 'function') {
+    // Ротация: старая сессия закрывается (и сливает свои события в базу),
+    // новая начинается тем же эфиром — ЗВУК НЕ ПРЕРЫВАЕТСЯ.
+    try { _stevStationStart(s.label, s.id, s.batchId); } catch (_) {}
+  } else if (typeof _stevBatch === 'function') {
+    try { _stevBatch(s.batchId); } catch (_) {}
+  }
+  stShowLive(got.dropped && Object.keys(got.dropped).length
+    ? ti('st.dropped_short', { n: Object.keys(got.dropped).reduce((a, k) => a + got.dropped[k], 0) })
+    : (r.repeats ? ti('st.repeats', { n: r.repeats }) : ''));
+  return got.items.length;
+}
+
+/** Осталось ≤ резерва — просим пачку, НЕ блокируя игру. */
+function stRefillIfLow() {
+  const s = _stSess;
+  if (!s || s.waiting || !stSessionLive()) return;
+  if (stRemaining() > s.reserveMin) return;
+  stRefillNow();
+}
+
+/** Пачка прямо сейчас. Возвращает обещание с числом добавленных треков — его
+ *  ждёт плеер, когда очередь дошла до края (тишина в колонках дороже). */
+function stRefillNow() {
+  const s = _stSess;
+  if (!s) return Promise.resolve(0);
+  if (s.waiting) return s.waiting;
+  // Сервер сам сказал, что резерв кончился, — это не «следующая пачка», а
+  // новая волна: открываем новую сессию и доклеиваем её сюда же.
+  const p = (s.suggest === 'new_session' || s.exhausted) ? stRotate() : stNextBatch();
+  s.waiting = p;
+  p.then(() => { if (s.waiting === p) s.waiting = null; },
+         () => { if (s.waiting === p) s.waiting = null; });
+  return p;
+}
+
+async function stNextBatch() {
+  const s = _stSess;
+  if (!s) return 0;
+  const events = (typeof _stevTakePending === 'function') ? _stevTakePending() : [];
+  let r = null;
+  try {
+    r = await api('POST', '/api/station/session/' + encodeURIComponent(s.id) + '/next',
+                  { events: events, knobs: _stKnobs, batch: ST_BATCH });
+  } catch (e) {
+    // Сеть подвела — события возвращаются в буфер и уедут с следующей
+    // попыткой либо при остановке станции. Молча их потерять = потерять вечер.
+    if (typeof _stevReturnPending === 'function') _stevReturnPending(events);
+    return 0;
+  }
+  if (!r) return 0;
+  if (r.stale) {
+    // Состояние сервера умерло (перезапуск, получасовой простой). Эфир это
+    // чинит САМ, тихо: новая сессия доклеивается к играющему. Ошибка на
+    // экране посреди музыки — тот самый случай, когда исправное состояние
+    // дороже оборванного эфира.
+    if (typeof _stevReturnPending === 'function') _stevReturnPending(events);
+    return stRotate();
+  }
+  if (typeof _stevReturnPending === 'function' && !(r.ok && (r.tracks || []).length)) {
+    _stevReturnPending(events);          // пачки нет — фидбек ещё не принят
+  }
+  if (!r.ok || !(r.tracks || []).length) {
+    s.exhausted = true; s.suggest = 'new_session';
+    return 0;
+  }
+  return stAdopt(r, false);
+}
+
+/** Тихая ротация: новый эфир того же жанра доклеивается к текущему. */
+async function stRotate() {
+  const s = _stSess;
+  if (!s) return 0;
+  let r = null;
+  try { r = await stSessionRequest(s.stationId); } catch (e) { return 0; }
+  if (!r || !r.ok || !(r.tracks || []).length) { s.exhausted = true; return 0; }
+  r.session_id = r.session_id || s.id;
+  return stAdopt(r, true);
+}
+
+/* ── РУЧКИ ЭФИРА ───────────────────────────────────────────────────────────
+ *
+ * Настроение, разнообразие, язык. Правило одно: контрол, который ничего не
+ * меняет, не имеет права выглядеть рабочим. Что каждая ручка делает с ЭТИМ
+ * эфиром, решает сервер — `knob_report` приходит с каждой пачкой, и у него есть
+ * поле `effect` ("active" | "no-op") на каждое значение. Сегодня живая ровно
+ * одна: `diversity`. `energy` и `language` — no-op ВСЕГДА, потому что признаков
+ * нет: bpm/energy ни один станционный источник не отдаёт, язык трека определить
+ * нечем. Обе ручки показываются ОТКЛЮЧЁННЫМИ с объяснением, а не рабочими
+ * кнопками, которые молча делают ничего.
+ */
+
+/** эффект ЗНАЧЕНИЯ ручки по докладу сервера; «active», «no-op» или '' (не
+ *  известно — до первой сессии доклада нет). */
+function stKnobEffect(key, value) {
+  const rep = _stReport && _stReport[key];
+  if (!rep) return '';
+  const vals = rep.values || [];
+  for (let i = 0; i < vals.length; i++) {
+    if (vals[i].value === value) return vals[i].effect || '';
+  }
+  // Сервер отчитывается только про текущее значение: спрашивают его — верим
+  // докладу; про любое другое честнее сказать «не знаю», чем выдумать.
+  return value === rep.value ? (rep.effect || '') : '';
+}
+
+/** Мёртвая ручка — та, у которой НЕ РАБОТАЕТ ВООБЩЕ НИ ОДНО значение. */
+function stKnobDead(key) {
+  const spec = ST_KNOBS.filter(g => g.key === key)[0];
+  if (!spec) return true;
+  const known = spec.values.map(v => stKnobEffect(key, v[0])).filter(Boolean);
+  if (!known.length) return key !== 'diversity';   // доклада нет: жива только та,
+                                                   // которую сервер объявил сам
+  return known.every(e => e !== 'active');
+}
+
+function stKnobNote(key) {
+  if (stKnobDead(key)) return t('st.knob_dead_' + key);
+  if (!stSessionLive()) return t('st.knob_next_station');
+  return key === 'diversity' ? t('st.knob_applies_tail') : '';
+}
+
+function stRenderKnobs() {
+  const box = document.getElementById('st-knobs');
+  if (!box) return;
+  box.innerHTML = ST_KNOBS.map(g => {
+    const dead = stKnobDead(g.key);
+    const chips = g.values.map(v => {
+      const value = v[0], on = _stKnobs[g.key] === value;
+      const noop = !dead && stKnobEffect(g.key, value) === 'no-op';
+      const cls = 'st-knob-chip' + (on ? ' on' : '') + (noop ? ' noop' : '');
+      const tip = dead ? t('st.knob_dead_' + g.key) : (noop ? t('st.knob_noop') : t(v[1]));
+      return `<button class="${cls}"${dead ? ' disabled' : ''} title="${esc(tip)}"
+                onclick="stSetKnob('${g.key}','${value}')">${esc(t(v[1]))}</button>`;
+    }).join('');
+    const note = stKnobNote(g.key);
+    return `<div class="st-knob${dead ? ' st-knob-dead' : ''}">
+      <span class="st-knob-t">${esc(t(g.title))}</span>
+      <span class="st-knob-chips">${chips}</span>
+      ${note ? `<span class="st-knob-note">${esc(note)}</span>` : ''}
+    </div>`;
+  }).join('');
+}
+
+async function stSetKnob(key, value) {
+  if (stKnobDead(key)) return;                  // мёртвую ручку не сделать живой
+  _stKnobs = Object.assign({}, _stKnobs);
+  _stKnobs[key] = value;
+  stKnobSave();
+  stRenderKnobs();
+  const s = _stSess;
+  if (!s || !stSessionLive()) return;           // применится при следующем открытии
+  let r = null;
+  try {
+    r = await api('POST', '/api/station/session/' + encodeURIComponent(s.id) + '/knobs',
+                  { knobs: _stKnobs });
+  } catch (e) { return; }
+  if (!r || r.stale) return;                    // эфир починит это сам на дозаказе
+  if (r.knob_report) _stReport = r.knob_report;
+  if (typeof r.reserve === 'number') s.reserve = r.reserve;
+  if (r.suggest) s.suggest = r.suggest;
+  stRenderKnobs();
+  stShowLive(t('st.knob_reordered'));
+}
+
+// Смена языка: панель ручек собирается в JS, а `applyLang()` перерисовывает
+// только узлы с data-i18n — поэтому следим за признаком языка (атрибут `lang на
+// <html>`, который ставит он же) и перерисовываем саму панель. Тот же приём, что
+// у динамических панелей плавающего плеера.
+(function () {
+  if (typeof MutationObserver !== 'function' || typeof document === 'undefined') return;
+  try {
+    new MutationObserver(function () { stRenderKnobs(); })
+      .observe(document.documentElement, { attributes: true, attributeFilter: ['lang'] });
+  } catch (_) {}
+})();
+
+function stPlayArtist(name) {
+  if (!name) return;
+  stRun(`/api/station/artist?name=${encodeURIComponent(name)}&limit=25&seed=${Date.now() & 0xffff}`,
+        name);
+}
+
+/**
+ * Эфир ОДНОЙ пачкой — так живут станции вокруг артиста: сессия серверу
+ * нужна жанровая (`/api/station/session` берёт id плитки), и для «вокруг
+ * человека» её нет. События при этом пишутся честно: у своего эфира есть id,
+ * которого хватает и на бан трека, и на долгий профиль; перестройка внутри
+ * эфира для одной пачки просто негде жить.
+ */
+async function stRun(url, label) {
+  stStatus(t('st.building').replace('{0}', label));
+  let r = null;
+  try { r = await api('GET', url); } catch (e) {
+    stStatus(t('st.load_failed') + ': ' + String(e)); return;
+  }
+  if (!r || !r.ok || !(r.tracks || []).length) { stShowEmpty(r); return; }
+  const got = stPlayable(r.tracks);
+  if (!got.items.length) { stStatus(t('st.nothing_playable')); stTellDropped(got.dropped); return; }
+  if (typeof _setupAudioEvents !== 'function' || typeof _playPreviewAt !== 'function') return;
+  Preview.queue = got.items;
+  Preview.idx = 0;
+  _stSess = null;                     // не сессия: дозаказа у этого эфира нет
+  _setupAudioEvents();
+  if (typeof _stevStationStart === 'function') {
+    try { _stevStationStart(label, stUuid(), ''); } catch (_) {}
+  }
+  const from = r.from_artists ? '  ·  ' + t('st.from_artists').replace('{0}', r.from_artists) : '';
+  stStatus(`${t('st.playing').replace('{0}', r.title || label)}  ·  ${got.items.length}${from}`);
+  _playPreviewAt(0);
+  if (Object.keys(got.dropped).length) stTellDropped(got.dropped);
 }

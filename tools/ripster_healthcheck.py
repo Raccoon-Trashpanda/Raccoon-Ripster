@@ -197,6 +197,48 @@ def _ps_proc_count(cmdline_regex: str) -> int:
         return 0
 
 
+def _port_owner() -> tuple[int, float]:
+    """(pid, unix-время старта) процесса, который СЛУШАЕТ порт приложения;
+    (0, 0.0) — если не слушает никто.
+
+    Опознание по сокету, а не по командной строке. 20.09.2026: бэкенд поднимает
+    ЭЛЕВИРОВАННЫЙ лаунчер, и у его дочернего python.exe наш непривилегированный
+    CIM-запрос видит CommandLine == null (и ExecutablePath тоже). Поэтому
+    `-match 'app\\.py'` перестал совпадать НИ С ЧЕМ — молча, без единой жалобы:
+    подсказка «Код новее запущенного app.py» в последний раз сработала для старта
+    16.09 15:51 и с тех пор не могла появиться в принципе, а `_heal_app_down`
+    считал, что бэкенда нет вообще — то есть на ЖИВОМ старте пошёл бы убивать
+    лаунчер и спавнить второй, ровно то, от чего предостерегает комментарий в
+    шаге 2. Владелец порта виден независимо от прав: PID и CreationDate отдаются
+    и для элевированного процесса.
+
+    Время считаем вычитанием эпохи, а не `Get-Date -UFormat %s`: тот отдаёт
+    строку в текущей локали, и `[double]::Parse` на запятичном разделителе врёт.
+    """
+    try:
+        port = int(BASE.rsplit(":", 1)[1])
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"$c = Get-NetTCPConnection -LocalPort {port} -State Listen "
+             "-ErrorAction SilentlyContinue | Select-Object -First 1; "
+             "if ($c) { $p = Get-CimInstance Win32_Process -Filter "
+             "\"ProcessId=$($c.OwningProcess)\"; if ($p) { \"$($p.ProcessId) \" + "
+             "[int][Math]::Floor((((Get-Date $p.CreationDate).ToUniversalTime() "
+             "- [datetime]'1970-01-01').TotalSeconds)) } }"],
+            capture_output=True, text=True, timeout=30, creationflags=CNW)
+        pid, _, ts = (r.stdout or "").strip().partition(" ")
+        return int(pid or 0), float(ts or 0)
+    except Exception:
+        return 0, 0.0
+
+
+def _app_backend_running() -> bool:
+    """Есть ли вообще процесс бэкенда — по командной строке ИЛИ по владельцу
+    порта. Второе обязательно: под элевированным лаунчером первое слепо
+    (см. `_port_owner`), а «бэкенда нет» запускает спавн второго."""
+    return _ps_proc_count(r"app\.py") > 0 or _port_owner()[0] > 0
+
+
 def _app_started_ts() -> float:
     """Когда стартовал ЖИВОЙ app.py (unix-время), 0.0 — если определить не вышло.
 
@@ -213,9 +255,11 @@ def _app_started_ts() -> float:
              "| Sort-Object CreationDate | Select-Object -First 1; "
              "if ($p) { [int][double]::Parse((Get-Date $p.CreationDate -UFormat %s)) }"],
             capture_output=True, text=True, timeout=30, creationflags=CNW)
-        return float((r.stdout or "0").strip() or 0)
+        ts = float((r.stdout or "0").strip() or 0)
     except Exception:
-        return 0.0
+        ts = 0.0
+    # Командной строки не видно (элевированный лаунчер) — спрашиваем сокет.
+    return ts or _port_owner()[1]
 
 
 _DETACHED = 0x00000008  # DETACHED_PROCESS
@@ -305,7 +349,7 @@ def _heal_app_down() -> bool:
     #    ВАЖНО: app.py спавнит дочерний python-воркер, который наследует сокет 7799 —
     #    убивать «лишние» app.py по netstat-владельцу нельзя, роняет весь сервис.
     how = ""
-    if _ps_proc_count(r"app\.py") == 0:
+    if not _app_backend_running():
         try:
             subprocess.run(["taskkill", "/F", "/IM", "RipsterLauncher.exe"],
                            capture_output=True, timeout=15, creationflags=CNW)
@@ -342,7 +386,7 @@ def _heal_app_down() -> bool:
     #    7 мин, в launcher.log ни строки). Запасной путь — прямой .venv app.py;
     #    лаунчер при следующем открытии сам подцепится к живому 7799.
     py = ROOT / ".venv" / "Scripts" / "python.exe"
-    if how.startswith("перезапуском") and py.exists() and _ps_proc_count(r"app\.py") == 0:
+    if how.startswith("перезапуском") and py.exists() and not _app_backend_running():
         try:
             subprocess.run(["taskkill", "/F", "/IM", "RipsterLauncher.exe"],
                            capture_output=True, timeout=15, creationflags=CNW)
@@ -776,8 +820,15 @@ def _heal_wrapper():
     ident = ROOT / "dist" / "docker" / "rootfs_working" / "data"
     ident.mkdir(parents=True, exist_ok=True)
     _docker("rm", "-f", "amd-wrapper")
+    # БЕЗ `--restart` — той же причиной, по которой его убрал `ripster/amd.py`:
+    # пересозданный движком после ребута контейнер поднимается без нашей правки
+    # `-p`, и если когда-нибудь вернётся старая форма с голым портом, дыра
+    # откроется сама, без единой нашей проверки. Что ПРОВЕРЕНО сегодня на
+    # engine 29.6.2: `docker restart` HostIp НЕ теряет (петля остаётся); путь
+    # полного ребута машины не проверялся — он и не нужен, раз враппер поднимаем
+    # сами: и `ensure_container`, и `check_wrapper_exposure` ниже.
     rc, out = _docker(
-        "run", "-d", "--name", "amd-wrapper", "--restart", "unless-stopped",
+        "run", "-d", "--name", "amd-wrapper",
         "-v", f"{ident}:/app/rootfs/data",
         "-p", "127.0.0.1:10020:10020", "-p", "127.0.0.1:20020:20020",
         "-p", "127.0.0.1:30020:30020",
@@ -794,6 +845,431 @@ def _heal_wrapper():
             bad("Wrapper: device-limit/login-failed — нужен ручной разбор (см. skill ripster-apple-wrapper)")
             return
     warn("Wrapper поднят, но не подтвердил логин за 40с — проверь docker logs amd-wrapper")
+
+
+# ── Экспозиция портов враппера: только петля, и firewall как гарант ──────────
+# 21.09.2026 `docker port amd-wrapper` показал 0.0.0.0 на 10020/20020/30020, а
+# 30020 БЕЗ АВТОРИЗАЦИИ отдаёт `dev_token`, `storefront_id` и media-user-token
+# активной учётки: любой в локальной сети получал живую сессию Apple владельца.
+# Мерили со СВОЕЙ сетевой стеки (VM docker-desktop, `nc` до 192.168.1.98): с
+# включённым правилом все три порта закрыты; с выключенным — ОТКРЫТЫ, и GET на
+# 30020 возвращает токены. Контроль (свой слушатель на 14020: открыт → правило
+# Block → закрыт → правило сняли → снова открыт) доказал, что закрывает именно
+# правило, а не маршрутизация.
+#
+# ПОЧЕМУ ДВА ЗАМКА, А НЕ ОДИН. Замерено здесь же, на Docker Desktop 4.83 /
+# engine 29.6.2: `-p 127.0.0.1:PORT:PORT` работает — и `docker port`, и `netstat`
+# дают петлю, и `docker restart` её сохраняет. Прежнее заключение «докер всё
+# равно публикует на 0.0.0.0 независимо от хоста» было снято с контейнера,
+# который пересоздало приложение своей старой командой: петлю не ломает докер,
+# её ПЕРЕЗАПИСЫВАЕТ тот, кто запускает враппер без хоста. Поэтому `-p` — замок
+# основной, а firewall — второй, на случай такого перезаписывания (и он же
+# накрывает слоты пула, до которых `amd.py` не касается вовсе).
+WRAPPER_GUARD_DISPLAY_NAME = "Ripster: Apple wrapper only local"
+# Имя правила: им и ищем, DisplayName человек может и подправить.
+WRAPPER_GUARD_RULE_NAME = "Ripster Apple wrapper only local"
+# Слоты пула (`wrapper_pool`) сидят на 10020+i / 20020+i, i — номер учётки;
+# учёток со временем больше, поэтому диапазон, а не три точечных порта.
+WRAPPER_GUARD_PORT_SPECS = ("10020-10049", "20020-20049", "30020")
+WRAPPER_CONTAINER_PREFIXES = ("amd-wrapper", "rip-wrapper-")
+# Порты основного враппера — то, что обязано быть закрыто безусловно.
+WRAPPER_CORE_PORTS = (10020, 20020, 30020)
+
+
+def _expand_port_specs(specs) -> set:
+    """("10020-10049", "30020") -> {10020..10049, 30020}.
+
+    Firewall отдаёт LocalPort то списком портов, то диапазонами — сравнивать
+    строки наивным `==` нельзя, покрытие проверяем по множеству."""
+    out = set()
+    for s in specs or ():
+        s = str(s).strip()
+        if not s:
+            continue
+        if "-" in s:
+            a, _, b = s.partition("-")
+            try:
+                out.update(range(int(a), int(b) + 1))
+            except ValueError:
+                pass
+        elif s.isdigit():
+            out.add(int(s))
+    return out
+
+
+def _is_loopback(host: str) -> bool:
+    """Пустой хост — это НЕ петля: docker трактует "" как «все интерфейсы».
+
+    Именно на этом и погорели первый раз: HostIp "" в `docker inspect` выглядит
+    как «что-то дефолтное», а по факту это 0.0.0.0."""
+    h = (host or "").strip().strip("[]")
+    return h == "localhost" or h.startswith("127.") or h == "::1"
+
+
+def _parse_docker_port(text: str) -> dict:
+    """`docker port NAME` -> {порт_контейнера: (порт_хоста, интерфейс_хоста)}.
+
+    На один контейнерный порт приходится по строке на стек (v4 и v6); держим
+    ХУДШИЙ интерфейс: если хоть один из них не петля — порт смотрит наружу."""
+    out: dict = {}
+    for line in (text or "").splitlines():
+        m = re.match(r"^\s*(\d+)/\w+\s+->\s+(.+?):(\d+)\s*$", line)
+        if not m:
+            continue
+        cport, host, hport = int(m.group(1)), m.group(2).strip(), int(m.group(3))
+        worst = host if _is_loopback(host) else (host or "0.0.0.0")
+        cur = out.get(cport)
+        if cur is None or (not _is_loopback(cur[1]) and _is_loopback(worst)):
+            out[cport] = (hport, worst)
+    return out
+
+
+def _wrapper_containers() -> list:
+    rc, out = _docker("ps", "--format", "{{.Names}}")
+    if rc != 0:
+        return []
+    return [n for n in out.split() if n.startswith(WRAPPER_CONTAINER_PREFIXES)]
+
+
+def _dec_port(name: str) -> dict:
+    rc, out = _docker("port", name)
+    return _parse_docker_port(out) if rc == 0 else {}
+
+
+def _run_spec_from_inspect(js: dict) -> dict:
+    """Что передать `docker run`, чтобы поднять тот же контейнер заново.
+
+    Пересоздание — единственный способ переписать публикацию портов, и оно
+    ОБЯЗАНО сохранить всё остальное один-в-один: mounts — это персональная
+    identity-папка учётки (`rootfs_id/<login>`), спутать её с `rootfs_working`
+    значит угнать аккаунт в «device limit» (см. skill ripster-apple-wrapper).
+    `--restart` сознательно НЕ восстанавливаем: см. комментарий в `_heal_wrapper`.
+    """
+    hc = js.get("HostConfig") or {}
+    cfg = js.get("Config") or {}
+    return {
+        "image": cfg.get("Image") or "",
+        "binds": list(hc.get("Binds") or []),
+        "env": [e for e in (cfg.get("Env") or []) if not e.upper().startswith("PATH=")],
+        "entrypoint": list(cfg.get("Entrypoint") or []),
+        "cmd": list(cfg.get("Cmd") or []),
+    }
+
+
+def _republish_cmd(name: str, spec: dict, bindings: dict) -> list:
+    """Команда перепубликации: тот же контейнер, но хост-интерфейс — петля."""
+    cmd = ["docker", "run", "-d", "--name", name]
+    # Entrypoint проставляем явно, когда он был: иначе пересозданный контейнер
+    # возьмёт entrypoint образа, а не то, чем его реально запускали.
+    if spec.get("entrypoint"):
+        cmd += ["--entrypoint", spec["entrypoint"][0]]
+    for b in spec.get("binds") or []:
+        cmd += ["-v", b]
+    for e in spec.get("env") or []:
+        cmd += ["-e", e]
+    for cport in sorted(bindings):
+        cmd += ["-p", f"127.0.0.1:{bindings[cport][0]}:{cport}"]
+    if spec.get("image"):
+        cmd.append(spec["image"])
+    # При явном `--entrypoint` всё, что было в Entrypoint после программы,
+    # становится аргументами команды — иначе они теряются.
+    cmd += spec.get("entrypoint", [])[1:] + (spec.get("cmd") or [])
+    return cmd
+
+
+def _heal_publish(name: str, bindings: dict) -> bool:
+    """Пересоздать контейнер на петле и ПЕРЕМЕРИТЬ, что получилось.
+
+    Без повторного замера эта функция однажды отрапортовала «перепубликован
+    на 127.0.0.1» на машине, где порт в тот же момент снова смотрел на 0.0.0.0:
+    `docker run` прошёл успешно, враппер ответил с петли — а команду пересоздания
+    выиграло у нас приложение, которое увидело, что враппер умер, и подняло его
+    своей старой командой (процесс запущен ДО правки `amd.py`, код на диске уже
+    новый). Зелёный отчёт при открытой дыре — худший из возможных исходов
+    самопочинки, поэтому верим только `docker port` после всех событий.
+    """
+    rc, out = _docker("inspect", name, "--format", "{{json .}}")
+    if rc != 0:
+        bad(f"Не смог прочитать конфиг контейнера {name} — порты правлю вручную")
+        return False
+    try:
+        spec = _run_spec_from_inspect(json.loads(out.strip()))
+    except Exception:
+        bad(f"Не распознал конфиг контейнера {name} — порты правлю вручную")
+        return False
+    cmd = _republish_cmd(name, spec, bindings)
+    _docker("rm", "-f", name, timeout=60)
+    rc, out = _docker(*cmd[1:], timeout=120)
+    if rc != 0:
+        # Команду не эхом: в env лежит `-L логин:пароль`.
+        bad(f"Перепубликация {name} не удалась: {out[:140]} — подними враппер "
+            f"вручную (образ {spec.get('image') or '?'}"
+            f"{', тома: ' + '; '.join(spec.get('binds') or []) if spec.get('binds') else ''})")
+        return False
+    # Ждём не «порт 10020 отвечает», а что ИМЕННО ЭТОТ контейнер поднялся: у
+    # слотов пула свои порты (10021, 10022…), а на 10020 отвечает основной
+    # враппер — проверка не по своему контейнеру дала бы «ожил» там, где слот
+    # лежит мёртвый.
+    after: dict = {}
+    for _ in range(20):
+        time.sleep(2)
+        rc2, st = _docker("inspect", "-f", "{{.State.Running}}", name)
+        after = {cp: hp for cp, hp in _dec_port(name).items() if not _is_loopback(hp[1])}
+        if st.strip() == "true" and not after:
+            fixed(f"{name}: порты перепубликованы на 127.0.0.1 "
+                  f"(было {sorted({h for _p, h in bindings.values()})})")
+            return True
+        if after:
+            break
+    bad(f"{name}: пересоздал на 127.0.0.1, а {sorted(after) or '?'} СНОВА опубликованы "
+        f"наружу ({sorted({h for _p, h in after.values()}) or '?'}) — враппер поднимает "
+        "процесс, запущенный до правки `ripster/amd.py`: код на диске верный, нужен "
+        "перезапуск app.py (сам не перезапускаю). До него порты держит только "
+        "правило firewall.")
+    return False
+
+
+def _lan_ipv4() -> str:
+    """Адрес карты, у которой есть маршрут по умолчанию (не петли и не APIPA)."""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "Get-NetIPConfiguration | Where-Object { $_.IPv4DefaultGateway } | "
+             "ForEach-Object { $_.IPv4Address.IPAddress }"],
+            capture_output=True, text=True, timeout=30, creationflags=CNW)
+        for ip in (r.stdout or "").split():
+            ip = ip.strip()
+            if ip and not ip.startswith("127.") and not ip.startswith("169.254."):
+                return ip
+    except Exception:
+        pass
+    return ""
+
+
+def _offhost_reachable(ip: str, port: int):
+    """Достигается ли порт С ДРУГОЙ сетевой стеки. None — спросить нечем.
+
+    Мерить с самого хоста бессмысленно: пакет на собственный LAN-адрес уходит
+    внутренним маршрутом и firewall его не видит вовсе — на этом и обжигались
+    («из той же машины всё закрыто» оказалось неверным выводом). Поэтому
+    спрашиваем VM Docker Desktop: отдельное ядро Linux со своим `nc`.
+    """
+    if not ip:
+        return None
+    try:
+        r = subprocess.run(
+            ["wsl", "-d", "docker-desktop", "-e", "sh", "-c",
+             f"nc -z -w2 {ip} {port}"],
+            capture_output=True, text=True, timeout=25, creationflags=CNW)
+    except Exception:
+        return None
+    out = ((r.stdout or "") + (r.stderr or "")).lower()
+    if r.returncode == 0:
+        return True
+    if "does not exist" in out or "could not be started" in out or "not found" in out:
+        return None            # ни дистрибутива, ни nc нет — это «не знаю», а не «закрыто»
+    return False
+
+
+def _firewall_guard_state() -> dict:
+    """{known, exists, enabled, action, ports} — что реально заведено в firewall."""
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             f"$r = @(Get-NetFirewallRule -DisplayName '{WRAPPER_GUARD_DISPLAY_NAME}' "
+             "-ErrorAction SilentlyContinue); if (-not $r) { 'MISSING' } else { "
+             "$p = ($r | Get-NetFirewallPortFilter -ErrorAction SilentlyContinue).LocalPort "
+             "-join ','; "
+             "$e = if (@($r | Where-Object { $_.Enabled -eq 'True' }).Count) {'on'} else {'off'}; "
+             "$a = if (@($r | Where-Object { $_.Action -eq 'Block' -and $_.Direction -eq "
+             "'Inbound' }).Count) {'block'} else {'wrong'}; \"$e|$a|$p\" }"],
+            capture_output=True, text=True, timeout=40, creationflags=CNW)
+    except Exception:
+        return {"known": False, "exists": False, "enabled": False, "ports": set()}
+    txt = (r.stdout or "").strip()
+    if not txt or "MISSING" in txt:
+        return {"known": r.returncode == 0, "exists": False,
+                "enabled": False, "ports": set()}
+    if "|" not in txt:
+        return {"known": False, "exists": False, "enabled": False, "ports": set()}
+    enabled, action, ports = (txt.split("|") + ["", "", ""])[:3]
+    return {"known": True, "exists": True, "enabled": enabled == "on",
+            "action": action, "ports": _expand_port_specs(ports.split(","))}
+
+
+def _ensure_firewall_guard() -> tuple:
+    """Завести (пере)создать Block-правило. (ok, чем_закончилось).
+
+    Старое правило с тем же именем сначала снимается: иначе их накапливается
+    несколько, и «починили» превращается в «завели ещё одно поверх»."""
+    ps = ("Remove-NetFirewallRule -DisplayName "
+          f"'{WRAPPER_GUARD_DISPLAY_NAME}' -ErrorAction SilentlyContinue | Out-Null; "
+          f"New-NetFirewallRule -Name '{WRAPPER_GUARD_RULE_NAME}' "
+          f"-DisplayName '{WRAPPER_GUARD_DISPLAY_NAME}' -Group 'Ripster' "
+          "-Direction Inbound -Action Block -Protocol TCP "
+          f"-LocalPort {','.join(WRAPPER_GUARD_PORT_SPECS)} -Profile Any | Out-Null")
+    try:
+        r = subprocess.run(["powershell", "-NoProfile", "-Command", ps],
+                           capture_output=True, text=True, timeout=90, creationflags=CNW)
+    except Exception as e:
+        return False, f"PowerShell не ответил: {str(e)[:60]}"
+    if r.returncode != 0:
+        err = ((r.stdout or "") + (r.stderr or "")).strip()
+        low = err.lower()
+        if "access" in low or "denied" in low or "отказ" in low or "прав" in low:
+            return False, ("нужны права администратора; выполни в повышенной "
+                           "консоли: " + ps)
+        return False, err[:160]
+    return True, "правило заведено заново"
+
+
+def check_wrapper_exposure():
+    """Порты Apple-враппера доступны ТОЛЬКО с петли — и это подкреплено правилом.
+
+    Три независимых измерения, потому что каждое ломается само по себе и молча:
+      1. как контейнер ОПУБЛИКОВАН (`docker port`: хост-интерфейс);
+      2. есть ли правило firewall, которое реально закрывает порты;
+      3. достижим ли порт с другой сетевой стеки (если спросить чем).
+    Расхождение чинит сам: машина, которая уже лежит с дырой, обязана прийти в
+    норму без единого действия владельца.
+
+    Почему firewall нужен, если верный `-p 127.0.0.1:` тоже работает (замерено
+    21.09.2026: nginx с `-p 127.0.0.1:18080:80` даёт петлю и в `docker port`, и
+    в PortBindings, и в netstat; `docker restart` HostIp не теряет). Затем, что
+    дыра пришла НЕ из докера, а из процесса приложения, запущенного ДО правки
+    `ripster/amd.py`: он пересоздаёт контейнер своей старой командой с голым
+    портом, и делает это через несколько секунд после нашего `docker rm -f`.
+    Правило firewall держит порты закрытыми и в тот момент, и при любом чужом
+    автоподъёме — это второй замок, а не единственный.
+    """
+    need = _expand_port_specs(WRAPPER_GUARD_PORT_SPECS)
+
+    # ── firewall чиним ПЕРВЫМ: это единственный работающий замок, и лезть в
+    #    живые контейнеры без приспущенного занавеса — значит на несколько
+    #    секунд открыть токены наружу там, где они были закрыты.
+    guard = _firewall_guard_state()
+    problem = ""
+    if not guard["known"]:
+        problem = "не смог прочитать firewall"
+    elif not guard["exists"]:
+        problem = "правило не заведено"
+    elif not guard["enabled"]:
+        problem = "правило выключено"
+    elif guard.get("action") != "block":
+        problem = "правило не Block/Inbound"
+    elif not need.issubset(guard["ports"]):
+        miss = sorted(need - guard["ports"])
+        problem = (f"из-под правила выпадают {miss[0]}…{miss[-1]} "
+                   f"({len(miss)} портов, всего накрыто {len(guard['ports'])})")
+    if problem:
+        warn(f"Firewall-защита портов враппера не работает: {problem}")
+        if not NO_FIX and guard["known"]:
+            ok_, what = _ensure_firewall_guard()
+            after = _firewall_guard_state()
+            if ok_ and after["exists"] and after["enabled"] and need.issubset(after["ports"]):
+                fixed(f"Правило «{WRAPPER_GUARD_DISPLAY_NAME}»: {what}")
+            elif ok_:
+                bad(f"Правило пересоздал, но проверить не смог ({what}) — "
+                    f"глянь Get-NetFirewallRule -DisplayName '{WRAPPER_GUARD_DISPLAY_NAME}'")
+            else:
+                bad(f"Не смог завести правило firewall ({what}) — "
+                    "порты враппера открыты всей сети, нужен админ")
+    else:
+        ok(f"Firewall: порты враппера закрыты извне правилом "
+           f"«{WRAPPER_GUARD_DISPLAY_NAME}»")
+
+    # ── публикация контейнеров
+    exposed: dict = {}
+    seen = 0
+    for name in _wrapper_containers():
+        seen += 1
+        bad_ports = {cp: hp for cp, hp in _dec_port(name).items()
+                     if not _is_loopback(hp[1])}
+        if bad_ports:
+            exposed[name] = bad_ports
+    if exposed:
+        warn("Порты враппера опубликованы наружу: "
+             + "; ".join(f"{n} → {sorted(p)}" for n, p in exposed.items()))
+        if not NO_FIX:
+            for name, ports in exposed.items():
+                _heal_publish(name, ports)
+    elif seen:
+        ok(f"Порты {seen} враппер-контейнеров(а) опубликованы на петлю")
+
+    # ── живая проверка извне (ничего не чинит, только верит факту)
+    ip = _lan_ipv4()
+    if ip:
+        verdicts = {p: _offhost_reachable(ip, p) for p in WRAPPER_CORE_PORTS}
+        reachable = [p for p, v in verdicts.items() if v is True]
+        unknown = [p for p, v in verdicts.items() if v is None]
+        if reachable:
+            bad(f"С внешней стеки ({ip}, VM docker-desktop) ДОСТУПНЫ порты "
+                f"{reachable} — сессия Apple утекает в сеть прямо сейчас")
+        elif unknown:
+            warn(f"Проверить досягаемость портов враппера извне нечем "
+                 f"(в VM docker-desktop нет nc/дистрибутива) — полагаюсь на "
+                 "docker port + firewall")
+        else:
+            ok(f"Проверено извне ({ip}): порты 10020/20020/30020 недоступны")
+
+
+def check_public_wrapper():
+    """Публичный wrapper-manager — четыре разных состояния вместо одной точки.
+
+    Повод. Проверка здоровья считала «здорово» ЛЮБОМУ HTTP-коду ниже 500, а
+    wm.wol.moe перешёл на HTTP и закрылся API-ключом: в ответ — 401. То есть
+    мы рапортовали порядок ровно тогда, когда путь был мёртв, и никакой
+    автохил тут бессилен: чужой сервис нам не подчиняется.
+
+    Поэтому отчёт называет причину своими словами и различает четыре случая:
+    работает / жив, но нас не пускает / молчит / не настроен. Строка в
+    настройках (static/views/settings.html) читает ТОТ ЖЕ провод, так что
+    расходиться им нечем.
+    """
+    st, js = _api("/api/amd/wrapper-status")
+    if not isinstance(js, dict):
+        bad(f"Наш сервер не ответил на /api/amd/wrapper-status: HTTP {st} "
+            f"{_esc(str(js)[:80])}")
+        return
+    state = str(js.get("state") or "")
+    if not state:
+        # Старый процесс на новом диске: кода четырёх состояний в нём нет, и
+        # врать про «работает/не работает» этот отчёт не вправе.
+        warn("Приложение отдаёт /api/amd/wrapper-status БЕЗ поля `state` — код на "
+             "диске новый, процесс старый. Нужен перезапуск app.py (сам не "
+             "перезапускаю); до него статус публичного враппера непроверяем")
+        return
+    reason = str(js.get("reason") or "")
+    detail = str(js.get("detail") or "")[:120]
+    latch = ""
+    if js.get("down"):
+        latch = f"; снят с маршрутов, следующая проба через {js.get('next_probe_in')} с"
+    chosen = str(_cfg_get("apple-wrapper") or "").strip().lower() == "public"
+
+    if state == "working":
+        ok(f"Публичный wrapper: готов, клиентов в пуле {js.get('client_count')}, "
+           f"регионы {','.join(map(str, js.get('regions') or [])) or '—'}{latch}")
+    elif state == "not_configured":
+        warn("Публичный wrapper не настроен: пуст `amd-instance-url`. "
+             "На «Публичный» режим автоматически не переключаем — "
+             "настройка на месте, если он вообще нужен")
+    elif state == "unreachable":
+        line = f"Публичный wrapper не отвечает ({reason})"
+        (bad if chosen else warn)(line + (f": {detail}" if detail else "") + latch)
+    elif state == "refusing":
+        # Все ветки «refusing» — это ОНИ, а не мы. Ключа у нас нет и раздобыть
+        # его автохилом нельзя; выдумывать тут «починили» означало бы писать
+        # в отчёт то, чего не было.
+        why = {
+            "api_key": "сервер требует API-ключ, которого у нас нет",
+            "pool_empty": "в чужом пуле нет готовых аккаунтов",
+            "no_status": "не узнаём их /status — upstream снова сменил протокол",
+        }.get(reason, f"HTTP-отказ ({reason or '?'})")
+        line = f"Публичный wrapper жив, но нас не обслуживает: {why}"
+        (bad if chosen else warn)(line + (f". Ответ: {detail}" if detail else "") + latch)
+    else:
+        warn(f"Публичный wrapper: незнакомое состояние `{state}` от нашего же API "
+             "— проверка больше не вслепую, но и вывода не даёт")
 
 
 def check_tokens():
@@ -1646,7 +2122,13 @@ _ERR_BUCKETS = [
     # Держать ПЕРЕД spotify-auth — как spotify-lyrics выше и по той же причине.
     ("spotify-unavailable", ("cannot get alternative track", "is unavailable on spotify",
                              "spotifytrackunavailableerror", "attribute 'download_type'",
-                             "extended metadata request failed")),
+                             "extended metadata request failed",
+                             # Наш СОБСТВЕННЫЙ вердикт того же инцидента, 20.09.2026:
+                             # строка буквально говорит «Вход исправен… перелогин не
+                             # поможет» — и всё равно попадала в spotify-auth, потому
+                             # что содержит слово «spotify». Диагноз в ней верный,
+                             # не хватало только имени.
+                             "недоступно для этой учётной записи")),
     # ДЕРЖАТЬ ПЕРЕД spotify-auth. Бакет авторизации ловит голую подстроку
     # "spotify", а у Spotify хост САМ содержит это слово — поэтому
     # «HTTPSConnectionPool(host='apresolve.spotify.com'): Max retries exceeded»
@@ -1664,6 +2146,16 @@ _ERR_BUCKETS = [
     # и он обязан называться собой, а не «авторизацией»: 12.09 он сработал из-за
     # обрыва сети, а не из-за токена, и починился сам, когда сеть вернулась.
     ("spotify-keeper-giveup", ("попытки подряд не помогли",)),
+    # ДЕРЖАТЬ ПЕРЕД spotify-auth, и по той же причине, что spotify-lyrics /
+    # spotify-unavailable / network выше: бакет авторизации ловит голую подстроку
+    # "spotify", а эта строка её содержит в префиксе «[spotify]». 20.09.2026
+    # сводка вывела spotify-auth×10 ПЕРВЫМ бакетом при свежем Bearer (41 мин из
+    # 60) — и ни одна из десяти строк не была отказом авторизации: пять — вот
+    # этот 502/503 от САМОГО Spotify на /me/following, четыре — недоступность
+    # релиза учётке, одна — обрыв дочитывания после 200. Отказ на стороне
+    # Spotify ничего не требует от владельца и проходит сам; называть его
+    # «авторизацией» значит звать чинить живой токен.
+    ("spotify-following-5xx", ("/me/following returned 5", "following fetch error")),
     ("spotify-auth",        ("orpheus_not_authed", "gettrack", "401", "spotify")),
     ("qobuz-sub",           ("нет активной подписки", "ineligible")),
     # Beatport отвечает 403 «You do not have permission to perform this action» на
@@ -1678,6 +2170,15 @@ _ERR_BUCKETS = [
                               "не хватает прав на скачивание",
                               "отказал в правах")),
     ("beatport-region",     ("region locked", "territory restricted")),
+    # Отказ ВХОДА Beatport — не права на релиз (beatport-entitlement выше) и не
+    # регион. 19.09.2026 шесть таких строк лежали в `other`, то есть в бакете
+    # «такого я ещё не видел», хотя это был известный и в тот же день починенный
+    # дефект: refresh РОТИРУЕТ refresh_token, новый не писался обратно в
+    # loginstorage.bin, OrpheusDL приходил с погашенным → Beatport отзывал всю
+    # цепочку. Формулировка «неверный логин/пароль» при этом ВРЁТ — учётка жива,
+    # чинить надо запись сессии. Имя бакета обязано вести к этому, а не к паролю.
+    ("beatport-auth",       ("beatport_not_authed",
+                             "authentication credentials were not provided")),
     # Deezer отдаёт трек, но не в запрошенном качестве (нет FLAC/320 у источника).
     # Это состояние источника/ARL, а не поломка: сообщение уже само советует, что
     # делать. 03.08.2026 давало 2 безымянные строки (сама ошибка + её копия из
@@ -1733,13 +2234,30 @@ _ERR_BUCKETS = [
     # Своё имя нужно, чтобы отличать его от невиданного: в `other` он выглядел
     # как четыре безымянные строки подряд.
     ("soundcloud-resolve",  ("could not extract track id",)),
+    # BBC: из ссылки не разобрался pid. 19.09.2026 две попытки одной передачи
+    # (m00315gq, Essential Mix) дали четыре безымянные строки в `other`, причём в
+    # лог ушёл СЫРОЙ ключ «console.bbc_bad_pid» — тогда живой app.py не знал ни
+    # расширенной регулярки (/programmes/ рядом с /sounds/play/), ни строки
+    # перевода. Обе правки уже на месте и проверены проводом 20.09 (та же ссылка
+    # → pid → HLS). Бакет нужен, чтобы возврат симптома назвал себя сам, а не
+    # выглядел новинкой: ловим и человеческую форму, и сырой ключ.
+    ("bbc-bad-pid",         ("console.bbc_bad_pid",
+                             "не удалось разобрать идентификатор из ссылки",
+                             "could not parse the id from the link")),
     # Заголовок трейсбека сам по себе не диагностирует НИЧЕГО — настоящая
     # причина печатается отдельной ERROR-строкой в конце (05.09.2026 обе
     # оказались `tidal-region`) и попадает в свой бакет. Держать в хвосте: если
     # у нового сбоя причины не окажется, она всё равно придёт своей строкой и
     # честно ляжет в `other`.
+    # Тело HTML-страницы чужой ошибки. 20.09.2026 Spotify ответил на
+    # /me/following страницей 503, её раскидало по восьми строкам лога, и две из
+    # них («<title>503 Server Error</title>», «<h1>Error: Server Error</h1>»)
+    # оказались помечены ERROR и попали в `other` — при том что сам инцидент уже
+    # посчитан строкой выше (spotify-following-5xx). Диагностируют они ровно
+    # ничего: это разметка, а не причина.
     ("noise-tail",          ("exit code 0", "=== track ",
-                             "traceback (most recent call last)")),
+                             "traceback (most recent call last)",
+                             "server error</title>", "error: server error")),
 ]
 
 
@@ -1969,6 +2487,16 @@ def check_errors_24h():
             # считается по ней, так что сводку можно не считать вовсе.
             if "summary:" in low and "success" in low:
                 continue
+            # Шапка альбома OrpheusDL, напечатанная в stderr. Соседние строки того
+            # же блока (Year / Duration / Number of tracks / Service) идут в
+            # stdout, а «Artist: Markus Homm (53403)» — в stderr, и наш захват
+            # метит её ERROR. 19.09.2026 четыре такие строки составили четверть
+            # бакета `other` при ПОЛНОСТЬЮ успешной загрузке Beatport. Отсекаем по
+            # форме (имя + числовой id в скобках на конце), а не по подстроке
+            # «artist:»: иначе настоящая ошибка со словом «artist» молча
+            # превратилась бы в шум — а это хуже, чем лишняя строка в `other`.
+            if _re.search(r"\bartists?: .+\(\d+\)\s*$", low):
+                continue
             # Сторонний Amazon-враппер (amz.dezalty.com) лежит сутками — каждый
             # прогон probe-all пишет одну и ту же ERROR-строку, и за сутки их
             # набирается 50+. Это НЕ наша поломка (check_engine_probe её уже
@@ -2121,6 +2649,13 @@ def main():
         check_apple_wrapper()
         check_apple_bearer()
         check_apple_pool_slots()
+        # Обязан идти ПОСЛЕ всех, кто контейнеры поднимает: `ensure_container`
+        # делает `docker start`/`docker run`, и пока процесс приложения старый
+        # (запущен до правки `ripster/amd.py`), он пересоздаёт враппер своей
+        # командой с ГОЛЫМ портом — то есть любой автоподъём обязан попадать под
+        # проверку публикации.
+        check_wrapper_exposure()
+        check_public_wrapper()
         check_deezer_arls()
         check_qobuz_accounts()
         check_soundcloud_tokens()

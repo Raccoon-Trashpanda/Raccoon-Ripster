@@ -80,6 +80,13 @@ def container_storefront(container: str, fresh: bool = False) -> str:
     return cc
 
 
+def forget_container(container: str) -> None:
+    """Забыть всё, что знали об этом контейнере. Обязателен после пересоздания:
+    country кэшируется на час, а свежий контейнер с `response type 6` внутри —
+    это НЕ та сессия, о которой часом раньше честно ответил тот же номер."""
+    _CACHE.pop(container, None)
+
+
 def _memo_path():
     from pathlib import Path
     import os
@@ -123,29 +130,195 @@ def container_running(container: str) -> bool:
         return False
 
 
-def ensure_slot_up(container: str, port: int = 0, timeout: float = 60.0) -> bool:
+# Что враппер пишет в свой журнал, когда сесть некуда. Классы берутся из
+# скилла ripster-apple-wrapper: device-limit (lease 3062 / response type 6) и
+# отказ логина (response type 4) лечатся ПО-РАЗНОМУ — первое продлением
+# ожидания и своим identity, второе только временем, — и оба неотличимы снаружи
+# от «нет прав в регионе», пока не заглянешь в контейнер.
+_BLOCK_PATTERNS = (
+    ("device_limit", ("device limit", "concurrent playing devices",
+                      "lease code 3062", "response type 6")),
+    ("login_failed", ("login failed", "response type 4")),
+    ("no_session", ("playback error",)),
+)
+
+
+def container_block_reason(container: str, tail: int = 60) -> str:
+    """ПОЧЕМУ контейнер не даёт ключ — по его же журналу. '' — не выяснили;
+    выдумывать причину вместо этого нельзя (см. ripster-honest-diagnostics)."""
+    try:
+        r = subprocess.run(["docker", "logs", f"--tail={tail}", container],
+                           capture_output=True, text=True, timeout=15,
+                           creationflags=_CNW)
+        # враппер пишет и в stdout, и в stderr — какой поток доедет до клиента,
+        # заранее не угадать, поэтому читаем оба
+        logs = ((r.stdout or "") + "\n" + (r.stderr or "")).lower()
+    except Exception:
+        return ""
+    for reason, needles in _BLOCK_PATTERNS:
+        if any(n in logs for n in needles):
+            return reason
+    return ""
+
+
+def slot_health(container: str, port: int = 0) -> dict:
+    """Три разных состояния, которые раньше сваливались в одно «слот не
+    поднялся»: контейнер жив, порт открыт, УЧЁТКА ЗАКЕШИРОВАНА. Последние два
+    расходятся ровно в том случае, который 22.09.2026 выдал «нет прав в
+    регионе» на альбом, доступный в четырёх витринах: контейнер работал, порт
+    10021 отвечал, а внутри — `response type 6`, то есть ключ дать было
+    некому."""
+    running = container_running(container)
+    session = container_storefront(container) if running else ""
+    return {"container": container, "running": running,
+            "country": session or _memo_load().get(container, ""),
+            "session": bool(session),
+            "port_open": bool(running and port and _port_open(port)),
+            "reason": "" if session else (container_block_reason(container)
+                                          if running else "stopped")}
+
+
+def _port_open(port: int, timeout: float = 1.2) -> bool:
+    import socket
+    s = socket.socket(); s.settimeout(timeout)
+    try:
+        s.connect(("127.0.0.1", int(port)))
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
+def _bindings(container: str, field: str) -> dict:
+    """Портовые привязки контейнера: HostConfig.PortBindings (как созданный)
+    или NetworkSettings.Ports (факт). Формы одинаковые."""
+    out = ""
+    try:
+        out = subprocess.run(
+            ["docker", "inspect", "-f", "{{json ." + field + "}}", container],
+            capture_output=True, text=True, timeout=10,
+            creationflags=_CNW).stdout.strip()
+        return json.loads(out) if out and out != "null" else {}
+    except Exception:
+        return {}
+
+
+def _loopback_only(spec: dict) -> bool:
+    """Каждая опубликованная строка смотрит на петлю? Пустая публикация — «нет»:
+    молча принять пустоту означало бы довериться недоступному проверке состоянию.
+    """
+    if not spec:
+        return False
+    for rows in spec.values():
+        for row in (rows or []):
+            if (row or {}).get("HostIp") not in ("127.0.0.1", "::1"):
+                return False
+    return True
+
+
+def container_exists(container: str) -> bool:
+    """Контейнер СУЩЕСТВУЕТ (хотя бы остановлен). Отличает «нет такого» от
+    «есть, но выключен» — `container_running` этих состояний не разделяет, а
+    лечатся они противоположно: второе — стартом, первое — созданием."""
+    out = ""
+    try:
+        r = subprocess.run(["docker", "inspect", "-f", "{{.Id}}", container],
+                           capture_output=True, text=True, timeout=10,
+                           creationflags=_CNW)
+        out = (r.stdout or "").strip()
+        return bool(out) and r.returncode == 0
+    except Exception:
+        return False
+
+
+def slot_of_container(container: str) -> int:
+    """`amd-wrapper` → 0, `rip-wrapper-N` → N, иначе -1."""
+    if container == "amd-wrapper":
+        return 0
+    m = re.match(r"rip-wrapper-(\d+)$", container or "")
+    return int(m.group(1)) if m else -1
+
+
+def ensure_slot_up(container: str, port: int = 0, timeout: float = 60.0,
+                   config: dict | None = None) -> bool:
     """Поднять слот и дождаться, пока он реально начнёт расшифровывать.
 
     Мало запустить контейнер: порт расшифровки открывается не сразу, а
     загрузчик, ткнувшийся раньше времени, получает «connection refused» — и это
     выглядит как «нет прав в регионе», хотя права ни при чём. Поэтому ждём
     именно порт, а не факт запуска.
+
+    22.09.2026: `docker start` у остановленного контейнера обнуляет HostIp
+    (Docker Desktop 4.83) — тот же механизм, из-за которого пул пересоздаёт
+    слоты вместо оживления, а amd.py убрал `--restart`. Этот путь — ТРЕТИЙ
+    оживлятор слотов (после пула и amd) и проверки не имел: оживлённый здесь
+    слот публиковал 30020 с токенами Apple на 0.0.0.0. Поэтому поднимаем только
+    заведомо-петлевые привязки, проверяем факт ПОСЛЕ старта, и при сорванной
+    привязке снимаем контейнер, а не оставляем наружу.
+
+    🔴 Снятие — не конец истории. 22.09 контейнеры `rip-wrapper-1/2` исчезли
+    именно так: `rm -f` сработал, а пересоздавать никто не вызвался, и страна
+    учёток GB выпала из перебора вместе с контейнером. Поэтому теперь слот,
+    которого НЕТ (или который мы только что сняли), пересоздаётся через
+    `wrapper_pool.ensure_slot` — единственный рецепт создания с петлевой
+    привязкой. Без `config` пересоздать нечем (нет учёток), и ответ честно
+    False.
     """
     import socket, time as _t
-    if not container_running(container):
-        try:
-            subprocess.run(["docker", "start", container], capture_output=True,
-                           text=True, timeout=30, creationflags=_CNW)
-        except Exception:
+    slot = slot_of_container(container)
+
+    def _recreate() -> bool:
+        if config is None or slot < 0:
             return False
+        try:
+            from ripster import wrapper_pool
+            return bool(wrapper_pool.ensure_slot(config, slot))
+        except Exception as e:
+            print(f"[apple] слот {container} не пересоздан: {e}", flush=True)
+            return False
+
+    if not container_running(container):
+        # Без `config` пересоздавать нечем (нет ни списка учёток, ни пула), и
+        # тогда путь ровно прежний: оживление существующего контейнера.
+        exists = container_exists(container) if config is not None else True
+        if not exists:
+            if not _recreate():
+                return False
+        elif not _loopback_only(_bindings(container, "HostConfig.PortBindings")):
+            # Поднимать нельзя, но и молча бросать нельзя: у слота есть учётка
+            # и страна, просто рецепт создания — у пула.
+            if not _recreate():
+                return False
+        else:
+            try:
+                subprocess.run(["docker", "start", container], capture_output=True,
+                               text=True, timeout=30, creationflags=_CNW)
+            except Exception:
+                return False
+    if not _loopback_only(_bindings(container, "NetworkSettings.Ports")):
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True,
+                       timeout=30, creationflags=_CNW)
+        # привязка сорвалась ПОСЛЕ старта — пересоздаём сразу, иначе слот
+        # исчезнет до следующей задачи, а задача сегодня уже никуда не пойдёт
+        return _recreate()
     if not port:
-        return container_running(container)
+        return container_running(container) and wait_session(container)
     deadline = _t.time() + timeout
     while _t.time() < deadline:
         s = socket.socket(); s.settimeout(1.5)
         try:
             s.connect(("127.0.0.1", port))
-            return True
+            # Порт открыт — ещё НЕ значит, что есть кому дать ключ. Go внутри
+            # контейнера поднимает порт раньше, чем успеет сесть: при
+            # `response type 6` (device limit) он держит TCP открытым сутками, и
+            # каждый трек через такой порт — Invalid CKC. 22.09.2026 на этом
+            # «живом» порту альбом, доступный в четырёх витринах, умер с
+            # вердиктом «нет прав в регионе».
+            return wait_session(container)
         except Exception:
             _t.sleep(2)
         finally:
@@ -154,9 +327,35 @@ def ensure_slot_up(container: str, port: int = 0, timeout: float = 60.0) -> bool
     return False
 
 
+def wait_session(container: str, timeout: float = 20.0) -> bool:
+    """Дождаться, что слот НАЗЫВАЕТ свою учётку (порт 30020 внутри отвечает).
+    Только что созданный контейнер логинится несколько секунд, поэтому ждём, но
+    недолго и без молотого `docker exec`: пробы идут с паузой, а удача
+    кэшируется в `container_storefront`."""
+    deadline = time.time() + timeout
+    while True:
+        if container_storefront(container):
+            return True
+        if time.time() >= deadline:
+            return False
+        time.sleep(2.5)
+
+
 def slot_port(slot: int) -> int:
     """Порт расшифровки слота. Слот 0 — общий 10020, дальше 10020+N."""
     return 10020 + int(slot)
+
+
+def any_session_alive(config: dict | None = None, max_slots: int = 8) -> bool:
+    """Есть ли ХОТЬ ОДНА своя учётка, способная дать ключ.
+
+    Спрашивать об этом надо ВСЕ слоты, а не только слот 0: `local_wrapper_session_alive()`
+    смотрит на 30020 основного контейнера, тогда как расшифровку в этот момент делал
+    другой слот. 22.09.2026 эта пара фактов и родила враньё в отчёте — «сессия ЖИВА,
+    значит у контента нет прав в регионе» — на задаче, где жива была основная
+    витрина, а мёртв именно тот слот, что отдавал ключ.
+    """
+    return any(s.get("session") for s in all_slots(max_slots, True, config))
 
 
 # ── Предпочтения по слотам: чей ход раньше и кого не трогать ────────────────
@@ -218,10 +417,19 @@ def all_slots(max_slots: int = 8, include_stopped: bool = False,
         name = "amd-wrapper" if i == 0 else f"rip-wrapper-{i}"
         running = container_running(name)
         cc = ""
+        session = False
         if running:
             cc = container_storefront(name)
+            session = bool(cc)
             if cc:
                 _memo_save(name, cc)
+            else:
+                # Проба молчит СЕЙЧАС (контейнер только что создан и ещё не
+                # прогрет, docker exec не успел), а страну мы уже знали раньше.
+                # Раньше такой слот выпадал из `all_slots` целиком — то есть
+                # свежеподнятый аккаунт был невидим для перебора ровно до
+                # следующего прогрева. Это не «нет страны», это «не спросили».
+                cc = memo.get(name, "")
         elif include_stopped:
             # Выключенный слот спросить нельзя, но страну мы уже знали раньше.
             # Без этого остановленная сессия выпадала из выбора совсем, и задача
@@ -229,7 +437,15 @@ def all_slots(max_slots: int = 8, include_stopped: bool = False,
             cc = memo.get(name, "")
         if cc:
             out.append({"slot": i, "container": name, "country": cc,
-                        "running": running, "port": slot_port(i)})
+                        "running": running, "port": slot_port(i),
+                        # `session` — учётка реально закеширована И может дать
+                        # ключ. `running` без `session` (device limit) и есть
+                        # тот самый слот, который 22.09 выдавал себя за живой:
+                        # контейнер запущен, порт открыт, ключа нет.
+                        "session": session,
+                        "reason": ("" if session else
+                                   (container_block_reason(name) if running
+                                    else "stopped"))})
     # Предпочтения навешиваются ПОСЛЕ обхода: обход про то, что физически есть,
     # конфиг — про то, чего мы от этого хотим. Смешивать нельзя, иначе слот,
     # выключенный в настройках, исчезнет и из диагностики тоже.
@@ -266,8 +482,7 @@ def pick_slot_for(countries, exclude=(), config: dict | None = None) -> dict | N
     иначе выбор будет бесконечно возвращать её же.
     """
     want = [c.lower() for c in (countries or [])]
-    skip = {c.lower() for c in (exclude or ())}
-    # include_stopped: выключенный слот — это НАША живая учётка, просто
+    skip = {c.lower() for c in (exclude or ())}    # include_stopped: выключенный слот — это НАША живая учётка, просто
     # погашенная сборщиком простоя. Пропускать её значит уходить к чужому
     # публичному wrapper'у при свободном своём аккаунте (09.08.2026).
     slots = [s for s in all_slots(include_stopped=True, config=config)
@@ -288,3 +503,135 @@ def pick_slot_for(countries, exclude=(), config: dict | None = None) -> dict | N
             if s["country"] == c:
                 return s
     return None
+
+
+# ── Лестница своих аккаунтов: порядок перебора и память об успехах ────────────
+#
+# `pick_slot_for` отвечает на вопрос «давай ОДИН слот под список витрин». Для
+# отказа по CKC этого мало: надо перебрать ВСЕ свои учётки, потому что «нет
+# прав в регионе» — это утверждение про ОДНУ сессию, а не про аккаунты владельца.
+# 22.09.2026 задача на альбом из `/ru/` умерла с текстом «нет прав», хотя рядом
+# стояли GB-учётки: перебор не начался, потому что каталог по названию не
+# подтвердил релиз (iTunes search не находит DJ-миксы), а old-логика требовала
+# подтверждения. Пустой ответ каталога — это «не выяснили», а не «нигде нет»
+# (см. докстринг `errors.apple_album_by_storefront`), и решать по нему нельзя.
+#
+# Поэтому порядок такой:
+#   1) страна, где ЭТОТ релиз уже успешно качнулся раньше (память побед);
+#   2) страны, где каталог релиз подтвердил;
+#   3) остальные свои страны — каталог молчит ≠ прав нет;
+#   внутри группы — по памяти побед, затем приоритет владельца, затем номер слота.
+# Отказавшие страны и слоты исключаются вызывающим (уже попробовано).
+
+def _wins_path():
+    from pathlib import Path
+    import os
+    base = Path(os.environ.get("RIPSTER_BASE_DIR") or Path(__file__).resolve().parent.parent)
+    p = base / "dist" / "docker" / "apple_slot_wins.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _wins_load() -> dict:
+    try:
+        d = json.loads(_wins_path().read_text(encoding="utf-8"))
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def release_id(url_or_id: str) -> str:
+    """Числовой Apple-номер релиза из ссылки (для памяти побед).
+
+    `?i=` проверяется ПЕРВЫМ: в ссылке вида `/us/album/x/1?i=2` номер альбома —
+    это контекст, а качается трек 2. Память, keyed не на тот номер, возвращала
+    бы удачную учётку не для того релиза.
+    """
+    m = (re.search(r"[?&]i=(\d+)", url_or_id or "")
+         or re.search(r"/(?:album|song|playlist|music-video)/[^/]+/(\d+)", url_or_id or "")
+         or re.search(r"/(\d+)(?:\?|$)", url_or_id or ""))
+    return m.group(1) if m else ""
+
+
+def remember_win(country: str, url_or_id: str = "", slot: int = -1) -> bool:
+    """Записать, КАКОЙ своей учёткой релиз в итоге качнулся.
+
+    Память двухуровневая: по номеру релиза (тот же альбом повторно идёт сразу
+    туда, где сработало) и по стране (следующий ПОХОЖИЙ релиз начинает с
+    недавно удачной витрины, а не с той же канадской, что отказывает третьей
+    неделю). Ничего секретного не пишем: только страна, номер релиза и номер
+    слота — ни учётных данных, ни токенов.
+    """
+    cc = (country or "").lower()
+    if not cc:
+        return False
+    d = _wins_load()
+    now = time.time()
+    rel = d.setdefault("release", {})
+    rid = release_id(url_or_id)
+    if rid:
+        rel[rid] = {"country": cc, "slot": slot, "ts": now}
+    ctr = d.setdefault("country", {})
+    row = ctr.get(cc) or {"wins": 0, "ts": 0}
+    ctr[cc] = {"wins": int(row.get("wins") or 0) + 1, "ts": now}
+    try:
+        _wins_path().write_text(json.dumps(d, ensure_ascii=False, indent=1),
+                                encoding="utf-8")
+        return True
+    except Exception:
+        return False
+
+
+def winning_country(url_or_id: str = "") -> str:
+    """Страна, которой этот релиз уже давался (пусто — не помним)."""
+    rid = release_id(url_or_id)
+    if not rid:
+        return ""
+    return str(((_wins_load().get("release") or {}).get(rid) or {}).get("country") or "")
+
+
+def manageable_slots(config: dict | None = None) -> list[dict]:
+    """Свои учётки, которые МОЖНО поднять: контейнер жив либо пул умеет его
+    создать. Молчание здесь опаснее ошибки — 22.09 перебор молча не увидел ни
+    одной GB-учётки, потому что контейнеров не существовало."""
+    slots = all_slots(include_stopped=True, config=config)
+    try:
+        from ripster import wrapper_pool
+    except Exception:
+        return [s for s in slots if s.get("running")]
+    out = []
+    for s in slots:
+        if s.get("running") or wrapper_pool.managed_slot(config or {}, s["slot"]):
+            out.append(s)
+    return out
+
+
+def ladder_order(config: dict | None = None, url_or_id: str = "",
+                 exclude=(), avail: dict | None = None) -> list[dict]:
+    """Наши Apple-сессии в том порядке, в котором их перебирать после
+    «Invalid CKC при живой сессии».
+
+    exclude — страны ИЛИ номера слотов, которые уже отказали этой задаче.
+    avail — {страна: (id, имя)} из каталога; пустой dict означает «не выяснено»,
+    и он НИКОГО не отсеивает (иначе именно так и терялись GB-учётки).
+    """
+    skip_cc = {str(x).lower() for x in exclude or ()
+               if isinstance(x, str) and not str(x).isdigit()}
+    skip_slot = {int(x) for x in exclude or ()
+                 if isinstance(x, int) or (isinstance(x, str) and x.isdigit())}
+    known = {str(c).lower() for c in (avail or {})}
+    star = winning_country(url_or_id)
+    wins = _wins_load().get("country") or {}
+    out: list[dict] = []
+    for s in manageable_slots(config):
+        cc = (s.get("country") or "").lower()
+        if not cc or cc in skip_cc or s["slot"] in skip_slot:
+            continue
+        if s.get("enabled") is False:      # выключенную владельцем учётку не зовём
+            continue
+        tier = 0 if (star and cc == star) else (1 if cc in known else 2)
+        out.append({**s, "tier": tier,
+                    "_win": float((wins.get(cc) or {}).get("ts") or 0),
+                    "_prio": float(s.get("priority", s["slot"]))})
+    out.sort(key=lambda s: (s["tier"], -s["_win"], s["_prio"], s["slot"]))
+    return out

@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="ru" data-skin="classic">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ripster — панель</title>
+<link rel="stylesheet" href="/static/panel/panel.css?v=6">
+<script src="/static/js/i18n.js?v=10187"></script>
+</head>
+<body>
+<div class="stage">
+
+  <section class="phone" id="phone" aria-label="Ripster">
+
+    <!-- Шапка как в мобильном Ripster (03_home.png): енот слева, поиск и
+         «Настройки» справа. Одна на все вкладки. -->
+    <header class="appbar">
+      <img class="mark" src="/static/panel/img/raccoon.png" alt="Ripster" width="34" height="34">
+      <span class="ab-sp"></span>
+      <button type="button" class="ab-ico" id="ab-search" data-i18n-title="m.tab.search">&#x2315;</button>
+      <button type="button" class="ab-pill" id="ab-settings" data-i18n="m.settings.title"></button>
+    </header>
+
+    <div class="screen on" id="scr-home">
+      <div class="scroller" id="home-body"></div>
+    </div>
+
+    <div class="screen" id="scr-search">
+      <header class="screentop">
+        <div class="searchbox">
+          <input id="sq" type="search" autocomplete="off" spellcheck="false" data-i18n-ph="m.search.ph">
+        </div>
+        <div class="chips" id="kind-chips"></div>
+        <div class="chips" id="svc-chips"></div>
+      </header>
+      <div class="scroller" id="search-body"></div>
+    </div>
+
+    <div class="screen" id="scr-library">
+      <header class="screentop">
+        <h1 class="etitle" data-i18n="m.lib.title"></h1>
+        <div class="searchbox">
+          <input id="lq" type="search" autocomplete="off" spellcheck="false" data-i18n-ph="m.lib.ph">
+        </div>
+        <div class="srcline" id="lib-sum"></div>
+      </header>
+      <div class="scroller" id="lib-body"></div>
+    </div>
+
+    <div class="screen" id="scr-downloads">
+      <header class="screentop">
+        <h1 class="etitle" data-i18n="m.dl.title"></h1>
+        <div class="srcline" id="dl-sum"></div>
+      </header>
+      <div class="scroller" id="dl-body"></div>
+    </div>
+
+    <div class="screen" id="scr-radar">
+      <header class="screentop">
+        <h1 class="etitle" data-i18n="m.radar.title"></h1>
+        <div class="srcline" id="radar-sum"></div>
+        <div class="rprog" id="radar-prog" style="display:none"><div class="rprog-fill" id="radar-prog-fill"></div></div>
+        <div class="rprogtxt" id="radar-prog-txt"></div>
+      </header>
+      <div class="scroller" id="radar-body"></div>
+    </div>
+
+    <div class="screen player" id="scr-player">
+      <div class="pscroll" id="player-body"></div>
+    </div>
+
+    <div class="sheet" id="sheet">
+      <div class="sheethead">
+        <button class="backbtn" id="sheet-back" type="button" data-i18n-title="m.close">&#8249;</button>
+        <span class="sheettitle" id="sheet-title"></span>
+      </div>
+      <div class="scroller" id="sheet-body"></div>
+    </div>
+
+    <div class="coverstage" id="coverstage"></div>
+
+    <div class="miniplayer" id="mini">
+      <div class="miniprog" id="mini-prog"></div>
+      <div class="minirow">
+        <img class="minicover" id="mini-cover" alt="">
+        <div class="minitext">
+          <div class="miniline1" id="mini-title"></div>
+          <div class="miniline2" id="mini-artist"></div>
+        </div>
+        <button class="minibtn" id="mini-play" type="button">&#9654;</button>
+      </div>
+    </div>
+
+    <nav class="tabbar" id="tabbar"></nav>
+  </section>
+
+  <aside class="dipline" id="dipline"></aside>
+</div>
+
+<div class="ctxmenu" id="ctxmenu"></div>
+
+<script src="/static/panel/i18n.panel.js?v=6"></script>
+<script src="/static/panel/panel.js?v=6"></script>
+<script src="/static/panel/radar.js?v=3"></script>
+</body>
+</html>
