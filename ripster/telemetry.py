@@ -25,6 +25,11 @@ Config keys (see config.example.yaml):
                                  install token = accepted free, empty/foreign =
                                  rejected.  See token_tier() below.
   telemetry-ingest-enabled bool  THIS instance accepts ingest       (default False)
+  telemetry-limit-*      int    жёсткие потолки для записей с ПУБЛИЧНЫМ токеном
+                                 (байт в сутки и строк в минуту на экземпляр,
+                                 архивов в сутки, размер архива, потолок диска
+                                 на весь приём). Дефолты — в _LIMITS; любое
+                                 нечисловое/нулевое значение = дефолт, а не «выкл».
 """
 from __future__ import annotations
 
@@ -381,37 +386,196 @@ def _safe_id(s: str) -> str:
 _MAX_LINES_PER_INSTANCE = 4000
 
 
+# ── ЛИМИТЫ ПУБЛИЧНОГО ЯРУСА ──────────────────────────────────────────────────
+# Публичный токен сборки секретом не является (он лежит в APK), поэтому с
+# 23.09.2026 он принимается, но писать с ним можно маленькими дозами. Это
+# последняя граница между «кто достал APK» и диском владельца, значит она
+# обязана переживать опечатку: любое нечисловое, нулевое или отрицательное
+# значение в конфиге означает дефолт, а не «лимит выключен».
+_LIMITS = {
+    "telemetry-limit-instance-bytes-day":  2 * 1024 * 1024,   # байт в сутки на экземпляр
+    "telemetry-limit-instance-lines-min":  120,               # строк в минуту на экземпляр
+    "telemetry-limit-batch-lines":         300,               # строк в одном батче
+    "telemetry-limit-line-chars":          2000,              # длина одной строки
+    "telemetry-limit-reports-day":         3,                 # архивов в сутки на экземпляр
+    "telemetry-limit-report-bytes":        12 * 1024 * 1024,  # размер одного архива
+    "telemetry-limit-remote-bytes":        200 * 1024 * 1024, # весь приём: logs/remote
+}
+
+
+def _limit(key: str) -> int:
+    """Значение лимита из конфига, иначе безопасный дефолт."""
+    try:
+        v = int(_cfg.get(key))
+    except (TypeError, ValueError):
+        return _LIMITS[key]
+    return v if v > 0 else _LIMITS[key]
+
+
+# Id задаёт клиент — путь в файловой системе владельца он получать не должен.
+# Все живые id тестеров (logs/remote/*.jsonl, девять штук на 23.09.2026) — 12
+# hex-символов, правило их покрывает; `../../config`, `%00` и имя на мегабайт —
+# нет. Нижняя граница отсекает и мусор вроде "1", который плодит экземпляры.
+_IID_RX = re.compile(r"^[A-Za-z0-9_\-]{4,32}$")
+
+
+def _clean_iid(s) -> str:
+    """Валидный instance_id либо пустая строка (то есть отказ записи)."""
+    s = str(s or "").strip()
+    return s if _IID_RX.match(s) else ""
+
+
+def _today() -> str:
+    return time.strftime("%Y-%m-%d")
+
+
+def _quota_used(rec: dict, day_key: str, n_key: str) -> int:
+    return int(rec.get(n_key) or 0) if rec.get(day_key) == _today() else 0
+
+
+def _quota_add(rec: dict, day_key: str, n_key: str, n: int) -> None:
+    """Счётчик суток живёт в записи индекса, а не только в памяти: перезапуск
+    приёмника не должен обнулять лимит тестера."""
+    day = _today()
+    if rec.get(day_key) != day:
+        rec[day_key], rec[n_key] = day, 0
+    rec[n_key] = int(rec.get(n_key) or 0) + n
+
+
+def _tree_bytes(d: Path) -> int:
+    total = 0
+    try:
+        for p in d.rglob("*"):
+            try:
+                if p.is_file():
+                    total += p.stat().st_size
+            except OSError:
+                pass
+    except Exception:
+        pass
+    return total
+
+
+def _prune_reports(target: int) -> int:
+    """Снести самые старые архивы, пока приём не влезет в `target` байт;
+    вернуть число снесённых. Индекс правится заодно: запись без файла
+    обещала бы владельцу скачивание того, чего нет."""
+    idx = _read_index()
+    items = sorted(((int(r.get("t") or 0), iid, r)
+                    for iid, rec in idx.items() for r in (rec.get("reports") or [])),
+                   key=lambda x: (x[0], x[1], str(x[2].get("code") or "")))
+    if not items:
+        return 0
+    total = _tree_bytes(_remote_dir())
+    removed = 0
+    for _ts, iid, r in items:
+        if total <= target:
+            break
+        name = os.path.basename(str(r.get("file") or ""))
+        try:
+            fp = _reports_dir() / name
+            size = fp.stat().st_size if fp.is_file() else 0
+            fp.unlink(missing_ok=True)
+        except OSError:
+            size = 0
+        rec = idx.get(iid)
+        if rec is not None:
+            rec["reports"] = [x for x in (rec.get("reports") or [])
+                              if os.path.basename(str(x.get("file") or "")) != name]
+        total -= size
+        removed += 1
+    if removed:
+        try:
+            _index_path().write_text(json.dumps(idx, ensure_ascii=False), encoding="utf-8")
+        except Exception:
+            pass
+        print(f"[telemetry] приём упирался в потолок диска: снесено старых отчётов: "
+              f"{removed} (logs/remote, лимит {_limit('telemetry-limit-remote-bytes')} байт)",
+              flush=True)
+    return removed
+
+
+_min_lines: dict = {}          # iid -> deque[(ts, n)]; перезапуск сбрасывает минуту
+
+
+def _lines_ok(iid: str, add: int) -> bool:
+    cap = _limit("telemetry-limit-instance-lines-min")
+    now = time.time()
+    w = _min_lines.setdefault(iid, deque())
+    while w and now - w[0][0] > 60:
+        w.popleft()
+    if sum(n for _ts, n in w) + add > cap:
+        return False
+    w.append((now, add))
+    return True
+
+
+def _public_budget(iid: str, add_bytes: int, add_lines: int = 0,
+                   reports: bool = False) -> str:
+    """Почему публичному ярусу писать нельзя; '' — можно. Все проверки ДО
+    записи: отказ не должен оставлять на диске половину батча."""
+    cap_disk = _limit("telemetry-limit-remote-bytes")
+    rec = _read_index().get(iid) or {}
+    if reports:
+        if _quota_used(rec, "r_day", "r_count") >= _limit("telemetry-limit-reports-day"):
+            return "report limit"
+    elif _quota_used(rec, "q_day", "q_bytes") + add_bytes > \
+            _limit("telemetry-limit-instance-bytes-day"):
+        return "day limit"
+    total = _tree_bytes(_remote_dir()) + add_bytes
+    if total > cap_disk:
+        _prune_reports(int(cap_disk * 0.9))     # сначала старые архивы, потом отказ
+        if _tree_bytes(_remote_dir()) + add_bytes > cap_disk:
+            return "disk limit"
+    if add_lines and not _lines_ok(iid, add_lines):
+        return "rate"
+    return ""
+
+
 def store_ingest(payload: dict, client_ip: str = "", owner: bool = False) -> dict:
     """Owner side: persist one batch. Returns {ok, stored}. Never raises."""
     if not _cfg.get("telemetry-ingest-enabled"):
         return {"ok": False, "error": "ingest disabled"}
-    if not token_gate_ok(payload.get("token"), owner=owner):
+    if not isinstance(payload, dict):
+        return {"ok": False, "error": "bad payload"}
+    tier = token_tier(payload.get("token"), owner=owner)
+    if not tier:
         _log_reject(payload.get("token"), payload.get("instance_id"))
         return {"ok": False, "error": "bad token"}
-    iid = _safe_id(payload.get("instance_id"))
+    iid = _clean_iid(payload.get("instance_id"))
+    if not iid:
+        _log_reject(payload.get("token"), payload.get("instance_id"),
+                    why="некорректный instance_id")
+        return {"ok": False, "error": "bad instance_id"}
     if not _instance_allowed(iid):
         return {"ok": False, "error": "instance limit"}
     lines = payload.get("lines") or []
     if not isinstance(lines, list):
         return {"ok": False, "error": "bad lines"}
-    lines = lines[:300]
-    d = _remote_dir()
-    fp = d / f"{iid}.jsonl"
+    lines = lines[:_limit("telemetry-limit-batch-lines")]
+    chars = _limit("telemetry-limit-line-chars")
+    kept = [ln for ln in lines if isinstance(ln, dict)]      # не-объект не пишем
+    blob = "".join(json.dumps({
+        "t":     int(ln.get("t") or time.time()),
+        "level": str(ln.get("level") or "info")[:12],
+        "text":  redact(ln.get("text") or "")[:chars],
+    }, ensure_ascii=False) + "\n" for ln in kept)
+    size = len(blob.encode("utf-8"))
+    if tier == "public":
+        why = _public_budget(iid, size, len(kept))
+        if why:
+            _log_reject(payload.get("token"), iid, why=f"публичный ярус, {why}")
+            return {"ok": False, "error": why}
+    fp = _remote_dir() / f"{iid}.jsonl"
     try:
         with fp.open("a", encoding="utf-8") as f:
-            for ln in lines:
-                if not isinstance(ln, dict):
-                    continue
-                f.write(json.dumps({
-                    "t":     int(ln.get("t") or time.time()),
-                    "level": str(ln.get("level") or "info")[:12],
-                    "text":  redact(ln.get("text") or "")[:2000],
-                }, ensure_ascii=False) + "\n")
+            f.write(blob)
         _trim_file(fp, _MAX_LINES_PER_INSTANCE)
-        _update_index(iid, payload, client_ip, len(lines))
-        return {"ok": True, "stored": len(lines)}
+        _update_index(iid, payload, client_ip, len(kept), add_bytes=size)
+        return {"ok": True, "stored": len(kept)}
     except Exception as e:
         return {"ok": False, "error": str(e)[:120]}
+
 
 
 def _trim_file(fp: Path, keep: int) -> None:
@@ -454,7 +618,8 @@ def _instance_allowed(iid: str) -> bool:
     return iid in idx or len(idx) < _MAX_INSTANCES
 
 
-def _update_index(iid: str, payload: dict, client_ip: str, n: int) -> None:
+def _update_index(iid: str, payload: dict, client_ip: str, n: int,
+                  add_bytes: int = 0) -> None:
     idx = _read_index()
     rec = idx.get(iid) or {"instance_id": iid, "first_seen": int(time.time()),
                            "total": 0, "errors": 0}
@@ -467,6 +632,8 @@ def _update_index(iid: str, payload: dict, client_ip: str, n: int) -> None:
     rec["errors"]      = int(rec.get("errors", 0)) + sum(
         1 for ln in (payload.get("lines") or [])
         if isinstance(ln, dict) and str(ln.get("level", "")).lower() in ("error", "critical"))
+    if add_bytes:
+        _quota_add(rec, "q_day", "q_bytes", add_bytes)
     idx[iid] = rec
     try:
         _index_path().write_text(json.dumps(idx, ensure_ascii=False, indent=0), encoding="utf-8")
@@ -523,8 +690,8 @@ def set_label(iid: str, label: str) -> bool:
 # два бага 27.07.2026 нашлись только потому, что удалось расспросить человека.
 # Поэтому отдельный канал: пользователь жмёт кнопку и присылает полный архив.
 
-_MAX_REPORT_BYTES = 12 * 1024 * 1024
-_MAX_REPORTS_PER_INSTANCE = 10
+_MAX_REPORTS_PER_INSTANCE = 10      # сколько архивов одного тестера держим на диске
+                                    # (размер одного — telemetry-limit-report-bytes)
 
 
 def _reports_dir() -> Path:
@@ -543,19 +710,32 @@ def store_report(meta: dict, blob: bytes, client_ip: str = "",
     """Owner side: сохранить присланный архив логов. Никогда не бросает."""
     if not _cfg.get("telemetry-ingest-enabled"):
         return {"ok": False, "error": "ingest disabled"}
-    if not token_gate_ok(meta.get("token"), owner=owner):
+    if not isinstance(meta, dict):
+        return {"ok": False, "error": "bad payload"}
+    tier = token_tier(meta.get("token"), owner=owner)
+    if not tier:
         _log_reject(meta.get("token"), meta.get("instance_id"))
         return {"ok": False, "error": "bad token"}
+    iid = _clean_iid(meta.get("instance_id"))
+    if not iid:
+        _log_reject(meta.get("token"), meta.get("instance_id"),
+                    why="некорректный instance_id")
+        return {"ok": False, "error": "bad instance_id"}
     if not blob:
         return {"ok": False, "error": "empty"}
-    if len(blob) > _MAX_REPORT_BYTES:
+    if len(blob) > _limit("telemetry-limit-report-bytes"):
         return {"ok": False, "error": "too big"}
     if not blob.startswith(b"PK"):                 # только zip, ничего исполняемого
         return {"ok": False, "error": "not a zip"}
-
-    iid  = _safe_id(meta.get("instance_id"))
     if not _instance_allowed(iid):
         return {"ok": False, "error": "instance limit"}
+    if tier == "public":
+        # чужая сборка с ключом из APK: архивов — три в сутки, и только те, что
+        # влезут в общий потолок диска (сначала сносятся старые архивы)
+        why = _public_budget(iid, len(blob), reports=True)
+        if why:
+            _log_reject(meta.get("token"), iid, why=f"публичный ярус, {why}")
+            return {"ok": False, "error": why}
     code = _report_code()
     ts   = int(time.time())
     try:
@@ -570,6 +750,8 @@ def store_report(meta: dict, blob: bytes, client_ip: str = "",
             if v:
                 rec[k] = v
         rec["ip"] = (client_ip or rec.get("ip") or "")[:45]
+        if tier == "public":
+            _quota_add(rec, "r_day", "r_count", 1)
         reports = list(rec.get("reports") or [])
         reports.append({"code": code, "t": ts, "size": len(blob),
                         "note": str(meta.get("note") or "")[:300], "file": fp.name})
