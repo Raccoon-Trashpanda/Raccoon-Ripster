@@ -1110,6 +1110,7 @@ def tidal_pool_append(refresh: str = "", country: str = "", label: str = "",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     # Слот = позиция в `configured_accounts`: 0 — основной, пул начинается с 1.
     return {"ok": True, "msg": f"Учётка добавлена как «{label}»",
+            "msg_key": "acc.pool_added", "params": {"label": label},
             "label": label, "slot": len(existing), "country": country, "user_id": uid}
 
 
@@ -1168,7 +1169,7 @@ async def tidal_accounts_set_primary(slot: int):
     new_refresh = (entry.get("refresh") or entry.get("tidal-refresh") or "").strip()
     if not new_refresh:
         return {"ok": False, "msg": "У этой учётки нет refresh-токена — сделать её основным нельзя",
-                "msg_key": "err.tidal_pool_no_token"}
+                "msg_key": "err.tidal_primary_no_token"}
     old_refresh = (_cfg.get("tidal-refresh") or "").strip()
     new_country = (entry.get("country") or entry.get("tidal-country") or "").strip().upper()
     old_country = (_cfg.get("tidal-country") or "").strip().upper()
@@ -1218,8 +1219,10 @@ async def tidal_accounts_set_primary(slot: int):
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     info = _ta.known(new_refresh) or {}
+    shown = entry.get("label") or new_country or "Tidal"
     return {"ok": True,
-            "msg": f"Основной сделана учётка «{entry.get('label') or new_country or 'Tidal'}»",
+            "msg": f"Основной сделана учётка «{shown}»",
+            "msg_key": "acc.primary_made", "params": {"label": shown},
             "label": entry.get("label") or "", "country": new_country,
             "plan": info.get("plan") or ""}
 

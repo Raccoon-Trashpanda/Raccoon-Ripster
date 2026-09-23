@@ -600,7 +600,11 @@ function _tidalRenderRows(list, accs, probe) {
   const byslot = {};
   (probe || []).forEach(p => { byslot[p.slot] = p; });
   list.innerHTML = _acctSorted(accs).map(a => {
-    const p = byslot[a.slot];
+    // Свежая проба (`?probe=1`) важнее, но строка пула приходит уже с
+    // ПОСЛЕДНИМ измерением (`measured`) — тот же кэш, по которому очередь
+    // расставляет порядок. Без этой второй опоры панель после входа с телефона
+    // висела бы серой до ближайшей фоновой пробы.
+    const p = byslot[a.slot] || (a.measured ? a : null);
     // Точка статуса единообразно с Deezer/Qobuz, но по ЗДОРОВЬЮ: зелёная —
     // жив и отдаёт lossless; оранжевая — жив, но без lossless; красная —
     // отвергнут; серая — ещё не спросили / «не знаю».
@@ -612,12 +616,13 @@ function _tidalRenderRows(list, accs, probe) {
     const cc = ((p && p.country) || a.country || '').trim().toUpperCase();
     const plan = (p && (p.plan || p.quality)) || '';
     const meta = [cc, plan].filter(Boolean).join(' · ');
-    return `<div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+    return `<div data-acct-slot="${a.slot}" data-acct-label="${escapeHtml(_acctLabel(a))}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
       ${acctDragHandle()}
       <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}"></span>
       <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${meta?` <span style="color:var(--muted)">· ${escapeHtml(meta)}</span>`:''}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
       ${acctPrefCtl('tidal', a)}
-      ${a.primary ? '' : `<button onclick="removeTidalAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      ${a.primary ? '' : `<button onclick="setTidalPrimary(${a.slot})" title="${escapeHtml(t('acc.make_primary'))}" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:#00d4b3;font-family:var(--font)">${escapeHtml(t('acc.make_primary'))}</button>
+      <button onclick="removeTidalAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
     </div>`;
   }).join('');
   acctDndWire('tidal', list);
@@ -668,6 +673,163 @@ async function removeTidalAccount(slot) {
     toast(r.msg || (r.ok ? t('t.done') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
     if(r.ok) loadTidalAccounts();
   } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function setTidalPrimary(slot) {
+  // Метку читаем из атрибута строки: `textContent` вернул бы и подпись кнопки,
+  // и страну с тарифом, и confirm показал бы «Сделать «NZ HIFI Сделать
+  // основной ✕» основной учёткой?».
+  const lbl = document.querySelector(`#tidal-accounts-list [data-acct-slot="${slot}"]`)?.dataset.acctLabel || ti('acc.slot', {n: slot});
+  if(!confirm(ti('acc.primary_confirm', {label: lbl}))) return;
+  try {
+    const r = await api('POST', `/api/tidal/accounts/${slot}/primary`, {});
+    toast(r.msg || (r.ok ? t('t.done') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    if(r.ok) loadTidalAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+// ── Tidal: вход ВО ВТОРУЮ учётку по device-link (мульти-акки с телефона) ─────
+// Тот же TV-поток, что у `tidalTvLogin`, но с `target:"pool"`: сервер дописывает
+// вошедшую учётку в `tidal-accounts` и НЕ трогает основную сессию. Отсюда и
+// форма панели: код + ссылка + QR, чтобы открыть их можно было с любого
+// телефона, а не только с того устройства, где стоит Ripster.
+//
+// Перевыпуск кода обязателен: срок жизни кода (~5 мин) короче, чем время, за
+// которое владелец успевает его заметить и ввести, поэтому по истечении просим
+// новый, а не просим нажать кнопку ещё раз. Потолок попыток — чтобы упорный
+// цикл не жёг device_authorization бесконечно, если рядом нет человека.
+const TIDAL_POOL_MAX_RETRY = 3;
+// Состояние ОДНО на всю панель, и поколение `gen` растёт только от действия
+// человека (новый клик, успешный вход). Перевыпуск кода обязан оставаться той
+// же цепочкой. Первая версия брала новый номер на каждом раунде — и старый
+// перевыпуск, дотянувший до кнопки после нового клика, объявлял себя главным:
+// панель продолжала гонять прежний пятиминутный код, кнопка оставалась
+// нажатой, а второй клик не мог её перехватить. Проверено стендом 23.09.
+const _tidalPool = {gen: 0, timer: null, left: 0, attempt: 0, busy: false,
+                    code: '', interval: 2, since: 0};
+
+function _tidalPoolStop() {
+  _tidalPool.gen++;
+  if(_tidalPool.timer) clearTimeout(_tidalPool.timer);
+  _tidalPool.timer = null;
+}
+
+function _tidalPoolBtn(on) {
+  const b = document.getElementById('tidal-pool-login-btn');
+  if(b) b.disabled = !on;
+}
+
+function _tidalPoolSay(html, color) {
+  const el = document.getElementById('tidal-pool-status');
+  if(el) { el.innerHTML = html; el.style.color = color || 'var(--muted)'; }
+}
+
+// Терминальное состояние: цепочка умерла, объяснение показано, кнопка снова
+// работает. Без этого panel остаётся с висящей кнопкой и человек не может
+// попробовать ещё раз — ровно то, за что панель и ругают.
+function _tidalPoolDone(html, color) {
+  _tidalPoolStop();
+  _tidalPoolSay(html, color);
+  _tidalPoolBtn(true);
+}
+
+async function tidalPoolLogin() {
+  const flow = document.getElementById('tidal-pool-flow');
+  if(!flow) return;
+  _tidalPoolStop();                 // прежняя цепочка замолкает
+  flow.style.display = '';
+  _tidalPoolBtn(false);
+  _tidalPool.attempt = 0;
+  await _tidalPoolRound();
+}
+
+async function _tidalPoolRound() {
+  const gen = _tidalPool.gen;
+  _tidalPoolSay(esc(t('s.tidal_pool_starting')));
+  let r = null;
+  try { r = await api('POST', '/api/tidal/auth/start', {}); } catch(e) {}
+  if(gen !== _tidalPool.gen) return;              // панель перехватил новый клик
+  if(!r || !r.ok) {
+    return _tidalPoolDone(`${esc(t('dlg.err'))}: ${esc((r && r.error) || '?')}`, 'var(--red)');
+  }
+  const url = r.verification_url || ('https://link.tidal.com/' + (r.user_code || ''));
+  const codeEl = document.getElementById('tidal-pool-code');
+  const linkEl = document.getElementById('tidal-pool-link');
+  const qrEl = document.getElementById('tidal-pool-qr');
+  if(codeEl) codeEl.textContent = r.user_code || '';
+  if(linkEl) { linkEl.href = url; linkEl.textContent = url; }
+  if(qrEl) {
+    // QR рисуем сами (static/js/qr_min.js): снять картинку с телефона —
+    // единственный способ войти, когда Ripster с этого телефона недоступен.
+    const svg = (typeof qrSvg === 'function') ? qrSvg(url, 168) : '';
+    qrEl.innerHTML = svg || `<div style="font-size:10px;color:#000;max-width:168px">${esc(t('s.tidal_pool_no_qr'))}</div>`;
+  }
+  _tidalPool.code = r.device_code || '';
+  _tidalPool.left = r.expires_in || 300;
+  _tidalPool.interval = Math.max(2, r.interval || 2);
+  _tidalPool.since = 0;
+  _tidalPool.busy = false;
+  _tidalPoolSay(esc(ti('s.tidal_pool_waiting', {n: _tidalPool.left})));
+  _tidalPool.timer = setTimeout(_tidalPoolTick, 1000);
+}
+
+async function _tidalPoolTick() {
+  const gen = _tidalPool.gen;
+  _tidalPool.timer = null;
+  if(gen !== _tidalPool.gen) return;
+  _tidalPool.left--; _tidalPool.since++;
+  if(_tidalPool.left <= 0) {
+    if(_tidalPool.attempt + 1 >= TIDAL_POOL_MAX_RETRY) {
+      return _tidalPoolDone(esc(t('s.tidal_pool_giveup')), 'var(--red)');
+    }
+    _tidalPool.attempt++;
+    _tidalPoolSay(esc(ti('s.tidal_pool_expired',
+                         {n: _tidalPool.attempt + 1, max: TIDAL_POOL_MAX_RETRY})), 'var(--orange)');
+    // Пауза перед новым кодом: без неё сообщение «выдаю новый» перезаписывается
+    // следующим же тиком, и человек видит только мелькнувшую строку.
+    _tidalPool.timer = setTimeout(_tidalPoolRound, 1500);
+    return;
+  }
+  if(!_tidalPool.busy && (_tidalPool.since % _tidalPool.interval) === 0) {
+    _tidalPool.busy = true;
+    let p = null;
+    try { p = await api('POST', '/api/tidal/auth/poll',
+                        {device_code: _tidalPool.code, target: 'pool'}); }
+    catch(e) {}
+    _tidalPool.busy = false;
+    if(gen !== _tidalPool.gen) return;
+    if(p && p.ok && p.saved) {
+      const what = [p.country, p.plan || t('s.tidal_pool_no_plan')].filter(Boolean).join(' · ');
+      _tidalPoolStop();
+      const flow = document.getElementById('tidal-pool-flow');
+      if(flow) flow.style.display = 'none';
+      _tidalPoolBtn(true);
+      toast(ti('s.tidal_pool_added', {label: p.label || 'Tidal', what}), 'var(--green)');
+      loadTidalAccounts();
+      return;
+    }
+    if(!(p && p.ok && p.pending)) {
+      return _tidalPoolDone(`${esc(t('dlg.err'))}: ${esc((p && p.error) || '?')}`, 'var(--red)');
+    }
+  }
+  _tidalPoolSay(esc(ti('s.tidal_pool_waiting', {n: _tidalPool.left})));
+  _tidalPool.timer = setTimeout(_tidalPoolTick, 1000);
+}
+
+function copyTidalPoolLink() {
+  const url = (document.getElementById('tidal-pool-link')?.textContent || '').trim();
+  if(!url) return;
+  const done = () => toast(t('toast.link_copied'), 'var(--green)');
+  // Clipboard API есть не везде (WebView2, http без безопасного контекста),
+  // поэтому временное поле — не запасной вариант для красоты, а рабочий путь.
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = url; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); done(); } catch(e) { toast(t('t.error'), 'var(--red)'); }
+    document.body.removeChild(ta);
+  };
+  try { navigator.clipboard.writeText(url).then(done).catch(fallback); }
+  catch(e) { fallback(); }
 }
 
 async function addDeezerAccount() {
