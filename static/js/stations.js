@@ -383,6 +383,19 @@ function stShowLive(extra) {
   stStatus(bits.join('  ·  '));
 }
 
+// Мёртвый источник обязан назвать причину, а не молчаливый ноль (претензия
+// 23.09.2026). Сервер кладёт в `sources` вместо числа i18n-ключ причины.
+const ST_SRC_LABEL = { 'soundcloud:chart': 'SoundCloud', deezer: 'Deezer',
+                       qobuz: 'Qobuz', tidal: 'Tidal', apple: 'Apple', yandex: 'Yandex' };
+function stSourceNotes(sources) {
+  const bits = [];
+  Object.keys(sources || {}).forEach(k => {
+    const v = sources[k];
+    if (typeof v === 'string') bits.push((ST_SRC_LABEL[k] || k) + ': ' + t(v));
+  });
+  return bits.length ? ti('st.src_notes', { list: bits.join(' · ') }) : '';
+}
+
 /**
  * Открыть сессию. Вся сеть — здесь; `next` ниже её не трогает.
  */
@@ -424,14 +437,15 @@ async function stPlay(id) {
     try { _stevStationStart(label, r.session_id, r.batch_id); } catch (_) {}
   }
   stRenderKnobs();
-  stShowLive();
+  stShowLive(stSourceNotes(r.sources));
   _playPreviewAt(0);
   if (got.dropped && Object.keys(got.dropped).length) stTellDropped(got.dropped);
 }
 
 /** Пустой эфир обязан СКАЗАТЬ почему — не «проверьте связь» и не молчание. */
 function stShowEmpty(r) {
-  stStatus((r && (r.reason || r.error)) ? t('st.empty_reason') : t('st.empty'));
+  const note = stSourceNotes(r && r.sources);
+  stStatus(note ? ti('st.empty_reason', { reason: note }) : t('st.empty'));
 }
 
 /**
