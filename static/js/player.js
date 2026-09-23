@@ -3386,10 +3386,14 @@ function _haptic(ms) {
 
 // Sync FP UI from the current Preview state
 function fpSyncFromState() {
-  const item = Preview.queue[Preview.idx] || {};
+  // BBC играет ВНЕ Preview.queue (свой <audio id="bbc-audio">), иначе плеер
+  // открывался бы с «♪» и пустой подложкой на только что запущенном эфире.
+  // bbc.js загружается после player.js — отсюда и проверка на живую функцию.
+  const bbc  = (typeof _bbcFpItem === 'function') && Preview.mode === 'bbc';
+  const item = bbc ? _bbcFpItem() : (Preview.queue[Preview.idx] || {});
   fpSyncMeta(item);
   // Restore play/pause icon from audio state
-  const audio = document.getElementById('pp-audio');
+  const audio = document.getElementById(bbc ? 'bbc-audio' : 'pp-audio');
   const playEl = document.getElementById('fp-play');
   if (audio && playEl) playEl.textContent = audio.paused ? '▶' : '⏸';
 }

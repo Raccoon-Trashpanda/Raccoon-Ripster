@@ -29,6 +29,7 @@ from fastapi import APIRouter
 
 from ripster import artist_xref as _xref
 from ripster import artist_identity as _ident
+from ripster import owner_anchor as _anchor
 
 router     = APIRouter()
 _config: dict = {}
@@ -52,6 +53,29 @@ def install(app, ctx) -> None:
     _base_dir  = ctx.base_dir
     _xref.configure(ctx.config, ctx.base_dir)
     app.include_router(router)
+
+
+async def _identity_door(releases: list, service: str) -> list:
+    """Единая дверь личности для кросс-сервисных лент — Qobuz, Tidal, Deezer.
+
+    Прежняя стояла только на складе радара (`routes/radar.py`), и именно
+    поэтому жалоба «в радаре по-прежнему не тот Соломон Грей» пережила правку
+    23.09: кластер, который владелец уже назвал чужим, приезжал в ленту из
+    Deezer и Qobuz в обход гейта. Теперь вердикт один для всех источников
+    (`artist_identity.feed_filter`: сверка id, склейка страниц, якорь
+    владельца).
+
+    Перед вердиктом — шаг доказательств: витрина отдаёт список релизов не
+    всегда и без лейбла, и без жанра; такое карточка честно уносит в «нечем
+    судить», а добытое одним публичным запросом ложится на диск и начинает
+    работать в следующем чтении.
+    """
+    try:
+        await _anchor.evidence(releases)
+    except Exception as e:                                 # noqa: BLE001
+        print(f"[releases] {service}: обогащение карточек: {e}", flush=True)
+    return _ident.feed_filter(releases, _watchlist or [], _base_dir,
+                              _save_watchlist)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -287,6 +311,7 @@ async def qobuz_releases(days: int = 30):
                     releases.append(rel)
 
         releases.sort(key=lambda x: x["date"], reverse=True)
+        releases = await _identity_door(releases, "qobuz")
 
         if _broadcast:
             await _broadcast({"type": "releases_scan_done", "artists_checked": total,
@@ -334,7 +359,10 @@ async def _tidal_fetch_artist(sem: asyncio.Semaphore, c: httpx.AsyncClient,
                     "type":    type_norm,
                     "date":    date, "year": date[:4],
                     "tracks":  alb.get("numberOfTracks"),
-                    "label":   "",
+                    # Витрина даёт лейбл прямо в списке релизов — берём, пока он
+                    # бесплатный: правило якоря судит по нему, а отдельного
+                    # запроса на это не просит.
+                    "label":   str(alb.get("label") or ""),
                     "cover":   _tidal_cover(alb.get("cover", "")),
                     "url":     f"https://listen.tidal.com/album/{alb_id}",
                     "artist_id": str(artist.get("id", "")),   # чтобы имя было кликабельно → страница артиста
@@ -434,6 +462,7 @@ async def tidal_releases(days: int = 30):
                     releases.append(rel)
 
         releases.sort(key=lambda x: x["date"], reverse=True)
+        releases = await _identity_door(releases, "tidal")
 
         if _broadcast:
             await _broadcast({"type": "releases_scan_done", "artists_checked": total,
@@ -487,7 +516,10 @@ async def _deezer_fetch_artist(sem: asyncio.Semaphore, c: httpx.AsyncClient,
                                 "compile": "compilation"}.get(rt, rt),
                     "date":    date, "year": date[:4],
                     "tracks":  alb.get("nb_tracks"),
-                    "label":   "",
+                    # Витрина даёт лейбл прямо в списке релизов — берём, пока он
+                    # бесплатный: правило якоря судит по нему, а отдельного
+                    # запроса на это не просит.
+                    "label":   str(alb.get("label") or ""),
                     "cover":   alb.get("cover_medium") or alb.get("cover") or "",
                     "url":     alb.get("link") or f"https://www.deezer.com/album/{alb_id}",
                     "artist_id": aid,
@@ -565,6 +597,7 @@ async def deezer_releases(days: int = 30):
                     seen.add(rel["id"])
                     releases.append(rel)
         releases.sort(key=lambda x: x["date"], reverse=True)
+        releases = await _identity_door(releases, "deezer")
 
         if _broadcast:
             await _broadcast({"type": "releases_scan_done", "artists_checked": total,

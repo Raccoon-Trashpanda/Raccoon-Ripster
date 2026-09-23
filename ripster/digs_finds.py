@@ -33,6 +33,9 @@ from ripster.digs import (
     _BASE, _DB, _HISTORY, _STREAM_SPLIT, _is_noise, _norm, _split_credit,
     build_profile,
 )
+# Единая с `_norm` схема: пробелы схлопываются одним и тем же регулярным
+# выражением — иначе два ключа нормализации в одном модуле расходятся.
+from ripster.watchlist_suggest import _WS_RE
 
 _BOT_CACHE = _BASE / "tgbot" / "cache_index.json"
 
@@ -44,8 +47,13 @@ _ALBUM_NOISE = re.compile(
 
 
 def _norm_title(t: str) -> str:
+    """Ключ сравнения изданий. Пробелы схлопываются (`_WS_RE`, как в `_norm`):
+    снятая пунктуация оставляла двойные разрывы — «L.A. Woman» давала
+    «l a  woman», и тот же альбом, записанный через один пробел, перставал
+    быть «тем же самым»: сравнение изданий и дедуп находок молча расходились."""
     s = _ALBUM_NOISE.sub(" ", (t or "").lower())
-    return re.sub(r"[^\w\s]+", " ", s, flags=re.U).strip()
+    s = re.sub(r"[^\w\s]+", " ", s, flags=re.U)
+    return _WS_RE.sub(" ", s).strip()
 
 
 def _titles_match(want: str, cand: str) -> bool:
@@ -264,6 +272,9 @@ def missing_releases(profile_artists: list, by_artist: dict, foreign: set,
     wanted = {_norm(a["name"]): a for a in profile_artists
               if not a.get("is_show") and _norm(a["name"]) not in foreign}
     out = []
+    # Один релиз приезжает и из стора Spotify, и со склада: котёл без сверки
+    # выдавал его дважды, и второй экземпляр сжигал слот в лимите.
+    seen: set = set()
     for rec in list(artists.values()) + list(extra.values()):
         key = _norm(rec.get("name", ""))
         prof = wanted.get(key)
@@ -273,6 +284,10 @@ def missing_releases(profile_artists: list, by_artist: dict, foreign: set,
             title = rel.get("title", "")
             if not title or _has(by_artist, key, title):
                 continue
+            dup = (key, _norm_title(title))
+            if dup in seen:
+                continue
+            seen.add(dup)
             # Причина должна быть ПРАВДОЙ, а не шаблоном с подставленным числом.
             # Артист попадает в профиль не только загрузками: за ним можно просто
             # следить или отметить его своим — и тогда на карточке появлялось

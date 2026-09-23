@@ -48,6 +48,16 @@ function ti(k, p) {
     return (p && p[n] != null) ? p[n] : '{' + n + '}';
   });
 }
+// Разворачивает detail API-сообщения (i18n-контракт {key, params, msg}) в строку
+// на языке панели; ключа нет — падаем на русский msg, а не показываем сырой JSON.
+function errText(d) {
+  if (d && typeof d === 'object' && d.key) {
+    var s = ti(d.key, d.params || {});
+    if (!s || s === d.key) s = d.msg || d.key;
+    return s;
+  }
+  return (typeof d === 'string') ? d : (d ? (d.msg || '') : '');
+}
 // Число со склонением. Формы в ключе через «|» в порядке категорий
 // Intl.PluralRules: ru — one|few|many («1 трек|2 трека|5 треков»), en — one|other.
 // Раньше ключ был один на все числа, и плитка радара писала «1 треков».
@@ -87,7 +97,10 @@ async function api(path) {
   S.api++;
   try {
     var r = await fetch(path, { credentials: 'same-origin' });
-    if (!r.ok) throw new Error(path.split('?')[0] + ' → HTTP ' + r.status);
+    if (!r.ok) {
+      var b = await r.json().catch(function () { return null; });
+      throw new Error(errText(b && b.detail) || (path.split('?')[0] + ' → HTTP ' + r.status));
+    }
     return await r.json();
   } catch (e) {
     S.apiErr++; S.lastErr = String(e.message || e); diag(); throw e;
@@ -101,7 +114,10 @@ async function apiPost(path, body) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body || {})
     });
-    if (!r.ok) throw new Error(path.split('?')[0] + ' → HTTP ' + r.status);
+    if (!r.ok) {
+      var b = await r.json().catch(function () { return null; });
+      throw new Error(errText(b && b.detail) || (path.split('?')[0] + ' → HTTP ' + r.status));
+    }
     return await r.json();
   } catch (e) {
     S.apiErr++; S.lastErr = String(e.message || e); diag(); throw e;

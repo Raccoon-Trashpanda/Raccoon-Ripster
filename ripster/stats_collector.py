@@ -10,10 +10,11 @@ Reads are used only by /api/stats (low frequency).
 """
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import time
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent.parent / "ripster_stats.db"
@@ -85,8 +86,16 @@ def import_history(history_list: list) -> None:
     rows = []
     for h in history_list:
         ts = _parse_ts(h.get("ts", ""))
+        hid = str(h.get("id") or "")
+        if not hid:
+            # id='' у двух записей PRIMARY KEY схлопнул бы в одну строку
+            # (INSERT OR IGNORE молча съедает вторую). Детерминированный хеш
+            # сохраняет обе и не дублирует их при повторном импорте.
+            hid = "hist-" + hashlib.sha1(
+                f"{h.get('ts', '')}|{h.get('url', '')}|{h.get('title', '')}"
+                .encode("utf-8", "replace")).hexdigest()[:16]
         rows.append((
-            h.get("id", ""),
+            hid,
             ts,
             h.get("service", ""),
             h.get("engine", ""),
@@ -114,8 +123,19 @@ def _parse_ts(ts_str: str) -> int:
         return int(time.time())
     try:
         dt = datetime.fromisoformat(ts_str)
+    except Exception:
+        return int(time.time())
+    try:
         return int(dt.timestamp())
     except Exception:
+        if dt.tzinfo is None:
+            # Windows кидает OSError на наивной .timestamp() у дат до 1970
+            # (исторический мусор в history.json превращался в «сейчас» —
+            # валидный ISO молча сдвигался на годы). Тот же смысл арифметикой:
+            # «как если UTC» минус локальное смещение текущего момента.
+            off = datetime.now(timezone.utc).astimezone().utcoffset()
+            if off is not None:
+                return int(dt.replace(tzinfo=timezone.utc).timestamp() - off.total_seconds())
         return int(time.time())
 
 
@@ -198,6 +218,7 @@ _SERVICE_LABELS = {
     "apple": "Apple Music", "deezer": "Deezer", "qobuz": "Qobuz",
     "tidal": "Tidal", "spotify": "Spotify", "soundcloud": "SoundCloud",
     "beatport": "Beatport", "bbc": "BBC", "jiosaavn": "JioSaavn",
+    "yandex": "Yandex Music", "amazon": "Amazon Music",
 }
 
 
@@ -246,9 +267,12 @@ def _aggregate(con, since: int, now: int, period: str) -> dict:
         " GROUP BY artist ORDER BY count DESC LIMIT 20", (since,)
     ).fetchall()]
 
-    # weekday: SQLite %w → 0=Sun; shift to Mon=0
+    # weekday: SQLite %w → 0=Sun; shift to Mon=0. Ведра — локальные ('localtime'):
+    # записи лежат как настоящий epoch из локального wall-clock (runner пишет
+    # datetime.now(), _parse_ts читает наивный ISO как локальный), а «unixepoch»
+    # без модификатора дал бы UTC-часы и график жил бы со сдвигом на пояс.
     wd_raw = con.execute(
-        "SELECT CAST(strftime('%w',ts,'unixepoch') AS INT) wd, COUNT(*) count"
+        "SELECT CAST(strftime('%w',ts,'unixepoch','localtime') AS INT) wd, COUNT(*) count"
         " FROM downloads WHERE ts>=? AND status='done' GROUP BY wd", (since,)
     ).fetchall()
     wd_map: dict[int, int] = {}
@@ -258,13 +282,13 @@ def _aggregate(con, since: int, now: int, period: str) -> dict:
 
     by_hour = [{"hour": h, "count": 0} for h in range(24)]
     for r in con.execute(
-        "SELECT CAST(strftime('%H',ts,'unixepoch') AS INT) h, COUNT(*) count"
+        "SELECT CAST(strftime('%H',ts,'unixepoch','localtime') AS INT) h, COUNT(*) count"
         " FROM downloads WHERE ts>=? AND status='done' GROUP BY h", (since,)
     ).fetchall():
         by_hour[r["h"]]["count"] = r["count"]
 
     by_day = [dict(r) for r in con.execute(
-        "SELECT strftime('%Y-%m-%d',ts,'unixepoch') date, COUNT(*) count"
+        "SELECT strftime('%Y-%m-%d',ts,'unixepoch','localtime') date, COUNT(*) count"
         " FROM downloads WHERE ts>=? AND status='done' GROUP BY date ORDER BY date", (since,)
     ).fetchall()]
 

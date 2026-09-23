@@ -397,7 +397,10 @@ def parse_tracklist_meta(html_text: str) -> dict:
         title = _html.unescape(m.group(1)).strip()
     dur = None
     # 1001TL prints "duration: HH:MM" / "MM:MM" near the header; best-effort.
-    md = re.search(r'duration[^0-9]{0,12}(\d{1,2}):(\d{2})(?::(\d{2}))?', html_text, re.I)
+    # Up to 3 leading minutes-digits: an Essential Mix runs 2 h and is printed
+    # "120:00" — capping at two digits silently lost the duration of exactly
+    # the sets this module exists for.
+    md = re.search(r'duration[^0-9]{0,12}(\d{1,3}):(\d{2})(?::(\d{2}))?', html_text, re.I)
     if md:
         a, b, c = md.group(1), md.group(2), md.group(3)
         dur = (int(a) * 60 + int(b)) if c is None else (int(a) * 3600 + int(b) * 60 + int(c))
@@ -437,9 +440,13 @@ def parse_tracklist(html_text: str) -> list[dict]:
 
     # Some 1001TL sets carry only track order/names with no cue times (every
     # cue is 0). That's a names-only tracklist — blank the bogus 0:00 stamps so
-    # downstream shows clean names and builds NO time-chapters.
-    distinct_pos = {t["seconds"] for t in tracks if t["seconds"]}
-    if len(distinct_pos) < 2:
+    # downstream shows clean names and builds NO time-chapters. Judged by the
+    # SHARE of real (non-"w/") rows carrying a cue, not by the count of
+    # distinct positions: a short set whose one main track has a real cue must
+    # keep it (w/ sub-tracks are already None and must not count as evidence).
+    main_rows = [t for t in tracks if not t["is_with"]]
+    cued_rows = [t for t in main_rows if t["seconds"]]
+    if main_rows and len(cued_rows) * 2 < len(main_rows):
         for t in tracks:
             t["seconds"] = None
             t["timestamp"] = ""
@@ -481,10 +488,11 @@ def tracklist_for(title: str, artist: str = "", duration: int = 0,
 
     def _ret(result: dict) -> dict:
         # On a NETWORK failure (not just "no match"), trip the cooldown so we
-        # stop hammering a slow/blocked 1001TL.
+        # stop hammering a slow/blocked 1001TL. A plain "no search results" is
+        # the site answering normally about a set it doesn't have — arming the
+        # breaker for it blocked ALL lookups for _COOLDOWN_SEC.
         wire = bool(result.get("challenged") or _net_failed)
-        if not result.get("ok") and (wire or result.get("error") in (
-                "no search results", "fetch/parse failed for all candidates")):
+        if not result.get("ok") and wire:
             globals()["_cooldown_until"] = time.time() + _COOLDOWN_SEC
         # A wire failure (captcha / timeout / reset) says nothing about whether the
         # set exists — caching it as a 12 h miss kept a mix tracklist-less long after

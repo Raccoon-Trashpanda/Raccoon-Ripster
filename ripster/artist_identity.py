@@ -291,7 +291,11 @@ def classify(anchor_rows: list, cand_rows: list) -> dict:
 # проходило, и склейка жила вечно. Отметка версии — единственный способ мягко
 # загнать старые вердикты обратно в перепроверку (темпом радара, не одним
 # прогоном), и она же отвечает за честный счётчик «сколько склеек мы разобрали».
-IDENTITY_RULE_VERSION = 3
+# Версия 4 (22.09.2026): носителей стали считать по ОБЪЕДИНЁННЫМ работам
+# личности, а не по каждому импринту (карьера, разложенная по четырём лейблам,
+# без этого не получала ни одного чистого свидетеля), и с id однофамильца стало
+# возможно снять подтверждение (`namesake_demotions`).
+IDENTITY_RULE_VERSION = 4
 
 def identity_of(entry: dict) -> dict:
     ident = entry.get("identity")
@@ -354,6 +358,177 @@ def services_bound(entry: dict) -> bool:
 
 
 # ── Пускать ли релиз ──────────────────────────────────────────────────────────
+
+_NO_ANCHOR = object()
+
+
+def _anchor_of(entry: dict):
+    """Якорь подписки — то, что владелец качал/отмечал/слушал.
+
+    Считается вне нашего круга (файлы владельца, локальные базы) и обязан не
+    уметь ломать ленту: нет каталога, нет базы, битый JSON — «не знаем», и
+    дальше решает профиль витрины.
+    """
+    try:
+        from . import owner_anchor
+        return owner_anchor.for_entry(entry)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+def _home_families(anchor: dict) -> set:
+    """Семьи якоря вместе с совместимыми: витрины мажут через релиз, и «Trance»
+    якоря не делает «House» чужим (см. `owner_anchor.FAMILY_COMPAT`)."""
+    from . import owner_anchor
+    fams = set(anchor.get("families") or ())
+    if not fams:
+        return fams
+    out = set(fams)
+    for cand, _pats in owner_anchor.GENRE_FAMILIES:
+        if any(owner_anchor.compatible(cand, f) for f in fams):
+            out.add(cand)
+    return out
+
+
+def anchor_show(entry: dict, rel: dict, anchor: Optional[dict] = None) -> tuple:
+    """Правило v5 «якорь владельца»: пускать ли релиз по ДЕЙСТВИЯМ владельца.
+
+    Профиль витрины для этого непригоден — он склеен из всех однофамильцев
+    страницы (у Aruna в жанрах подписки trance живёт рядом с telugu и gangsta
+    rap). Якорь — объединение людей, которого у витрины нет: он лежит только в
+    фонотеке владельца.
+
+    Возвращает ("show"|"hide"|"", причина). "" — судить нечем, и это НЕ молчаливое
+    «свой»: карточка проходит, но попадает в счётчик `anchor_unknown`, чтобы в
+    отчёте «не тронуто» было отличимо от «проверено и принято».
+
+    Правила решения — ровно те, что требует честность цензуры:
+      • лейбл релиза лежит среди лейблов якоря — свой;
+      • семья жанра релиза своя или совместимая — свой;
+      • жанр ТОЧНЫЙ и чужой, а лейбл либо тоже чужой, либо неизвестен — чужой
+        однофамилец;
+      • жанр — ведро («Pop», «Dance», «Singer/Songwriter») или молчит: ведром
+        не прячут, но чужой ЛЕЙБЛ при молчаливом жанре — уже два довода;
+      • жанр неизвестен и лейбл неизвестен (или своих лейблов у якоря нет) —
+        показываем и считаем: без доказательства не цензуруем;
+      • диджейский микс — не работа артиста: его жанр — про сет, а не про
+        личность, и прячем его только по чужому лейблу (`is_mix`, `label_foreign`).
+    """
+    from . import owner_anchor
+
+    anchor = anchor if anchor is not None else _anchor_of(entry)
+    if not anchor:
+        return "", ""
+    artist = str(entry.get("name") or "")
+    fams = owner_anchor.families_of(rel)
+    lbl = label_key(str(rel.get("label") or ""), artist)
+    home_labels = set(anchor.get("labels") or ())
+    home_fams = _home_families(anchor)
+    # Микс — полка витрины, а не работа артиста: его жанр описывает сет,
+    # который поставил кто-то ещё, и по нему нельзя сказать, ЧЕЙ это человек.
+    # Замер 23.09: 16 из 27 «скрытых» карточек оказались диджейскими миксами
+    # подписчиков (Skrillex → «Turn Up Select», жанр «Hip-Hop»). Правилам про
+    # личность к ним не применять — кроме лейбла: он-то настоящий.
+    mix = owner_anchor.is_mix(rel)
+
+    if lbl and lbl in home_labels:
+        return "show", "якорь: лейбл совпал с тем, что качал владелец"
+    if fams and home_fams and not mix and (fams & home_fams):
+        return "show", f"якорь: жанр {'/'.join(sorted(fams))} свой"
+
+    foreign_label = owner_anchor.label_foreign(
+        lbl, home_labels, artist, str(rel.get("label") or ""))
+    if mix:
+        if foreign_label:
+            return "hide", (f"авто: сет выпущен лейблом, которого нет среди "
+                            f"лейблов владельца ({rel.get('label')} против "
+                            f"{'/'.join(sorted(home_labels))})")
+        return "", ""
+
+    if fams and anchor.get("families") and not (fams & home_fams):
+        why = (f"авто: жанр/лейбл не совпадает с тем, что владелец качал "
+               f"(жанр релиза {'/'.join(sorted(fams))}"
+               f"{', лейбл ' + str(rel.get('label')) if lbl else ', лейбл неизвестен'}; "
+               f"в якоре {'/'.join(sorted(anchor.get('families') or ()))})")
+        return "hide", why
+    if foreign_label:
+        # Ведро («Pop», «Singer/Songwriter») само по себе не довод против
+        # артиста — но в паре с чужим лейблом это два независимых
+        # свидетельства, и именно так ловится однофамилец, которого витрина
+        # положила в общую корзину.
+        gtxt = ", ".join(owner_anchor.genres_of(rel)) or "жанра нет"
+        why = (f"авто: {gtxt}"
+               f"{'' if fams else ' — ведро, о личности молчит'}"
+               f", а лейбл «{rel.get('label')}» не похож на те, что качал "
+               f"владелец ({'/'.join(sorted(home_labels))})")
+        return "hide", why
+    return "", ""                                 # судить нечем — не считаем чужим
+
+
+def home_show(entry: dict, rel: dict, anchor=_NO_ANCHOR) -> tuple[bool, str]:
+    """Релиз со СТРАНИЦЫ подписки (Apple/Deezer/Qobuz склеивают однофамильцев в id).
+
+    Порядок доказательств — от действия владельца к данным витрины:
+
+      1. решение владельца (`choice.hide_titles`, возврат `show_titles`) — оно
+         не обсуждается и не перекрывается ни авто-правилом, ни профилем;
+      2. якорь владельца (правило v5, `anchor_show`) — единственный признак,
+         который НЕ лепится из однофамильцев;
+      3. профиль подписки: работу, известную чистой витрине, её лейбл, её жанр;
+      4. судить нечем — не трогаем.
+
+    Скрываем ровно то, против чего говорит доказанное, и карточка помечается
+    владельцу (`hidden_add`), а не удаляется: склад остаётся складом.
+    """
+    from . import owner_anchor
+
+    prof = identity_of(entry).get("profile") or {}
+    choice = identity_of(entry).get("choice") or {}
+    artist = str(entry.get("name") or "")
+    titles = set(prof.get("titles") or [])
+    hidden = set(prof.get("hidden_titles") or [])
+    t = tkey(rel.get("title", "") or rel.get("name", ""))
+    if t and t in {tkey(x) for x in (choice.get("show_titles") or ())}:
+        return True, "владелец вернул вручную"
+    if t and t in hidden:
+        return False, "cluster not attested by any clean catalog"
+    if anchor is _NO_ANCHOR:
+        anchor = _anchor_of(entry)
+    if anchor:
+        dec, why = anchor_show(entry, rel, anchor)
+        if dec == "show":
+            owner_anchor.note("anchor_show")
+            return True, why
+        if dec == "hide":
+            owner_anchor.note("anchor_hide")
+            return False, why
+        # Якорь есть, но против карточки он не высказался: «не тронуто» обязан
+        # быть отличим от «проверено и принято».
+        owner_anchor.note("anchor_unknown")
+    else:
+        owner_anchor.note("no_anchor")
+    if not (titles or hidden):
+        return True, ""                       # судить нечем — не трогаем
+    if t and t in titles:
+        return True, "discography"
+    raw_lbl = norm(str(rel.get("label") or ""))
+    lbl = label_key(raw_lbl, artist)
+    stored = set(prof.get("labels") or [])
+    # Профили, собранные до нормализации, держат лейблы строкой из каталога —
+    # сравниваем обе формы, пока такие подписки не перепривязались.
+    if lbl and (lbl in stored or raw_lbl in stored):
+        return True, "label"
+    g = {norm(str(x)) for x in owner_anchor.genres_of(rel)}
+    if g & set(prof.get("genres") or []):
+        return True, "genre"
+    if not prof.get("merged"):
+        return True, ""          # единичный промах на несклеенной странице — не цензура
+    # Склеенная страница и релиз, не похожий ни на одно подтверждённое множество:
+    # судим только по лейблу карточки — чужой кластер опознан именно им.
+    if lbl and lbl not in stored and raw_lbl not in stored:
+        return False, "label absent from the confirmed catalogs"
+    return True, ""
+
 
 def stitch_shows(rel: dict, entries: list) -> bool:
     """Релиз из чужой витрины попадает в ленту, только если среди его
@@ -428,19 +603,16 @@ def _token(name: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"[^\w\s]", " ", str(name or "").lower())).strip()
 
 
-def _persons(clusters: dict) -> dict:
-    """Кластеры, сведённые по НОСИТЕЛЯМ: {носители: {titles, genres, absent}}.
-
-    Личность аттестует не лейбл, а набор витрин, которые этот лейбл знают.
-    У одной карьеры импринты меняются (Mercury Classics, Decca, собственный
-    Solomon Grey Music), а свидетели остаются те же — без сведения по носителям
-    каждая такая ветка выглядит вторым человеком, и их набиралось по девять на
-    страницу. Разные личности, наоборот, дают РАЗНЫЕ наборы витрин: испанского
-    госпел-Solomon Grey не знает ни одна витрина, несущая австралийского.
+def _persons_by_labels(clusters: dict, drop=()) -> dict:
+    """Профили без свидетелей: носители берутся строкой из самого кластера
+    (`c["sup"]`/`c["con"]`). Так живут складские записи, у которых нет
+    `witness_overlaps`; `drop` — склеенные витрины, вычитаемые из носителей.
     """
+    drop_t = {_token(x) for x in drop}
     out: dict[frozenset, dict] = {}
     for lbl, c in (clusters or {}).items():
-        sup = frozenset(_token(s) for s in (c.get("sup") or ()))
+        sup = frozenset(_token(s) for s in (c.get("sup") or ())
+                        if _token(s) not in drop_t)
         p = out.setdefault(sup, {"titles": set(), "genres": [], "absent": [],
                                  "labels": []})
         p["titles"] |= set(c.get("titles") or ())
@@ -452,6 +624,83 @@ def _persons(clusters: dict) -> dict:
         # через одну, и объединение жанров размывает границу между людьми.
         p["family"] = _families(set.intersection(*p["genres"]) if p["genres"] else set())
         p["con"] = set.intersection(*p["absent"]) if p["absent"] else set()
+    return out
+
+
+def _persons(clusters: dict, overlaps: Optional[dict] = None,
+             drop=()) -> dict:
+    """Кластеры, сведённые по НОСИТЕЛЯМ: {носители: {titles, genres, family,
+    con, labels}}.
+
+    Личность аттестует не лейбл, а набор витрин, которые этот лейбл знают.
+    У одной карьеры импринты меняются (Mercury Classics, Decca, собственный
+    Solomon Grey Music), а свидетели остаются те же — без сведения по носителям
+    каждая такая ветка выглядит вторым человеком, и их набиралось по девять на
+    страницу. Разные личности, наоборот, дают РАЗНЫЕ наборы витрин: испанского
+    госпел-Solomon Grey не знает ни одна витрина, несущая австралийского.
+
+    Носителей считаем по ОБЪЕДИНЁННЫМ работам личности, а не по каждому импринту
+    в отдельности (22.09.2026, живой Solomon Grey). Австралийский композитор
+    разложен витринами по четырём лейблам, и tidal — чистый свидетель, знающий
+    ТОЛЬКО его, — попадает на каждый из четырёх импринтов ровно ОДНОЙ работой.
+    Порог `_SUPPORT_MIN` на импринте его не видит, композитор остаётся без
+    чистого свидетеля, взаимного опровержения не построить, и `_merged_witnesses`
+    не может начать отклеивать deezer/qobuz: склейка прячется от владельца ровно
+    тем движком, который обязан был её показывать. По объединению работ tidal
+    даёт три совпадения — и становится честным носителем личности.
+
+    `overlaps` — {витрина: годные работы страницы}; без неё (профили, собранные
+    до того, как свидетелей стали сохранять) возвращаемся к `_persons_by_labels`.
+    `drop` — склеенные витрины, исключаемые из носителей на этом шаге итерации
+    `_merged_witnesses`.
+    """
+    if not overlaps:
+        return _persons_by_labels(clusters, drop)
+    drop_t = {_token(x) for x in drop}
+    ov = {str(s): {tkey(x) for x in (tk or ())} for s, tk in overlaps.items()
+          if _token(s) not in drop_t}
+
+    def carriers(ts: set) -> frozenset:
+        return frozenset(_token(s) for s, tk in ov.items()
+                         if len(tk & ts) >= _SUPPORT_MIN)
+
+    def absent(ts: set) -> set:
+        return {_token(s) for s, tk in ov.items()
+                if len(tk) >= _ATTEST_MIN and not (tk & ts)}
+
+    by_token = {_token(s): tk for s, tk in ov.items()}
+
+    # Фаза 1 — предварительная группировка по носителям ОДНОГО импринта.
+    pre: dict[frozenset, list] = {}
+    for _lbl, c in (clusters or {}).items():
+        ts = {tkey(x) for x in (c.get("titles") or ())}
+        if not ts:
+            continue
+        gs = {norm(str(x)) for x in (c.get("genres") or ())}
+        pre.setdefault(carriers(ts), []).append((str(_lbl), ts, gs))
+    # Фаза 2 — переносим носителей на объединение работ личности и склеиваем
+    # ветки, которые поодиночке не дотягивали до порога, а вместе носятся одними
+    # и теми же витринами (одна карьера на нескольких импринтах).
+    out: dict[frozenset, dict] = {}
+    for items in pre.values():
+        union = set().union(*[ts for _lbl, ts, _gs in items]) if items else set()
+        k = carriers(union)
+        p = out.setdefault(k, {"titles": set(), "genres": [], "labels": []})
+        for lbl, ts, gs in items:
+            p["titles"] |= ts
+            p["labels"].append(lbl)
+            # Жанр личности доказывают только те кластеры, которые знает хоть
+            # одна витрина-носитель: осколок страницы, не подтверждённый никем
+            # («anjunadeep» у Solomon Grey — три микса, которых нет ни у tidal,
+            # ни у spotify), о личности ничего не говорит, но в пересечение
+            # жанров он ложится и обнуляет его — и пара личностей перестаёт
+            # быть доказанной.
+            if any(s in by_token and (by_token[s] & ts) for s in k):
+                p["genres"].append(gs)
+    for k, p in out.items():
+        gs = [x for x in p["genres"] if x]
+        p["family"] = _families(set.intersection(*gs) if gs else set())
+        p["con"] = absent(p["titles"])
     return out
 
 
@@ -489,23 +738,7 @@ def _person_pairs(persons: dict) -> list:
     return out
 
 
-def _strip(clusters: dict, drop: set) -> dict:
-    """Кластеры, у которых вычёркнуты склеенные витрины.
-
-    `drop` — токены носителей (`_token`), поэтому вычитание идёт в той же
-    системе ключей, что и сами носители: «hot rail» в списке свидетелей и
-    «hot-rail» в склейке — одно и то же, и на разнице строк склейка бы не
-    вычлась, а с ней исчезло бы и опровержение.
-    """
-    return {lbl: {"titles": c.get("titles") or set(),
-                  "genres": c.get("genres") or set(),
-                  "sup": [s for s in (c.get("sup") or ())
-                          if _token(s) not in drop],
-                  "con": c.get("con") or ()}
-            for lbl, c in (clusters or {}).items()}
-
-
-def _merged_witnesses(clusters: dict) -> set:
+def _merged_witnesses(clusters: dict, overlaps: Optional[dict] = None) -> set:
     """Витрины, на чьём id лежат ОБЕ спорящие личности.
 
     Такой свидетель не подтверждает никого: он и есть та склейка, из-за которой
@@ -520,7 +753,7 @@ def _merged_witnesses(clusters: dict) -> set:
     merged: set = set()
     for _ in range(3):
         newly = set()
-        for k1, k2 in _person_pairs(_persons(_strip(clusters, merged))):
+        for k1, k2 in _person_pairs(_persons(clusters, overlaps, merged)):
             newly |= (k1 & k2)
         if not (newly - merged):
             return merged | newly
@@ -528,26 +761,29 @@ def _merged_witnesses(clusters: dict) -> set:
     return merged
 
 
-def _split(clusters: dict) -> tuple[dict, list, set]:
+def _split(clusters: dict, overlaps: Optional[dict] = None
+           ) -> tuple[dict, list, set]:
     """Разбор страницы целиком: (личности, спорящие пары, склеенные витрины).
 
     Одна функция, а не три: `_two_people` и профиль обязаны видеть ОДНИН и тот
     же набор свидетелей, иначе «склейка есть» и «склейка скрыта от владельца»
-    будут решаться по-разному.
+    будут решаться по-разному. Свидетелей (`overlaps`) передаём обоим путям —
+    живому бинду и офлайновому пересчёту склада, — иначе экзамен и радар
+    разойдутся ровно там, где живёт жалоба.
     """
-    merged = _merged_witnesses(clusters)
-    persons = _persons(_strip(clusters, merged))
+    merged = _merged_witnesses(clusters, overlaps)
+    persons = _persons(clusters, overlaps, merged)
     return persons, _person_pairs(persons), merged
 
 
-def _two_people(clusters: dict) -> bool:
+def _two_people(clusters: dict, overlaps: Optional[dict] = None) -> bool:
     """Два человека на одной странице? Чистый предикат по кластерам.
 
     Склеенная витрина свидетелем не считается (`_merged_witnesses`): иначе
     носители обеих личностей пересекаются, взаимного опровержения не видно,
     и склейка прячется от владельца — ровно то, на чём жалоба и живёт.
     """
-    return bool(_split(clusters)[1])
+    return bool(_split(clusters, overlaps)[1])
 
 
 
@@ -617,8 +853,8 @@ def _profile_of(anchor: list, witnesses: dict, choice: Optional[dict] = None,
     gs = {lbl: genres_of(ts) for lbl, ts in groups.items()}
     clusters = {lbl: {"titles": ts, "genres": gs[lbl],
                       "sup": sup[lbl], "con": con[lbl]}
-                for lbl in groups}
-    live, pairs, merged_w = _split(clusters)
+                for lbl, ts in groups.items()}
+    live, pairs, merged_w = _split(clusters, overlaps)
     two_people = bool(pairs)
 
     # Кто из двух «нужен» — данные не решают: обе личности лежат на id, который
@@ -721,6 +957,18 @@ def clusters_of(entry: dict) -> dict:
     return merged
 
 
+def witness_overlaps_of(entry: dict) -> dict:
+    """{витрина: годные работы страницы} из СОХРАНЁННОГО профиля — те самые
+    свидетели, по которым `_persons` считает носителей. Нужны затем, чтобы
+    офлайновый пересчёт склада (`two_people`, экзамен) шёл тем же путём, что
+    живой бинд: и там, и тут в `_persons` кладут ОДНИ и те же overlaps, иначе
+    экзамен и радар разойдутся — а расхождение и есть сегодняшний урок
+    (22.09.2026)."""
+    prof = identity_of(entry).get("profile") or {}
+    return {str(svc): {tkey(x) for x in (tk or ())}
+            for svc, tk in (prof.get("witness_overlaps") or {}).items()}
+
+
 def two_people(entry: dict) -> bool:
     """Сколько человек лежит на id подписки — по её кластерам, а не по флагу
     прошлой привязки (см. `clusters_of`).
@@ -730,7 +978,7 @@ def two_people(entry: dict) -> bool:
     if not clusters:
         return bool((ident.get("profile") or {}).get("two_people")
                     or ident.get("two_people"))
-    return _two_people(clusters)
+    return _two_people(clusters, witness_overlaps_of(entry))
 
 
 def needs_owner(entry: dict) -> bool:
@@ -751,59 +999,206 @@ def needs_owner(entry: dict) -> bool:
     return two_people(entry)
 
 
-def home_show(entry: dict, rel: dict) -> tuple[bool, str]:
-    """Релиз со СТРАНИЦЫ подписки (Apple/Deezer склеивают однофамильцев в id).
+def namesake_demotions(entry: dict) -> dict:
+    """{витрина: id} — чей подтверждённый id на деле принадлежит НЕ тому
+    человеку, которого подписчик назвал своим.
 
-    Пускаем всё, что опирается о подтверждённый профиль: работу, известную
-    чистой витрине, её лейбл, её жанр, — и всё, о чём судить нечем (у подписки
-    нет внешнего подтверждения → цензуру не вводим). Скрываем ровно два случая:
-    релиз принадлежит чужому лейбловому кластеру склеенной страницы, и склеенная
-    страница с неизвестным релизом, который ничем не опирается. И в том, и в
-    другом карточка помечается владельцу, а не удаляется.
+    Одна и та же функция для живого бинда и для пересчёта склада (её зовёт
+    `tools/namesake_exam.py`): вердикт «это однофамилец» обязан считаться по
+    одним правилам, иначе экзамен проверяет догадку, а не то, что делает радар.
+
+    Основание — не «мало совпадений» (это «не знаю»), а доказанные два человека
+    на странице: `_split` разобрал склейку, и работы принятого id лежат У ВЕРХА
+    в том кластере, который владелец перевёл в чужие. Пока владелец не выбрал,
+    разъединять нечего: обе личности всё ещё кандидаты на «его» (данные этого не
+    решают), и подписка ждёт его в `needs_owner` — там автозакачка и стоит.
+
+    Склеенную витрину (`merged_witnesses`) не трогаем: на её id лежат обе
+    личности, она подтверждает и его тоже — это не однофамилец, это та самая
+    склейка, и её лечит выбор владельца, а не снятие подтверждения.
     """
-    prof = identity_of(entry).get("profile") or {}
-    artist = str(entry.get("name") or "")
-    titles = set(prof.get("titles") or [])
-    hidden = set(prof.get("hidden_titles") or [])
-    if not (titles or hidden):
-        return True, ""                       # судить нечем — не трогаем
-    t = tkey(rel.get("title", "") or rel.get("name", ""))
-    if t and t in hidden:
-        return False, "cluster not attested by any clean catalog"
-    if t and t in titles:
-        return True, "discography"
-    raw_lbl = norm(str(rel.get("label") or ""))
-    lbl = label_key(raw_lbl, artist)
-    stored = set(prof.get("labels") or [])
-    # Профили, собранные до нормализации, держат лейблы строкой из каталога —
-    # сравниваем обе формы, пока такие подписки не перепривязались.
-    if lbl and (lbl in stored or raw_lbl in stored):
-        return True, "label"
-    g = {norm(str(x)) for x in (rel.get("genres") or
-                                ([rel.get("genre")] if rel.get("genre") else []))}
-    if g & set(prof.get("genres") or []):
-        return True, "genre"
-    if not prof.get("merged"):
-        return True, ""          # единичный промах на несклеенной странице — не цензура
-    # Склеенная страница и релиз, не похожий ни на одно подтверждённое множество:
-    # судим только по лейблу карточки — чужой кластер опознан именно им.
-    if lbl and lbl not in stored and raw_lbl not in stored:
-        return False, "label absent from the confirmed catalogs"
-    return True, ""
+    ident = identity_of(entry)
+    prof = ident.get("profile") or {}
+    choice = ident.get("choice") or {}
+    if not (prof.get("two_people") or (choice.get("hide") or choice.get("hide_titles"))):
+        return {}
+    hidden = {tkey(str(x)) for x in (prof.get("hidden_titles") or ()) if x}
+    own = {tkey(str(x)) for x in (prof.get("titles") or ()) if x}
+    if not hidden or not own:
+        return {}                       # чужое не названо — разъединять нечем
+    merged = {_token(x) for x in (prof.get("merged_witnesses") or ())}
+    out: dict[str, str] = {}
+    for svc, rec in (ident.get("services") or {}).items():
+        rec = rec or {}
+        if rec.get("status") != CONFIRMED:
+            continue
+        aid = str(rec.get("id") or "")
+        shared = {tkey(str(x)) for x in ((prof.get("witness_overlaps") or {}).get(svc) or ()) if x}
+        if not aid or not shared or _token(svc) in merged:
+            continue
+        if shared & own:
+            continue                    # несёт и его работы тоже — не однофамилец
+        if shared <= hidden:
+            out[str(svc)] = aid
+    return out
+
+
+def apply_namesake_demotions(entry: dict, services_map: dict,
+                             demotions: dict, prof: dict) -> None:
+    """Снять подтверждение с id однофамильца и записать это как починку.
+
+    Снимаем до статуса `pending`: «не подтверждено для ЭТОЙ подписки» — честный
+    вердикт, и он же обязывает перепроверить (через `_RETRY_TTL` витрины могут
+    отдать и настоящий id нашего человека). Сам id и числа остаются в записи и
+    уходят в `namesakes` — владельцу видно, КОГО именно радар считал им и
+    перестал считать, а `repairs` переживает перезапуск.
+    """
+    for svc, aid in (demotions or {}).items():
+        rec = dict(services_map.get(svc) or {})
+        if str(rec.get("id") or "") != aid or rec.get("namesake"):
+            continue
+        why = ("подтверждение держалось на склейке однофамильцев: работы этого "
+               "id лежат в кластере, который владелец назвал чужим")
+        services_map[svc] = {
+            "id": aid, "name": rec.get("name") or str(entry.get("name") or ""),
+            "status": PENDING, "namesake": True, "namesakes": [aid],
+            "evidence": rec.get("evidence") or {}, "ts": rec.get("ts"),
+            "why": why,
+        }
+        ident = identity_of(entry)
+        rep = ident.setdefault("repairs", [])
+        if not any((r.get("service"), r.get("from")) == (svc, aid) and r.get("why") == why
+                   for r in rep):
+            rep.append({"service": svc, "from": aid, "to": "",
+                        "name": str(entry.get("name") or ""), "why": why,
+                        "ts": time.time()})
+            del rep[:-20]
+        prof.setdefault("demoted_namesakes", {})[svc] = aid
 
 
 def hidden_add(entry: dict, rel: dict, reason: str) -> None:
-    """Скрытое MUST быть видно владельцу: список на подписке + счётчик."""
+    """Скрытое MUST быть видно владельцу: список на подписке + счётчик.
+
+    Вместе с причиной пишем сервис и id карточки: владелец решает «вернуть или
+    нет» по конкретной карточке, а не по названию, под которым на этом же id
+    лежат ещё и чужие релизы.
+    """
     ident = identity_of(entry)
     hid = ident.setdefault("hidden", [])
     k = tkey(rel.get("title", "") or rel.get("name", ""))
     if k and not any(h.get("key") == k for h in hid):
+        from . import owner_anchor
         hid.append({"key": k, "title": str(rel.get("title") or rel.get("name") or ""),
                     "date": str(rel.get("date") or ""), "reason": reason,
+                    "service": str(rel.get("service") or ""),
+                    "id": str(rel.get("id") or ""),
+                    "label": str(rel.get("label") or ""),
+                    "genres": owner_anchor.genres_of(rel),
                     "ts": time.time()})
         if len(hid) > 80:
             del hid[:len(hid) - 80]
     entry["identity"] = ident
+
+
+def _sub_index(entries: list) -> tuple[dict, dict]:
+    """(подписки по Apple-id, подписки по (витрина, подтверждённый id)).
+
+    Склеенные страницы бывают не только у Apple: Deezer и Qobuz держат
+    однофамильцев на одном id так же (Solomon Grey, 23.09.2026 — испанский
+    «Refugio en la Tormenta» шёл в ленту Deezer ×1 и Qobuz ×6, хотя владелец
+    скрыл весь этот кластер). Подписку ищем по паре (сервис, id ПОДТВЕРЖДЁННОЙ
+    витрины) для любого сервиса.
+    """
+    by_aid, by_svc_aid = {}, {}
+    for e in entries or []:
+        aid = str(e.get("artist_id") or "")
+        if aid and e.get("kind") != "label":
+            by_aid.setdefault(aid, e)
+        if e.get("kind") == "label":
+            continue
+        for svc, rec in ((identity_of(e).get("services") or {}).items()):
+            rec = rec or {}
+            if rec.get("status") == CONFIRMED and rec.get("id"):
+                by_svc_aid.setdefault((str(svc), str(rec["id"])), e)
+    return by_aid, by_svc_aid
+
+
+def feed_filter(rels: list, entries: list, base_dir=None, save=None) -> list:
+    """Единый фильтр ленты — для ВСЕХ витрин, а не только для склада радара.
+
+    Прежняя дверь жила в `routes/radar.py` и стояла только на складе
+    (apple/bbc/soundcloud/labels): кросс-сервисные ленты Deezer/Qobuz/Tidal
+    из `routes/releases.py` проходили мимо неё, и именно поэтому жалоба
+    владельца на «не того Соломона» пережила правку 23.09 — кластер, который
+    он уже назвал чужим, всё равно приезжал из Deezer и Qobuz.
+
+    Самоизлечение при ЧТЕНИИ: склад не трогается, а в ленту не выходит то, чью
+    принадлежность нельзя подтвердить. Ничего не удаляется: запись остаётся в
+    складе (см. docstring модуля ripster-radar-persistence) и становится видна
+    владельцу в /api/identity как скрытая с причиной.
+    """
+    from . import owner_anchor
+
+    # Диск с добытыми ранее доказательствами читаем ВСЕГДА: иначе вердикт
+    # зависел бы от того, каким именно путём карточку сегодня обогатили.
+    owner_anchor.apply_card_cache(rels or [])
+    by_aid, by_svc_aid = _sub_index(entries)
+    catalog = load_catalog(base_dir) if base_dir else {}
+    touched, out = False, []
+    for r in rels or []:
+        if not stitch_shows(r, entries):
+            owner_anchor.note("stitch_dropped")
+            continue
+        ok, why = name_claim_shows(r, entries, catalog)
+        if not ok:
+            owner_anchor.note("name_claim_dropped")
+            _remember_dropped(r, why)
+            continue
+        entry = _entry_for(r, by_aid, by_svc_aid)
+        if entry is not None and entry.get("name"):
+            keep, why = home_show(entry, r)
+            if not keep:
+                hidden_add(entry, r, why)
+                touched = True
+                continue
+        out.append(r)
+    if touched and save:
+        try:
+            save(entries)
+        except Exception as e:                                 # noqa: BLE001
+            print(f"[identity] вишлист не сохранён: {e}", flush=True)
+    return out
+
+
+def _entry_for(rel: dict, by_aid: dict, by_svc_aid: dict) -> Optional[dict]:
+    """Подписка, к которой относится карточка, — по id витрины."""
+    rs, ra = str(rel.get("service") or ""), str(rel.get("artist_id") or "")
+    if rs == "apple":
+        e = by_aid.get(ra)
+        if e is not None:
+            return e
+    return by_svc_aid.get((rs, ra)) if ra else None
+
+
+# Карточки, отсечённые сверкой по имени (у лейбловой ленты нет id подписки):
+# писать `hidden` им некуда — держим короткий список для отчёта, иначе
+# «пропало молча» неотличимо от «ничего не было».
+_DROPPED: list = []
+
+
+def _remember_dropped(rel: dict, why: str) -> None:
+    item = {"title": str(rel.get("title") or rel.get("name") or ""),
+            "artist": str(rel.get("artist") or ""),
+            "service": str(rel.get("service") or ""),
+            "date": str(rel.get("date") or ""), "reason": why, "ts": time.time()}
+    if not any(d.get("title") == item["title"] and
+               d.get("artist") == item["artist"] for d in _DROPPED):
+        _DROPPED.append(item)
+    del _DROPPED[:-200]
+
+
+def dropped_cards(n: int = 50) -> list:
+    return list(_DROPPED)[-n:]
 
 
 # ── Сетевой обход: кандидаты → признаки → карта на подписке ─────────────────
@@ -1373,6 +1768,12 @@ async def bind(entry: dict, client, cfg: dict, *, services: tuple =
                                 for s, r in services_map.items()
                                 if (r or {}).get("namesakes")}
     entry["identity"] = ident
+    # Подтверждение, державшееся на склейке, снимаем сразу же — по тому же
+    # профилю, по которому её увидели: иначе id однофамильца ещё один проход
+    # питал бы ленту и автозакачку.
+    demotions = namesake_demotions(entry)
+    if demotions:
+        apply_namesake_demotions(entry, services_map, demotions, ident["profile"])
     ident["two_people"] = two_people(entry)
     ident["needs_owner"] = needs_owner(entry)
     ident["anchor"] = {"service": entry.get("service") or "apple",
@@ -1419,6 +1820,14 @@ async def bind_pass(entries: list, client, cfg: dict, *, services: tuple =
                                                          write=10, pool=5))
     done, started = 0, time.time()
     try:
+        # Якорь владельца (23.09) живёт локально, но лейбл/жанр скачанного
+        # добирается витриной — здесь, в сетевом темпе радара, а не в ленте:
+        # всё добытое ложится на диск и больше не спрашивается.
+        try:
+            from . import owner_anchor
+            await owner_anchor.enrich(entries, cap=6, budget_sec=4.0)
+        except Exception as ex:                           # noqa: BLE001
+            print(f"[identity] обогащение якоря: {ex}", flush=True)
         for e in todo[:max(0, int(cap))]:
             if time.time() - started > budget_sec:
                 break
@@ -1438,13 +1847,17 @@ async def bind_pass(entries: list, client, cfg: dict, *, services: tuple =
 
 
 def set_choice(entry: dict, hide: Optional[list] = None,
-               hide_titles: Optional[list] = None) -> dict:
+               hide_titles: Optional[list] = None,
+               show_titles: Optional[list] = None) -> dict:
     """Решение владельца о склеенной странице — без нового запроса к витринам.
 
     Данные не выбирают, какую из двух личностей человек и имел в виду, подписывая
     id: обе лежат на нём. Поэтому скрываем ровно то, что он назвал сам, — по
     составу лейбловых групп, сохранённому в профиле. Выбор переживает следующий
     привязочный проход (`identity["choice"]`).
+
+    `show_titles` — обратный ход: релиз, спрятанный автоправилом якоря, владелец
+    вернул себе. Он выигрывает у автоматики и у `hide_titles` этого же релиза.
     """
     ident = identity_of(entry)
     choice = dict(ident.get("choice") or {})
@@ -1452,6 +1865,13 @@ def set_choice(entry: dict, hide: Optional[list] = None,
         choice["hide"] = [str(x) for x in hide]
     if hide_titles is not None:
         choice["hide_titles"] = [str(x) for x in hide_titles]
+    if show_titles is not None:
+        keep = {tkey(str(t)) for t in show_titles}
+        back = sorted(keep | {tkey(str(t)) for t in (choice.get("show_titles") or [])})
+        choice["show_titles"] = back
+        # Возвращённое больше не может числиться спрятанным по имени релиза.
+        choice["hide_titles"] = [str(t) for t in (choice.get("hide_titles") or [])
+                                 if tkey(str(t)) not in keep]
     ident["choice"] = choice
 
     prof = dict(ident.get("profile") or {})
@@ -1463,8 +1883,10 @@ def set_choice(entry: dict, hide: Optional[list] = None,
         hidden |= groups.get(label_key(str(lbl), artist), set())
     for t in choice.get("hide_titles") or []:
         hidden.add(tkey(str(t)))
+    hidden -= {tkey(str(t)) for t in (choice.get("show_titles") or [])}
     visible = ({t for t in (prof.get("titles") or [])}
-               | {t for t in (prof.get("hidden_titles") or [])}) - hidden
+               | {t for t in (prof.get("hidden_titles") or [])}
+               | {tkey(str(t)) for t in (choice.get("show_titles") or [])}) - hidden
     prof["hidden_titles"] = sorted(hidden)[:_TITLES_CAP]
     prof["titles"] = sorted(visible)[:_TITLES_CAP]
     prof["merged"] = bool(hidden)
@@ -1485,14 +1907,25 @@ def summary(entries: list) -> dict:
     ещё проверялись СТАРЫМИ правилами (и разберутся в темпе радара), второе —
     сколько подтверждений уже переложились на другой id, то есть сколько чужих
     склеек сняли.
+
+    `anchors` / `no_anchor` — про правило якоря (23.09): сколько подписок вообще
+    чем судить, а сколько остаются на старых данных. Скрывать «нет якоря» было
+    бы хуже самой цензуры: владелец обязан видеть, где автомат молчит.
     """
     out = {"confirmed": 0, "pending": 0, "conflict": 0, "hidden": 0, "unbound": 0,
            "merged": 0, "needs_owner": 0, "stale": 0, "repairs": 0,
-           "ambiguous": 0, "items": []}
+           "ambiguous": 0, "auto_hidden": [], "no_anchor": [], "items": []}
+    try:
+        from . import owner_anchor
+    except Exception:                                          # noqa: BLE001
+        owner_anchor = None
     for e in entries or []:
         if not e.get("artist_id") or e.get("kind") == "label":
             continue
         ident = identity_of(e)
+        anchor = owner_anchor.describe(e) if owner_anchor else {"anchor": None}
+        if not anchor.get("anchor"):
+            out["no_anchor"].append(str(e.get("name") or ""))
         if rules_stale(e):
             out["stale"] += 1
         out["repairs"] += len(ident.get("repairs") or [])
@@ -1517,12 +1950,20 @@ def summary(entries: list) -> dict:
             out["needs_owner"] += 1
         hid = len(ident.get("hidden") or [])
         out["hidden"] += hid
+        for h in ident.get("hidden") or []:
+            if str(h.get("reason") or "").startswith("авто:"):
+                out["auto_hidden"].append({
+                    "artist": e.get("name"), "title": h.get("title"),
+                    "label": h.get("label") or "", "genres": h.get("genres") or [],
+                    "service": h.get("service") or "", "id": h.get("id") or "",
+                    "reason": h.get("reason")})
         # «Не разрешилось» должно быть видно: подписка, чью личность ни одна
         # витрина не подтвердила, владельцу заметна сама по себе — её релизы из
         # чужих витрин в ленту не выйдут, и без объяснения это выглядит как
         # молчаливая потеря находок.
         if (hid or ident.get("conflict") or prof.get("merged") or owner
-                or pending or ident.get("repairs") or rules_stale(e)):
+                or pending or ident.get("repairs") or rules_stale(e)
+                or anchor.get("anchor")):
             out["items"].append({
                 "name": e.get("name"), "id": str(e.get("artist_id") or ""),
                 "services": dict(st), "hidden": hid, "pending_services": pending,
@@ -1536,7 +1977,10 @@ def summary(entries: list) -> dict:
                 "groups": prof.get("groups") or {},
                 "group_titles": prof.get("group_titles") or {},
                 "hide": (ident.get("choice") or {}).get("hide") or [],
+                "show_titles": (ident.get("choice") or {}).get("show_titles") or [],
+                "anchor": anchor,
             })
+    out["anchors"] = sum(1 for i in out["items"] if (i["anchor"] or {}).get("anchor"))
     return out
 
 

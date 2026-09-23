@@ -1798,8 +1798,16 @@ async function playRelease(service, url, title, artist, cover) {
       + `&url=${encodeURIComponent(url)}`
       + `&title=${encodeURIComponent(title || '')}&artist=${encodeURIComponent(artist || '')}`);
     if (!r.ok) {
-      const detail = await r.text().catch(() => '');
-      toast(t('t.error_c') + (detail.slice(0, 120) || r.status), 'var(--red)');
+      // Сервер отдаёт detail по i18n-контракту: объект {key, params, msg}.
+      // Раньше сюда шёл сырой текст ответа — и человек видел JSON-дамп
+      // `{"detail":{"key":"err.sp_rl_hr",…}}` вместо внятной причины (баг 23.09).
+      let msg = '';
+      try {
+        const j = await r.json();
+        const dt = j && j.detail;
+        msg = (typeof errText === 'function') ? errText(dt) : (dt && dt.msg) || (typeof dt === 'string' ? dt : '');
+      } catch (_) {}
+      toast(t('t.error_c') + (msg || r.status), 'var(--red)');
       return;
     }
     const d = await r.json();

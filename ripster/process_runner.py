@@ -297,10 +297,12 @@ class ProcessRunner:
                                        "params": {"reason": self.engine.abort_reason}})
                     break
 
-            # Wait for process to actually exit, but not forever.
-            await self._shutdown()
-
         finally:
+            # The process belongs to the runner: it is stopped here and not in
+            # the body, otherwise an engine raising (or the consumer going away
+            # mid-run) jumped over the shutdown and left the child downloading
+            # behind us — with a wrapper slot still held.
+            await self._shutdown()
             # Always record a finished RunResult, even on exceptions.
             exit_code = (
                 self._proc.returncode

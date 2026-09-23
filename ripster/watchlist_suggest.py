@@ -43,7 +43,7 @@ _MIX_NOISE = {
     "radio", "extended", "club", "original", "instrumental", "acoustic",
     "vocal", "dub", "live", "album", "single", "short", "long", "full",
     "continuous", "clean", "dirty", "edit", "version", "remastered",
-    "bonus", "intro", "outro", "mixed", "unmixed", "dj", "reprise",
+    "bonus", "intro", "outro", "mixed", "unmixed", "dj", "reprise", "mix",
 }
 
 # "(Gorje Hewek Remix)", "[RAWSOUL012]"-style noise is excluded by requiring
@@ -55,7 +55,7 @@ _REMIX_RE = re.compile(
 )
 _FEAT_RE = re.compile(
     r"\b(?:feat|ft|featuring)\.?\s+([^()\[\],]{2,60}?)"
-    r"(?=\s*[\)\]\[,]|\s+-\s|$)",
+    r"(?=\s*[\(\)\[\],]|\s+-\s|$)",
     re.IGNORECASE,
 )
 
@@ -177,6 +177,12 @@ def compute(watchlist_items: list, limit: int = 12, min_score: float = 8.0) -> d
             " WHERE stream_type='soundcloud' AND stream_name!=''"
             " GROUP BY stream_name"
         ).fetchall()
+    except sqlite3.Error as e:
+        # Файл есть, но таблиц нет (посторонний/разобранный ripster_stats.db):
+        # подключение удалось, а запрос упал. Маршрут /api/watchlist/suggestions
+        # ничего не ловит — наружу ушёл бы 500 вместо того же конверта с ошибкой,
+        # что модуль возвращает на отсутствующей/неоткрываемой базе.
+        return {"ok": False, "error": str(e), "suggestions": []}
     finally:
         con.close()
 

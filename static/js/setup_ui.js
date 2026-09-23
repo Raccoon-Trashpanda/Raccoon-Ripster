@@ -15,27 +15,27 @@
 // install streams to the Setup console.
 const SETUP_COMPONENTS = [
   // ── Apple Music ───────────────────────────────────────────────────────────
-  { key:'apple', icon:'🍎', label:'Apple Music (AMD v2)', tag:'рекомендуется', color:'#fc3c44', def:true,
+  { key:'apple', icon:'🍎', label:'Apple Music (AMD v2)', tag:true, color:'#fc3c44', def:true,
     desc:'',   // текст только в i18n: setup.apple.desc
     endpoint:'/api/setup/component/apple', status:'apple' },
-  { key:'ffmpeg', icon:'🎞️', label:'ffmpeg', tag:'для Apple', color:'#fc8a44', def:true,
+  { key:'ffmpeg', icon:'🎞️', label:'ffmpeg', tag:true, color:'#fc8a44', def:true,
     desc:'',   // текст только в i18n: setup.ffmpeg.desc
     endpoint:'/api/setup/component/ffmpeg', status:'ffmpeg' },
-  { key:'mp4decrypt', icon:'🔓', label:'Bento4 (mp4decrypt)', tag:'для Apple', color:'#fc8a44', def:true,
+  { key:'mp4decrypt', icon:'🔓', label:'Bento4 (mp4decrypt)', tag:true, color:'#fc8a44', def:true,
     desc:'',   // текст только в i18n: setup.mp4decrypt.desc
     endpoint:'/api/setup/component/mp4decrypt', status:'mp4decrypt' },
   // ── SoundCloud ────────────────────────────────────────────────────────────
-  { key:'node', icon:'🟩', label:'Node.js', tag:'для SoundCloud', color:'#3c873a', def:true,
+  { key:'node', icon:'🟩', label:'Node.js', tag:true, color:'#3c873a', def:true,
     desc:'',   // текст только в i18n: setup.node.desc
     endpoint:'/api/setup/component/node', status:'node' },
   { key:'soundcloud', icon:'🎧', label:'SoundCloud (Lucida)', color:'#ff5500', def:true,
     desc:'',   // текст только в i18n: setup.soundcloud.desc
     endpoint:'/api/setup/component/soundcloud', status:'soundcloud' },
-  { key:'wvd', icon:'🔐', label:'Widevine L3 (one-click)', tag:'опционально', color:'#c084e0',
+  { key:'wvd', icon:'🔐', label:'Widevine L3 (one-click)', tag:true, color:'#c084e0',
     desc:'',   // текст только в i18n: setup.wvd.desc
     endpoint:'/api/widevine/mint-auto', wsdone:'widevine_minted', status:'wvd' },
   { key:'wvd-manual', icon:'🔐', label:'Widevine L3 — manual mint (wizard)', tag:'fallback', color:'#c084e0', advanced:true,
-    desc:'Фолбэк: если авто-минт застрял (KeyDive завис на приветствии Chrome) — интерактивный мастер в отдельном окне.',
+    desc:'',   // текст только в i18n: setup.wvd-manual.desc
     endpoint:'/api/widevine/mint-wizard', wizard:true, status:'wvd' },
   // ── Spotify / Beatport (OrpheusDL) ────────────────────────────────────────
   { key:'orpheus', icon:'🟢', label:'OrpheusDL (Spotify)', color:'#1db954', def:true,
@@ -48,7 +48,7 @@ const SETUP_COMPONENTS = [
     desc:'',   // text lives in i18n: setup.jiosaavn.desc / setup.jiosaavn.tag
     endpoint:'/api/setup/component/jiosaavn', status:'jiosaavn' },
   // ── Advanced ──────────────────────────────────────────────────────────────
-  { key:'zhaarey', icon:'⚙️', label:'Apple wrapper (zhaarey)', tag:'продвинутое', color:'#af52de',
+  { key:'zhaarey', icon:'⚙️', label:'Apple wrapper (zhaarey)', tag:true, color:'#af52de',
     desc:'',   // текст только в i18n: setup.zhaarey.desc
     endpoint:'/api/setup/component/zhaarey', advanced:true, status:'go' },
 ];

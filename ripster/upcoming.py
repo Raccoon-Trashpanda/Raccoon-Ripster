@@ -54,6 +54,7 @@
 """
 from __future__ import annotations
 
+import copy
 import json
 import re
 import time
@@ -144,6 +145,10 @@ def parse_date(raw: str) -> str:
     s = str(raw or "").strip()
     m = _DATE_RE.search(s)
     if m:
+        try:
+            datetime.strptime(m.group(0), "%Y-%m-%d")
+        except ValueError:
+            return ""      # «2026-13-40» — цифры есть, даты нет. Не выдумываем.
         return m.group(0)
     # Голый год («2026») — источник назвал только год. Это НЕ 1 января:
     # выдавать точную дату там, где её не сказали, — ровно та самая выдумка.
@@ -160,7 +165,9 @@ def make_record(*, src: str, src_url: str, date_raw: str, ident: str,
     meta = SOURCES.get(src)
     if not meta:
         return None
-    if not (src_url and str(ident).strip() and str(title).strip()):
+    # src_url проверяется после strip() — как ident/title: страница, которую мы
+    # «РЕАЛЬНО открыли», не может состоять из пробелов; хранится дословно.
+    if not (str(src_url or "").strip() and str(ident).strip() and str(title).strip()):
         return None
     if meta["tier"] not in CREATING_TIERS:
         return None          # ярус 3 записей не заводит — только дополняет
@@ -215,7 +222,9 @@ def merge(records: list) -> list:
         k = identity(r)
         cur = out.get(k)
         if cur is None:
-            out[k] = dict(r)
+            # глубокая копия: merge не имеет права append'ить в списки
+            # входной записи (confirmed_by) — это калечит данные вызывающего
+            out[k] = copy.deepcopy(r)
             continue
         for s in r.get("confirmed_by") or [r.get("src")]:
             if s and s not in cur["confirmed_by"]:
@@ -242,7 +251,10 @@ def in_horizon(rec: dict, today: str = "") -> bool:
     if not d:
         return False
     today = today or datetime.now().strftime("%Y-%m-%d")
-    horizon = (datetime.now() + timedelta(days=_HORIZON_DAYS)).strftime("%Y-%m-%d")
+    # обе границы — от переданного today, иначе реплей/перемотка ловит
+    # горизонт, отрезанный от точки отсчёта
+    horizon = (datetime.strptime(today, "%Y-%m-%d")
+               + timedelta(days=_HORIZON_DAYS)).strftime("%Y-%m-%d")
     return today < d <= horizon
 
 

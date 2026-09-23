@@ -1,5 +1,5 @@
 // ======================================================================
-// GUEST / ADMIN (guest sessions, admin links, per-guest activity)
+// Guest/admin + per-guest live lamp helpers
 // Extracted from app.js (mechanical split — same global functions, no behaviour
 // change). Loaded AFTER app.js in index.html, so it sees S/api/toast/etc.
 // ======================================================================
@@ -23,9 +23,9 @@ async function checkSessionMode() {
       if (quota && d.quota) {
         const q = d.quota;
         if (q.type === 'count')
-          quota.textContent = `${q.limit - q.used} загр. осталось`;
+          quota.textContent = ti('ga.remaining', {n: q.limit - q.used});
         else if (q.type === 'time')
-          quota.textContent = `⏱ ${d.quota_minutes_left ?? '?'} мин.`;
+          quota.textContent = ti('ga.minutes', {n: d.quota_minutes_left ?? '?'});
       }
       // Session expiry countdown
       if (d.expires_at && expEl) {
@@ -35,8 +35,8 @@ async function checkSessionMode() {
           const h = Math.floor(left / 3600000);
           const m = Math.floor((left % 3600000) / 60000);
           expEl.textContent = left > 0
-            ? `· ⏱ ${h}ч ${m}м`
-            : '· ссылка истекла';
+            ? ti('ga.time_left', {h, m})
+            : t('ga.link_expired');
         };
         tick();
         if (_guestExpiryInterval) clearInterval(_guestExpiryInterval);
@@ -75,7 +75,7 @@ async function loadGuestSvcStatus() {
         <span style="width:6px;height:6px;border-radius:50%;background:${on ? '#4ade80' : '#555'};flex-shrink:0"></span>
       </span>`;
     }).join('');
-  } catch { el.innerHTML = '<span style="font-size:12px;color:var(--muted)">Ошибка загрузки</span>'; }
+  } catch { el.innerHTML = `<span style="font-size:12px;color:var(--muted)">${esc(t('ga.load_error'))}</span>`; }
 }
 
 async function loadGuestHistory() {
@@ -87,7 +87,7 @@ async function loadGuestHistory() {
     const d = await r.json();
     const acts = d.activity || [];
     if (!acts.length) {
-      container.innerHTML = `<div style="font-size:12px;color:var(--muted);text-align:center;padding:12px">${t('act.empty')||'Нет загрузок'}</div>`;
+      container.innerHTML = `<div style="font-size:12px;color:var(--muted);text-align:center;padding:12px">${esc(t('act.empty'))}</div>`;
       return;
     }
     const SVC_ICON = {apple:'🍎',qobuz:'🎵',deezer:'🎧',tidal:'🌊',spotify:'💚',soundcloud:'☁',bbc:'📻'};
@@ -95,7 +95,7 @@ async function loadGuestHistory() {
     const done = acts.filter(a=>a.status==='done').length;
     const errs = acts.filter(a=>a.status==='error').length;
     const svcs = [...new Set(acts.map(a=>a.service).filter(Boolean))];
-    const svcStr = svcs.map(s=>`${SVC_ICON[s]||'🎶'} ${s}`).join(' · ');
+    const svcStr = svcs.map(s=>`${SVC_ICON[s]||'🎶'} ${escapeHtml(s)}`).join(' · ');
     container.innerHTML = `
       <div style="display:flex;gap:14px;font-size:11px;color:var(--muted);margin-bottom:8px;flex-wrap:wrap">
         <span>✓ <b style="color:#22c55e">${done}</b></span>
@@ -185,13 +185,13 @@ async function loadAdminLinks() {
       fetch('/api/admin/links'),
       fetch('/api/config'),
     ]);
-    if (!linksRes.ok) { container.innerHTML = '<div style="font-size:12px;color:var(--muted);text-align:center;padding:16px">Нет доступа</div>'; return; }
+    if (!linksRes.ok) { container.innerHTML = `<div style="font-size:12px;color:var(--muted);text-align:center;padding:16px">${esc(t('ga.no_access'))}</div>`; return; }
     const links = await linksRes.json();
     S._adminLinks = links;   // cache for the lightweight live bar updater
     const freshCfg = cfgRes.ok ? await cfgRes.json() : {};
     if (freshCfg['public-url']) Object.assign(S.config || {}, {'public-url': freshCfg['public-url']});
     if (!links.length) {
-      container.innerHTML = `<div style="font-size:12px;color:var(--muted);text-align:center;padding:16px">${t('s.admin_no_links')||'Нет ссылок'}</div>`;
+      container.innerHTML = `<div style="font-size:12px;color:var(--muted);text-align:center;padding:16px">${esc(t('s.admin_no_links'))}</div>`;
       return;
     }
     const _baseUrl = (freshCfg['public-url'] || S.config?.['public-url'] || '').replace(/\/$/, '') || window.location.origin;
@@ -210,7 +210,7 @@ async function loadAdminLinks() {
       const _pct  = _guestTaskPct(_run);
       const lamp  = lk.session_count > 0 ? (_run ? '🟢' : '🟡') : '○';
       const lampTxt = lk.session_count > 0
-        ? (_run ? (t('act.downloading') || 'качает') : t('act.online'))
+        ? (_run ? t('act.downloading') : t('act.online'))
         : t('act.offline');
       const onlineDot = `${lamp} <span style="color:var(--muted)">${lampTxt}${lk.session_count > 1 ? ' (' + lk.session_count + ')' : ''}</span>`;
       const dlBar = _run
@@ -243,7 +243,7 @@ async function loadAdminLinks() {
               <code style="flex:1;min-width:0;font-size:10.5px;font-family:var(--mono);color:${active?'#c084fc':'var(--muted)'};background:rgba(0,0,0,.18);padding:3px 7px;border-radius:5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(guestUrl)}</code>
               <button onclick="navigator.clipboard.writeText('${escJ(guestUrl)}').then(()=>toast(t('toast.copied'),'var(--green)')).catch(()=>{const ta=document.createElement('textarea');ta.value='${escJ(guestUrl)}';document.body.appendChild(ta);ta.select();document.execCommand('copy');document.body.removeChild(ta);toast(t('toast.copied'),'var(--green)')})"
                 style="padding:3px 9px;border-radius:6px;border:1px solid rgba(175,82,222,.3);background:rgba(175,82,222,.12);color:#c084fc;font-size:11px;font-weight:600;cursor:pointer;flex-shrink:0;white-space:nowrap">
-                ⎘ Копировать
+                ${esc(t('ga.copy'))}
               </button>
             </div>
           </div>
@@ -296,21 +296,21 @@ async function showGuestActivity(token) {
     const h = Math.floor(timeLeft / 3600000);
     const m = Math.floor((timeLeft % 3600000) / 60000);
     const expStr = exp
-      ? (timeLeft > 0 ? `⏱ ${h}ч ${m}м` : 'истекла')
+      ? (timeLeft > 0 ? ti('ga.expired_short', {h, m}) : t('ga.expired'))
       : '';
     const q = d.quota || {};
     let qStr = '';
-    if (q.type === 'count') qStr = ` · ${q.used||0}/${q.limit} загр.`;
-    else if (q.type === 'time') qStr = ` · лимит ${q.limit} мин.`;
+    if (q.type === 'count') qStr = ti('ga.quota_count', {u: q.used||0, l: q.limit});
+    else if (q.type === 'time') qStr = ti('ga.quota_time', {n: q.limit});
     const sessStr = d.session_count > 0
-      ? `<span style="color:#22c55e">● ${d.session_count} онлайн</span>`
-      : `<span style="color:var(--muted)">○ офлайн</span>`;
+      ? `<span style="color:#22c55e">${esc(ti('ga.online', {n: d.session_count}))}</span>`
+      : `<span style="color:var(--muted)">${esc(t('ga.offline'))}</span>`;
 
     const SVC_ICON = {apple:'🍎',qobuz:'🎵',deezer:'🎧',tidal:'🌊',spotify:'💚',soundcloud:'☁',bbc:'📻'};
     const done = acts.filter(a=>a.status==='done'||a.event==='dl_ok').length;
     const errs = acts.filter(a=>a.status==='error'||a.event==='dl_error'||a.event==='add_blocked').length;
     const svcs = [...new Set(acts.map(a=>a.service).filter(Boolean))];
-    const svcStr = svcs.map(s=>`${SVC_ICON[s]||'🎶'} ${s}`).join(' · ');
+    const svcStr = svcs.map(s=>`${SVC_ICON[s]||'🎶'} ${escapeHtml(s)}`).join(' · ');
 
     const header = `<div style="display:flex;gap:12px;font-size:11px;flex-wrap:wrap;margin-bottom:6px;padding-bottom:6px;border-bottom:1px solid var(--border)">
       ${sessStr}
@@ -322,12 +322,12 @@ async function showGuestActivity(token) {
     </div>`;
 
     if (!acts.length) {
-      panel.innerHTML = header + `<div style="font-size:11px;color:var(--muted)">${t('act.empty')||'Нет загрузок'}</div>`;
+      panel.innerHTML = header + `<div style="font-size:11px;color:var(--muted)">${esc(t('act.empty'))}</div>`;
       return;
     }
-    const _BR = {'quota_exceeded':'квота','rate_limit':'лимит запросов'};
-    const _DR = {'task_not_found':'нет задачи','not_finished':'не готово',
-                 'access_denied':'нет доступа','files_missing':'нет файлов','no_audio_files':'нет аудио'};
+    const _BR = {'quota_exceeded':t('ga.r_quota'),'rate_limit':t('ga.r_rate')};
+    const _DR = {'task_not_found':t('ga.r_no_task'),'not_finished':t('ga.r_not_ready'),
+                 'access_denied':t('ga.r_no_access'),'files_missing':t('ga.r_files_missing'),'no_audio_files':t('ga.r_no_audio')};
     panel.innerHTML = header + `<div style="display:flex;flex-direction:column;gap:4px;max-height:200px;overflow-y:auto">` +
       acts.slice().reverse().map(a => {
         const ts     = a.ts ? new Date(a.ts).toLocaleTimeString() : '';
@@ -339,13 +339,13 @@ async function showGuestActivity(token) {
           lbl = a.url || '—';
         } else if (a.event === 'add_blocked') {
           evtIco = '🚫'; col = 'var(--red)';
-          lbl = (_BR[a.reason]||a.reason||'заблокировано') + (a.url ? ' · '+a.url : '');
+          lbl = (_BR[a.reason]||a.reason||t('ga.blocked')) + (a.url ? ' · '+a.url : '');
         } else if (a.event === 'dl_ok') {
           evtIco = '📥'; col = '#22c55e';
           lbl = a.filename || a.title || '—';
         } else if (a.event === 'dl_error') {
           evtIco = '❌'; col = 'var(--red)';
-          lbl = (_DR[a.reason]||a.reason||'ошибка') + (a.title ? ' — '+a.title : '');
+          lbl = (_DR[a.reason]||a.reason||t('ga.error')) + (a.title ? ' — '+a.title : '');
         } else if (a.status === 'done') {
           evtIco = '✓'; col = '#22c55e';
           lbl = a.title || a.url || '—';
@@ -362,6 +362,7 @@ async function showGuestActivity(token) {
         </div>`;
       }).join('') + `</div>`;
   } catch(e) {
-    panel.innerHTML = `<div style="font-size:11px;color:var(--red)">Ошибка загрузки активности</div>`;
+    panel.innerHTML = `<div style="font-size:11px;color:var(--red)">${esc(t('ga.load_error_act'))}</div>`;
   }
 }
+

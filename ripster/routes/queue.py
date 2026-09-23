@@ -179,8 +179,8 @@ async def add_to_queue(body: dict, request: Request):
             raise HTTPException(409, imsg(
                 "err.queue_service_quality_mismatch",
                 f"Ссылка на Apple с качеством «{_q}» — это код чужого сервиса. "
-                "Поставьте в очередь ссылку того сервиса, что выбрали, и его "
-                "качество."))
+                "Поставьте в очередь ссылку того сервиса, что выбрали, и его качество.",
+                q=_q))
         if svc != "apple" and _q.startswith("alac"):
             # Reverse direction: an Apple quality on a non-Apple link. Folded to
             # that service's own default below (see _APPLE_ONLY guard) — log it so

@@ -142,7 +142,16 @@ def _orpheus_clients() -> dict[str, tuple[str, str]]:
 
 
 def write_session(slot: int, refresh: str, country: str = "") -> dict:
-    """Выписать слоту собственную сессию OrpheusDL из refresh-токена.
+    """Выписать слоту собственную сессию OrpheusDL из refresh-токена."""
+    return write_session_to(ensure_slot(slot) / "config", refresh, country)
+
+
+def write_session_to(config_dir, refresh: str, country: str = "") -> dict:
+    """Перезаписать сессию в ЛЮБОМ каталоге конфига OrpheusDL.
+
+    Отдельно от `write_session` потому, что чинить сессию приходится не только
+    слотам пула: у основного прогона свой путь, и движок знает про него, но не
+    знает номер слота (см. `engines.tidal._slot_session_path`).
 
     Зачем так, а не «войти»: вход у OrpheusDL интерактивный (TV-логин требует
     открыть ссылку и подтвердить, mobile-логин спрашивает пароль через
@@ -159,7 +168,7 @@ def write_session(slot: int, refresh: str, country: str = "") -> dict:
 
     import httpx
 
-    d = ensure_slot(slot)
+    d = Path(config_dir)
     clients = _orpheus_clients()
     if not clients:
         return {"ok": False, "why": "в настройках OrpheusDL нет идентификаторов клиентов Tidal"}
@@ -192,27 +201,35 @@ def write_session(slot: int, refresh: str, country: str = "") -> dict:
     if not sessions:
         return {"ok": False, "why": "ни один клиент не принял токен", "errors": errors}
 
-    # За основу берём хранилище основной установки: в нём уже есть разделы
-    # других модулей (beatport, spotify), и затирать их нулём значило бы
-    # разлогинить слот во всём остальном.
+    # За основу берём ТО, что уже лежит в целевом каталоге, а если его нет —
+    # хранилище основной установки: в нём есть разделы других модулей (beatport,
+    # spotify), и затирать их нулём значило бы разлогинить слот во всём остальном.
+    dst = d / "loginstorage.bin"
     blob: dict = {"advancedmode": False, "modules": {}}
-    src = orpheus_dir() / "config" / "loginstorage.bin"
-    if src.is_file():
+    for src in (dst, orpheus_dir() / "config" / "loginstorage.bin"):
+        if not src.is_file():
+            continue
         try:
             from ripster.safe_pickle import safe_loads
 
             blob = safe_loads(src.read_bytes())
+            break
         except Exception:  # noqa: BLE001
-            pass
+            continue
     mod = blob.setdefault("modules", {}).setdefault("tidal", {})
     mod.setdefault("selected", "default")
     sess = mod.setdefault("sessions", {}).setdefault("default", {})
     sess["clear_session"] = False
     sess["custom_data"] = {"sessions": sessions}
 
-    (d / "config").mkdir(parents=True, exist_ok=True)
-    (d / "config" / "loginstorage.bin").write_bytes(pickle.dumps(blob))
-    return {"ok": True, "clients": sorted(sessions), "errors": errors,
+    # Атомарно: этот файл читает и дочерний OrpheusDL, и полузаписанный он
+    # увидел бы как битое хранилище — ровно та гонка, из-за которой
+    # `seed_settings` уже пишет через os.replace.
+    d.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(f"{dst.name}.{os.getpid()}.tmp")
+    tmp.write_bytes(pickle.dumps(blob))
+    os.replace(tmp, dst)
+    return {"ok": True, "clients": sorted(sessions), "errors": errors, "path": str(dst),
             "country": next(iter(sessions.values())).get("country_code", "")}
 
 

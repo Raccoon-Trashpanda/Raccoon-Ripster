@@ -201,12 +201,18 @@ async def _page_urls(port: int) -> list:
 # ── добыча ───────────────────────────────────────────────────────────────────
 def _from_url(urls: list, param: str) -> str:
     """Токен из фрагмента адреса (`#access_token=…&token_type=…`)."""
-    from urllib.parse import urlparse, parse_qs
+    from urllib.parse import urlparse, parse_qs, unquote
     for u in urls:
         if param not in u:
             continue
-        frag = urlparse(u).fragment or ""
-        val = parse_qs(frag).get(param, [""])[0]
+        # Фрагмент — не query string: parse_qs заменил бы '+' в токене пробелом.
+        # Режем вручную и снимаем только percent-кодирование.
+        val = ""
+        for pair in (urlparse(u).fragment or "").split("&"):
+            key, _, value = pair.partition("=")
+            if key == param and value:
+                val = unquote(value)
+                break
         if not val:                       # бывает и обычным параметром запроса
             val = parse_qs(urlparse(u).query).get(param, [""])[0]
         if val:

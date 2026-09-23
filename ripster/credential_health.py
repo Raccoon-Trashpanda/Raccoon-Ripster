@@ -499,6 +499,13 @@ def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD,
     if not accounts:
         return lines
 
+    # Мера — сессия движка, а не только `tidal-refresh` из config.yaml: 23.09
+    # этот отчёт писал «✅ активна, PREMIUM» про учётку из конфига, пока
+    # загрузка в 19:37 падала с TidalAuthError, потому что качает ОрpheusDL
+    # своей сессией из loginstorage.bin.
+    eng = ta.engine_session_secret()
+    eng_secrets = {ta.account_secret(a) for a in accounts}
+
     async def _check_all():
         out = []
         for i, acct in enumerate(accounts):
@@ -508,6 +515,17 @@ def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD,
                 info = {"alive": False, "unreachable": True,
                         "reason": f"ошибка проверки: {type(e).__name__}"}
             out.append((i, acct, info))
+        # Сессия движка обязана быть измерена в ЭТОМ же прогоне циклов: общий
+        # httpx-клиент привязывается к первому asyncio.run, второй кидает
+        # RuntimeError вместо ответа (см. докстринг функции).
+        if eng and eng not in eng_secrets:
+            try:
+                out.append((-1, {"tidal-refresh": eng},
+                            await ta.account_info({"tidal-refresh": eng}, fresh=True)))
+            except Exception as e:  # noqa: BLE001
+                out.append((-1, {"tidal-refresh": eng},
+                            {"alive": False, "unreachable": True,
+                             "reason": f"ошибка проверки: {type(e).__name__}"}))
         return out
 
     try:
@@ -518,9 +536,13 @@ def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD,
 
     from . import account_roster as _ar
     active_secret = (cfg.get("tidal-refresh") or "").strip()
+    eng_info = next((inf for _i, a, inf in results
+                     if eng and ta.account_secret(a) == eng), None)
     roster: list[str] = []
 
     for i, acct, info in results:
+        if i < 0:
+            continue          # проба сессии движка: она нужна для меры, не для отчёта
         secret = ta.account_secret(acct)
         masked = _mask(secret)
         label = acct.get("label") or f"слот {i}"
@@ -538,6 +560,14 @@ def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD,
         if not alive and info.get("unreachable"):
             lines.append(f"⚠️ Tidal {label} ({masked}): {reason} — учётка не тронута")
             continue
+
+        # Та же правда, что и в JSON-ростере: «активна» без шанса на следующую
+        # загрузку не показывается.
+        drift = _ar.engine_drift(is_active=bool(secret and secret == active_secret),
+                                 engine_secret=eng, own_secret=secret,
+                                 own_alive=alive, engine_info=eng_info or info)
+        if drift:
+            info["session_drift"] = drift
 
         if alive is not None:
             _status = _ar.classify(

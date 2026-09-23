@@ -326,12 +326,16 @@ const _ctIO = ('IntersectionObserver' in window)
 // момента, когда карточка подошла к экрану.
 function tintVisibleCards(root) {
   const scope = root || document;
-  const cards = scope.querySelectorAll('.rel-card:not([data-tinted])');
+  // .bbc-card — сетка BBC Sounds: те же обложки, та же окантовка в тон,
+  // что у карточек релизов.
+  const cards = scope.querySelectorAll('.rel-card:not([data-tinted]),.bbc-card:not([data-tinted])');
   if (!cards.length) return;
   cards.forEach(card => {
     const img = card.querySelector('img');
     const src = img && (img.dataset.lightboxSrc || img.src);
-    if (!src) { card.dataset.tinted = 'no'; return; }
+    // data:-заглушка BBC (нет кадра ни у выпуска, ни у бренда) красить нечем:
+    // это серый прямоугольник, а не обложка.
+    if (!src || src.startsWith('data:')) { card.dataset.tinted = 'no'; return; }
     card.dataset.tinted  = '1';
     card.dataset.tintSrc = src;
     // Цвет уже посчитан раньше — красим сразу: сети здесь не будет вовсе,
@@ -366,14 +370,16 @@ function tintSearchPanel(coverUrl) {
     pending = true;
     requestAnimationFrame(() => { pending = false; tintVisibleCards(); });
   };
-  const grid = () => document.getElementById('releases-grid');
+  const grids = () => [document.getElementById('releases-grid'),
+                       document.getElementById('bbc-grid')];
   const obs = new MutationObserver(kick);
   const attach = () => {
-    const g = grid();
-    if (g && !g.dataset.tintWatch) {
-      g.dataset.tintWatch = '1';
-      obs.observe(g, { childList: true, subtree: false });
-      kick();
+    for (const g of grids()) {
+      if (g && !g.dataset.tintWatch) {
+        g.dataset.tintWatch = '1';
+        obs.observe(g, { childList: true, subtree: false });
+        kick();
+      }
     }
   };
   document.addEventListener('click', e => {

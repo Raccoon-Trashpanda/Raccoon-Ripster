@@ -99,6 +99,31 @@ def is_degraded(info: dict, *, premium: bool) -> bool:
 _BADGE = {ACTIVE: "✅ активна", BENCH: "🟢 запас", RETIRED: "⚪ снята"}
 
 
+def engine_drift(*, is_active: bool, engine_secret: str, own_secret: str,
+                 own_alive=None, engine_info: dict | None = None) -> str:
+    """Почему «✅ активна» этой строки НЕ значит, что следующая загрузка выйдет.
+
+    Пусто — значит значит. Текст один для обеих поверхностей (JSON-ростер и
+    текстовый отчёт боту в `credential_health`): расходиться им нельзя, ровно на
+    расхождении и попались 23.09.2026 — бот писал «✅ активна» про учётку из
+    config.yaml, а падала загрузка, потому что качает сессия OrpheusDL.
+    """
+    if not is_active:
+        return ""
+    info = engine_info or {}
+    if not engine_secret:
+        return "у движка нет сессии Tidal — качать нечем"
+    if engine_secret != own_secret:
+        why = "движок качает другой учёткой"
+        if info.get("alive") is False:
+            why += f": {info.get('reason') or 'отклонена Tidal'}"
+        return why
+    if own_alive is False:
+        return ("сессия, которой качаем, отклонена Tidal: "
+                f"{info.get('reason') or 'без причины'}")
+    return ""
+
+
 def line(service: str, label: str, info: dict, status: str, *, premium: bool = True) -> str:
     """Одна строка ростера для текстового отчёта.
 
@@ -201,19 +226,20 @@ def roster_cards(cfg: dict) -> dict:
             # дня переживает сегодняшнюю блокировку учётки.
             info = dict(_run(ta.account_info(acct, fresh=is_active)))
             info["engine_session"] = uses
-            if is_active and uses != "same":
-                # Заголовок «активна» при мертвой качалке — та же ложь. Скажем,
-                # чем кончится следующая загрузка, если это известно.
-                why = ("у движка нет сессии Tidal — качать нечем" if uses == "none"
-                       else "движок качает другой учёткой")
-                if sess:
-                    live = _run(ta.account_info({"tidal-refresh": sess}, fresh=True))
-                    if live.get("alive") is False:
-                        why += f": {live.get('reason') or 'отклонена Tidal'}"
-                        info["alive"] = False
-                    elif live.get("country"):
-                        info.setdefault("engine_country", live["country"])
-                info["session_drift"] = why
+            eng_info = info
+            if is_active and uses == "other":
+                # Сессия движка — другая учётка: спрашиваем именно её, потому
+                # что решение о «можно качать» принимается по ней.
+                eng_info = _run(ta.account_info({"tidal-refresh": sess}, fresh=True))
+                if eng_info.get("alive") is False:
+                    info["alive"] = False
+                elif eng_info.get("country"):
+                    info.setdefault("engine_country", eng_info["country"])
+            if is_active:
+                drift = engine_drift(is_active=True, engine_secret=sess, own_secret=sec,
+                                     own_alive=info.get("alive"), engine_info=eng_info)
+                if drift:
+                    info["session_drift"] = drift
             cards.append(_card("tidal", acct.get("label") or f"слот {i}", info,
                                is_active=is_active,
                                premium=bool(info.get("lossless")), masked=_mask(sec)))

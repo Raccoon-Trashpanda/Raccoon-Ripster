@@ -928,7 +928,7 @@ function _scDetailHTML(it) {
       ${meta.length ? `<div style="font-size:11px;color:var(--muted2);margin-top:7px">${meta.join('  ·  ')}</div>` : ''}
       <div id="scd-quality" style="font-size:11px;color:var(--muted2);margin-top:6px">${t('sc2.q_loading')}</div>
       <div style="display:flex;gap:7px;margin-top:14px">
-        <button onclick="${playCall}" style="${btn('rgba(255,85,0,.14)','rgba(255,85,0,.25)','#ff7a33')}">▶ ${t('btn.play')||'Играть'}</button>
+        <button onclick="${playCall}" style="${btn('rgba(255,85,0,.14)','rgba(255,85,0,.25)','#ff7a33')}">▶ ${t('btn.play')}</button>
         <button onclick="scDownload('${it.id}')" style="${btn('rgba(255,255,255,.06)','var(--border)','var(--text)')}">${t('btn.download')}</button>
         <a href="${esc(it.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" title="${t('sc2.open_on_sc')}" style="padding:8px 11px;border:1px solid var(--border);border-radius:8px;font-size:13px;color:var(--muted);text-decoration:none;display:flex;align-items:center">↗</a>
       </div>

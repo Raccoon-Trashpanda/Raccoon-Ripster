@@ -168,14 +168,16 @@ def _get(path: str, params: dict | None, cred: dict) -> httpx.Response:
 # ── кэш ──────────────────────────────────────────────────────────────────────
 
 def _cache_read(key: str) -> dict | None:
+    # Повреждённый кэш — промах, а не авария: диск чинится сам (следующая
+    # запись перезапишет файл), а 500 в роуте за этот мусор заплатил бы юзер.
     try:
         d = json.loads(_CACHE.read_text(encoding="utf-8"))
+        ent = d.get(key)
+        if not ent or (time.time() - float(ent.get("ts", 0))) > _TTL:
+            return None
+        return ent.get("data")
     except Exception:  # noqa: BLE001
         return None
-    ent = d.get(key)
-    if not ent or (time.time() - float(ent.get("ts", 0))) > _TTL:
-        return None
-    return ent.get("data")
 
 
 def _cache_write(key: str, data: dict) -> None:
@@ -253,6 +255,12 @@ def ids_for(url: str, *, cfg: dict | None = None, fresh: bool = False) -> dict:
 
     for m in matches:
         walk(m)
+        # Кабинет отдаёт JSON как есть, и матчем может оказаться не только
+        # словарь (walk это переживает). Поля этого элемента — title/artists/
+        # webUrl — берём только со словаря, иначе один не-словарь роняет весь
+        # ответ, хотя идентификаторы уже собраны.
+        if not isinstance(m, dict):
+            continue
         if not title:
             title = m.get("title") or m.get("albumName") or ""
         if not artists:

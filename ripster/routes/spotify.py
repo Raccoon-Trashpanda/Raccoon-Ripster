@@ -29,6 +29,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 # module load time (discovery.install() must run before any convert call).
 from ripster import compilations as _comps
 from ripster import artist_identity as _ident
+from ripster import spotify_gql_hashes as _gqlh
 from ripster.artist_xref import norm
 from ripster.routes import discovery as _disc
 
@@ -126,6 +127,7 @@ def install(app, ctx) -> None:
     _save_config_fn  = ctx.save_config
     _sp_watchlist    = getattr(ctx, "watchlist", None) or []
     _sp_save_watchlist = getattr(ctx, "save_watchlist", None)
+    _gqlh.configure(ctx.base_dir / "spotify_gql_hashes.json")
     _load_disk_cache()
     _load_artist_state()
     _reconcile_from_cache()
@@ -798,8 +800,9 @@ _SP_GQL_DISCO_HASH = "5e07d323febb57b4a56a42abbf781490e58764aa45feb6e3dc0591564f
 # запросом отдаёт свежак по подпискам без перебора артистов — сигнал БЫСТРЕЕ
 # полного краула, используется КАК ДОПОЛНЕНИЕ (краул остаётся сеткой полноты).
 # operationName+hash вытащены из web-player бандла (dwp-whats-new-feed чанк),
-# variables — как шлёт сам клиент. Хэш может ротироваться Spotify без
-# предупреждения (как и _SP_GQL_DISCO_HASH) — тогда просто перевытащить.
+# variables — как шлёт сам клиент. Хэш ротируется Spotify без предупреждения
+# (как и _SP_GQL_DISCO_HASH) — с 23.09.2026 за это больше не надо руками
+# перевытаскивать: см. _SP_GQL_HASHES и ripster/spotify_gql_hashes.py.
 _SP_GQL_WHATSNEW_HASH = "d889c8c936ab192af8ced595427f5ba2acdf63478fdc0a181c8d477f8322630e"
 # 2026-07-24: queryArtistAppearsOn — the web player's "Appears On" shelf, i.e. the
 # releases an artist is on WITHOUT being the album artist. This is the ONLY way to
@@ -811,6 +814,53 @@ _SP_GQL_WHATSNEW_HASH = "d889c8c936ab192af8ced595427f5ba2acdf63478fdc0a181c8d477
 # seen album needs one getAlbum call for metadata (cached durably, see _sp_album_meta).
 _SP_GQL_APPEARS_HASH  = "9a4bb7a20d6720fe52d7b47bc001cfa91940ddf5e7113761460b4a288d18a4c1"
 _SP_GQL_GETALBUM_HASH = "b9bfabef66ed756e5e13f68a942deb60bd4125ec1f1be8cc42769dc0259b4b10"
+# Хэш этих операций — не наша константа, а то, что Spotify ротит вместе с
+# web-player бандлом. Рантайм-добыча живёт в ripster/spotify_gql_hashes.py:
+# open.spotify.com → его же бандлы и чанки → пары operationName→sha256. Значения
+# выше остаются ПОСЛЕДНИМ резервом (первый старт без сети, стухший CDN) и никогда
+# не выигрывают у свежего найденного хэша молча — см. _sp_gql_params.
+_SP_GQL_HASHES = {
+    "queryArtistDiscographyAll": _SP_GQL_DISCO_HASH,
+    "queryWhatsNewFeed":         _SP_GQL_WHATSNEW_HASH,
+    "queryArtistAppearsOn":      _SP_GQL_APPEARS_HASH,
+    "getAlbum":                  _SP_GQL_GETALBUM_HASH,
+}
+
+
+def _sp_gql_params(operation: str, variables: dict) -> tuple:
+    """(params, sha) для pathfinder: хэш берётся из добытой таблицы, а не из
+    константы, поэтому ротация больше не ждёт, пока кто-то перевытащит её руками."""
+    sha = _gqlh.hash_for(operation, _SP_GQL_HASHES.get(operation, ""))
+    return {
+        "operationName": operation,
+        "variables":     json.dumps(variables),
+        "extensions":    json.dumps({"persistedQuery": {"version": 1, "sha256Hash": sha}}),
+    }, sha
+
+
+async def _sp_gql_get(gc, operation: str, variables: dict):
+    """GET в pathfinder с рантайм-хэшем. На ответ «такого хэша больше нет»
+    (PersistedQueryNotFound / 412) — добываем заново и повторяем РОВНО раз, так
+    что зациклиться нечем. None = запрос не мог быть выполнен: отличаем от
+    «артист ничего не выпустил»."""
+    await _gqlh.maybe_refresh((operation,))
+    params, sha = _sp_gql_params(operation, variables)
+    r = await gc.get(_SP_GQL_URL, params=params)
+    if not _gqlh.stale_hash_error(r):
+        return r
+    fresh = await _gqlh.rediscover(operation, sha)
+    if fresh and fresh != sha:
+        params["extensions"] = json.dumps(
+            {"persistedQuery": {"version": 1, "sha256Hash": fresh}})
+        r2 = await gc.get(_SP_GQL_URL, params=params)
+        if not _gqlh.stale_hash_error(r2):
+            print(f"[spotify] gql-hashes: '{operation}' — хэш {sha[:8]}… протух, "
+                  f"повторили с добытого {fresh[:8]}…", flush=True)
+            return r2
+    else:
+        print(f"[spotify] gql-hashes: '{operation}' — сервер отверг хэш {sha[:8]}…, "
+              f"замены нет: в сегодняшнем бандле операции не нашли", flush=True)
+    return None
 # Budget per crawl pass. The shelf costs exactly ONE request per artist (see
 # _gql_appears_on: the persisted query ignores offset, so there is nothing to page),
 # plus one getAlbum per album id we have never seen. Still budgeted and round-robined
@@ -948,16 +998,13 @@ async def _gql_appears_on(gc, aid: str) -> tuple[list, int]:
     for artists with a long shelf we see the 50 Spotify chose to surface. That is
     fine in practice: a compilation credits many artists, and it only has to appear
     on ONE followed artist's shelf to reach the feed."""
-    params = {
-        "operationName": "queryArtistAppearsOn",
-        "variables": json.dumps({"uri": f"spotify:artist:{aid}"}),
-        "extensions": json.dumps({"persistedQuery": {
-            "version": 1, "sha256Hash": _SP_GQL_APPEARS_HASH}}),
-    }
     try:
-        r = await gc.get(_SP_GQL_URL, params=params)
+        r = await _sp_gql_get(gc, "queryArtistAppearsOn",
+                              {"uri": f"spotify:artist:{aid}"})
     except Exception:
         return [], 0
+    if r is None:
+        return [], -1       # хэш протух и замены нет: полку не прочли, а не «полка пуста»
     if r.status_code != 200:
         return [], -r.status_code
     try:
@@ -975,16 +1022,11 @@ async def _sp_fetch_album_meta(gc, album_id: str) -> dict:
     cached = _sp_album_meta.get(album_id)
     if cached is not None:
         return cached
-    params = {
-        "operationName": "getAlbum",
-        "variables": json.dumps({"uri": f"spotify:album:{album_id}",
-                                  "locale": "", "offset": 0, "limit": 1}),
-        "extensions": json.dumps({"persistedQuery": {
-            "version": 1, "sha256Hash": _SP_GQL_GETALBUM_HASH}}),
-    }
     try:
-        r = await gc.get(_SP_GQL_URL, params=params)
-        if r.status_code != 200:
+        r = await _sp_gql_get(gc, "getAlbum",
+                              {"uri": f"spotify:album:{album_id}",
+                               "locale": "", "offset": 0, "limit": 1})
+        if r is None or r.status_code != 200:
             return {}
         alb = (r.json().get("data") or {}).get("albumUnion") or {}
     except Exception:
@@ -1092,19 +1134,18 @@ async def _gql_whatsnew(gc) -> list:
     """One request = the same personalized "new releases for you" feed the app's
     own bell icon reads. No per-artist loop — catches fresh drops the instant
     Spotify's backend has computed them for this account."""
-    params = {
-        "operationName": "queryWhatsNewFeed",
-        "variables": json.dumps({
-            "offset": 0, "limit": 50, "onlyUnPlayedItems": False,
-            "includedContentTypes": [], "includeEpisodeContentRatingsV2": False,
-        }),
-        "extensions": json.dumps({"persistedQuery": {
-            "version": 1, "sha256Hash": _SP_GQL_WHATSNEW_HASH}}),
+    variables = {
+        "offset": 0, "limit": 50, "onlyUnPlayedItems": False,
+        "includedContentTypes": [], "includeEpisodeContentRatingsV2": False,
     }
     try:
-        r = await gc.get(_SP_GQL_URL, params=params)
+        r = await _sp_gql_get(gc, "queryWhatsNewFeed", variables)
     except Exception as e:
         print(f"[spotify] what's-new fetch error: {e}", flush=True)
+        return []
+    if r is None:
+        print("[spotify] what's-new: хэш queryWhatsNewFeed протух, "
+              "нового в бандле не нашли", flush=True)
         return []
     if r.status_code == 401:
         fresh_b = await _radar_fresh_bearer()
@@ -1114,8 +1155,10 @@ async def _gql_whatsnew(gc) -> list:
         if ct2:
             gc.headers["client-token"] = ct2
         try:
-            r = await gc.get(_SP_GQL_URL, params=params)
+            r = await _sp_gql_get(gc, "queryWhatsNewFeed", variables)
         except Exception:
+            return []
+        if r is None:
             return []
     if r.status_code != 200:
         print(f"[spotify] what's-new: HTTP {r.status_code}", flush=True)
@@ -1753,17 +1796,16 @@ async def _run_sp_scan_inner(days: int, types: str, cache_key: str) -> None:
             if dt < interval:
                 await asyncio.sleep(interval - dt)
             last_req[0] = _t.monotonic()
-            params = {
-                "operationName": "queryArtistDiscographyAll",
-                "variables": json.dumps({"uri": f"spotify:artist:{aid}",
-                                          "offset": offset, "limit": 50}),
-                "extensions": json.dumps({"persistedQuery": {
-                    "version": 1, "sha256Hash": _SP_GQL_DISCO_HASH}}),
-            }
             try:
-                dr = await gc.get(_SP_GQL_URL, params=params)
+                dr = await _sp_gql_get(
+                    gc, "queryArtistDiscographyAll",
+                    {"uri": f"spotify:artist:{aid}", "offset": offset, "limit": 50})
             except Exception:
                 return None, 0
+            if dr is None:
+                # протухший хэш — не «артист ничего не выпустил»: он остаётся
+                # stale и доберётся после следующей добычи
+                return None, 410
             if dr.status_code == 401 and _tries < 1:
                 fresh_b = await _radar_fresh_bearer()
                 if fresh_b:

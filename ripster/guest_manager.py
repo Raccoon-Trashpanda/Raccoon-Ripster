@@ -36,9 +36,21 @@ _ALLOWED_GUEST_TOKEN_KEYS = {
 # Characters stripped from filesystem names so computed save-dirs are safe.
 _UNSAFE_FS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 
+# Имя файла не должно совпадать с устройством Windows: папку CON создать нельзя,
+# а zip "CON.zip" не открывается ничем, кроме самого Windows.
+_WIN_RESERVED = re.compile(r'^(?:con|prn|aux|nul|com[0-9]+|lpt[0-9]+)$', re.I)
+
 
 def _sanitize(s: str) -> str:
-    return _UNSAFE_FS.sub("_", s or "").strip(". ")[:80] or "Unknown"
+    # strip ДО и ПОСЛЕ обрезки: [:80] может снова оставить '.' или ' ' в конце,
+    # а Windows молча съедает такой хвост при создании папки — и сверка
+    # предсказанного имени с реальным в routes/download.py перестаёт сходиться.
+    out = _UNSAFE_FS.sub("_", s or "").strip(". ")[:80].strip(". ")
+    if not out:
+        return "Unknown"
+    if _WIN_RESERVED.match(out.split(".", 1)[0]):
+        out = "_" + out
+    return out
 
 
 def _utcnow() -> datetime:
@@ -123,9 +135,14 @@ class GuestManager:
 
     def all_links(self) -> list[dict]:
         """All links newest-first (for admin view). Annotates each with live session_count."""
-        links = sorted(self._links.values(),
-                       key=lambda l: l.get("created_at", ""),
-                       reverse=True)
+        # created_at у двух ссылок часто совпадает (разрешение часов ~0.5 мс), а
+        # устойчивая сортировка при равных ключах оставляет порядок вставки —
+        # старые шли вперёд. Вторым ключом сам индекс вставки: dict хранит его
+        # и после загрузки с диска, reverse=True ставит свежую ссылку выше.
+        links = [lk for _, lk in sorted(
+            enumerate(self._links.values()),
+            key=lambda p: (p[1].get("created_at") or "", p[0]),
+            reverse=True)]
         # Count in-memory sessions per token + collect their session ids (don't
         # mutate the stored dicts). The session ids let the admin UI correlate the
         # live download queue (tasks carry session_id) with each guest → a real

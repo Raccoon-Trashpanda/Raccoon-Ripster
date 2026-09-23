@@ -23,6 +23,7 @@ Template variables:
 from __future__ import annotations
 
 import re
+import string
 from pathlib import Path
 from typing import Optional
 
@@ -466,6 +467,50 @@ def fix_artist_tags(directory: Path) -> list[Path]:
 
 # ── Filename renderer ──────────────────────────────────────────────────────────
 
+# Private-use sentinel: shields the "/" inside a raw {tracknumber} ("1/12")
+# from filename sanitisation, and is restored after it.
+_TN_SLASH = "\ue000"
+
+
+class _TagFormatter(string.Formatter):
+    """Fill {key} / {key:spec} from tags per the module contract:
+    {tracknumber} is the RAW tag string ("1" or "1/12"), {discnumber} and any
+    format spec render the parsed int (0 when missing/unparseable), and every
+    other key — including unknown ones, with or without a spec — substitutes
+    the empty string instead of raising, so the result is always usable."""
+    _NUM = ("tracknumber", "discnumber")
+
+    def __init__(self, tags: dict):
+        self._tags = tags or {}
+
+    def get_value(self, key, args, kwargs):
+        return key if isinstance(key, str) else ""
+
+    def format_field(self, key, spec):
+        if not isinstance(key, str) or not key:
+            return ""
+        raw = self._tags.get(key)
+        raw = "" if raw is None else str(raw).replace(_TN_SLASH, "")
+        if key in self._NUM:
+            n = _parse_number(raw)
+            if spec:
+                try:
+                    return format(0 if n is None else n, spec)
+                except ValueError:
+                    return ""
+            if key == "tracknumber":
+                return raw.replace("/", _TN_SLASH)
+            return str(0 if n is None else n)
+        if not raw:
+            return ""
+        if spec:
+            try:
+                return format(raw, spec)
+            except ValueError:
+                return raw
+        return raw
+
+
 def render_filename(template: str, tags: dict, ext: str) -> str:
     """Apply *template* using *tags*, append *ext* (without dot), sanitize.
 
@@ -473,28 +518,15 @@ def render_filename(template: str, tags: dict, ext: str) -> str:
     Missing keys are replaced with empty string so the result is always
     a usable filename.
     """
-    # Build substitution values: raw strings + parsed ints for numeric fields
-    vals: dict = dict(tags)
-    for num_key in ("tracknumber", "discnumber"):
-        raw = tags.get(num_key, "")
-        n   = _parse_number(raw)
-        vals[num_key] = n if n is not None else 0
-
-    # Replace each {key} or {key:fmt} using Python format_map
-    class _FallbackMap(dict):
-        def __missing__(self, key):
-            # strip format spec — return empty string for unknown keys
-            return ""
-
     try:
-        name = template.format_map(_FallbackMap(vals))
-    except (ValueError, KeyError):
+        name = _TagFormatter(tags).vformat(template, (), {})
+    except Exception:
         return ""
-
-    name = _sanitize(name)
-    if not name:
-        return ""
-    return f"{name}.{ext.lstrip('.')}"
+    if name.strip():
+        name = _sanitize(name).replace(_TN_SLASH, "/")
+    else:
+        name = ""
+    return f"{name}.{(ext or '').lstrip('.')}"
 
 
 def rename_from_tags(directory: Path, template: str) -> list[tuple[Path, Path]]:
@@ -534,8 +566,12 @@ def rename_from_tags(directory: Path, template: str) -> list[tuple[Path, Path]]:
         # longer matches its own songNameFormat, so it can't skip it). Drop the
         # redundant copy instead of stamping out a "_2" twin — otherwise every
         # retry doubles the release.
+        # On case-insensitive filesystems `desired` IS this file when only the
+        # case differs, so exclude the source name itself from the check.
         desired = directory / new_name
-        if desired.exists() and desired != file and _same_content(desired, file):
+        if (desired.exists() and desired != file
+                and desired.name.lower() != file.name.lower()
+                and _same_content(desired, file)):
             try:
                 file.unlink()
             except OSError:
@@ -543,11 +579,16 @@ def rename_from_tags(directory: Path, template: str) -> list[tuple[Path, Path]]:
             used_names.add(new_name.lower())
             continue
 
-        # Resolve collisions
+        # Resolve collisions. A candidate matching the source file's own name
+        # case-insensitively is not a collision — it is the file itself, and a
+        # case-only rename (e.g. "Track.FLAC" → "track.FLAC") is exactly what
+        # the tags asked for.
         stem_candidate, dot, ext_candidate = new_name.rpartition(".")
         candidate = new_name
         counter   = 2
-        while candidate.lower() in used_names or (directory / candidate).exists():
+        while candidate.lower() in used_names or (
+                candidate.lower() != file.name.lower()
+                and (directory / candidate).exists()):
             candidate = f"{stem_candidate}_{counter}.{ext_candidate}"
             counter  += 1
 

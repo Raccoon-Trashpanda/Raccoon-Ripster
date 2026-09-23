@@ -168,6 +168,28 @@ def _parse_ep(ep: dict) -> dict:
     }
 
 
+def _fill_missing_images(items: list[dict], fallback: str) -> list[dict]:
+    """Нет своей картинки у выпуска — подставляем КАРТИНКУ БРЕНДА: это тоже
+    официальное изображение BBC, той же передачи. Чужие кадры не подставляем:
+    когда нет и бренда — пустая строка, фронт честно покажет заглушку.
+    Ровно этот запасной путь уже работал в /upcoming (_guide_rows) и в
+    preflight (parent.image); в сетке и поиске его не хватало."""
+    if fallback:
+        for it in items:
+            if not it.get("image"):
+                it["image"] = fallback
+    return items
+
+
+async def _brand_image(brand_id: str) -> str:
+    try:
+        async with _HTTP.ashared() as c:
+            meta = await _brand_meta_of(brand_id, c)
+        return meta.get("image") or ""
+    except Exception:
+        return ""
+
+
 # ── Brands ────────────────────────────────────────────────────────────────────
 
 @router.get("/brands")
@@ -206,10 +228,12 @@ async def get_episodes(
     if r.status_code != 200:
         raise HTTPException(502, f"BBC API {r.status_code}")
     data = r.json()
+    items = [_parse_ep(ep) for ep in data.get("data", [])]
+    _fill_missing_images(items, await _brand_image(brand_id))
     return {
         "total":  data.get("total", 0),
         "offset": offset,
-        "items":  [_parse_ep(ep) for ep in data.get("data", [])],
+        "items":  items,
     }
 
 
@@ -606,6 +630,32 @@ async def schedule_forecast(
 
 # ── Search ────────────────────────────────────────────────────────────────────
 
+# PID выпуска → его запасная картинка (своя или бренда) из programmes API.
+# RMS-поиск отдаёт image_url не у каждого выпуска, а у бренда — есть всегда.
+_ep_fallback: dict[str, str] = {}
+
+
+async def _episode_fallback_cover(pid: str) -> str:
+    if not pid:
+        return ""
+    if pid in _ep_fallback:
+        return _ep_fallback[pid]
+    img = ""
+    try:
+        async with _HTTP.ashared() as c:
+            r = await c.get(f"{_PROG_API}/{pid}.json",
+                            headers={"Accept": "application/json"})
+        if r.status_code == 200:
+            prog = (r.json() or {}).get("programme") or {}
+            par  = ((prog.get("parent") or {}).get("programme") or {})
+            img  = _md_bbc.ichef((prog.get("image") or {}).get("pid")
+                                 or (par.get("image") or {}).get("pid") or "")
+    except Exception:
+        img = ""
+    _ep_fallback[pid] = img
+    return img
+
+
 @router.get("/search")
 async def search_bbc(q: str = Query(..., min_length=1)):
     url = f"{_RMS}/experience/inline/search"
@@ -628,6 +678,13 @@ async def search_bbc(q: str = Query(..., min_length=1)):
             if ep.get("type") != "playable_item":
                 continue
             items.append(_parse_ep(ep))
+    no_img = [it["pid"] for it in items if not it["image"] and it["pid"]]
+    if no_img:
+        covers = await asyncio.gather(*(_episode_fallback_cover(p) for p in dict.fromkeys(no_img)))
+        by_pid = dict(zip(dict.fromkeys(no_img), covers))
+        for it in items:
+            if not it["image"]:
+                it["image"] = by_pid.get(it["pid"], "")
     return {"items": items}
 
 

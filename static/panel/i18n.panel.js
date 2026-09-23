@@ -101,6 +101,14 @@
     'm.radar.copy_manual':'Скопируйте ссылку вручную: она показана в карточке',
     'm.radar.no_play_match':'Играбельной копии этого релиза не нашлось',
     'm.radar.play_fail':'Не удалось запустить: {x}',
+    // Контракт API-сообщений: сервер присылает detail объектом {key,params,msg}.
+    // Радар ▶ может получить эти ключи, когда Spotify под баном.
+    'err.play_sp_banned_noalt':'Spotify заблокирован до {t}, точной копии релиза на Deezer не нашлось — играть нечем',
+    'err.play_sp_failed_noalt':'Spotify не отвечает, точной копии релиза на Deezer не нашлось — играть нечем',
+    'err.sp_rl_now':'Лимит запросов Spotify',
+    'err.sp_rl_sec':'Лимит запросов Spotify — подожди {s} с',
+    'err.sp_rl_min':'Лимит запросов Spotify — подожди {m} мин',
+    'err.sp_rl_hr':'Лимит запросов Spotify — блокировка ещё на {h} ч {m} мин',
 
     'm.mix.title':'Трек-лист',
     'm.mix.loading':'Читаем трек-лист…',
@@ -304,6 +312,12 @@
     'm.radar.copy_manual':'Copy the link by hand — it is shown in the card',
     'm.radar.no_play_match':'No playable copy of this release was found',
     'm.radar.play_fail':'Could not start playback: {x}',
+    'err.play_sp_banned_noalt':'Spotify is blocked until {t} and no exact Deezer copy of this release was found — there is nothing to play',
+    'err.play_sp_failed_noalt':'Spotify is not responding and no exact Deezer copy of this release was found — there is nothing to play',
+    'err.sp_rl_now':'Spotify rate limit',
+    'err.sp_rl_sec':'Spotify rate limit — wait {s}s',
+    'err.sp_rl_min':'Spotify rate limit — wait {m} min',
+    'err.sp_rl_hr':'Spotify rate limit — blocked for another {h}h {m}m',
 
     'm.mix.title':'Tracklist',
     'm.mix.loading':'Reading the tracklist…',

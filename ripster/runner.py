@@ -2896,9 +2896,17 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # retry once in-place (skip-existing recovers transient failures), then
             # report a clear PARTIAL instead of a misleading green "done".
             _meta = task.get("meta") or {}
+            # `meta["tracks"]` с 23.09.2026 — СПИСОК треков (треклист при старте),
+            # а не число: int(list) падал в except, ожидание становилось 0, и
+            # страж недостачи молча выключался там, где trackCount не пришёл.
+            _mt = _meta.get("tracks")
+            if isinstance(_mt, list):
+                _mt = len(_mt)
+            if not _mt and isinstance(task.get("tracks"), list):
+                _mt = len(task["tracks"])
             try:
                 _expected = int(_meta.get("trackCount") or _meta.get("totalTracks")
-                                or _meta.get("tracks") or 0)
+                                or _mt or 0)
             except Exception:
                 _expected = 0
             # Apple's catalog metadata trackCount can be INFLATED — e.g. a phantom
@@ -2921,7 +2929,10 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # what we actually got (the user can grab the rest via the wrapper).
             _permanent_miss = bool(_re.search(
                 r"Decryption is not available|not available in your country|"
-                r"Resource not found|no longer available|region", log_text, _re.I))
+                r"Resource not found|no longer available|region|"
+                # Spotify/OrpheusDL: трек недоступен учётке — повтор даст то же
+                # самое (Srabon Megher Din, 20.09.2026: 2 из 11 так и не пришли)
+                r"is unavailable \(Cannot get alternative track\)", log_text, _re.I))
             # Auto-complete a partial release ON ITS OWN — keep re-running (engines
             # skip already-downloaded tracks) until it's whole or we stop making
             # progress, so the user never has to press "повторить" 4 times. Bail

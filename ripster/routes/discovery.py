@@ -94,8 +94,11 @@ _sp_rate_limit_until: float = 0.0   # epoch-seconds; Spotify API blocked until t
 
 
 def _record_sp_rate_limit(retry_after: int) -> None:
-    global _sp_rate_limit_until
+    global _sp_rate_limit_until, _sp_bg_fail_streak
     _sp_rate_limit_until = _time.time() + max(retry_after, 5)
+    # Любой 429 (фон или интерактив) — сигнал фону дышать чаще: бан общий,
+    # и продлить его повторным стуком нельзя даже интерактивной кнопкой.
+    _sp_bg_fail_streak += 1
 
 
 def _sp_rate_limit_msg() -> str:
@@ -112,6 +115,17 @@ def _sp_rate_limit_msg() -> str:
     mins = (remaining % 3600) // 60
     tail = f" {mins} мин" if mins else ""
     return f"лимит запросов Spotify — блокировка на {hrs} ч{tail} (слишком много запросов к API)"
+
+
+def _sp_unban_clock() -> str:
+    """Локальные часы (HH:MM), до которых длится бан Spotify. Человек мыслит
+    моментом снятия, а не длительностью: «до 23:41» честнее, чем «ещё 2 ч 11»,
+    когда неизвестно, с какого часа считать. `localtime` — без tzdata (на этой
+    машине его нет), поэтому опираемся на системное локальное время."""
+    try:
+        return _time.strftime("%H:%M", _time.localtime(_sp_rate_limit_until))
+    except Exception:
+        return ""
 
 
 def _sp_rate_limit_i18n() -> tuple[str, dict]:
@@ -136,6 +150,55 @@ def _sp_rate_limit_payload() -> dict:
 
 def _sp_is_rate_limited() -> bool:
     return _time.time() < _sp_rate_limit_until
+
+
+# ── Бюджет ФОНОВЫХ запросов к Spotify ────────────────────────────────────────
+#
+# Радар (сверка лейблов, обход вотчлиста, кросс-сервисная сопоставка) ходит к
+# Spotify ТЕМ ЖЕ app-токеном, что и интерактивное ▶ в релиз-радаре. Spotify
+# банит токен, а не вызывающего: обход на сотни одиночных /v1/albums выбивал
+# 429, токен уходил в бан на часы (Retry-After до 12 ч, 23.08.2026), и 23.09
+# нажатие ▶ отвечало «блокировка на 2 ч 11 мин» — человек лишался звука потому,
+# что что-то где-то фоново сверяло лейблы.
+#
+# Правила:
+#   * фону — маленький скользящий бюджет (окно 60 с, не более N запросов, пауза
+#     между запросами); интерактивные запросы бюджет НЕ тратят и идут всегда;
+#   * первый же 429 ОСТАНАВЛИВАЕТ фоновый цикл и разносит интервалы запросов
+#     экспоненциально — в стену ногами не ходим;
+#   * отказ бюджета — не ошибка: релиз остаётся «неподтверждённым в этот раз»,
+#     следующий обход досверяет его следующей порцией.
+_SP_BG_WINDOW     = 60.0   # сек, скользящее окно
+_SP_BG_MAX        = 8      # фоновых запросов в окно — на порядок ниже порога Spotify
+_SP_BG_GAP        = 2.0    # минимальная пауза между двумя фоновыми запросами, сек
+_SP_BG_GAP_CAP    = 16     # потолок множителя расхода паузы
+_sp_bg_hist: list = []
+_sp_bg_gap_until: float = 0.0
+_sp_bg_fail_streak: int = 0
+
+
+def _sp_bg_admit() -> bool:
+    """Пускать ли ОДИН фоновый запрос к Spotify? Вызов потребляет разрешение."""
+    global _sp_bg_gap_until
+    if _sp_is_rate_limited():
+        return False
+    now = _time.time()
+    if now < _sp_bg_gap_until:
+        return False
+    _sp_bg_hist[:] = [x for x in _sp_bg_hist if now - x < _SP_BG_WINDOW]
+    if len(_sp_bg_hist) >= _SP_BG_MAX:
+        return False
+    _sp_bg_hist.append(now)
+    _sp_bg_gap_until = now + _SP_BG_GAP * (2 ** min(_sp_bg_fail_streak, _SP_BG_GAP_CAP))
+    return True
+
+
+def _sp_bg_state_reset() -> None:
+    """Только для тестов и перезапуска: забыть накопленный бюджет и провалы."""
+    global _sp_bg_gap_until, _sp_bg_fail_streak
+    _sp_bg_hist.clear()
+    _sp_bg_gap_until = 0.0
+    _sp_bg_fail_streak = 0
 
 
 def install(app, ctx) -> None:
@@ -743,6 +806,14 @@ async def _sp_real_labels(ids: list[str]) -> tuple[dict, bool]:
                 batch_ok = _SP_ALBUMS_BATCH_OK
                 for k in range(0, len(want), 20):
                     chunk = want[k:k + 20]
+                    if not _sp_bg_admit():
+                        # Бюджет исчерпан или токен под баном: остаток —
+                        # «не проверен в этот раз», а не «лейбл не тот».
+                        verified = False
+                        print(f"[label] сверка приостановлена: фоновый бюджет Spotify "
+                              f"выбран (подтверждено {len(_sp_label_cache) - before} "
+                              f"за этот вызов)", flush=True)
+                        break
                     if batch_ok:
                         r = await c.get("https://api.spotify.com/v1/albums",
                                         params={"ids": ",".join(chunk)}, headers=h)
@@ -751,6 +822,15 @@ async def _sp_real_labels(ids: list[str]) -> tuple[dict, bool]:
                                 if alb and alb.get("id"):
                                     _sp_label_cache[alb["id"]] = _label_from_album(alb)
                             continue
+                        if r.status_code == 429:
+                            # Бан приходит и на пакет — не переходим к поштучному
+                            # обходу, который только продлил бы стену 429.
+                            _record_sp_rate_limit(int(r.headers.get("Retry-After", 3600)))
+                            print(f"[label] 429 на batch /v1/albums — {_sp_rate_limit_msg()}; "
+                                  f"сверка лейблов остановлена", flush=True)
+                            if len(_sp_label_cache) != before:
+                                _sp_label_cache_save()
+                            return ({i: _sp_label_cache.get(i, "") for i in ids}, False)
                         batch_ok = _SP_ALBUMS_BATCH_OK = False
                         print(f"[label] batch /v1/albums -> HTTP {r.status_code}, "
                               f"перехожу на поштучный запрос", flush=True)
@@ -760,6 +840,9 @@ async def _sp_real_labels(ids: list[str]) -> tuple[dict, bool]:
                         verified = False
                         chunk = chunk[:_SP_SINGLE_VERIFY_CAP]
                     for one in chunk:
+                        if not _sp_bg_admit():
+                            verified = False
+                            break
                         r1 = await c.get(f"https://api.spotify.com/v1/albums/{one}",
                                          headers=h)
                         if r1.status_code == 429:
@@ -812,7 +895,13 @@ async def _search_spotify_label(label: str, limit: int) -> dict:
     (сеть, токен), выбрасывается ТОЖЕ — непроверенная запись выглядит как
     данные, и это хуже её отсутствия."""
     label = _clean_label(label) or label
-    out = await _search_spotify(f'label:"{label}"', "album", limit)
+    out = await _search_spotify(f'label:"{label}"', "album", limit, bg=True)
+    if out.get("bg_deferred"):
+        # Отказ нашего бюджета, а не отсутствие лейбла: наружу — verify_failed,
+        # чтобы пустая лента не читалась как «проверь написание».
+        out["verify_failed"] = True
+        out["candidates"] = 0
+        return out
     res = out.get("results") or []
     # Полное имя лейбла нередко чуть длиннее того, что Spotify индексирует в
     # `label:` («Erased Tapes Records» vs «Erased Tapes»). Пусто по полному —
@@ -823,7 +912,11 @@ async def _search_spotify_label(label: str, limit: int) -> dict:
         for n in (3, 2):
             if len(words) > n:
                 alt = " ".join(words[:n])
-                out = await _search_spotify(f'label:"{alt}"', "album", limit)
+                out = await _search_spotify(f'label:"{alt}"', "album", limit, bg=True)
+                if out.get("bg_deferred"):
+                    out["verify_failed"] = True
+                    out["candidates"] = 0
+                    return out
                 res = out.get("results") or []
                 if res:
                     break
@@ -988,12 +1081,20 @@ async def _seed_upc(seed: dict) -> str:
         return ""
     try:
         if svc == "spotify":
+            # Фон (вотчлист/доступность): без разрешения бюджета не стучимся,
+            # 429 фиксируем как бан — раньше он терялся в `except` и не
+            # останавливал следующий seed.
+            if not _sp_bg_admit():
+                return ""
             token = await _get_spotify_app_token()
             if not token:
                 return ""
             async with _HTTP.ashared() as c:
                 r = await c.get(f"https://api.spotify.com/v1/albums/{sid}",
                                 headers={"Authorization": f"Bearer {token}"})
+                if r.status_code == 429:
+                    _record_sp_rate_limit(int(r.headers.get("Retry-After", 30)))
+                    return ""
             return str(((r.json().get("external_ids") or {}).get("upc") or "")).strip()
         if svc == "deezer":
             async with _HTTP.ashared() as c:
@@ -1018,6 +1119,8 @@ async def _seed_isrcs(seed: dict, limit: int = 4) -> list[str]:
     out: list[str] = []
     try:
         if svc == "spotify":
+            if not _sp_bg_admit():
+                return []
             token = await _get_spotify_app_token()
             if not token:
                 return []
@@ -1025,11 +1128,19 @@ async def _seed_isrcs(seed: dict, limit: int = 4) -> list[str]:
             async with _HTTP.ashared() as c:
                 r = await c.get(f"https://api.spotify.com/v1/albums/{sid}/tracks",
                                 params={"limit": limit}, headers=h)
+                if r.status_code == 429:
+                    _record_sp_rate_limit(int(r.headers.get("Retry-After", 30)))
+                    return []
                 ids = [it.get("id") for it in (r.json().get("items") or []) if it.get("id")]
                 if not ids:
                     return []
+                if not _sp_bg_admit():
+                    return []
                 r2 = await c.get("https://api.spotify.com/v1/tracks",
                                  params={"ids": ",".join(ids[:limit])}, headers=h)
+                if r2.status_code == 429:
+                    _record_sp_rate_limit(int(r2.headers.get("Retry-After", 30)))
+                    return []
                 for t in (r2.json().get("tracks") or []):
                     v = str(((t or {}).get("external_ids") or {}).get("isrc") or "").upper()
                     if v and v not in out:
@@ -1283,7 +1394,7 @@ async def _match_seeds_in_service(seeds: list[dict], service: str, label: str,
             elif service == "deezer":
                 r = await _search_deezer(term, "album", 3)
             elif service == "spotify":
-                r = await _search_spotify(term, "album", 3)
+                r = await _search_spotify(term, "album", 3, bg=True)
             else:
                 continue
         except Exception:
@@ -1773,10 +1884,24 @@ async def api_release_expand(service: str, url: str, title: str = "", artist: st
         # у Deezer напрямую дешевле, чем сказать человеку «не играет».
         # 23.08.2026 нажатие ▶ в радаре отвечало «блокировка на 12 ч», хотя
         # играть было откуда.
-        if service == "spotify" and _sp_is_rate_limited() and (title or artist):
+        #
+        # Фоллбэк срабатывает на ЛЮБОЙ отказ Spotify, а не только на бан:
+        # 5xx/сетевая ошибка движка оставляли человека без звука так же верно,
+        # как 429, а копия на Deezer при этом никуда не делась.
+        if service == "spotify" and (title or artist):
             alt = await _deezer_album_by_name(title, artist)
             if alt:
                 return {"ok": True, "via": "deezer", **alt}
+            # Копии на Deezer нет — называем причину по-человечески, вместо
+            # сырого JSON-дампа `{"detail":{key,params,msg}}` в интерфейсе (23.09).
+            if _sp_is_rate_limited():
+                raise HTTPException(503, imsg(
+                    "err.play_sp_banned_noalt",
+                    "Spotify заблокирован до {t}, точной копии релиза на Deezer не нашлось — играть нечем",
+                    t=_sp_unban_clock()))
+            raise HTTPException(502, imsg(
+                "err.play_sp_failed_noalt",
+                "Spotify не отвечает, точной копии релиза на Deezer не нашлось — играть нечем"))
         if d.get("error_key"):
             raise HTTPException(502, imsg(d["error_key"], d["error"],
                                           **(d.get("error_args") or {})))
@@ -1930,11 +2055,29 @@ async def _attach_playable_sources(tracks: list, upc: str) -> None:
 _TIDAL_API = "https://api.tidal.com/v1"
 
 
-def _tidal_headers() -> dict | None:
-    token = (_config.get("tidal-token") or "").strip()
-    if not token:
-        return None
-    return {"Authorization": f"Bearer {token}"}
+def _tidal_configured() -> bool:
+    """Есть ли чем говорить с Tidal: живая сессия движка ИЛИ вставленный токен.
+
+    Синхронный и без сети сознательно: им пользуются как ПРОПУСОМ источника
+    («есть учётка — ищем»), а проверять сессию дешёво только по наличию
+    refresh-токена в хранилище.
+    """
+    if (_config.get("tidal-token") or "").strip():
+        return True
+    try:
+        from ripster.engines.tidal import session_refresh_token
+        return bool(session_refresh_token())
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
+async def _tidal_get(c, url: str, params: dict) -> tuple:
+    """GET Bearer'ом из живой сессии → (response, country); на 401 перевыпускает
+    токен и повторяет РОВНО ОДИН раз (общая реализация с движком).
+    None в ответе — говорить с Tidal нечем."""
+    from ripster.engines.tidal import _api_get
+    r, _tok, cc = await _api_get(c, url, params, _config)
+    return r, cc
 
 
 def _tidal_country() -> str:
@@ -1949,18 +2092,21 @@ def _tidal_cover(uuid: str, size: int = 160) -> str:
 
 
 async def _search_tidal(q: str, ent: str, limit: int) -> dict:
-    hdr = _tidal_headers()
-    if not hdr:
+    if not _tidal_configured():
         return {"results": [], "error_key": "err.tidal_no_token_cfg", "error": "Tidal access_token не настроен. Добавь в Settings → Tidal."}
-    cc = _tidal_country()
     type_map = {"album": "albums", "track": "tracks", "artist": "artists"}
     t_type = type_map.get(ent, "albums")
     try:
         async with _HTTP.ashared() as c:
-            r = await c.get(f"{_TIDAL_API}/search/{t_type}", headers=hdr,
-                            params={"query": q, "limit": limit, "countryCode": cc})
+            r, _cc = await _tidal_get(c, f"{_TIDAL_API}/search/{t_type}",
+                                     {"query": q, "limit": limit})
+            if r is None:
+                return {"results": [], "error_key": "err.tidal_no_token_cfg",
+                        "error": "Tidal: нет живого токена — обнови вход в Settings → Tidal."}
             if r.status_code == 401:
-                return {"results": [], "error_key": "err.tidal_token_expired", "error": "Tidal: токен истёк. Обнови access_token в Settings → Tidal."}
+                return {"results": [], "error_key": "err.tidal_token_expired",
+                        "error": "Tidal: токен не принят даже после перевыпуска из refresh "
+                                 "— нужен новый вход в Settings → Tidal."}
             data = r.json()
         results = []
         for item in data.get("items") or []:
@@ -2053,9 +2199,14 @@ def _sp_cover(images: list) -> str:
     return pick.get("url", "")
 
 
-async def _search_spotify(q: str, ent: str, limit: int) -> dict:
+async def _search_spotify(q: str, ent: str, limit: int, bg: bool = False) -> dict:
     if _sp_is_rate_limited():
         return {"results": [], **_sp_rate_limit_payload()}
+    if bg and not _sp_bg_admit():
+        # Фон не пустили в бюджет — это НЕ «ничего не найдено»: вызывающий
+        # обязан относится к этому как к «в этот раз не проверили».
+        return {"results": [], "bg_deferred": True,
+                "error": "фоновый бюджет запросов Spotify исчерпан — досверяем в следующий обход"}
     token = await _get_spotify_app_token()
     if not token:
         return {"results": [], "error_key": "err.sp_not_configured", "error": "Spotify API не настроен — добавь Client ID/Secret в Settings → Spotify"}
@@ -2226,6 +2377,10 @@ async def _artist_spotify(artist_id: str, types: str) -> dict:
             try:
                 async with _HTTP.ashared() as c2:
                     for row in appears:
+                        # Дополнение «чем участвует» — фон: без разрешения
+                        # бюджета снимаем со страницы доплату, а не лимит.
+                        if not _sp_bg_admit():
+                            break
                         tr = await c2.get(
                             f"https://api.spotify.com/v1/albums/{row['id']}/tracks",
                             headers={"Authorization": f"Bearer {token}"},
@@ -2532,7 +2687,7 @@ async def _resolve_spotify_album(sp_url: str) -> dict:
 
     # Tidal — fuzzy album search
     try:
-        if _tidal_headers() and q:
+        if _tidal_configured() and q:
             td = await _search_tidal(q, "album", 3)
             for item in (td.get("results") or [])[:1]:
                 _add({"service": "tidal", "url": item.get("url", ""),
@@ -2689,38 +2844,23 @@ async def _resolve_release_id(url: str) -> str:
             return _fallback()
 
         if "tidal.com" in host:
-            # Use the FRESH access_token minted from OrpheusDL's self-refreshing
-            # session — the pasted tidal-token dies in ~16 h, and when it did the
-            # isrc/upc lookup 401'd and fell back to a url: id. That made Tidal
-            # releases cache under url:tidal.com/… instead of isrc:/upc:, so they
-            # never cross-service-deduped. Fall back to the pasted token.
-            hdr = None
-            _cc = ""   # страна СЕССИИ: альбом другой витрины даёт 404
-            try:
-                from ripster.engines.tidal import _orpheus_access_token
-                _tok, _cc = await _orpheus_access_token()
-                if not _tok:
-                    _cc = ""
-                if _tok:
-                    hdr = {"Authorization": f"Bearer {_tok}"}
-            except Exception:
-                hdr = None
-            if hdr is None:
-                hdr = _tidal_headers()
-            if hdr:
-                m = _re.search(r"/(track|album)/(\d+)", u)
-                if m:
-                    kind, tid = m.group(1), m.group(2)
-                    ep = "tracks" if kind == "track" else "albums"
-                    async with _HTTP.ashared() as c:
-                        r = await c.get(f"{_TIDAL_API}/{ep}/{tid}", headers=hdr,
-                                        params={"countryCode": _cc or _tidal_country()})
-                        if r.status_code == 200:
-                            d = r.json()
-                            if kind == "track" and d.get("isrc"):
-                                return f"isrc:{d['isrc']}"
-                            if kind == "album" and d.get("upc"):
-                                return f"upc:{d['upc']}"
+            # Bearer из ЖИВОЙ сессии движка (перевыпускается из refresh, на 401
+            # повторяет ровно один раз) — вставленный tidal-token живёт ~16 ч, и
+            # когда он умирал, isrc/upc-поиск получал 401 и откатывался к url: id.
+            # Тогда Tidal-релизы кэшировались под url:tidal.com/… вместо isrc:/upc:
+            # и не дедуплицировались между сервисами.
+            m = _re.search(r"/(track|album)/(\d+)", u)
+            if m:
+                kind, tid = m.group(1), m.group(2)
+                ep = "tracks" if kind == "track" else "albums"
+                async with _HTTP.ashared() as c:
+                    r, _cc = await _tidal_get(c, f"{_TIDAL_API}/{ep}/{tid}", {})
+                    if r is not None and r.status_code == 200:
+                        d = r.json()
+                        if kind == "track" and d.get("isrc"):
+                            return f"isrc:{d['isrc']}"
+                        if kind == "album" and d.get("upc"):
+                            return f"upc:{d['upc']}"
             return _fallback()
 
         if "music.apple.com" in host:
@@ -3007,7 +3147,7 @@ async def isrc_upgrade(body: dict):
 
     # 5. Tidal — fuzzy title+artist (the v1 user API has no clean ISRC endpoint)
     try:
-        if _tidal_headers():
+        if _tidal_configured():
             q = f"{artist} {title}".strip()
             td = await _search_tidal(q, "track", 3)
             for item in (td.get("results") or [])[:1]:

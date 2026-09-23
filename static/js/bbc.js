@@ -56,6 +56,7 @@ const BBC = {
   hls:         null,
   pid:         null,
   title:       null,
+  artist:      null,
   art:         null,
   duration:    0,
   inited:      false,
@@ -194,12 +195,15 @@ function bbcCard(ep) {
   const pid   = ep.pid  || '';
   const vpid  = ep.vpid || '';
   const brandLabel = (BBC.brands.find(b => b.id === BBC.activeBrand) || {}).label || '';
-  const imgAttr = img ? `src="${esc(img)}"` : '';
+  // src есть ВСЕГДА: без него <img> молча стоит пустым окном (onerror на
+  // отсутствующий src не стреляет), а плитка-заглушка честна и переживаема —
+  // MixesDB-кадр и возврат родного идут через тот же onerror-контур.
+  const imgAttr = `src="${esc(img || _BBC_TILE)}"`;
   // Будущий эфир записывается с LIVE-потока канала (планировщик — bbc_schedule).
   const start = _bbcLiveFuture(ep);
   const keyAttr = start ? `data-key="${esc((ep.channel||'')+'|'+start)}"` : '';
   return `
-  <div id="bbccard-${pid}" data-bbc-pid="${pid}" data-bbc-upcoming="${ep.upcoming?1:''}" data-bbc-title="${_escA(title)}" data-bbc-artist="${_escA(sub)}" data-bbc-img="${_escA(img)}" data-bbc-vpid="${_escA(vpid)}" data-bbc-brand="${_escA(brandLabel)}" data-bbc-date="${_escA(date)}"
+  <div id="bbccard-${pid}" class="bbc-card" data-bbc-pid="${pid}" data-bbc-upcoming="${ep.upcoming?1:''}" data-bbc-title="${_escA(title)}" data-bbc-artist="${_escA(sub)}" data-bbc-img="${_escA(img)}" data-bbc-vpid="${_escA(vpid)}" data-bbc-brand="${_escA(brandLabel)}" data-bbc-date="${_escA(date)}"
     style="background:var(--surface);border:1px solid var(--border);border-radius:12px;overflow:hidden;transition:border-color .15s"
     onmouseenter="this.style.borderColor='var(--border2)'" onmouseleave="this.style.borderColor='var(--border)'">
     <div style="position:relative;cursor:pointer" onclick="_bbcOpenMix('${pid}','${vpid}','${_esc(title)}','${_esc(sub)}','${_esc(img)}',${ep.duration||0},'${_esc(date)}')" title="${t('b.open_mix')}">
@@ -359,6 +363,29 @@ function _bbcCover(url, px) {
   return (typeof relCover === 'function') ? relCover(url, px) : url;
 }
 
+// Честная заглушка «своего дома»: SVG-плитка 320×320 (📻 на тёмном поле) как
+// data-URI. Когда картинки нет ни у выпуска, ни у бренда (бэкенд подставляет
+// бренд — routes/bbc.py:_fill_missing_images), интерфейс показывает нейтральную
+// плитку того же размера, а не пустое окно без src и не битый кадр.
+const _BBC_TILE = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(
+  '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="320">' +
+  '<rect width="320" height="320" fill="#26262c"/>' +
+  '<text x="160" y="196" font-size="96" text-anchor="middle">📻</text></svg>');
+
+// Снимок текущего BBC-эфира для развёрнутого плеера. Плеер читает визуал из
+// Preview.queue, а BBC играет ВНЕ очереди (свой <audio id="bbc-audio">, свои
+// кнопки — см. bbcPlay). Чтобы у BBC был тот же кадр и размытая подложка, что
+// у остальных сервисов, player.js:fpSyncFromState спрашивает нас здесь.
+function _bbcFpItem() {
+  const titleStr = (BBC.artist && BBC.title) ? `${BBC.title} — ${BBC.artist}` : (BBC.title || '');
+  return {
+    title:  titleStr,
+    artist: '📻 BBC Sounds',
+    label:  'BBC Sounds',
+    cover:  _bbcCover(BBC.art, 1000) || _BBC_TILE,
+  };
+}
+
 // Нет картинки / не грузится → нейтральная плашка 📻. Специально НЕ подставляем
 // чужой кадр: серый квадрат честнее обложки от другой передачи. Если сорвался
 // подставленный MixesDB-кадр, сначала возвращаем родную обложку BBC.
@@ -395,9 +422,10 @@ async function bbcPlay(pid, vpid, title, artist, art) {
   Preview.idx   = -1;
   Preview.mode  = 'bbc';
 
-  BBC.pid   = pid;
-  BBC.title = title;
-  BBC.art   = art;
+  BBC.pid    = pid;
+  BBC.title  = title;
+  BBC.artist = artist || '';
+  BBC.art    = art;
 
   // Update global player UI
   const titleStr = artist ? `${title} — ${artist}` : title;
@@ -406,17 +434,20 @@ async function bbcPlay(pid, vpid, title, artist, art) {
   document.getElementById('pp-title-big').textContent  = titleStr;
   document.getElementById('pp-artist-big').textContent = '📻 BBC Sounds';
   // Обложка в плеер: полосе хватает 320, развёрнутый плеер большой — там крупный
-  // кадр (1024; 1000×1000 ichef не отдаёт).
+  // кадр (1024; 1000×1000 ichef не отдаёт). Своей картинки нет — плитка-заглушка,
+  // а не пустой квадрат.
   ['pp-art','pp-art-big'].forEach(id => {
     const el = document.getElementById(id); if (!el) return;
-    const url = art ? _bbcCover(art, id === 'pp-art-big' ? 1000 : 320) : '';
-    el.innerHTML = url
-      ? `<img src="${esc(url)}" onerror="_bbcCoverFail(this)" style="width:100%;height:100%;object-fit:cover"/>`
-      : '📻';
+    const url = _bbcCover(art, id === 'pp-art-big' ? 1000 : 320) || _BBC_TILE;
+    el.innerHTML = `<img src="${esc(url)}" onerror="_bbcCoverFail(this)" style="width:100%;height:100%;object-fit:cover"/>`;
   });
-  ['pp-fill','pp-fill-big'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = '0%'; });
-  ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = (id==='pp-cur') ? '0:00.000' : '0:00'; });
-  ['pp-dur','pp-dur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '0:00'; });
+  // Развёрнутый плеер (обложка + размытая подложка) живёт состоянием
+  // Preview.queue, а BBC — вне очереди. Просим плеер перерисоваться: он сам
+  // спросит у нас снимок через _bbcFpItem() (см. player.js:fpSyncFromState).
+  try { if (typeof fpSyncFromState === 'function') fpSyncFromState(); } catch {}
+  ['pp-fill','pp-fill-big','fp-fill'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = '0%'; });
+  ['pp-cur','pp-cur-big','fp-cur'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = (id==='pp-cur') ? '0:00.000' : '0:00'; });
+  ['pp-dur','pp-dur-big','fp-dur'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '0:00'; });
 
   const playBtn  = document.getElementById('pp-play');
   const playBtnB = document.getElementById('pp-play-big');
@@ -512,7 +543,7 @@ function _bbcTimeUpdate() {
   const pct    = dur ? (cur / dur * 100) + '%' : '0%';
   const curStr = _bbcFmtDur(cur);
   const durStr = _bbcFmtDur(dur);
-  ['pp-fill','pp-fill-big'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = pct; });
+  ['pp-fill','pp-fill-big','fp-fill'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = pct; });
   // BBC plays through its own <audio id="bbc-audio">, deliberately NOT read by
   // the shared rAF ms-loop (_ppMsLoop — see its comment), so #pp-cur is owned
   // here instead. Match the M:SS.mmm format the loop uses elsewhere so pausing
@@ -522,7 +553,9 @@ function _bbcTimeUpdate() {
   if (curEl) curEl.innerHTML = _i>0 ? curMs.slice(0,_i)+'<span class="pp-ms">'+curMs.slice(_i)+'</span>' : curMs;
   const curBigEl = document.getElementById('pp-cur-big');
   if (curBigEl) curBigEl.textContent = curStr;
-  ['pp-dur','pp-dur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = durStr; });
+  const fpCurEl = document.getElementById('fp-cur');
+  if (fpCurEl) fpCurEl.textContent = curStr;
+  ['pp-dur','pp-dur-big','fp-dur'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = durStr; });
   _mixPosSave('bbc:' + (BBC.pid || ''), cur, dur);
   // 1001Tracklists chapters: highlight current track + draw ticks once duration known.
   if (typeof _updateCurrentChapter === 'function') _updateCurrentChapter(cur);
@@ -654,6 +687,9 @@ function _bbcOpenMix(pid, vpid, title, artist, art, dur, date) {
   const schedBtn = (card && card.dataset.bbcUpcoming === '1')
     ? (card.querySelector('.bbc-sched-btn')?.outerHTML || '') : '';
   d.innerHTML = _bbcDetailHTML(pid, vpid, title, artist, art, dur, date, schedBtn);
+  // Панель в тон обложке — как у панелей поиска/артиста (cookies_ui) и
+  // SoundCloud: тот же краситель из cover_tint, чужих кадров не подставляем.
+  if (typeof tintDetailPanel === 'function') tintDetailPanel(art ? _bbcCover(art, 480) : '');
   bd.style.display = 'block'; bd.classList.add('show');
   requestAnimationFrame(() => { d.classList.add('open'); d.style.transform = 'translateX(0)'; });
   if (schedBtn) _bbcApplySchedLabels();

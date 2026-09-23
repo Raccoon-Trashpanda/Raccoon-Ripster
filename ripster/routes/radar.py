@@ -43,6 +43,7 @@ from fastapi import APIRouter, Query
 
 from ripster import artist_identity as _ident
 from ripster import compilations as _comps
+from ripster import owner_anchor as _anchor
 
 router = APIRouter()
 _s: dict = {}
@@ -70,6 +71,9 @@ def install(app, ctx) -> None:
         # кроме строки имени.
         "base_dir": ctx.base_dir,
     })
+    # Якорь владельца судит по его же фонотеке: `ripster_stats.db`,
+    # `rel_favorites.json`, `stations.db` лежат рядом со складом радара.
+    _anchor.configure(ctx.base_dir)
     _load_cache()
     app.include_router(router)
 
@@ -159,13 +163,17 @@ def _durable_save(store: dict) -> None:
         print(f"[radar] store save error: {e}", flush=True)
 
 
-def _durable_merge(source: str, fresh: list, days: int) -> list:
+async def _durable_merge(source: str, fresh: list, days: int) -> list:
     """Слить свежую выдачу источника со складом и отдать окно в `days`.
 
     Свежие записи ОБНОВЛЯЮТ складские (у релиза могла уточниться дата или
     обложка), но никогда их не удаляют: отсутствие в текущем ответе означает
     лишь «источник больше не показывает», а не «релиза не было».
+
+    До слияния — шаг доказательств (`_anchor_evidence`): уточнённые карточки
+    уходят на склад уже с лейблом/жанром, и следующее чтение не переспрашивает.
     """
+    await _anchor_evidence(fresh or [])
     store = _durable_load()
     bucket = store.get(source) or {}
     for r in (fresh or []):
@@ -199,8 +207,8 @@ def _identity_filter(source: str, rels: list) -> list:
     Ловит три беды прежних версий:
       • карточки name-сшивки (`via_xref`) — их id никогда не подтверждался
         общими работами, это и были чужие однофамильцы в ленте;
-      • карточки со склеенной Apple-страницы подписки, где релиз принадлежит
-        другому человеку с тем же именем;
+      • карточки со склеенной страницы подписки, где релиз принадлежит другому
+        человеку с тем же именем;
       • карточки лейбловой ленты (`via_label`), у которых на подписку указывает
         ТОЛЬКО строка имени — их гейт по `via_xref` молча пропускал, и так в
         подписке на рэпера «BOP» жил dnb-релиз Hospital Records (21.09.2026).
@@ -208,35 +216,28 @@ def _identity_filter(source: str, rels: list) -> list:
     Ничего не удаляется: запись остаётся в складе (иначе мы теряем находку —
     см. ripster-radar-persistence) и становится видна владельцу в /api/identity
     как скрытая с причиной.
-    """
-    entries = _s.get("watchlist") or []
-    catalog = (_ident.load_catalog(_s["base_dir"])
-               if _s.get("base_dir") else {})
-    by_aid = {}
-    for e in entries:
-        aid = str(e.get("artist_id") or "")
-        if aid and e.get("kind") != "label":
-            by_aid.setdefault(aid, e)
 
-    touched, out = False, []
-    for r in rels:
-        if not _ident.stitch_shows(r, entries):
-            continue
-        if not _ident.name_claim_shows(r, entries, catalog)[0]:
-            continue
-        entry = None
-        if str(r.get("service") or "") == "apple":
-            entry = by_aid.get(str(r.get("artist_id") or ""))
-        if entry is not None:
-            ok, why = _ident.home_show(entry, r)
-            if not ok:
-                _ident.hidden_add(entry, r, why)
-                touched = True
-                continue
-        out.append(r)
-    if touched and _s.get("save_watchlist"):
-        _s["save_watchlist"](entries)
-    return out
+    С 23.09.2026 правило живёт в `artist_identity.feed_filter`: та же дверь
+    обязана стоять и на кросс-сервисных лентах Deezer/Qobuz/Tidal, а не только
+    на радарном складе — иначе жалоба «не тот Соломон» переживает любую правку
+    здесь. `source` остался в сигнатуре для вызывающего кода складов.
+    """
+    return _ident.feed_filter(rels, _s.get("watchlist") or [],
+                              _s.get("base_dir"), _s.get("save_watchlist"))
+
+
+async def _anchor_evidence(rels: list) -> None:
+    """Добать лейбл/жанр карточкам, о которых витрина в списке молчит.
+
+    Правило якоря судит по доказательствам: без этого шага ленты, где у
+    карточки нет ни лейбла, ни жанра (Deezer отдаёт список релизов вообще без
+    них), вечно проходили бы с вердиктом «нечем судить». Один публичный запрос
+    на карточку, ответ — на диск: во второй раз лента читается сразу.
+    """
+    try:
+        await _anchor.evidence(rels)
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[radar] обогащение карточек: {e}", flush=True)
 
 
 @router.get("/api/identity")
@@ -250,6 +251,10 @@ async def identity_report():
     entries = _s.get("watchlist") or []
     rep = _ident.summary(entries)
     rep["ok"] = True
+    # Счётчики исходов правила — против того, чтобы «скрыто 12» выглядело
+    # победой: сколько карточек правило НЕ тронуло, потому что судить было нечем.
+    rep["counters"] = _anchor.counters()
+    rep["dropped"] = _ident.dropped_cards(30)
     return rep
 
 
@@ -260,6 +265,10 @@ async def identity_choice(body: dict):
     Данные показывают на id двух человек, но не показывают, какого из них он
     хотел, когда подписывался. Скрываем ровно названные им лейбловые группы;
     карточки не удаляются, а помечаются, и выбор переживает перезагрузку.
+
+    `show_titles` — обратный ход: вернуть карточку, спрятанную автоправилом
+    якоря. Решение человека стоит выше правила, поэтому возврат не перекрывается
+    ни следующим сканом, ни новым вердиктом витрины.
     """
     entries = _s.get("watchlist") or []
     want = str(body.get("name") or "").strip()
@@ -271,7 +280,8 @@ async def identity_choice(body: dict):
         return {"ok": False, "error": "watchlist entry not found"}
     for e in hit:
         _ident.set_choice(e, hide=body.get("hide"),
-                          hide_titles=body.get("hide_titles"))
+                          hide_titles=body.get("hide_titles"),
+                          show_titles=body.get("show_titles"))
     if _s.get("save_watchlist"):
         _s["save_watchlist"](entries)
     return {"ok": True, "updated": len(hit),
@@ -440,7 +450,7 @@ async def releases_bbc(days: int = Query(90, ge=1, le=365),
                                    return_exceptions=True)
     releases = [r for res in results if isinstance(res, list) for r in res]
     # Склад: то, что источник уже не показывает, всё равно остаётся.
-    releases = _durable_merge("bbc", releases, days)
+    releases = await _durable_merge("bbc", releases, days)
     return _store(key, {"ok": True, "releases": releases,
                         "sources": len(BRANDS)})
 
@@ -560,6 +570,11 @@ async def releases_upcoming(days: int = Query(120, ge=1, le=400),
     out = [r for r in store.values()
            if not r.get("released") and today < (r.get("date") or "") <= horizon]
     out.sort(key=lambda r: r.get("date", ""))
+    # Та же дверь, что и у остальных источников: предзаказ чужого однофамильца
+    # владельцу не нужен, а «скрытый» кластер из грядущего возвращался бы каждый
+    # раз, когда витрина показывает его заранее.
+    await _anchor_evidence(out)
+    out = _identity_filter("upcoming", out)
 
     if added or released:
         print(f"[upcoming] источников {len(used)}, новых {added}, "
@@ -671,7 +686,7 @@ async def releases_soundcloud(days: int = Query(90, ge=1, le=365),
                                    return_exceptions=True)
     releases = [r for res in results if isinstance(res, list) for r in res]
     # Склад: то, что источник уже не показывает, всё равно остаётся.
-    releases = _durable_merge("soundcloud", releases, days)
+    releases = await _durable_merge("soundcloud", releases, days)
     return _store(key, {"ok": True, "releases": releases,
                         "sources": len(entries)})
 
@@ -811,17 +826,19 @@ async def _apple_artist_albums(client, artist_id: str, storefront: str,
 
 async def _apple_catalog_boost(client, artist_id: str, storefront: str,
                                bearer: str, albums: dict) -> None:
-    """Каталог с bearer из конфига: точные genreNames и честный isCompilation.
-    Публичный lookup называет жанром только один тег, а каталог — весь список,
-    и именно там миксы лежат под «DJ-Mixes». Молча проходим мимо, если
-    токена нет или каталог его не принимает."""
+    """Каталог с bearer из конфига: точные genreNames, честный isCompilation и
+    recordLabel. Публичный lookup называет жанром только один тег, а каталог —
+    весь список, и именно там миксы лежат под «DJ-Mixes»; `recordLabel` там же —
+    публичный lookup лейбла не отдаёт вовсе. Молча проходим мимо, если токена нет
+    или каталог его не принимает."""
     if not bearer:
         return
     hdr = {"Authorization": f"Bearer {bearer}", "Origin": "https://music.apple.com",
            "Accept": "application/json"}
     params = {"limit": "25",
               "fields[albums]": "name,artistName,artworkUrl100,releaseDate,"
-                                "trackCount,isCompilation,isSingle,genreNames,url"}
+                                "trackCount,isCompilation,isSingle,genreNames,"
+                                "recordLabel,url"}
     off = 0
     for _ in range(4):                            # ≤100 релизов на артиста
         try:
@@ -845,10 +862,15 @@ async def _apple_catalog_boost(client, artist_id: str, storefront: str,
                                    "artist": a.get("artistName", ""),
                                    "date": (a.get("releaseDate", "") or "")[:10],
                                    "cover": _apple_cover(a), "url": a.get("url", ""),
-                                   "genres": [], "track_count": a.get("trackCount"),
+                                   "genres": [], "label": "",
+                                   "track_count": a.get("trackCount"),
                                    "is_compilation": bool(a.get("isCompilation")),
                                    "track_times": []}
             g["genres"] = list(a.get("genreNames") or []) or g["genres"]
+            # Лейбл — доказательство для правила якоря (23.09): у Aruna жанры
+            # подписки склеены в кашу, а «Enhanced Recordings» на карточке
+            # отличает её транс от телугу-певца с тем же именем.
+            g["label"] = str(a.get("recordLabel") or "") or g.get("label") or ""
             g["is_compilation"] = bool(a.get("isCompilation"))
             g["track_count"] = a.get("trackCount") or g["track_count"]
             g["cover"] = g["cover"] or _apple_cover(a)
@@ -954,6 +976,11 @@ def _apple_mix_item(a: dict, entry: dict, why: str) -> dict:
         "cover":     a.get("cover", ""),
         "url":       url,
         "service":   "apple",
+        # Доказательства для правила якоря (`artist_identity.anchor_show`):
+        # без них карточка нечем не отвечает на вопрос «чьё это» и проходит
+        # молча — а должна быть видна в отчёте как «нечем судить».
+        "label":     str(a.get("label") or ""),
+        "genres":    list(a.get("genres") or []),
     }
 
 
@@ -987,7 +1014,7 @@ async def releases_apple(days: int = Query(90, ge=1, le=365),
     async with httpx.AsyncClient(timeout=20) as client:
         got = await collect_apple_mixes(client, entries, storefront, bearer,
                                         days, with_comps)
-    uniq = _durable_merge("apple_mixes", got["mixes"], days)
+    uniq = await _durable_merge("apple_mixes", got["mixes"], days)
     return _store(key, {"ok": True, "releases": uniq, "sources": len(entries),
                         "rejected": len(got["rejected"])})
 
@@ -1109,5 +1136,5 @@ async def releases_labels(days: int = Query(90, ge=1, le=9999),
         uniq.append(r)
     uniq.sort(key=lambda x: x["date"], reverse=True)
     # Склад: то, что источник уже не показывает, всё равно остаётся.
-    uniq = _durable_merge("labels", uniq, days)
+    uniq = await _durable_merge("labels", uniq, days)
     return _store(key, {"ok": True, "releases": uniq, "sources": len(entries)})

@@ -615,6 +615,13 @@ function buildQueueItem(task) {
     (task.status==='done' ? `<button class="dl-action-btn dl-cloud-btn" onclick="uploadToCloud('${task.id}',this)" title="${t('q.gofile')}" style="--c:#f0a050">🔗${(task._dl_gofile||0)>0?`<span class="dl-cnt">${task._dl_gofile}</span>`:''}</button>` : '') +
     ((task.status==='error'||task.status==='cancelled'||_partial) ? `<button class="dl-action-btn" onclick="retryTask('${task.id}')" title="↺ ${t('q.retry_missing')}" style="--c:#ffd60a">↺</button>` : '');
 
+  // Кнопки действий (qi-actions) идут справа от строки, у крестика: владелец
+  // просил «крестики справа от трека, а не снизу». Селектор
+  // .qi .qi-actions .dl-cloud-btn в player_lib.js ищет по потомкам, так что
+  // смена уровня вложенности его не задевает. Держать здесь пояснение
+  // HTML-комментарием нельзя: внутри шаблонной строки это уже не комментарий,
+  // а текст — он уезжает в DOM каждого ряда и взрывается на обратных кавычках
+  // (08.08.2026 очередь перестала рисоваться целиком).
   el.innerHTML = `
     <div class="qi-art">${m?.artworkUrl?`<img src="${esc(m.artworkUrl)}" data-cover data-lightbox onload="this.classList.add('loaded')" style="cursor:zoom-in" loading="lazy"/>`:'🎵'}</div>
     <div class="qi-body">
@@ -633,14 +640,6 @@ function buildQueueItem(task) {
       ${typeof qtPanel === 'function' ? qtPanel(task) : ''}
       ${logLines.length?`<div class="qi-log-panel" id="qi-log-${task.id}">${logHtml}</div>`:''}
     </div>
-    <!-- Кнопки действий вынесены из нижней строки вправо, к крестику: владелец
-         просил «крестики справа от трека, а не снизу». Селектор
-         .qi .qi-actions .dl-cloud-btn в player_lib.js ищет по потомкам, так
-         что смена уровня вложенности его не задевает.
-         ВНИМАНИЕ: это HTML-комментарий ВНУТРИ шаблонной строки, то есть всё
-         ещё JavaScript. Обратные кавычки здесь ставить нельзя — они закрывают
-         строку, и следующий за ними текст разбирается как код. Именно так
-         08.08.2026 очередь перестала рисоваться целиком. -->
     <div class="qi-actions">${_acts}</div>
     <button class="qi-close owner-only" onclick="removeTask('${task.id}')" title="${t('q.remove')}">✕</button>
   `;

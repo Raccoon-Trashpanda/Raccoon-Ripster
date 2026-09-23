@@ -843,15 +843,6 @@ function _acctLabel(a) {
   return s || a.label || '';
 }
 
-// `t` на неизвестный ключ возвращает сам ключ — в интерфейсе это выглядит как
-// сломанная подпись. Эти строки появились вместе с вводом по токену, а
-// словарь i18n.js ведёт другая задача, поэтому до его обновления показываем
-// русский текст из разметки (там он стоит значением по умолчанию).
-function _tOr(key, fallback) {
-  const v = t(key);
-  return v === key ? fallback : v;
-}
-
 function acctDragHandle() {
   return `<span class="acct-drag" tabindex="0" role="button" draggable="false"
       title="${escapeHtml(t('acc.drag_hint'))}" aria-label="${escapeHtml(t('acc.drag_hint'))}"
@@ -1039,7 +1030,7 @@ async function loadAppleAccounts() {
       const token = a.kind === 'token';
       const dot = token ? 'var(--muted2)'
                         : (a.busy ? 'var(--orange)' : (a.running ? 'var(--green)' : 'var(--muted)'));
-      const state = token ? _tOr('acc.token_only', 'токен · каталог/тексты/AAC, без ALAC')
+      const state = token ? t('acc.token_only')
                           : (a.busy ? t('acc.busy') : (a.running ? t('acc.ready') : t('acc.not_started')));
       return `
       <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
@@ -1070,9 +1061,7 @@ async function addAppleAccount() {
     const tokEl = document.getElementById('s-apple-pool-token');
     if (tokEl) tokEl.value = id;
     [emailEl, passEl, labelEl].forEach(el => { if(el) el.value = ''; });
-    toast(_tOr('acc.token_wrong_field',
-      'Это media-user-token, а не Apple ID — переложил его в поле «токен».'),
-      'var(--orange)');
+    toast(t('acc.token_wrong_field'), 'var(--orange)');
     return;
   }
   try {
@@ -1097,18 +1086,18 @@ async function addAppleTokenAccount() {
   const token  = (tokEl?.value || '').trim();
   const country = (ccEl?.value || '').trim().toLowerCase();
   if(!token) { toast(t('t.error'), 'var(--red)'); return; }
-  toast(_tOr('acc.token_checking', 'Проверяю токен у Apple…'), 'var(--muted)');
+  toast(t('acc.token_checking'), 'var(--muted)');
   try {
     const r = await api('POST', '/api/wrapper/accounts/add', {token, country});
     if(r.ok) {
       // Причина целиком — подписью: текст про 403/401 и про «без ALAC» в одну
       // строку не влезает, а именно он и есть ответ на вопрос «что не так».
-      toast(_tOr('acc.token_saved', 'Токен сохранён'), 'var(--green)', r.msg || '', 10000);
+      toast(t('acc.token_saved'), 'var(--green)', r.msg || '', 10000);
       [tokEl, ccEl].forEach(el => { if(el) el.value = ''; });
       loadAppleAccounts();
     } else {
       const ours = r.state === 'bad_request';
-      toast(_tOr(ours ? 'acc.token_bad_request' : 'acc.token_rejected', 'Токен не принят'),
+      toast(t(ours ? 'acc.token_bad_request' : 'acc.token_rejected'),
             ours ? 'var(--orange)' : 'var(--red)', r.msg || '', 12000);
     }
   } catch(e) { toast(t('t.error'), 'var(--red)'); }

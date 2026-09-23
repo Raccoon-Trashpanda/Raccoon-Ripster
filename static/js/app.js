@@ -759,6 +759,15 @@ async function api(method, path, body, timeoutMs) {
       const s = errKeyText(data.note_key, data.note_args);
       if (s) data.note = s;
     }
+    // И для поля `msg` dict-ответов — тот же контракт, что у WS-логов
+    // (`msg_key` + `params`, см. i18n.log_event): «мягкие» ручки пула учёток
+    // отдают русскую деталь в msg, а локализуемый смысл — в msg_key.
+    // Оригинал прячется в `msg_raw`: в нём технические подробности (код HTTP,
+    // причина), которых короткая подпись не сохраняет.
+    if (data && data.msg_key) {
+      const s = errKeyText(data.msg_key, data.params);
+      if (s) { if (data.msg_raw === undefined) data.msg_raw = data.msg; data.msg = s; }
+    }
     return data;
   } catch (_) {
     throw new Error(!r.ok ? `${t('t.server_down')} (HTTP ${r.status})` : t('t.bad_server_resp'));

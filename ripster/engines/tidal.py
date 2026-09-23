@@ -227,14 +227,320 @@ def _slot_session_path(config: dict | None) -> Path:
 # self-healing path downloads use. Falls back to the pasted token if unavailable.
 _AT_CACHE: dict = {"token": "", "exp": 0.0, "country": "", "user_id": ""}
 
-def _read_tv_session() -> dict | None:
-    """TV session dict (refresh_token/country/user_id) from the pickled
-    loginstorage. Plain dicts + datetime only — no orpheus import needed."""
+_TOKEN_URL = "https://auth.tidal.com/v1/oauth2/token"
+
+
+def _session_tv(path: Path) -> dict | None:
+    """TV-session dict (refresh_token/country/user_id) из пикл-хранилища OrpheusDL.
+    Обычные dict + datetime — импорт orpheus не нужен."""
     try:
-        blob = _pickle_loads(_session_path().read_bytes())
+        blob = _pickle_loads(path.read_bytes())
         return blob["modules"]["tidal"]["sessions"]["default"]["custom_data"]["sessions"]["TV"]
     except Exception:
         return None
+
+def _read_tv_session() -> dict | None:
+    """TV session dict (refresh_token/country/user_id) from the pickled
+    loginstorage. Plain dicts + datetime only — no orpheus import needed."""
+    return _session_tv(_session_path())
+
+
+def session_refresh_token(session_file=None) -> str:
+    """Refresh-токен, которым ЭТОТ прогон будет качать. Пусто — если сессии нет.
+
+    Растёт из файла, а не из конфига, сознательно: расхождение этих двух
+    хранилищ и есть причина аварии 23.09.2026 (см.
+    docs/TIDAL_SESSION_DIAG_2026-09-23.md), и измерять здоровье надо ровно тем,
+    что движок реально использует.
+    """
+    p = Path(session_file) if session_file else _session_path()
+    return str((_session_tv(p) or {}).get("refresh_token") or "").strip()
+
+
+def _refresh_form(refresh: str) -> dict:
+    cid, csec = _tv_client()
+    form = {"refresh_token": refresh, "client_id": cid, "grant_type": "refresh_token"}
+    if csec:
+        form["client_secret"] = csec
+    return form
+
+
+def _interpret_refresh(r) -> tuple[dict, str, bool]:
+    """Ответ токен-эндпоинта → (данные, причина отказа, отозвана ли учётка).
+
+    `revoked` — это «Tidal сказал нет по существу» (400/401/403/412: отзыв,
+    блокировка `abuse_detected`, «токен выдан другому клиенту»). С этим не спорят:
+    поможет только новый вход. Всё остальное (сеть, 429, 5xx) — свойство канала,
+    учётку за это казнить нельзя.
+    """
+    try:
+        j = r.json() if r.status_code == 200 else {}
+    except Exception:
+        j = {}
+    if r.status_code == 200 and (j.get("access_token") or "").strip():
+        return j, "", False
+    why = ""
+    try:
+        body = r.json()
+        why = str(body.get("error_description") or body.get("userMessage")
+                  or body.get("error") or "").strip()
+    except Exception:
+        why = (getattr(r, "text", "") or "").strip()[:120]
+    reason = f"HTTP {r.status_code}" + (f": {why[:120]}" if why else "")
+    return {}, reason, r.status_code in (400, 401, 403, 412)
+
+
+def _refresh_sync(refresh: str) -> tuple[dict, str, bool]:
+    """Один refresh_token-грант (для синхронного pre-flight перед прогоном)."""
+    if not refresh:
+        return {}, "нет refresh-токена", True
+    try:
+        r = _HTTP.client().post(_TOKEN_URL, data=_refresh_form(refresh), timeout=20)
+    except Exception as e:
+        return {}, f"сеть: {type(e).__name__}", False
+    return _interpret_refresh(r)
+
+
+async def _refresh_async(refresh: str) -> tuple[dict, str, bool]:
+    """То же, но из событийного цикла (путь поиска/станций)."""
+    if not refresh:
+        return {}, "нет refresh-токена", True
+    try:
+        async with _HTTP.ashared() as c:
+            r = await c.post(_TOKEN_URL, data=_refresh_form(refresh), timeout=20)
+    except Exception as e:
+        return {}, f"сеть: {type(e).__name__}", False
+    return _interpret_refresh(r)
+
+
+# ── запись ротированных/восстановленных токенов обратно в конфиг ─────────────
+# Правило владельца: «ротированные токены писать обратно». Молча жить свежим
+# токеном в памяти — это тот же дефект, что убил NZ-учётку 23.09: файл и память
+# разъезжаются, и следующий прогон (или другой процесс) берёт мёртвое значение.
+
+
+def _token_key_files():
+    from ripster import credential_health as _ch
+    return _ch._yaml_files_to_check()
+
+
+def persist_credentials(*, refresh: str = "", old_refresh: str = "", access: str = "",
+                        country: str = "", expiry: int = 0) -> bool:
+    """Сохранить новую пару токенов штатным путём продукта. True — если дошли.
+
+    Ищем НЕ «ключ tidal-refresh», а то МЕСТО, где лежит `old_refresh`: ключ живёт
+    то в config.yaml, то в tokens/tidal.yaml (это синхронизируемый снимок), и
+    слепая правка config.yaml оставила бы в tokens/ прежнее значение — приложение
+    при старте перетянет его обратно и вся починка обнулится.
+
+    Записывает ТОЛЬКО ту учётку, которой принадлежит `old_refresh`. Иначе ротация
+    refresh у слота пула молча переставила бы ОСНОВНУЮ учётку — а это ровно та
+    подмена, из-за которой `dist/tidal_pool/acct2` хранил сессию владельца.
+    """
+    old = (old_refresh or "").strip()
+    new = (refresh or "").strip()
+    if not old or not new or old == new:
+        return False                       # ротации нет — писать нечего
+    primary_updates = {"tidal-refresh": new}
+    for k, v in (("tidal-token", access), ("tidal-country", country),
+                 ("tidal-token-expiry", str(expiry) if expiry else "")):
+        if v:
+            primary_updates[k] = v
+
+    # Штатный путь продукта: точечно перечитать тот yaml, где ключ реально лежит
+    # (им же пользуется сторож здоровья), а не переписать конфиг целиком — иначе
+    # дефолты и секреты из tokens/ уехали бы в открытый config.yaml.
+    import yaml
+    from ripster.config_service import _atomic_write_yaml
+
+    wrote = False
+    for path in _token_key_files():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            continue
+        if not isinstance(data, dict):
+            continue
+        if _apply_pair(data, old, new, primary_updates) and _atomic_write_yaml(path, data):
+            wrote = True
+    if wrote:
+        # Правку сделал не основной процесс (или основной держит конфиг в памяти
+        # и перезапишет файл целиком) — просим перечитать с диска.
+        try:
+            from ripster import credential_health as _ch
+            _ch._notify_app_config_changed()
+        except Exception:
+            pass
+    return wrote
+
+
+def _apply_pair(store: dict, old: str, new: str, primary_updates: dict) -> bool:
+    """Подставить `new` туда, где хранился `old`: основная учётка или запись пула.
+    Возвращает True, если что-то изменилось."""
+    changed = False
+    if str(store.get("tidal-refresh") or "").strip() == old:
+        for k, v in primary_updates.items():
+            if str(store.get(k) or "") != str(v):
+                store[k] = v
+                changed = True
+        return changed
+    pool = store.get("tidal-accounts")
+    if isinstance(pool, list):
+        for a in pool:
+            if isinstance(a, dict) and str(a.get("refresh") or a.get("tidal-refresh")
+                                             or "").strip() == old:
+                a["refresh"] = new
+                a.pop("tidal-refresh", None)
+                changed = True
+    return changed
+
+
+def repair_session(session_file, refresh: str, country: str = "") -> dict:
+    """Перезаписать сессию OrpheusDL из заведомо живого refresh-токена.
+
+    Одна реализация на все случаи (основной прогон, слот пула, health-мерка) —
+    иначе починка разъедется с тем, чем слот заводится.
+    """
+    from ripster import tidal_pool as _tp
+    return _tp.write_session_to(Path(session_file).parent, refresh, country)
+
+
+def _adopt_minted(target: Path, stored: str, minted: dict) -> str:
+    """Ответ Tidal с ДРУГИМ refresh — починить им и сессию, и конфиг.
+
+    Tidal на этом клиенте refresh не ротирует (23.09 проверено: в ответе то же
+    значение), поэтому ветка редкая — но именно редкость и опасна: ротация без
+    записи обратно означала бы сессию, которую через сутки нечем перевыпустить.
+    """
+    new_refresh = str(minted.get("refresh_token") or "").strip()
+    user = minted.get("user") or {}
+    cc = str(user.get("countryCode") or "").upper()
+    if new_refresh and new_refresh != stored:
+        rep = repair_session(target, new_refresh, cc)
+        if rep.get("ok"):
+            persist_credentials(refresh=new_refresh, old_refresh=stored,
+                                access=str(minted.get("access_token") or ""),
+                                country=cc,
+                                expiry=int(time.time()) + int(minted.get("expires_in") or 3600))
+    return cc
+
+
+async def _orpheus_access_token(config: dict | None = None) -> tuple[str, str]:
+    """Return a FRESH (access_token, country) from the OrpheusDL TV session,
+    cached ~4 h. ('', '') if no session / refresh fails."""
+    now = time.time()
+    if _AT_CACHE["token"] and now < _AT_CACHE["exp"]:
+        return _AT_CACHE["token"], _AT_CACHE["country"]
+    target = _session_path()
+    tv = _session_tv(target)
+    cid, csec = _tv_client()
+    if not (tv and tv.get("refresh_token") and cid):
+        return "", ""
+    stored = str(tv["refresh_token"])
+    j, why, revoked = await _refresh_async(stored)
+    if not j and revoked:
+        # Сессия мертва, а учётка может быть жива: 23.09.2026 хранилище OrpheusDL
+        # и config.yaml разошлись, и поиск молча откатывался на протухший
+        # вставленный токен. Пробуем refresh ЭТОЙ конфигурации — и при успехе
+        # чиним файл, чтобы следующий прогон не повторял ту же починку.
+        alt = str((config or {}).get("_tidal_refresh")
+                  or (config or {}).get("tidal-refresh") or "").strip()
+        if alt and alt != stored:
+            j2, why2, _ = await _refresh_async(alt)
+            if j2:
+                j = j2
+                rep = repair_session(target, alt, "")
+                if rep.get("ok"):
+                    persist_credentials(refresh=alt, old_refresh=stored)
+    if not j:
+        return "", ""
+    _AT_CACHE["token"]   = j["access_token"]
+    _AT_CACHE["exp"]     = now + max(60, int(j.get("expires_in", 3600)) - 120)
+    _AT_CACHE["country"] = str(tv.get("country_code") or "").upper()
+    _AT_CACHE["user_id"] = str(tv.get("user_id") or "")
+    _adopt_minted(target, stored, j)
+    if j.get("user"):
+        _AT_CACHE["country"] = (str(j["user"].get("countryCode") or "")
+                                or _AT_CACHE["country"]).upper()
+    return _AT_CACHE["token"], _AT_CACHE["country"]
+
+
+async def _tidal_token_country(config: dict) -> tuple[str, str]:
+    """Prefer the fresh OrpheusDL-session token; fall back to the pasted one."""
+    tok, cc = await _orpheus_access_token(config)
+    if tok:
+        return tok, (cc or (config.get("tidal-country") or "US").strip().upper() or "US")
+    return ((config.get("tidal-token") or "").strip(),
+            (config.get("tidal-country") or "US").strip().upper() or "US")
+
+
+async def _api_get(c, url: str, params: dict, config: dict) -> tuple:
+    """GET Bearer'ом из живого источника → (response, token, country).
+
+    На 401 перевыпускает токен и повторяет РОВНО ОДИН раз. Раньше 401 значил
+    «Tidal: токен истёк. Обнови access_token в Settings → Tidal» — совет, который
+    не может помочь: access-токен продукту не нужен от слова «вручную», он
+    перевыпускается из refresh. Именно так станции 23.09.2026 в 18:44 и
+    отчитались смертью там, где достаточно было одного повторного запроса.
+    """
+    tok, cc = await _tidal_token_country(config)
+    p = dict(params or {})
+    p.setdefault("countryCode", cc)
+    if not tok:
+        # Ни живого, ни вставленного токена: запрос уйдёт анонимным и получит 401,
+        # который мы иначе приняли бы за «истёк». Сказали честно — пустой ответ.
+        return None, "", cc
+    r = await c.get(url, headers={"Authorization": f"Bearer {tok}"}, params=p)
+    if r.status_code == 401:
+        _AT_CACHE["token"], _AT_CACHE["exp"] = "", 0.0
+        tok2, cc2 = await _tidal_token_country(config)
+        if tok2 and tok2 != tok:
+            p["countryCode"] = cc2
+            r = await c.get(url, headers={"Authorization": f"Bearer {tok2}"}, params=p)
+            return r, tok2, cc2
+    return r, tok, cc
+
+
+def ensure_run_session(config: dict | None = None) -> str:
+    """Pre-flight ПЕРЕД запуском OrpheusDL: сессия, которой качаем, жива?
+
+    Движок (orpheus/modules/tidal) на отказе refresh не печатает ничего и
+    возвращает False, а через две секунды падает `TidalAuthError` из проверки
+    подписки — пользователь видит «переавторизуйся», тогда как настоящая причина
+    лежит в одном HTTP-ответе. Проверяем сами и чиним, пока прогон не начался:
+    стоит это один POST на загрузку против минутного процесса и трёх авто-повторов.
+
+    Возвращает строку-заметку для лога. Бросает ValueError с честной причиной,
+    когда починка невозможна (учётка отозвана Tidal).
+    """
+    config = config or {}
+    target = _slot_session_path(config)
+    stored = session_refresh_token(target)
+    if not stored:
+        return ""                                  # сессии нет — об этом скажет build_cmd
+    j, why, revoked = _refresh_sync(stored)
+    if j:
+        cc = _adopt_minted(target, stored, j)
+        return f"сессия подтверждена (country={cc or (j.get('user') or {}).get('countryCode', '?')})"
+    if not revoked:
+        # Канал, не учётка: не имеем права выдавать «переавторизуйся».
+        raise ValueError(
+            f"Tidal: токен-сервер не отвечает ({why}) — это НЕ смерть учётки, "
+            f"повтор загрузки через минуту обычно помогает.")
+    alt = str(config.get("_tidal_refresh") or config.get("tidal-refresh") or "").strip()
+    if alt and alt != stored:
+        j2, why2, _ = _refresh_sync(alt)
+        if j2:
+            rep = repair_session(target, alt, "")
+            if rep.get("ok"):
+                persist_credentials(refresh=alt, old_refresh=stored)
+                return (f"сессия была мертва ({why}); перестроена из refresh-токена "
+                        f"этой учётки")
+    raise ValueError(
+        "TIDAL_SESSION_REVOKED: Tidal отозвал сессию этой учётки "
+        f"({why}) — автоматика восстановить не может, нужен новый вход в "
+        "Settings → Tidal.")
+
 
 # OrpheusDL-tidal ships these public TV (Atmos) client creds as its module
 # defaults (orpheus/modules/tidal/interface.py). Embed them as a fallback so a
@@ -268,42 +574,6 @@ def _tv_client() -> tuple[str, str]:
 
 def _mobile_atmos_client() -> str:
     return _tidal_module_settings().get("mobile_atmos_hires_token") or _MOBILE_ATMOS_TOKEN_DEFAULT
-
-async def _orpheus_access_token() -> tuple[str, str]:
-    """Return a FRESH (access_token, country) from the OrpheusDL TV session,
-    cached ~4 h. ('', '') if no session / refresh fails."""
-    now = time.time()
-    if _AT_CACHE["token"] and now < _AT_CACHE["exp"]:
-        return _AT_CACHE["token"], _AT_CACHE["country"]
-    tv = _read_tv_session()
-    cid, csec = _tv_client()
-    if not (tv and tv.get("refresh_token") and cid):
-        return "", ""
-    try:
-        async with _HTTP.ashared() as c:
-            r = await c.post(
-                "https://auth.tidal.com/v1/oauth2/token",
-                data={"refresh_token": tv["refresh_token"], "client_id": cid,
-                      "client_secret": csec, "grant_type": "refresh_token"},
-            )
-        if r.status_code != 200:
-            return "", ""
-        j = r.json()
-        _AT_CACHE["token"]   = j["access_token"]
-        _AT_CACHE["exp"]     = now + max(60, int(j.get("expires_in", 3600)) - 120)
-        _AT_CACHE["country"] = (tv.get("country_code") or "").upper()
-        _AT_CACHE["user_id"] = str(tv.get("user_id") or "")
-        return _AT_CACHE["token"], _AT_CACHE["country"]
-    except Exception:
-        return "", ""
-
-async def _tidal_token_country(config: dict) -> tuple[str, str]:
-    """Prefer the fresh OrpheusDL-session token; fall back to the pasted one."""
-    tok, cc = await _orpheus_access_token()
-    if tok:
-        return tok, (cc or (config.get("tidal-country") or "US").strip().upper() or "US")
-    return ((config.get("tidal-token") or "").strip(),
-            (config.get("tidal-country") or "US").strip().upper() or "US")
 
 
 # ── patterns ──────────────────────────────────────────────────────────────────
@@ -543,6 +813,14 @@ class TidalEngine(EngineBase):
                 "TIDAL_NOT_AUTHED: войди в Tidal в Settings → Tidal "
                 "(TV-логин через link.tidal.com или mobile логин/пароль)"
             )
+        # Pre-flight: сессия ЭТОГО прогона жива? Молча запускать OrpheusDL на
+        # мёртвой сессии нельзя: он не печатает причину отказа refresh (у TV-ветки
+        # её просто нет) и падает через 5 секунд с «переавторизуйся», тогда как
+        # настоящая причина — в одном HTTP-ответе. Авария 23.09.2026 (403
+        # abuse_detected у новозеландской учётки) выглядела ровно так.
+        self._session_note = ensure_run_session(config)
+        if self._session_note:
+            print(f"[tidal] {self._session_note}", flush=True)
 
         save_path = config.get("tidal-save-path") or config.get("save-path") or ""
         orpheus_quality = _QUALITY_ORPHEUS.get(quality, "lossless")
@@ -564,6 +842,7 @@ class TidalEngine(EngineBase):
         # Раннер читает abort_reason после каждой строки и глушит процесс
         # (см. ProcessRunner._engine_wants_abort).
         self.abort_reason = ""
+        self._session_note = ""
         self._perm_fails = 0
         self._auth_fails = 0
         self._saved = 0
@@ -753,20 +1032,15 @@ class TidalEngine(EngineBase):
         return uniq or ["FLAC"]
 
     async def search(self, query: str, search_type: str, limit: int, config: dict) -> list[dict]:
-        import httpx as _httpx
-        token, country = await _tidal_token_country(config)
-        if not token:
-            return []
-        headers  = {"Authorization": f"Bearer {token}"}
         type_map = {"album": "albums", "track": "tracks", "artist": "artists"}
         t_type   = type_map.get(search_type, "albums")
         try:
             async with _HTTP.ashared() as c:
-                r = await c.get(
-                    f"https://api.tidal.com/v1/search/{t_type}",
-                    headers=headers,
-                    params={"query": query, "limit": limit, "countryCode": country},
-                )
+                r, token, country = await _api_get(
+                    c, f"https://api.tidal.com/v1/search/{t_type}",
+                    {"query": query, "limit": limit}, config)
+                if r is None:
+                    return []
                 if r.status_code == 401:
                     return []
                 data = r.json()
@@ -820,12 +1094,6 @@ class TidalEngine(EngineBase):
             return []
 
     async def get_artist(self, artist_id: str, types: str, config: dict) -> dict:
-        import httpx as _httpx
-        token, country = await _tidal_token_country(config)
-        if not token:
-            return {"error_key": "err.tidal_no_token_cfg",
-                    "error": "Tidal access_token не настроен", "releases": []}
-        headers = {"Authorization": f"Bearer {token}"}
         wanted  = {t.strip() for t in types.split(",") if t.strip()} if types else set()
         # `all` = «без фильтра», а не тип релиза. Ниже идёт прямое сравнение
         # `type_norm not in wanted`, поэтому без этой нормализации выбор «все
@@ -836,12 +1104,17 @@ class TidalEngine(EngineBase):
         import asyncio as _aio
         try:
             async with _HTTP.ashared() as c:
-                info_r = await c.get(f"https://api.tidal.com/v1/artists/{artist_id}",
-                                     headers=headers, params={"countryCode": country})
+                info_r, token, country = await _api_get(
+                    c, f"https://api.tidal.com/v1/artists/{artist_id}", {}, config)
+                if info_r is None:
+                    return {"error_key": "err.tidal_no_token_cfg",
+                            "error": "Tidal access_token не настроен", "releases": []}
                 if info_r.status_code == 401:
                     return {"error_key": "err.tidal_token_expired",
-                            "error": "Tidal: токен истёк. Обнови access_token в Settings → Tidal.",
+                            "error": "Tidal: токен не принят даже после перевыпуска — "
+                                     "обнови вход в Settings → Tidal.",
                             "releases": []}
+                headers = {"Authorization": f"Bearer {token}"}
                 info = info_r.json()
                 aname = (info.get("name") or "").strip().lower()
 
@@ -937,19 +1210,18 @@ class TidalEngine(EngineBase):
             return {"error": str(e), "releases": []}
 
     async def get_album(self, album_id: str, config: dict) -> dict:
-        import httpx as _httpx
-        token, country = await _tidal_token_country(config)
-        if not token:
-            return {"error_key": "err.tidal_no_token_cfg",
-                    "error": "Tidal access_token не настроен"}
-        headers = {"Authorization": f"Bearer {token}"}
         try:
             async with _HTTP.ashared() as c:
-                alb_r = await c.get(f"https://api.tidal.com/v1/albums/{album_id}",
-                                    headers=headers, params={"countryCode": country})
+                alb_r, token, country = await _api_get(
+                    c, f"https://api.tidal.com/v1/albums/{album_id}", {}, config)
+                if alb_r is None:
+                    return {"error_key": "err.tidal_no_token_cfg",
+                            "error": "Tidal access_token не настроен"}
                 if alb_r.status_code == 401:
                     return {"error_key": "err.tidal_token_expired",
-                            "error": "Tidal: токен истёк. Обнови access_token в Settings → Tidal."}
+                            "error": "Tidal: токен не принят даже после перевыпуска — "
+                                     "обнови вход в Settings → Tidal."}
+                headers = {"Authorization": f"Bearer {token}"}
                 a = alb_r.json()
                 tr_r = await c.get(f"https://api.tidal.com/v1/albums/{album_id}/tracks",
                                    headers=headers,

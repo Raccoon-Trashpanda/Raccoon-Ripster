@@ -42,7 +42,7 @@ _loaded = False
 #: id найдены навсегда, промахи — на 2 недели (артиста могли ещё не завести).
 _TTL_MISS = 14 * 24 * 3600.0
 
-#: Хосты сервисов в url-rels → наш ключ + как достать id из ссылки.
+#: Хосты сервисов в url-rels → наш ключ. Как из ссылки достать id — `_service_id`.
 _SVC_HOST = {
     "deezer.com": "deezer", "tidal.com": "tidal", "listen.tidal.com": "tidal",
     "open.spotify.com": "spotify", "music.apple.com": "apple",
@@ -53,6 +53,44 @@ _SVC_HOST = {
 #: Витрины, чьи id мы вообще умеем доставать из ссылок (Apple — страница
 #: подписки, её id лежит в вишлисте, поэтому и в разборе он участвует).
 _SVC_ORDER = ("apple", "spotify", "deezer", "tidal", "qobuz")
+
+#: Сегменты пути, после которых на всех витринах лежит id артиста.
+_ID_MARKERS = ("artist", "user", "interpreter")
+_ID_MARKER_RE = re.compile(r"/(?:%s)/(.*)$" % "|".join(_ID_MARKERS))
+#: У этих двух между маркером и числовым id стоит слаг — id берётся с конца.
+_ID_AT_TAIL = ("apple", "qobuz")
+
+
+def _service_id(service: str, url: str) -> str:
+    """id артиста из ссылки витрины; "" — ссылка без id.
+
+    Одна регулярка на все витрины не работала: у Apple путь
+    /us/artist/<slug>/<numeric>, у Qobuz — /<locale>/interpreter/<slug>/<id>,
+    а SoundCloud вообще даёт художнику голый слаг без всякого маркера. Поэтому
+    для Apple/Qobuz id — ПОСЛЕДНИЙ сегмент после маркера, для остальных —
+    сегмент сразу за ним, а SoundCloud (маркера нет) — последний сегмент пути.
+    """
+    path = url.split("?", 1)[0].split("#", 1)[0]
+    m = _ID_MARKER_RE.search(path)
+    if m:
+        segs = [s for s in m.group(1).split("/") if s]
+        sid = (segs[-1] if service in _ID_AT_TAIL else segs[0]) if segs else ""
+    elif service == "soundcloud":
+        segs = [s for s in path.split("/") if s]
+        sid = segs[-1] if segs else ""
+    else:
+        sid = ""
+    return sid.rstrip(".")
+
+
+def _rels_key(mbid: str) -> str:
+    """Ключ кэша ссылок: формат id в записях — часть контракта.
+
+    Меняем вместе со способом доставать id: старые записи держат slug Apple
+    («nasaya» вместо 286581445) и пустые soundcloud/qobuz, а hits не протухают
+    никогда — без смены ключа починка до уже опознанных артистов бы не дошла.
+    """
+    return f"rels3::{mbid}"
 
 
 def configure(base_dir: Path) -> None:
@@ -123,7 +161,11 @@ def _genre_score(cand: dict, genre_hint: str) -> int:
         return 0
     hay = " ".join([t.get("name", "") for t in (cand.get("tags") or [])]
                    + [cand.get("disambiguation", "")]).lower()
-    return sum(1 for w in hint if w in hay)
+    # Совпадение — СЛОВО, а не подстрока: «rap» не имеет права засчитываться за
+    # тег «trap» (и «left» за «deathmetal»), иначе разведение одноимённых по
+    # жанру приписывает рэп-артисту электронщика и наоборот.
+    words = set(re.findall(r"[a-z0-9]+", hay))
+    return sum(1 for w in hint if w in words)
 
 
 def search_artist(name: str, genre_hint: str = "") -> Optional[dict]:
@@ -180,7 +222,8 @@ def artist_service_ids(mbid: str) -> dict:
     `ids` — ВСЕ id этой витрины, которые у артиста есть, а не первый: Robert
     Hood висит на двух deezer-id (182613 и 284523761) одновременно, и, оставив
     в карте один, мы сами лишим себя доказательства, что это ОДИН человек, а
-    не два однофамильца. `id` оставлен первым — прежний контракт вызывающих.
+    не два однофамильца. `id` — первый найденный, а `url` — та ссылка,
+    которая его несёт (прежний контракт вызывающих: один id на витрину).
 
     Пусто — ссылок нет (это «не знаю», а не «артиста там нет»).
     """
@@ -190,7 +233,7 @@ def artist_service_ids(mbid: str) -> dict:
     _load()
     # Ключ со сменой формата: старые записи держат по одному id на витрину, и
     # читать их новым кодом — значит молча вернуть прежнюю слепоту.
-    key = f"rels2::{mbid}"
+    key = _rels_key(mbid)
     ent = _cache.get(key)
     if ent is not None and not ent.get("miss"):
         return ent.get("svc") or {}
@@ -205,11 +248,18 @@ def artist_service_ids(mbid: str) -> dict:
         for host, name in _SVC_HOST.items():
             if host not in low:
                 continue
-            m = re.search(r"/(?:artist|user)/([A-Za-z0-9._-]+)", url)
-            sid = (m.group(1) if m else "").rstrip(".")
-            rec = svc.setdefault(name, {"url": url, "id": sid, "ids": []})
-            if sid and sid not in rec["ids"]:
-                rec["ids"].append(sid)
+            sid = _service_id(name, url)
+            rec = svc.get(name)
+            if rec is None:
+                svc[name] = {"url": url, "id": sid, "ids": [sid] if sid else []}
+            elif sid:
+                # Первая ссылка витрины не обязательно содержит id (Tidal-альбом
+                # вместо страницы артиста): id берётся из первой ссылки, где он
+                # есть, — вместе с URL, который его действительно несёт.
+                if not rec["id"]:
+                    rec["id"], rec["url"] = sid, url
+                if sid not in rec["ids"]:
+                    rec["ids"].append(sid)
             break
     _cache[key] = {"svc": svc, "ts": time.time()}
     _save()
