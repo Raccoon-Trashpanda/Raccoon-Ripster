@@ -19,12 +19,14 @@ from ripster import telemetry as _t
 
 router = APIRouter()
 
-# Soft anti-abuse: cap ingest body + a tiny per-IP rate window.
+# Soft anti-abuse: cap ingest body + rate windows.
 _MAX_BODY = 256 * 1024
 _MAX_REPORT = 12 * 1024 * 1024      # полный архив логов, а не строчки
-_rate: dict = {}          # ip -> [window_start, count]
-_RATE_MAX = 30            # batches per window
+_rate: dict = {}          # сырой peer -> {"win": t, "n": всего, "inst": {iid: [t, n]}}
+_RATE_MAX = 30            # батчей в минуту на экземпляр
+_RATE_MAX_PEER = 300      # и суммарно на сырой peer — потолок при переборе id
 _RATE_WIN = 60            # seconds
+_RATE_KEYS_PRUNE = 500    # после этого чистим протёкшие id из бакета
 
 _ctx = None
 
@@ -48,15 +50,31 @@ def _ctx_version() -> str:
     return str((getattr(_ctx, "app_info", None) or {}).get("version") or "")
 
 
-def _rate_ok(ip: str) -> bool:
+def _rate_ok(peer: str, iid=None) -> bool:
+    """Пускаем ли запрос. Бакет — по СЫРОМУ peer: X-Forwarded-For задаёт сам
+    клиент, и лимит по нему обходился вращением заголовка (тест 1743a3a).
+    Внутри бакета два окна: общее на peer (iid=None; считается ДО чтения тела,
+    чтобы флуд не выкачивал память) и на instance id (iid=…; уже после разбора).
+
+    Окно на экземпляр нужно потому, что за туннелем ВСЕ тестеры приходят как
+    127.0.0.1: без него один болтливый клиент выжигал общий бюджет и молча
+    глушил диагностику остальных. Окно на peer держит флуд, когда ids перебирают
+    (мусорные id сваливаются в один бакет «-», а не плодят свежие)."""
     import time
     now = time.time()
-    w = _rate.get(ip)
+    rec = _rate.get(peer)
+    if not rec or now - rec["win"] > _RATE_WIN:
+        rec = _rate[peer] = {"win": now, "n": 0, "inst": {}}
+    if iid is None:
+        rec["n"] += 1
+        return rec["n"] <= _RATE_MAX_PEER
+    if len(rec["inst"]) > _RATE_KEYS_PRUNE:      # перебор id не раздувает память
+        rec["inst"] = {k: v for k, v in rec["inst"].items() if now - v[0] <= _RATE_WIN}
+    w = rec["inst"].get(iid)
     if not w or now - w[0] > _RATE_WIN:
-        _rate[ip] = [now, 1]
-        return True
+        w = rec["inst"][iid] = [now, 0]
     w[1] += 1
-    return w[1] <= _RATE_MAX
+    return rec["n"] <= _RATE_MAX_PEER and w[1] <= _RATE_MAX
 
 
 def _owner_ok(request: Request) -> bool:
@@ -81,9 +99,8 @@ async def ingest(request: Request):
     # (редкие батчи) это допустимо и закрывает DoS. XFF оставляем ТОЛЬКО как
     # отображаемую атрибуцию, не как границу безопасности. Security-фикс 18.09.2026.
     peer = (request.client.host if request.client else "")
-    if not _rate_ok(peer):
+    if not _rate_ok(peer):                       # до чтения тела: флуд не качаем
         return {"ok": False, "error": "rate"}
-    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or peer
     body = await request.body()
     if len(body) > _MAX_BODY:
         return {"ok": False, "error": "too big"}
@@ -94,6 +111,10 @@ async def ingest(request: Request):
         return {"ok": False, "error": "bad json"}
     if not isinstance(payload, dict):
         return {"ok": False, "error": "bad payload"}
+    # второй рубеж — уже по instance id (валидированному: мусорные id в один бакет)
+    if not _rate_ok(peer, _t._clean_iid(payload.get("instance_id")) or "-"):
+        return {"ok": False, "error": "rate"}
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or peer
     return _t.store_ingest(payload, client_ip=ip, owner=_owner_ok(request))
 
 
@@ -108,13 +129,15 @@ async def report_ingest(request: Request):
     # Лимит по СЫРОМУ пиру (см. ingest выше): XFF подделывается → крутя его,
     # атакующий обходил лимит и заливал 12-МБ архивы = disk-fill DoS. Security 18.09.
     peer = (request.client.host if request.client else "")
-    if not _rate_ok(peer):
+    if not _rate_ok(peer):                       # до чтения тела: 12 МБ не качаем
         return {"ok": False, "error": "rate"}
-    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or peer
     blob = await request.body()
     if len(blob) > _MAX_REPORT:
         return {"ok": False, "error": "too big"}
     h = request.headers
+    if not _rate_ok(peer, _t._clean_iid(h.get("x-ripster-instance")) or "-"):
+        return {"ok": False, "error": "rate"}
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() or peer
     meta = {
         "token":       h.get("x-ripster-token", ""),
         "instance_id": h.get("x-ripster-instance", ""),
