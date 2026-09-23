@@ -20,8 +20,10 @@ Config keys (see config.example.yaml):
   telemetry-instance-id    str   anonymous UUID, auto-generated once
   telemetry-token          str   ingest gate. On the CLIENT: what we send (falls
                                  back to the baked-in public constant). On the
-                                 INGEST side a public/empty value is NOT accepted
-                                 — see required_ingest_token() below.
+                                 INGEST side it picks a TIER, not a yes/no:
+                                 public token = accepted under hard limits,
+                                 install token = accepted free, empty/foreign =
+                                 rejected.  See token_tier() below.
   telemetry-ingest-enabled bool  THIS instance accepts ingest       (default False)
 """
 from __future__ import annotations
@@ -134,9 +136,9 @@ def redact(text: str) -> str:
 # диагностика и оказалась мёртвой при живом на вид переключателе. Значение из
 # конфига по-прежнему главнее: свой сервер приёма никто не запрещает.
 #
-# ВАЖНО: это токена ОТПРАВИТЕЛЯ. На ПРИЁМЕ публичная константа не считается —
-# см. token_gate_ok()/required_ingest_token(): секретом она быть не может, она
-# лежит в открытой сборке.
+# ВАЖНО: это токен ОТПРАВИТЕЛЯ. На ПРИЁМЕ он не «пускать/не пускать», а ярус
+# записи: публичная константа из открытой сборки принимается, но под жёсткими
+# лимитами — см. token_tier().
 _DEFAULT_URL   = "https://raccoon-ripster.serveousercontent.com"
 _DEFAULT_TOKEN = "OtHdzmO7GiZPTPjxSaj9lEUCy0A__rhW"
 
@@ -149,19 +151,26 @@ def ingest_token() -> str:
     return (_cfg.get("telemetry-token") or "").strip() or _DEFAULT_TOKEN
 
 
-# ── INGEST GATE: какой токен приёмник готов принять ──────────────────────────
+# ── INGEST GATE: КТО пишет, и что из этого следует ───────────────────────────
 # `telemetry-token` — ЕДИНСТВЕНная проверка публичных /api/telemetry/ingest и
 # /api/telemetry/report (CSRF-изъятие + публичный путь, см. app.py). Значение по
 # умолчанию вшито в публичную сборку, то есть секретом НЕ является: кто достал
 # исходники или APK — тот умеет писать и строчки, и 12-мегабайтные архивы в
 # приёмник владельца (disk-fill DoS + хвост для stored-XSS в UI владельца).
-# Ровно этот хвост был назван 18.09.2026 после дыры `/api/pair/*` и закрыт теперь.
+# Ровно этот хвост был назван 18.09.2026 после дыры `/api/pair/*`, и коммит
+# 9e5de41 закрыл его строго: публичную константу приём не брал вовсе.
 #
-# Поэтому приёмник отвергает ПУСТОЙ токен и публичную константу всегда. Настоящий
-# ключ — приватный токен этой установки: либо владелец сам выдал его в
-# `telemetry-token` (тогда он и есть требуемый), либо он выдан один раз и лежит
-# ВНЕ репозитория и вне config.yaml — рядом с instance_id.txt, в профиле
-# пользователя, куда нет доступа у чужой сборки.
+# РЕШЕНИЕ ВЛАДЕЛЬЦА 23.09.2026 — строгость бьёт по своим. В logs/remote/*.jsonl
+# ~10 живых установок тестеров, и все они шлют ИМЕННО публичную константу: с
+# ближайшего перезапуска приложения их отчёты молча перестали бы приезжать.
+# Поэтому публичный токен ПРИНИМАЕТСЯ, но как гость худшего сорта — на него
+# навешаны жёсткие лимиты (см. «ЛИМИТЫ» ниже) и его записи не исполняются в UI.
+# Секретом этот ключ быть не может, значит защита не в токене, а в объёме.
+#
+# Приватная механика сохранена намеренно: токен установки (выданный владельцем в
+# `telemetry-token` либо выданный один раз и лежащий ВНЕ репозитория и вне
+# config.yaml, рядом с instance_id.txt) принимается без публичных лимитов. Но
+# ТРЕБОВАТЬСЯ он больше не может.
 _PRIVATE_TOKEN_FILE = "ingest_token.txt"
 _required_token: Optional[str] = None
 
@@ -173,27 +182,38 @@ def _private_token_file() -> Path:
     return ((Path(base) / "Ripster") if base else _base_dir) / _PRIVATE_TOKEN_FILE
 
 
-def required_ingest_token() -> str:
-    """Токен, который ПРИЁМНИК требует от чужой сборки. Никогда не пустой и
-    никогда не публичная константа."""
-    global _required_token
-    if _required_token:
-        return _required_token
+def _issued_private_token() -> str:
+    """Приватный токен ЭТОЙ установки, если он уже есть: значение из
+    `telemetry-token` (не публичная константа) либо ранее выданный файл.
+    НИЧЕГО не генерирует и не пишет — gate дёргается на каждом чужом запросе,
+    заводить файл профиля из-за пришедшей строки нельзя."""
     want = (_cfg.get("telemetry-token") or "").strip()
     if want and want != _DEFAULT_TOKEN:
-        _required_token = want
         return want
-    # 1) уже выданный — читаем (пережил перезапуск, тестеры не осиротели)
     try:
         f = _private_token_file()
         if f.is_file():
             saved = f.read_text(encoding="utf-8").strip()
             if saved and saved != _DEFAULT_TOKEN:
-                _required_token = saved
                 return saved
     except Exception:
         pass
-    # 2) выдаём один раз на установку
+    return ""
+
+
+def required_ingest_token() -> str:
+    """Ключ установки, при необходимости выданный один раз. С 23.09.2026 это НЕ
+    требование приёма (см. token_tier): публичный токен сборки принимается, но
+    под лимитами. Механика оставлена намеренно — этим ключом пользуется владелец
+    и те, кому он выдан вручную, и их записи идут без публичных ограничений."""
+    global _required_token
+    if _required_token:
+        return _required_token
+    found = _issued_private_token()
+    if found:
+        _required_token = found
+        return found
+    # выдаём один раз на установку (переживает перезапуск через файл)
     import secrets
     fresh = secrets.token_urlsafe(24)
     try:
@@ -202,7 +222,7 @@ def required_ingest_token() -> str:
         f.write_text(fresh, encoding="utf-8")
     except Exception:
         # Файл не записался (read-only профиль и т.п.) — живём с токеном этого
-        # процесса: чужой сборке с публичным токеном всё равно не пустить.
+        # процесса: он всё равно пускает без лимитов, а чужому не известен.
         pass
     _required_token = fresh
     return fresh
@@ -214,31 +234,42 @@ def forget_required_token() -> None:
     _required_token = None
 
 
-def token_gate_ok(presented: str, owner: bool = False) -> bool:
-    """Пустить ли запись на приёмную сторону.
+def token_tier(presented: str, owner: bool = False) -> str:
+    """Кто пишет приёмнику: 'owner' | 'private' | 'public' | '' (пусто = отказ).
 
     `owner` — запрос пришёл с неподделываемой owner-cookie (браузер владельца
-    жмёт «отправить отчёт» у себя); тогда токен не нужен вовсе. Иначе — только
-    точное совпадение с приватным токеном этой установки. Пустой и публичный
-    токены не пускаем НИКОГДА, даже когда владелец в `telemetry-token` записал
-    публичную константу (так у всех, кто ставил сборку до этого фикса).
-    """
+    жмёт «отправить отчёт» у себя); тогда токен не нужен вовсе. 'private' — ключ
+    этой установки, пишется свободно. 'public' — публичная константа из сборки:
+    принимаем (решение владельца 23.09.2026 — её шлют ~10 тестерских установок),
+    но под жёсткими лимитами. ПУСТОЙ и чужой токен отвергаются: принимать надо
+    публичный токен сборки, а не любой мусор."""
     if owner:
-        return True
-    want = required_ingest_token()
+        return "owner"
     got = str(presented or "").strip()
-    return bool(got) and got != _DEFAULT_TOKEN and got == want
+    if not got:
+        return ""
+    if got == _DEFAULT_TOKEN:
+        return "public"
+    if got == _issued_private_token():
+        return "private"
+    return ""
 
 
-def _log_reject(presented, iid) -> None:
+def token_gate_ok(presented: str, owner: bool = False) -> bool:
+    """Пустить ли запись вообще; каким ярусом — см. token_tier()."""
+    return bool(token_tier(presented, owner=owner))
+
+
+def _log_reject(presented, iid, why: str = "") -> None:
     """Отказ виден в консоли владельца, но НЕ содержит секретов: токен не
     печатаем вообще, только его природу. Без этой строки отказ молчит, а
-    «тихий отказ» хуже отказа громкого (см. разбор с /api/config/reload)."""
+    «тихий отказ» хуже отказа громкого (см. разбор с /api/config/reload).
+    `iid` печатается через _safe_id: чужая строка не должна формировать то, что
+    увидит владелец."""
     got = str(presented or "").strip()
-    why = ("пустой токен" if not got else
-           "публичный токен сборки" if got == _DEFAULT_TOKEN else "не тот токен")
+    why = why or ("пустой токен" if not got else "не тот токен")
     print(f"[telemetry] запись отклонена ({why}) от instance="
-          f"{_safe_id(iid) if iid else '—'}; приватный токен: {_private_token_file()}",
+          f"{_safe_id(iid) if iid else '—'}; ключ установки: {_private_token_file()}",
           flush=True)
 
 

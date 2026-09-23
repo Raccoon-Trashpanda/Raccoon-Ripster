@@ -1,10 +1,10 @@
 """
 Telemetry routes.
 
-  POST /api/telemetry/ingest          — PUBLIC (приватным токеном установки или
-                                        owner-cookie): tester builds push batches
-                                        of warn/error lines here. Публичная
-                                        константа из сборки больше НЕ пускает.
+  POST /api/telemetry/ingest          — PUBLIC: tester builds push batches of
+                                        warn/error lines here. Публичная константа
+                                        из сборки принимается, но под жёсткими
+                                        лимитами (пустой/чужой токен — отказ).
   GET  /api/telemetry/instances       — OWNER: list reporting instances.
   GET  /api/telemetry/instance/{id}   — OWNER: stored lines for one instance.
   DELETE /api/telemetry/instance/{id} — OWNER: forget one instance.
@@ -63,9 +63,8 @@ def _owner_ok(request: Request) -> bool:
     """Владелец по НЕПОДДЕЛЫВАЕМОЙ сессийной куке (HMAC over session-secret), а
     не по «похож на localhost»: за туннелем любой чужой запрос приходит как
     127.0.0.1 (uvicorn без proxy_headers) — разбор 18.09.2026, `/api/pair/*`.
-    Нужен здесь, потому что публичные write-ручки телеметрии теперь требуют
-    приватный токен установки, а интерфейс владельца токена не знает — у него
-    есть кука."""
+    Нужен здесь, потому что интерфейс владельца токена не знает — у него есть
+    кука, и по ней его запись идёт свободным ярусом (см. telemetry.token_tier)."""
     try:
         from ripster import auth as _auth
         return bool(_auth.verify_session_cookie(request.cookies.get("ripster-session", "")))
