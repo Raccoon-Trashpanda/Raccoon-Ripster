@@ -97,13 +97,13 @@ async def upload_task_to_gofile(task: dict) -> str:
 
     Raises RuntimeError on any failure.
     """
-    from ripster.routes.download import _get_task_dir, _find_audio_files, _write_zip_file
+    from ripster.routes.download import _get_task_dir, _task_delivery_files, _write_zip_file
 
     d = _get_task_dir(task)
     if not d:
         raise RuntimeError("Директория загрузки не найдена — файлы могли быть перемещены.")
 
-    files = _find_audio_files(d)
+    files = _task_delivery_files(task, d)
     if not files:
         raise RuntimeError("Аудио файлы не найдены в директории загрузки.")
 

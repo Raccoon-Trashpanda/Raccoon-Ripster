@@ -127,6 +127,72 @@ def _find_audio_files(directory: Path, roots: list[Path] | None = None) -> list[
     )
 
 
+def _task_expected_stems(task: dict) -> set[str]:
+    """Normalized stems of the files THIS task alone could own.
+
+    Sources, strongest first: the manifest entry (written at completion), the
+    runner's captured list, the names the engine reported saving, and finally the
+    `<artist> - <title>` shape our own naming template produces. Empty means "we do
+    not know this task's file names" — callers must then fall back to the folder
+    glob, never to an empty delivery."""
+    stems: set[str] = set()
+    tid = task.get("id", "")
+    if tid:
+        try:
+            from ripster import download_manifest as _dm
+            ent = _dm.lookup(tid)
+            if ent:
+                stems |= {_norm(Path(n).stem) for n in (ent.get("files") or []) if n}
+        except Exception:
+            pass
+    for key in ("_files", "_engine_files"):
+        for n in (task.get(key) or []):
+            if n:
+                stems.add(_norm(Path(str(n)).stem))
+    if not stems:
+        m      = task.get("meta") or {}
+        artist = (m.get("albumArtist") or m.get("artist") or task.get("artist") or "").strip()
+        for fld in ("title", "album"):
+            val = (m.get(fld) or task.get(fld) or "").strip()
+            if not val:
+                continue
+            stems.add(_norm(val))
+            if artist:
+                stems.add(_norm(f"{artist} - {val}"))
+    return {s for s in stems if s}
+
+
+def _task_delivery_files(task: dict, directory: Optional[Path] = None) -> list[Path]:
+    """Files to hand to THIS task — a folder glob narrowed to the task's own files
+    whenever the folder turns out to be shared.
+
+    A release folder is delivered whole, exactly as before. But when the resolved
+    folder is a `<service>/<quality>/` — a single downloaded before the deemix
+    layout fix lay FLAT there, among every other task's tracks — globbing it would
+    hand a guest strangers' files. So: if this task's expected names identify a
+    strict subset of what is in the folder, deliver the subset.
+
+    Never narrower than "nothing", and never a partial answer: if ANY of the
+    expected names is missing from the folder, the names drifted after the engine
+    wrote them (post-download retag/rename) and the full glob comes back — the
+    same all-or-nothing rule runner._filter_engine_files follows so real files are
+    never dropped."""
+    roots = _all_save_roots()
+    d = Path(directory) if directory else _get_task_dir(task)
+    if not (d and d.is_dir()):
+        return []
+    found = _find_audio_files(d, roots)
+    if not found:
+        return []
+    stems = _task_expected_stems(task)
+    if not stems:
+        return found
+    picked = [f for f in found if _norm(f.stem) in stems]
+    if picked and len(picked) < len(found) and len(picked) >= len(stems):
+        return picked
+    return found
+
+
 def _has_audio_near(d: Path) -> bool:
     """True if d contains audio files directly OR in any immediate subdirectory.
     Used by strategy-3 so multi-disc Album/ dirs (no direct audio, only Disc 1/, Disc 2/)
@@ -202,6 +268,13 @@ def _find_nested_album(base: Path, artist: str, album: str,
     — so it can't grab an unrelated same-named folder. Requires audio files; prefers
     the newest match. Bounded depth.
 
+    Two folder names are accepted for the release: ``<album>`` (gamdl: apple/
+    ``<quality>/Artist/Album``) and ``<artist> - <album>`` — the template deemix and
+    streamrip build (`albumNameTemplate` = "%artist% - %album%"). Without the second
+    one a Deezer release is found by NOTHING here, and the fallthrough was the
+    3-level mtime scan, which tops out at the ARTIST folder (`deezer/FLAC/Toto`) and
+    handed the guest every release of that artist, not just the one they asked for.
+
     This is what lets a skip-everything retry resolve (gamdl re-run with every track
     already on disk emits no fresh-mtime files, so the time-scan can't find them, and
     a fresh task_id means no marker — but the album folder is right there on disk)."""
@@ -210,6 +283,9 @@ def _find_nested_album(base: Path, artist: str, album: str,
     sal = _sanitize(album)
     if not sal:
         return None
+    names = {sal}
+    if sa:
+        names.add(_sanitize(f"{artist} - {album}"))
     best, best_mt = None, -1.0
     stack = [(base, 0)]
     while stack:
@@ -217,7 +293,7 @@ def _find_nested_album(base: Path, artist: str, album: str,
         if depth >= max_depth:
             continue
         for child in _iter_subdirs(d, roots):
-            if _sanitize(child.name) == sal and (not sa or _sanitize(child.parent.name) == sa):
+            if _sanitize(child.name) in names and (not sa or _sanitize(child.parent.name) == sa):
                 if _find_audio_files(child, roots):
                     try:
                         mt = child.stat().st_mtime
@@ -242,7 +318,9 @@ def _get_task_dir(task: dict) -> Optional[Path]:
          modified after task start. Falls back to a 24-hour window when
          _start_time is unknown (e.g. old history entries).
     After resolving via strategy 1-3 the marker file is written so that
-    subsequent lookups always hit strategy 0.
+    subsequent lookups always hit strategy 0 — except 2d/3, which answer with a
+    SHARED folder (`<service>/<quality>/`); callers must narrow that to the task's
+    own files via `_task_delivery_files` instead of globbing it.
     """
     roots = _all_save_roots()
     task_id = task.get("id", "")
@@ -354,6 +432,38 @@ def _get_task_dir(task: dict) -> Optional[Path]:
         if nested:
             _write_marker_lazy(nested)
             return nested
+
+    # 2d. Плоский релиз (легаси) — синглы, скачанные до фикса раскладки deemix,
+    #     лежат россыпью прямо в `<service>/<quality>/`: папки релиза нет ни у
+    #     одной из стратегий 0-2c, и задача терялась здесь (`dir unresolved at
+    #     completion` → манифеста нет → гость без файлов). Ищем НЕ папку, а
+    #     конкретные файлы задачи (по манифесту / списку движка / шаблону
+    #     «артист - трек») и отвечаем на них общую папку — выдачу сузит
+    #     `_task_delivery_files`, а не этот ответ.
+    #     Маркер сюда не пишется: метка задачи в папке качества сделала бы общий
+    #     корень «родной папкой» задачи навсегда (стратегия 0 вернула бы его
+    #     любому следующему запросу). По той же причине он не пишется в 3.
+    stems = _task_expected_stems(task)
+    if stems:
+        hits: list[Path] = []
+        stack: list[tuple[Path, int]] = [(base, 0)]
+        while stack:
+            d, depth = stack.pop()
+            if depth > 2:
+                continue
+            try:
+                entries = sorted(d.iterdir())
+            except OSError:
+                continue
+            for e in entries:
+                if e.is_dir():
+                    if _safe_path(e, roots):
+                        stack.append((e, depth + 1))
+                elif _is_audio(e) and _norm(e.stem) in stems and _safe_path(e, roots):
+                    hits.append(e)
+        if hits:
+            return max({h.parent for h in hits},
+                       key=lambda p: sum(1 for h in hits if h.parent == p))
 
     # 3. Time-based scan: walk 3 levels, pick audio dir whose mtime falls
     #    within [start_ts - 10, done_ts + 120].  Without the upper bound, a
@@ -602,7 +712,7 @@ async def download_file(
                         "Авто-fallback на Deezer/Qobuz/Apple запущен; жди новых задач в очереди.", 404)
         return _err("Папка результата не найдена — возможно файлы были перемещены или задача не завершилась успешно.", 404)
 
-    files = _find_audio_files(d)
+    files = _task_delivery_files(task, d)
     if not files:
         _guest_log(request, event="dl_error", reason="no_audio_files", task_id=task_id)
         return _err("No audio files found in output directory.", 404)
@@ -683,7 +793,7 @@ async def zip_request(body: dict, request: Request, background_tasks: Background
                 raise HTTPException(403, f"Access denied for task {tid}")
             d = _get_task_dir(task)
             if d:
-                for f in _find_audio_files(d):
+                for f in _task_delivery_files(task, d):
                     task_files.append((f, d))
 
         if not task_files:
