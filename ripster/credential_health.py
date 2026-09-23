@@ -671,7 +671,10 @@ def promote_best_tidal() -> list[str]:
       качать ПК продолжил бы прежней учёткой.
 
     Прежняя основная не выбрасывается, а переезжает в пул: она может быть
-    жива и годиться на AAC, а её потеря была бы молчаливым уроном.
+    жива и годиться на AAC, а её потеря была бы молчаливым уроном. Мёртвую
+    держать в пуле нельзя, но и терять молча — тем более: она попадает в
+    реестр снятых и в DEAD_ACCOUNTS.txt (23.09.2026 новозеландская учётка
+    пропала из маршрутизации именно без этой строки).
     """
     import yaml
 
@@ -724,6 +727,16 @@ def promote_best_tidal() -> list[str]:
     # 2. Конфиг: новая — основной, старая — в пул (если жива), без дублей.
     old_country = (cur.get("tidal-country") or cur_info.get("country") or "").upper()
     old_alive = bool(cur_info.get("alive"))
+    if old_refresh and not old_alive:
+        # Мёртвая прежняя основная уходит из конфига — и это обязано быть
+        # записано. 23.09.2026 так исчезла единственная новозеландская учётка:
+        # её refresh отозвал Tidal, автопромоут снял её с маршрутизации, и ни
+        # в DEAD_ACCOUNTS.txt, ни в реестре снятых не осталось ни строки.
+        # Владелец узнал об этом только потому, что релизы перестали приходить.
+        from . import retired_credentials as _retired
+        why = cur_info.get("reason") or "учётка отвергнута Tidal"
+        _retired.retire("tidal_account", old_refresh, f"автопромоут: {why}")
+        _append_archive("tidal_account", _ident(old_refresh), old_country, why)
     for path in _yaml_files_to_check():
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
@@ -769,7 +782,8 @@ def promote_best_tidal() -> list[str]:
         f"🔁 Tidal: основной назначена «{acct.get('label')}» "
         f"({info.get('plan')}, {info.get('quality')}, {info.get('country')}) — "
         f"прежняя ({cur_info.get('plan') or '?'}, {cur_info.get('quality') or 'без lossless'}) "
-        f"{'перенесена в пул' if old_alive else 'снята'}; сессия движка переписана "
+        f"{'перенесена в пул' if old_alive else 'снята и записана в DEAD_ACCOUNTS.txt + реестр снятых'}; "
+        f"сессия движка переписана "
         f"({', '.join(rep.get('clients') or [])})")
     return lines
 
