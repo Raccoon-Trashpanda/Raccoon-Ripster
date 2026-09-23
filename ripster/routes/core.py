@@ -468,7 +468,10 @@ async def tidal_auth_poll(body: dict):
                 "atmos": bool(atmos_ok), "preview": at[:6] + "…"}
     err = j.get("error")
     if err in ("authorization_pending", "slow_down") or (r.status_code == 400 and not err):
-        return {"ok": True, "pending": True}
+        # `slow_down` наружу отдельным флагом (RFC 8628 3.5): тот, кто опрашивает
+        # ссылку, обязан по этой ответке увеличить паузу. Молча поллить чаще —
+        # второй способ получить блокировку учётки «за злоупотребление».
+        return {"ok": True, "pending": True, "slow_down": err == "slow_down"}
     return {"ok": False, "error": j.get("error_description") or err or "token exchange failed"}
 
 
