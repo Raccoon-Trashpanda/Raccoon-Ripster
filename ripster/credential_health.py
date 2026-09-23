@@ -529,6 +529,16 @@ def check_all_tidal_accounts(threshold: int = DEFAULT_THRESHOLD,
 
         # Единая карточка учётки: флаг · страна · тариф · срок · статус.
         # active — та, что реально в config; premium у Tidal = отдаёт lossless.
+
+        # Сетевая авария внутри самой проверки (исключение из account_info,
+        # перехваченное в _check_all) приходит как alive=False+unreachable=True.
+        # Как у Deezer/Qobuz: про учётку не узнали НИЧЕГО — streak не копим и
+        # карточку о смерти не выводим, иначе три обрыва подряд сняли бы живую
+        # учётку, а виноват был бы наш канал, а не она.
+        if not alive and info.get("unreachable"):
+            lines.append(f"⚠️ Tidal {label} ({masked}): {reason} — учётка не тронута")
+            continue
+
         if alive is not None:
             _status = _ar.classify(
                 info, is_active=(secret and secret == active_secret),
