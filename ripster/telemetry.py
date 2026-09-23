@@ -18,7 +18,10 @@ Config keys (see config.example.yaml):
   telemetry-url            str   owner ingest base URL (the tunnel)
   telemetry-level          str   min level to forward: warn|error   (default warn)
   telemetry-instance-id    str   anonymous UUID, auto-generated once
-  telemetry-token          str   soft shared gate, baked in the public build
+  telemetry-token          str   ingest gate. On the CLIENT: what we send (falls
+                                 back to the baked-in public constant). On the
+                                 INGEST side a public/empty value is NOT accepted
+                                 — see required_ingest_token() below.
   telemetry-ingest-enabled bool  THIS instance accepts ingest       (default False)
 """
 from __future__ import annotations
@@ -130,6 +133,10 @@ def redact(text: str) -> str:
 # адрес отключает отправку целиком, сколько ни щёлкай тумблер. Именно так вся
 # диагностика и оказалась мёртвой при живом на вид переключателе. Значение из
 # конфига по-прежнему главнее: свой сервер приёма никто не запрещает.
+#
+# ВАЖНО: это токена ОТПРАВИТЕЛЯ. На ПРИЁМЕ публичная константа не считается —
+# см. token_gate_ok()/required_ingest_token(): секретом она быть не может, она
+# лежит в открытой сборке.
 _DEFAULT_URL   = "https://raccoon-ripster.serveousercontent.com"
 _DEFAULT_TOKEN = "OtHdzmO7GiZPTPjxSaj9lEUCy0A__rhW"
 
@@ -140,6 +147,99 @@ def ingest_url() -> str:
 
 def ingest_token() -> str:
     return (_cfg.get("telemetry-token") or "").strip() or _DEFAULT_TOKEN
+
+
+# ── INGEST GATE: какой токен приёмник готов принять ──────────────────────────
+# `telemetry-token` — ЕДИНСТВЕНная проверка публичных /api/telemetry/ingest и
+# /api/telemetry/report (CSRF-изъятие + публичный путь, см. app.py). Значение по
+# умолчанию вшито в публичную сборку, то есть секретом НЕ является: кто достал
+# исходники или APK — тот умеет писать и строчки, и 12-мегабайтные архивы в
+# приёмник владельца (disk-fill DoS + хвост для stored-XSS в UI владельца).
+# Ровно этот хвост был назван 18.09.2026 после дыры `/api/pair/*` и закрыт теперь.
+#
+# Поэтому приёмник отвергает ПУСТОЙ токен и публичную константу всегда. Настоящий
+# ключ — приватный токен этой установки: либо владелец сам выдал его в
+# `telemetry-token` (тогда он и есть требуемый), либо он выдан один раз и лежит
+# ВНЕ репозитория и вне config.yaml — рядом с instance_id.txt, в профиле
+# пользователя, куда нет доступа у чужой сборки.
+_PRIVATE_TOKEN_FILE = "ingest_token.txt"
+_required_token: Optional[str] = None
+
+
+def _private_token_file() -> Path:
+    """Дом приватного токена — тот же, что у instance_id: writes into the user
+    profile, never into the install dir (which is mirrored into the public repo)."""
+    base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or ""
+    return ((Path(base) / "Ripster") if base else _base_dir) / _PRIVATE_TOKEN_FILE
+
+
+def required_ingest_token() -> str:
+    """Токен, который ПРИЁМНИК требует от чужой сборки. Никогда не пустой и
+    никогда не публичная константа."""
+    global _required_token
+    if _required_token:
+        return _required_token
+    want = (_cfg.get("telemetry-token") or "").strip()
+    if want and want != _DEFAULT_TOKEN:
+        _required_token = want
+        return want
+    # 1) уже выданный — читаем (пережил перезапуск, тестеры не осиротели)
+    try:
+        f = _private_token_file()
+        if f.is_file():
+            saved = f.read_text(encoding="utf-8").strip()
+            if saved and saved != _DEFAULT_TOKEN:
+                _required_token = saved
+                return saved
+    except Exception:
+        pass
+    # 2) выдаём один раз на установку
+    import secrets
+    fresh = secrets.token_urlsafe(24)
+    try:
+        f = _private_token_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(fresh, encoding="utf-8")
+    except Exception:
+        # Файл не записался (read-only профиль и т.п.) — живём с токеном этого
+        # процесса: чужой сборке с публичным токеном всё равно не пустить.
+        pass
+    _required_token = fresh
+    return fresh
+
+
+def forget_required_token() -> None:
+    """Тестам и переоцифровке: забыть кэш требуемого токена."""
+    global _required_token
+    _required_token = None
+
+
+def token_gate_ok(presented: str, owner: bool = False) -> bool:
+    """Пустить ли запись на приёмную сторону.
+
+    `owner` — запрос пришёл с неподделываемой owner-cookie (браузер владельца
+    жмёт «отправить отчёт» у себя); тогда токен не нужен вовсе. Иначе — только
+    точное совпадение с приватным токеном этой установки. Пустой и публичный
+    токены не пускаем НИКОГДА, даже когда владелец в `telemetry-token` записал
+    публичную константу (так у всех, кто ставил сборку до этого фикса).
+    """
+    if owner:
+        return True
+    want = required_ingest_token()
+    got = str(presented or "").strip()
+    return bool(got) and got != _DEFAULT_TOKEN and got == want
+
+
+def _log_reject(presented, iid) -> None:
+    """Отказ виден в консоли владельца, но НЕ содержит секретов: токен не
+    печатаем вообще, только его природу. Без этой строки отказ молчит, а
+    «тихий отказ» хуже отказа громкого (см. разбор с /api/config/reload)."""
+    got = str(presented or "").strip()
+    why = ("пустой токен" if not got else
+           "публичный токен сборки" if got == _DEFAULT_TOKEN else "не тот токен")
+    print(f"[telemetry] запись отклонена ({why}) от instance="
+          f"{_safe_id(iid) if iid else '—'}; приватный токен: {_private_token_file()}",
+          flush=True)
 
 
 def forwarding_enabled() -> bool:
@@ -250,12 +350,12 @@ def _safe_id(s: str) -> str:
 _MAX_LINES_PER_INSTANCE = 4000
 
 
-def store_ingest(payload: dict, client_ip: str = "") -> dict:
+def store_ingest(payload: dict, client_ip: str = "", owner: bool = False) -> dict:
     """Owner side: persist one batch. Returns {ok, stored}. Never raises."""
     if not _cfg.get("telemetry-ingest-enabled"):
         return {"ok": False, "error": "ingest disabled"}
-    want = (_cfg.get("telemetry-token") or "").strip()
-    if want and (payload.get("token") or "").strip() != want:
+    if not token_gate_ok(payload.get("token"), owner=owner):
+        _log_reject(payload.get("token"), payload.get("instance_id"))
         return {"ok": False, "error": "bad token"}
     iid = _safe_id(payload.get("instance_id"))
     if not _instance_allowed(iid):
@@ -407,12 +507,13 @@ def _report_code() -> str:
     return uuid.uuid4().hex[:6].upper()
 
 
-def store_report(meta: dict, blob: bytes, client_ip: str = "") -> dict:
+def store_report(meta: dict, blob: bytes, client_ip: str = "",
+                 owner: bool = False) -> dict:
     """Owner side: сохранить присланный архив логов. Никогда не бросает."""
     if not _cfg.get("telemetry-ingest-enabled"):
         return {"ok": False, "error": "ingest disabled"}
-    want = (_cfg.get("telemetry-token") or "").strip()
-    if want and (meta.get("token") or "").strip() != want:
+    if not token_gate_ok(meta.get("token"), owner=owner):
+        _log_reject(meta.get("token"), meta.get("instance_id"))
         return {"ok": False, "error": "bad token"}
     if not blob:
         return {"ok": False, "error": "empty"}

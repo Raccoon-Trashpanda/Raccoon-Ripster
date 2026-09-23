@@ -1,8 +1,10 @@
 """
 Telemetry routes.
 
-  POST /api/telemetry/ingest          — PUBLIC (token-gated): tester builds push
-                                        batches of warn/error lines here.
+  POST /api/telemetry/ingest          — PUBLIC (приватным токеном установки или
+                                        owner-cookie): tester builds push batches
+                                        of warn/error lines here. Публичная
+                                        константа из сборки больше НЕ пускает.
   GET  /api/telemetry/instances       — OWNER: list reporting instances.
   GET  /api/telemetry/instance/{id}   — OWNER: stored lines for one instance.
   DELETE /api/telemetry/instance/{id} — OWNER: forget one instance.
@@ -57,6 +59,20 @@ def _rate_ok(ip: str) -> bool:
     return w[1] <= _RATE_MAX
 
 
+def _owner_ok(request: Request) -> bool:
+    """Владелец по НЕПОДДЕЛЫВАЕМОЙ сессийной куке (HMAC over session-secret), а
+    не по «похож на localhost»: за туннелем любой чужой запрос приходит как
+    127.0.0.1 (uvicorn без proxy_headers) — разбор 18.09.2026, `/api/pair/*`.
+    Нужен здесь, потому что публичные write-ручки телеметрии теперь требуют
+    приватный токен установки, а интерфейс владельца токена не знает — у него
+    есть кука."""
+    try:
+        from ripster import auth as _auth
+        return bool(_auth.verify_session_cookie(request.cookies.get("ripster-session", "")))
+    except Exception:
+        return False
+
+
 @router.post("/api/telemetry/ingest")
 async def ingest(request: Request):
     """Public ingest for tester builds. Validated + token-gated inside the store."""
@@ -79,7 +95,7 @@ async def ingest(request: Request):
         return {"ok": False, "error": "bad json"}
     if not isinstance(payload, dict):
         return {"ok": False, "error": "bad payload"}
-    return _t.store_ingest(payload, client_ip=ip)
+    return _t.store_ingest(payload, client_ip=ip, owner=_owner_ok(request))
 
 
 @router.post("/api/telemetry/report")
@@ -108,7 +124,7 @@ async def report_ingest(request: Request):
         "name":        _diag.decode_hdr(h.get("x-ripster-name", "")),
         "note":        _diag.decode_hdr(h.get("x-ripster-note", "")),
     }
-    return _t.store_report(meta, blob, client_ip=ip)
+    return _t.store_report(meta, blob, client_ip=ip, owner=_owner_ok(request))
 
 
 @router.post("/api/diag/send-report")

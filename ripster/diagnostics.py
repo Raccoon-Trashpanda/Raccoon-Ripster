@@ -157,6 +157,25 @@ async def send_report(cfg: dict, base_dir: Path, version: str, note: str = "") -
         base = "https://" + base
 
     blob = build_bundle(base_dir, version, note)
+    # Эта сборка САМА является приёмником (сборка владельца): архив не летит
+    # через туннель, а кладётся на то же самое место. Без этой ветки кнопка
+    # «Отправить отчёт» у владельца отвалилась бы 23.09.2026, когда приёмник
+    # перестал принимать публичный токен сборки (тот больше не секрет): запрос
+    # возвращался на наш же /api/telemetry/report и получал «bad token».
+    # Проверяем именно роль, а не адрес: forwarded_enabled() исключает приёмник
+    # из отправки по той же причине (см. telemetry.forwarding_enabled).
+    if _t._cfg.get("telemetry-ingest-enabled"):
+        res = _t.store_report({
+            "token":       "",
+            "instance_id": (cfg.get("telemetry-instance-id") or "").strip(),
+            "app_version": version,
+            "platform":    platform.platform()[:64],
+            "name":        cfg.get("telemetry-name") or "",
+            "note":        note,
+        }, blob, client_ip="127.0.0.1", owner=True)
+        if not res.get("ok"):
+            return {**res, "error_key": "err.report_rejected"}
+        return {"ok": True, "code": res.get("code", ""), "size": len(blob)}
     headers = {
         "Content-Type":       "application/zip",
         "X-Ripster-Token":    _t.ingest_token(),
