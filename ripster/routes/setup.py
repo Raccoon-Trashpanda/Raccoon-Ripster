@@ -146,9 +146,11 @@ async def widevine_mint_wizard():
     import subprocess
     bat = _base_dir / "_widevine_setup" / "wvd.bat"
     if sys.platform != "win32":
-        return {"ok": False, "error": "Мастер WVD доступен только на Windows."}
+        return {"ok": False, "error": "Мастер WVD доступен только на Windows.",
+                "error_key": "su.wvd_windows_only", "error_args": {}}
     if not bat.exists():
-        return {"ok": False, "error": "_widevine_setup/wvd.bat не найден в установке."}
+        return {"ok": False, "error": "_widevine_setup/wvd.bat не найден в установке.",
+                "error_key": "su.wvd_bat_missing", "error_args": {}}
     try:
         subprocess.Popen(
             ["cmd", "/c", "start", "Ripster WVD L3 minter", "cmd", "/k", str(bat)],
@@ -156,8 +158,10 @@ async def widevine_mint_wizard():
             creationflags=getattr(subprocess, "CREATE_NEW_CONSOLE", 0),
         )
     except Exception as e:
-        return {"ok": False, "error": f"не удалось запустить мастер: {e}"}
-    return {"ok": True, "msg": "Мастер WVD открылся в отдельном окне — следуй инструкциям там."}
+        return {"ok": False, "error": f"не удалось запустить мастер: {e}",
+                "error_key": "su.wvd_launch_failed", "error_args": {"e": str(e)}}
+    return {"ok": True, "msg": "Мастер WVD открылся в отдельном окне — следуй инструкциям там.",
+            "msg_key": "su.wvd_opened", "params": {}}
 
 
 @router.post("/api/widevine/mint-auto")
@@ -571,11 +575,13 @@ async def wrapper_accounts_order(body: dict):
     # последнего сигнатура (cfg, config_file, tokens_dir), и вызов с одним
     # аргументом упал бы в рантайме — при синтаксической корректности файла.
     if not _save_config:
-        raise HTTPException(500, "сохранение конфига недоступно")
+        raise HTTPException(500, imsg("err.cfg_save_unavailable",
+                                      "сохранение конфига недоступно"))
     try:
         _save_config(_cfg)
     except Exception as e:
-        raise HTTPException(500, f"не сохранил конфиг: {e}")
+        raise HTTPException(500, imsg("err.cfg_save_failed",
+                                      "не сохранил конфиг: {e}", e=str(e)))
     return {"ok": True,
             "primary": head.get("label") or head["id"],
             "order": [a.get("label") or a["id"] for a in new],
@@ -728,7 +734,8 @@ async def wrapper_accounts_add(body: dict):
         return await _wrapper_account_add_token(token, country, label)
 
     if not apple_id or not password:
-        return {"ok": False, "msg": "Нужны id и password"}
+        return {"ok": False, "msg": "Нужны id и password",
+                "msg_key": "acc.need_id_password", "params": {}}
     # Токен, вставленный в поле «Apple ID», — не абстракция: до появления
     # отдельного поля владелец записывал его именно так, и пул скармливал его
     # врапперу как логин, сжигая слот устройства.
@@ -741,7 +748,8 @@ async def wrapper_accounts_add(body: dict):
     existing = list(_cfg.get("wrapper-accounts") or [])
     label = label or apple_id
     if any(a.get("id") == apple_id for a in existing):
-        return {"ok": False, "msg": "Этот аккаунт уже добавлен"}
+        return {"ok": False, "msg": "Этот аккаунт уже добавлен",
+                "msg_key": "acc.account_duplicate", "params": {}}
     existing.append({"id": apple_id, "password": password, "label": label})
     _cfg["wrapper-accounts"] = existing
     if _save_config:
@@ -753,8 +761,9 @@ async def wrapper_accounts_add(body: dict):
 
     from ripster import wrapper_pool as _pool
     if not _pool.pool_enabled(_cfg):
-        return {"ok": True, "msg": "Аккаунт сохранён. Включи apple-pool, чтобы поднять враппер под него.",
-                "started": False}
+        return {"ok": True, "started": False,
+                "msg": "Аккаунт сохранён. Включи apple-pool, чтобы поднять враппер под него.",
+                "msg_key": "acc.saved_pool_off", "params": {}}
 
     def _do():
         try:
@@ -764,7 +773,8 @@ async def wrapper_accounts_add(body: dict):
         except Exception as e:
             print(f"[wrapper-pool] failed to start slot for new account: {e}", flush=True)
     asyncio.create_task(asyncio.to_thread(_do))
-    return {"ok": True, "msg": f"Аккаунт добавлен, запускаю враппер…", "started": True}
+    return {"ok": True, "msg": "Аккаунт добавлен, запускаю враппер…",
+            "msg_key": "acc.wrapper_starting", "params": {}, "started": True}
 
 
 @router.post("/api/wrapper/accounts/{slot}/remove")
@@ -772,11 +782,13 @@ async def wrapper_accounts_remove(slot: int):
     """Remove an additional account (slot >= 1 only — slot 0 is the primary
     account, managed via the regular wrapper-apple-id/wrapper-password UI)."""
     if slot < 1:
-        return {"ok": False, "msg": "Слот 0 — основной аккаунт, убирается через обычные настройки Apple"}
+        return {"ok": False, "msg": "Слот 0 — основной аккаунт, убирается через обычные настройки Apple",
+                "msg_key": "acc.slot0_apple", "params": {}}
     existing = list(_cfg.get("wrapper-accounts") or [])
     idx = slot - 1
     if idx < 0 or idx >= len(existing):
-        return {"ok": False, "msg": "Нет такого аккаунта"}
+        return {"ok": False, "msg": "Нет такого аккаунта",
+                "msg_key": "acc.no_account", "params": {}}
     removed = existing.pop(idx)
     _cfg["wrapper-accounts"] = existing
     if _save_config:
@@ -794,7 +806,8 @@ async def wrapper_accounts_remove(slot: int):
         except Exception:
             pass
     await asyncio.to_thread(_stop)
-    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
+            "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
 
 
 # ── Deezer multi-account pool (load-balanced, no Docker) ───────────────────────
@@ -836,11 +849,13 @@ async def deezer_accounts_add(body: dict):
     arl   = (body.get("arl") or "").strip()
     label = (body.get("label") or "").strip() or "account"
     if not arl:
-        return {"ok": False, "msg": "Нужен ARL"}
+        return {"ok": False, "msg": "Нужен ARL",
+                "msg_key": "acc.need_arl", "params": {}}
 
     existing = list(_cfg.get("deezer-accounts") or [])
     if any(a.get("arl") == arl for a in existing):
-        return {"ok": False, "msg": "Этот ARL уже добавлен"}
+        return {"ok": False, "msg": "Этот ARL уже добавлен",
+                "msg_key": "acc.arl_duplicate", "params": {}}
     existing.append({"arl": arl, "label": label})
     _cfg["deezer-accounts"] = existing
     if _save_config:
@@ -849,7 +864,8 @@ async def deezer_accounts_add(body: dict):
         except Exception as e:
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
-    return {"ok": True, "msg": f"ARL добавлен как «{label}»"}
+    return {"ok": True, "msg": f"ARL добавлен как «{label}»",
+            "msg_key": "acc.arl_added", "params": {"label": label}}
 
 
 @router.post("/api/deezer/accounts/{slot}/remove")
@@ -857,11 +873,13 @@ async def deezer_accounts_remove(slot: int):
     """Remove an additional account (slot >= 1 only — slot 0 is the primary
     ARL, managed via the regular deezer-arl field in Settings → Deezer)."""
     if slot < 1:
-        return {"ok": False, "msg": "Слот 0 — основной ARL, убирается через обычные настройки Deezer"}
+        return {"ok": False, "msg": "Слот 0 — основной ARL, убирается через обычные настройки Deezer",
+                "msg_key": "acc.slot0_deezer", "params": {}}
     existing = list(_cfg.get("deezer-accounts") or [])
     idx = slot - 1
     if idx < 0 or idx >= len(existing):
-        return {"ok": False, "msg": "Нет такого аккаунта"}
+        return {"ok": False, "msg": "Нет такого аккаунта",
+                "msg_key": "acc.no_account", "params": {}}
     removed = existing.pop(idx)
     _cfg["deezer-accounts"] = existing
     if _save_config:
@@ -870,7 +888,8 @@ async def deezer_accounts_remove(slot: int):
         except Exception as e:
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
-    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
+            "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
 
 
 # ── Spotify multi-account pool (librespot corridors + browser OAuth per slot) ──
@@ -946,7 +965,8 @@ async def spotify_accounts_add(request: Request, body: dict = None):
     try:
         _sp.ensure_corridor(slot)
     except Exception as e:                         # noqa: BLE001
-        return {"ok": False, "msg": f"Не удалось создать коридор: {e}"}
+        return {"ok": False, "msg": f"Не удалось создать коридор: {e}",
+                "msg_key": "acc.corridor_failed", "params": {"e": str(e)}}
     existing.append({"label": label, "enabled": True, "priority": None})
     _cfg["spotify-accounts"] = existing
     if _save_config:
@@ -956,6 +976,7 @@ async def spotify_accounts_add(request: Request, body: dict = None):
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "slot": slot, "label": label,
+            "msg_key": "acc.slot_booked", "params": {"slot": slot},
             "msg": f"Слот {slot} забронирован — войди в Spotify для этой учётки"}
 
 
@@ -972,7 +993,8 @@ async def spotify_accounts_remove(request: Request, slot: int):
     existing = list(_cfg.get("spotify-accounts") or [])
     idx = slot - 1
     if idx < 0 or idx >= len(existing):
-        return {"ok": False, "msg": "Нет такого аккаунта"}
+        return {"ok": False, "msg": "Нет такого аккаунта",
+                "msg_key": "acc.no_account", "params": {}}
     removed = existing.pop(idx)
     _cfg["spotify-accounts"] = existing
     if _save_config:
@@ -986,7 +1008,8 @@ async def spotify_accounts_remove(request: Request, slot: int):
         shutil.rmtree(_sp.corridor_dir(slot), ignore_errors=True)
     except Exception:                              # noqa: BLE001
         pass
-    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
+            "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
 
 
 # ── Tidal multi-account pool ───────────────────────────────────────────────────
@@ -1250,12 +1273,14 @@ async def qobuz_accounts_add(body: dict):
     password   = (body.get("password") or "").strip()
     label      = (body.get("label") or "").strip() or email or user_id or "account"
     if not ((user_id and auth_token) or email):
-        return {"ok": False, "msg": "Нужны user_id+auth_token ИЛИ email+password"}
+        return {"ok": False, "msg": "Нужны user_id+auth_token ИЛИ email+password",
+                "msg_key": "acc.need_qobuz_creds", "params": {}}
 
     existing = list(_cfg.get("qobuz-accounts") or [])
     if any((a.get("user_id") == user_id and user_id) or (a.get("email") == email and email)
            for a in existing):
-        return {"ok": False, "msg": "Этот аккаунт уже добавлен"}
+        return {"ok": False, "msg": "Этот аккаунт уже добавлен",
+                "msg_key": "acc.account_duplicate", "params": {}}
     existing.append({"user_id": user_id, "auth_token": auth_token,
                      "email": email, "password": password, "label": label})
     _cfg["qobuz-accounts"] = existing
@@ -1265,7 +1290,8 @@ async def qobuz_accounts_add(body: dict):
         except Exception as e:
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
-    return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»"}
+    return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»",
+            "msg_key": "acc.account_added_as", "params": {"label": label}}
 
 
 @router.post("/api/qobuz/accounts/{slot}/remove")
@@ -1273,11 +1299,13 @@ async def qobuz_accounts_remove(slot: int):
     """Remove an additional account (slot >= 1 only — slot 0 is the primary
     account, managed via the regular Settings → Qobuz fields)."""
     if slot < 1:
-        return {"ok": False, "msg": "Слот 0 — основной аккаунт, убирается через обычные настройки Qobuz"}
+        return {"ok": False, "msg": "Слот 0 — основной аккаунт, убирается через обычные настройки Qobuz",
+                "msg_key": "acc.slot0_qobuz", "params": {}}
     existing = list(_cfg.get("qobuz-accounts") or [])
     idx = slot - 1
     if idx < 0 or idx >= len(existing):
-        return {"ok": False, "msg": "Нет такого аккаунта"}
+        return {"ok": False, "msg": "Нет такого аккаунта",
+                "msg_key": "acc.no_account", "params": {}}
     removed = existing.pop(idx)
     _cfg["qobuz-accounts"] = existing
     if _save_config:
@@ -1286,7 +1314,8 @@ async def qobuz_accounts_remove(slot: int):
         except Exception as e:
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
-    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
+            "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
 
 
 # ── SoundCloud multi-account pool (load-balanced, token is a plain CLI arg) ────
@@ -1305,10 +1334,12 @@ async def soundcloud_accounts_add(body: dict):
     token = (body.get("token") or "").strip()
     label = (body.get("label") or "").strip() or "account"
     if not token:
-        return {"ok": False, "msg": "Нужен токен"}
+        return {"ok": False, "msg": "Нужен токен",
+                "msg_key": "acc.need_token", "params": {}}
     existing = list(_cfg.get("soundcloud-accounts") or [])
     if any(a.get("token") == token for a in existing):
-        return {"ok": False, "msg": "Этот токен уже добавлен"}
+        return {"ok": False, "msg": "Этот токен уже добавлен",
+                "msg_key": "acc.token_already", "params": {}}
     existing.append({"token": token, "label": label})
     _cfg["soundcloud-accounts"] = existing
     if _save_config:
@@ -1317,17 +1348,20 @@ async def soundcloud_accounts_add(body: dict):
         except Exception as e:
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
-    return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»"}
+    return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»",
+            "msg_key": "acc.account_added_as", "params": {"label": label}}
 
 
 @router.post("/api/soundcloud/accounts/{slot}/remove")
 async def soundcloud_accounts_remove(slot: int):
     if slot < 1:
-        return {"ok": False, "msg": "Слот 0 — основной токен, убирается через обычные настройки SoundCloud"}
+        return {"ok": False, "msg": "Слот 0 — основной токен, убирается через обычные настройки SoundCloud",
+                "msg_key": "acc.slot0_soundcloud", "params": {}}
     existing = list(_cfg.get("soundcloud-accounts") or [])
     idx = slot - 1
     if idx < 0 or idx >= len(existing):
-        return {"ok": False, "msg": "Нет такого аккаунта"}
+        return {"ok": False, "msg": "Нет такого аккаунта",
+                "msg_key": "acc.no_account", "params": {}}
     removed = existing.pop(idx)
     _cfg["soundcloud-accounts"] = existing
     if _save_config:
@@ -1336,7 +1370,8 @@ async def soundcloud_accounts_remove(slot: int):
         except Exception as e:
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
-    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
+            "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
 
 
 # ── Yandex Music multi-account pool (load-balanced, token is a plain CLI arg) ──
@@ -1434,10 +1469,12 @@ async def yandex_accounts_add(body: dict):
     token = (body.get("token") or "").strip()
     label = (body.get("label") or "").strip() or "account"
     if not token:
-        return {"ok": False, "msg": "Нужен токен"}
+        return {"ok": False, "msg": "Нужен токен",
+                "msg_key": "acc.need_token", "params": {}}
     existing = list(_cfg.get("yandex-accounts") or [])
     if any(a.get("token") == token for a in existing):
-        return {"ok": False, "msg": "Этот токен уже добавлен"}
+        return {"ok": False, "msg": "Этот токен уже добавлен",
+                "msg_key": "acc.token_already", "params": {}}
     existing.append({"token": token, "label": label})
     _cfg["yandex-accounts"] = existing
     if _save_config:
@@ -1446,17 +1483,20 @@ async def yandex_accounts_add(body: dict):
         except Exception as e:
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
-    return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»"}
+    return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»",
+            "msg_key": "acc.account_added_as", "params": {"label": label}}
 
 
 @router.post("/api/yandex/accounts/{slot}/remove")
 async def yandex_accounts_remove(slot: int):
     if slot < 1:
-        return {"ok": False, "msg": "Слот 0 — основной токен, убирается через обычные настройки Yandex"}
+        return {"ok": False, "msg": "Слот 0 — основной токен, убирается через обычные настройки Yandex",
+                "msg_key": "acc.slot0_yandex", "params": {}}
     existing = list(_cfg.get("yandex-accounts") or [])
     idx = slot - 1
     if idx < 0 or idx >= len(existing):
-        return {"ok": False, "msg": "Нет такого аккаунта"}
+        return {"ok": False, "msg": "Нет такого аккаунта",
+                "msg_key": "acc.no_account", "params": {}}
     removed = existing.pop(idx)
     _cfg["yandex-accounts"] = existing
     if _save_config:
@@ -1465,7 +1505,8 @@ async def yandex_accounts_remove(slot: int):
         except Exception as e:
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
-    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
+    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
+            "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
 
 
 # ── OrpheusDL-Spotify ─────────────────────────────────────────────────────────
