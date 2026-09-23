@@ -75,6 +75,23 @@ def account_secret(acct: dict) -> str:
             or (acct.get("tidal-email") or acct.get("email") or "").strip())
 
 
+def engine_session_secret() -> str:
+    """Refresh-токен ТОЙ сессии, которой движок будет качать прямо сейчас.
+
+    Это НЕ `tidal-refresh` из config.yaml: OrpheusDL берёт сессию из своего
+    хранилища (`orpheus/config/loginstorage.bin`, у слота пула — своего), и эти
+    два хранилища ничем не синхронизированы. 23.09.2026 ростер показывал
+    «✅ активна, alive: true» по конфигу, а загрузки в 19:37 падали с
+    TidalAuthError именно потому, что сессия движка была мертва. Пусто — если
+    сессии нет вовсе (тогда качать нечем).
+    """
+    try:
+        from ripster.engines.tidal import session_refresh_token
+        return session_refresh_token()
+    except Exception:  # noqa: BLE001
+        return ""
+
+
 def known(secret: str, max_age: float = 24 * 3600.0) -> dict | None:
     """Последнее измерение, если оно не старше `max_age`. Иначе None.
 

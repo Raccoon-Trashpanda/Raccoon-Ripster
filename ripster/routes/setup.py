@@ -650,6 +650,19 @@ async def wrapper_accounts_prefs(body: dict):
     return {"ok": True, "changed": changed, "slots": n}
 
 
+# Вердикт пробы → i18n-ключ по тому же контракту, что WS-логи (`msg_key` +
+# `params`): клиент разворачивает ключ через ti(), русский `msg` остаётся
+# fallback для бота, healthcheck и языков без перевода. Ключи «why» отличаются
+# от заголовочных acc.token_rejected/acc.token_bad_request именно деталями:
+# заголовок отвечает «что», подписью уходит «почему и что делать».
+_PROBE_MSG_KEYS = {
+    "token_rejected": "acc.token_rejected_why",
+    "bad_request":    "acc.token_bad_request_why",
+    "empty":          "acc.token_empty",
+    "malformed":      "acc.token_malformed",
+}
+
+
 async def _wrapper_account_add_token(token: str, country: str, label: str) -> dict:
     """Запись аккаунта по media-user-token: сначала спросить Apple, потом писать.
 
@@ -668,13 +681,16 @@ async def _wrapper_account_add_token(token: str, country: str, label: str) -> di
         # взаимоисключающие: при 403 «вставь свежий токен», при 401 «токен мог
         # быть цел, сломан запрос».
         return {"ok": False, "state": state,
-                "msg": probe.get("reason") or "токен не проверен"}
+                "msg": probe.get("reason") or "токен не проверен",
+                "msg_key": _PROBE_MSG_KEYS.get(state, "acc.token_unverified"),
+                "params": {}}
 
     cc = (probe.get("storefront") or country or "").lower()
     existing = list(_cfg.get("wrapper-accounts") or [])
     if any(str(a.get("token") or "") == token for a in existing if isinstance(a, dict)):
         return {"ok": False, "state": "duplicate",
-                "msg": "Такой токен уже добавлен"}
+                "msg": "Такой токен уже добавлен",
+                "msg_key": "acc.token_duplicate", "params": {}}
     entry = {"token": token, "country": cc,
              "label": label or (f"token · {cc}" if cc else "token")}
     existing.append(entry)
@@ -683,9 +699,11 @@ async def _wrapper_account_add_token(token: str, country: str, label: str) -> di
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "started": False, "state": "ok", "country": cc,
             "label": entry["label"],
+            "msg_key": "acc.token_saved_wrapper_note", "params": {},
             "msg": ("Аккаунт по токену сохранён. Враппер под него НЕ поднимается: "
                     "media-user-token даёт каталог, тексты и AAC, но не ALAC/Atmos — "
                     "для них нужен аккаунт с логином.")}
@@ -716,8 +734,9 @@ async def wrapper_accounts_add(body: dict):
     # врапперу как логин, сжигая слот устройства.
     from ripster.wrapper_pool import _looks_like_media_user_token
     if _looks_like_media_user_token(apple_id):
-        return {"ok": False, "msg": "Это похоже на media-user-token, а не на Apple ID — "
-                                    "вставьте его в поле «токен»"}
+        return {"ok": False, "msg_key": "acc.token_in_id_field", "params": {},
+                "msg": "Это похоже на media-user-token, а не на Apple ID — "
+                       "вставьте его в поле «токен»"}
 
     existing = list(_cfg.get("wrapper-accounts") or [])
     label = label or apple_id
@@ -729,7 +748,8 @@ async def wrapper_accounts_add(body: dict):
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
 
     from ripster import wrapper_pool as _pool
     if not _pool.pool_enabled(_cfg):
@@ -763,7 +783,8 @@ async def wrapper_accounts_remove(slot: int):
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
 
     def _stop():
         try:
@@ -826,7 +847,8 @@ async def deezer_accounts_add(body: dict):
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "msg": f"ARL добавлен как «{label}»"}
 
 
@@ -846,7 +868,8 @@ async def deezer_accounts_remove(slot: int):
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
 
 
@@ -930,7 +953,8 @@ async def spotify_accounts_add(request: Request, body: dict = None):
         try:
             _save_config(_cfg)
         except Exception as e:                     # noqa: BLE001
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "slot": slot, "label": label,
             "msg": f"Слот {slot} забронирован — войди в Spotify для этой учётки"}
 
@@ -955,7 +979,8 @@ async def spotify_accounts_remove(request: Request, slot: int):
         try:
             _save_config(_cfg)
         except Exception as e:                     # noqa: BLE001
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     try:                                           # коридор учётки — на диск не смотрим, жалеем место
         import shutil
         shutil.rmtree(_sp.corridor_dir(slot), ignore_errors=True)
@@ -965,14 +990,28 @@ async def spotify_accounts_remove(request: Request, slot: int):
 
 
 # ── Tidal multi-account pool ───────────────────────────────────────────────────
-#   GET  /api/tidal/accounts         — список учёток Tidal в пуле (основной + доп.)
+#   GET  /api/tidal/accounts         — список учёток Tidal в пуле (основной + доп.),
+#                                      страна/тариф/«жива» — из той же пробы, по
+#                                      которой ростер расставляет порядок
 #   POST /api/tidal/accounts/add     — добавить учётку по refresh-токену
-#   POST /api/tidal/accounts/{slot}/remove — убрать доп. учётку (не слот 0)
+#   POST /api/tidal/accounts/{slot}/remove   — убрать доп. учётку (не слот 0)
+#   POST /api/tidal/accounts/{slot}/primary  — сделать доп. учётку основной
+#   Общая запись пула — `tidal_pool_append`, ею же пользуется device-flow
+#   (`/api/tidal/auth/poll` с `target: "pool"`).
 
 @router.get("/api/tidal/accounts")
 async def tidal_accounts_list(probe: int = 0):
     """Учётки Tidal: основной (`tidal-refresh`) + пул (`tidal-accounts`).
-    С ?probe=1 — спрашивает каждую о стране/тарифе/сроке/lossless."""
+
+    Без `probe` список строится БЫСТРО: из конфига плюс последнее измерение из
+    кэша `tidal_accounts` (та же проба, по которой ростер расставляет слоты —
+    `tidal_pool.health_rank` читает её же). Поэтому страна/подписка/«жива» в
+    панели и в порядке пула не могут разойтись: враньё о том, какая учётка
+    lossless-ная, и стоило владельцу нескольких вечеров.
+
+    С ?probe=1 — каждая учётка спрашивается заново (страна/тариф/срок/lossless).
+    """
+    from ripster import tidal_accounts as _ta
     from ripster import tidal_pool as _tp
     accts = _tp.configured_accounts(_cfg)
     out = {"pool": [{"slot": i,
@@ -990,10 +1029,22 @@ async def tidal_accounts_list(probe: int = 0):
                      "enabled": a.get("enabled", True),
                      "priority": a.get("priority", i)}
                     for i, a in enumerate(accts)]}
+    # Кэш измерений: `alive: None` — «сеть не ответила», отсутствующий ключ —
+    # «не спрашивали». Разводить их обязаны: неспрошенную учётку показываем
+    # серой, а не мёртвой.
+    for row, a in zip(out["pool"], accts):
+        info = _ta.known(_ta.account_secret(a)) or {}
+        if info:
+            row["measured"] = True
+            for k in ("alive", "plan", "quality", "lossless", "valid_until"):
+                if k in info:
+                    row[k] = info[k]
+            row["country"] = row["country"] or (info.get("country") or "").upper()
+            if info.get("reason"):
+                row["reason"] = info["reason"]
     if not probe:
         return out
     try:
-        from ripster import tidal_accounts as _ta
         probed = []
         for i, a in enumerate(accts):
             info = await _ta.account_info(a, fresh=True)
@@ -1007,33 +1058,70 @@ async def tidal_accounts_list(probe: int = 0):
     return out
 
 
-@router.post("/api/tidal/accounts/add")
-async def tidal_accounts_add(body: dict):
-    """Добавить учётку Tidal в пул по refresh-токену. Основной (`tidal-refresh`,
-    слот 0) не трогает. Вступает в силу на следующей загрузке через пул —
-    рестарт не нужен. Автопромоут (`promote_best_tidal`) поднимет её основной,
-    если она реально отдаёт lossless, а текущая основная — нет."""
-    refresh = (body.get("refresh") or body.get("token") or "").strip()
-    country = (body.get("country") or "").strip().upper()
-    label   = (body.get("label") or "").strip() or "account"
+def tidal_pool_append(refresh: str = "", country: str = "", label: str = "",
+                      user_id: "int | str" = "") -> dict:
+    """Записать учётку Tidal в пул `tidal-accounts` и сохранить конфиг.
+
+    ЕДИНЫЙ путь добавления для обоих входов: вклейки refresh-токена
+    (`/api/tidal/accounts/add`) и device-flow (`/api/tidal/auth/poll` с
+    `target: "pool"`). Правила дедупа разъедутся в двух копиях — и пул начнёт
+    плодить дубли той же учётки, а это ровно то, за что автопромоут потом
+    перетасовывает слоты впустую.
+    """
+    refresh = (refresh or "").strip()
+    country = (country or "").strip().upper()
+    label   = (label or "").strip()
+    uid     = str(user_id or "").strip()
     if not refresh:
-        return {"ok": False, "msg": "Нужен refresh-токен Tidal (eyJ…)"}
-    existing = list(_cfg.get("tidal-accounts") or [])
-    if (_cfg.get("tidal-refresh") or "").strip() == refresh or any(
-            (a.get("refresh") or a.get("tidal-refresh") or "").strip() == refresh
-            for a in existing if isinstance(a, dict)):
-        return {"ok": False, "msg": "Эта учётка уже добавлена"}
-    entry = {"label": label, "refresh": refresh}
+        return {"ok": False, "msg": "Нужен refresh-токен Tidal (eyJ…)",
+                "msg_key": "err.tidal_pool_no_token"}
+    existing = [a for a in (_cfg.get("tidal-accounts") or []) if isinstance(a, dict)]
+    primary_refresh = (_cfg.get("tidal-refresh") or "").strip()
+    primary_uid     = str(_cfg.get("tidal-user-id") or "").strip()
+    # Дедуп по токену ловит вклейку одного и того же refresh дважды, но НЕ
+    # ловит вход device-flow: там токен каждый раз новый, а учётка та же.
+    # Поэтому второй ключ — user_id, который Tidal отдаёт в /v1/sessions.
+    if (refresh == primary_refresh
+            or any((a.get("refresh") or a.get("tidal-refresh") or "").strip() == refresh
+                   for a in existing)
+            or (uid and uid == primary_uid)
+            or any(uid and str(a.get("user_id") or "").strip() == uid for a in existing)):
+        return {"ok": False, "msg": "Эта учётка уже добавлена",
+                "msg_key": "err.tidal_pool_duplicate"}
+    if not label:
+        # Страна в метке — не украшение: пять безымянных «account» с телефона не
+        # различить, а порядок пула решают именно страны (NZ-учётка даёт релизы
+        # на сутки раньше).
+        n = len(existing) + 1
+        label = f"Tidal {country} #{n}" if country else f"Tidal #{n}"
+    entry: dict = {"label": label, "refresh": refresh}
     if country:
         entry["country"] = country
+    if uid:
+        entry["user_id"] = uid
     existing.append(entry)
     _cfg["tidal-accounts"] = existing
     if _save_config:
         try:
             _save_config(_cfg)
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
-    return {"ok": True, "msg": f"Учётка добавлена как «{label}»"}
+            _cfg["tidal-accounts"] = [a for a in existing if a is not entry]
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
+    # Слот = позиция в `configured_accounts`: 0 — основной, пул начинается с 1.
+    return {"ok": True, "msg": f"Учётка добавлена как «{label}»",
+            "label": label, "slot": len(existing), "country": country, "user_id": uid}
+
+
+@router.post("/api/tidal/accounts/add")
+async def tidal_accounts_add(body: dict):
+    """Добавить учётку Tidal в пул по refresh-токену. Основной (`tidal-refresh`,
+    слот 0) не трогает. Вступает в силу на следующей загрузке через пул —
+    рестарт не нужен. Автопромоут (`promote_best_tidal`) поднимет её основной,
+    если она реально отдаёт lossless, а текущая основная — нет."""
+    return tidal_pool_append(refresh=body.get("refresh") or body.get("token") or "",
+                             country=body.get("country") or "",
+                             label=body.get("label") or "")
 
 
 @router.post("/api/tidal/accounts/{slot}/remove")
@@ -1051,8 +1139,89 @@ async def tidal_accounts_remove(slot: int):
         try:
             _save_config(_cfg)
         except Exception as e:  # noqa: BLE001
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "msg": f"Учётка {removed.get('label', '')} убрана"}
+
+
+@router.post("/api/tidal/accounts/{slot}/primary")
+async def tidal_accounts_set_primary(slot: int):
+    """Сделать учётку пула Tidal основной (слот >= 1). Прежняя основная не
+    выбрасывается, а переежает в пул — она может быть жива и годиться на AAC.
+
+    Порядок тот же, что у автопромоута (`credential_health.promote_best_tidal`):
+    сперва СЕССИЯ движка, и только потом конфиг. Качает не конфиг, а
+    `loginstorage.bin`, и обратный порядок дал бы пустую вывеску: панель показала
+    бы новую учётку, а загрузки шли бы прежней.
+    """
+    from ripster import tidal_accounts as _ta
+    from ripster import tidal_pool as _tp
+
+    if slot < 1:
+        return {"ok": False, "msg": "Слот 0 — основная учётка",
+                "msg_key": "err.tidal_primary_is_zero"}
+    existing = [a for a in (_cfg.get("tidal-accounts") or []) if isinstance(a, dict)]
+    idx = slot - 1
+    if idx >= len(existing):
+        return {"ok": False, "msg": "Нет такой учётки", "msg_key": "err.tidal_pool_gone"}
+    entry = existing[idx]
+    new_refresh = (entry.get("refresh") or entry.get("tidal-refresh") or "").strip()
+    if not new_refresh:
+        return {"ok": False, "msg": "У этой учётки нет refresh-токена — сделать её основным нельзя",
+                "msg_key": "err.tidal_pool_no_token"}
+    old_refresh = (_cfg.get("tidal-refresh") or "").strip()
+    new_country = (entry.get("country") or entry.get("tidal-country") or "").strip().upper()
+    old_country = (_cfg.get("tidal-country") or "").strip().upper()
+    if new_refresh == old_refresh:
+        return {"ok": False, "msg": "Эта учётка уже основная",
+                "msg_key": "err.tidal_already_primary"}
+
+    rep = _tp.write_session(0, new_refresh, new_country)
+    if not rep.get("ok"):
+        return {"ok": False, "msg": f"Сессия не переписана, основная не изменена: {rep.get('why')}",
+                "msg_key": "err.tidal_session_write_failed", "params": {"why": rep.get("why") or ""}}
+
+    old = {"refresh": old_refresh, "country": old_country,
+           "user_id": str(_cfg.get("tidal-user-id") or "").strip()}
+    existing.pop(idx)
+    if old["refresh"]:
+        demoted = {"label": (f"Tidal {old['country']} — прежняя основная" if old["country"]
+                             else "Прежняя основная"),
+                   "refresh": old["refresh"]}
+        if old["country"]:
+            demoted["country"] = old["country"]
+        if old["user_id"]:
+            demoted["user_id"] = old["user_id"]
+        existing.append(demoted)
+    _cfg["tidal-accounts"] = existing
+    _cfg["tidal-refresh"] = new_refresh
+    _cfg["tidal-country"] = new_country
+    # Прежние access-токен, uid и срок принадлежат СТАРОЙ учётке и живут ещё
+    # сутки: оставить их — значит кормить поиск/телефон чужой парой.
+    _cfg["tidal-user-id"] = str(entry.get("user_id") or "")
+    for k in ("tidal-token", "tidal-token-expiry"):
+        if k in _cfg:
+            _cfg[k] = ""
+    try:  # кэш токена движка: иначе поиск достанется прежней учётке до истечения
+        from ripster.engines import tidal as _te
+        _te._AT_CACHE.update({"token": "", "exp": 0.0, "country": "", "user_id": ""})
+    except Exception:  # noqa: BLE001
+        pass
+    if _save_config:
+        try:
+            _save_config(_cfg)
+        except Exception as e:  # noqa: BLE001
+            # Движок уже качает новой учёткой: откатываем и его, иначе панель
+            # врёт ровно в ту сторону, ради которой всё и делалось.
+            if old["refresh"]:
+                _tp.write_session(0, old["refresh"], old["country"])
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
+    info = _ta.known(new_refresh) or {}
+    return {"ok": True,
+            "msg": f"Основной сделана учётка «{entry.get('label') or new_country or 'Tidal'}»",
+            "label": entry.get("label") or "", "country": new_country,
+            "plan": info.get("plan") or ""}
 
 
 # ── Qobuz multi-account pool (load-balanced, no Docker) ────────────────────────
@@ -1091,7 +1260,8 @@ async def qobuz_accounts_add(body: dict):
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»"}
 
 
@@ -1111,7 +1281,8 @@ async def qobuz_accounts_remove(slot: int):
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
 
 
@@ -1141,7 +1312,8 @@ async def soundcloud_accounts_add(body: dict):
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»"}
 
 
@@ -1159,7 +1331,8 @@ async def soundcloud_accounts_remove(slot: int):
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
 
 
@@ -1242,7 +1415,8 @@ async def pool_accounts_prefs(service: str, body: dict):
             try:
                 _save_config(_cfg)
             except Exception as e:
-                return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+                return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "changed": changed, "slots": len(extras) + 1}
 
 
@@ -1267,7 +1441,8 @@ async def yandex_accounts_add(body: dict):
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "msg": f"Аккаунт добавлен как «{label}»"}
 
 
@@ -1285,7 +1460,8 @@ async def yandex_accounts_remove(slot: int):
         try:
             _save_config(_cfg)
         except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}"}
+            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран"}
 
 

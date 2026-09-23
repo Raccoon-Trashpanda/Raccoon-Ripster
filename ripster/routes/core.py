@@ -403,6 +403,14 @@ async def tidal_auth_poll(body: dict):
     code = (body.get("device_code") or "").strip()
     if not code:
         return {"ok": False, "error": "device_code required"}
+    # target: "primary" (по умолчанию — прежнее поведение, основная сессия
+    # перезаписывается) либо "pool" — вошедшая учётка добавляется в
+    # `tidal-accounts`, основная не трогается. Второе нужно владельцу, который
+    # сидит с телефона вдали от ПК и не может вклеивать refresh-токены руками.
+    target = (body.get("target") or "primary").strip().lower()
+    if target not in ("primary", "pool"):
+        return {"ok": False, "error_key": "err.tidal_bad_target",
+                "error": "target — 'primary' или 'pool'"}
     cid, csec = _tv_client()
     try:
         async with _httpx.AsyncClient(timeout=15) as c:
@@ -430,6 +438,27 @@ async def tidal_auth_poll(body: dict):
                 country = sj.get("countryCode") or ""
         except Exception:
             pass
+        if target == "pool":
+            # Основная сессия не трогается: вход во вторую учётку не имеет права
+            # разлогинить первую (ни TV-сессию, ни производную Atmos-сессию).
+            from ripster import tidal_accounts as _ta
+            from ripster.routes.setup import tidal_pool_append
+            res = tidal_pool_append(refresh=rt, country=country,
+                                    label=(body.get("label") or "").strip(),
+                                    user_id=user_id)
+            if not res.get("ok"):
+                return {"ok": False, "error": res.get("msg"), "error_key": res.get("msg_key")}
+            # Та же проба, что у панели пула и у ростера: страна, тариф, живость.
+            # Ответ кэшируется по этому refresh, поэтому новая строка пула
+            # загорается сразу, без второго запроса.
+            # Токен наружу не отдаётся никогда — ни access, ни refresh.
+            info = await _ta.account_info({"refresh": rt}, fresh=True)
+            return {"ok": True, "saved": True, "target": "pool",
+                    "slot": res.get("slot"), "label": res.get("label") or "",
+                    "country": info.get("country") or country,
+                    "plan": info.get("plan") or "",
+                    "quality": info.get("quality") or "",
+                    "alive": info.get("alive")}
         if not _save_tidal_session("TV", at, rt, exp, user_id, country):
             return {"ok": False, "error_key": "err.session_write_failed", "error": "Авторизация прошла, но не удалось записать сессию"}
         # Also derive the MOBILE_ATMOS session from the same refresh_token so the

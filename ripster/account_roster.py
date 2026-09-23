@@ -87,8 +87,12 @@ def classify(info: dict, *, is_active: bool, premium: bool) -> str:
 
 
 def is_degraded(info: dict, *, premium: bool) -> bool:
-    """Активная учётка «не тянет»: жива, но не премиум или срок вышел. Именно
-    это и есть скрытая беда — активный слот без максимума качества."""
+    """Активная учётка «не тянет»: жива, но не премиум, срок вышел — либо ЕЮ НЕ
+    КАЧАЮТ. Последнее важнее всех: 23.09.2026 активная карточка была зелёной при
+    мёртвой сессии движка, и «✅ активна» означало ровно противоположное тому,
+    что видел пользователь в логе загрузок."""
+    if info.get("session_drift"):
+        return True
     return info.get("alive") is not False and (not premium or is_expired(_expiry_raw(info)))
 
 
@@ -105,7 +109,11 @@ def line(service: str, label: str, info: dict, status: str, *, premium: bool = T
     exp = expiry_date(_expiry_raw(info))
     exp_s = f"до {exp}" if exp else "срок ?"
     badge = _BADGE.get(status, status)
-    if status == ACTIVE and is_degraded(info, premium=premium):
+    drift = str(info.get("session_drift") or "")
+    if drift:
+        # Зелёную галочку поверх этой строки ставить нельзя: она и была ложью.
+        badge = f"⚠️ {drift}"
+    elif status == ACTIVE and is_degraded(info, premium=premium):
         badge += " ⚠️ без премиума" if not premium else " ⚠️ истёк"
     who = f" · {label}" if label else ""
     return f"{country_flag(cc)} {service}{who} · {cc or '??'} · {plan} · {exp_s} · {badge}"
@@ -141,6 +149,11 @@ def as_dict(service: str, label: str, info: dict, status: str, *,
         "alive": info.get("alive"),
         "premium": bool(premium),
         "degraded": (status == ACTIVE and is_degraded(info, premium=premium)),
+        # Чем КАЧАЕТ эта учётка: 'same' — сессия движка совпадает, 'other' —
+        # движок сидит на другой, 'none' — сессии движка нет. Пусто для
+        # сервисов без такого разделения.
+        "engine_session": info.get("engine_session") or "",
+        "session_drift": str(info.get("session_drift") or ""),
         "masked": masked,
     }
 
@@ -176,12 +189,33 @@ def roster_cards(cfg: dict) -> dict:
     try:
         from . import tidal_accounts as ta, tidal_pool as tp
         active = (cfg.get("tidal-refresh") or "").strip()
+        # Мера — сессия движка, а не refresh из config.yaml: качает OrpheusDL
+        # первой, и именно она умерла 23.09 в 19:37, пока карточка была зелёной.
+        sess = ta.engine_session_secret()
         cards = []
         for i, acct in enumerate(tp.configured_accounts(cfg) or []):
-            info = _run(ta.account_info(acct, fresh=False))
             sec = ta.account_secret(acct)
+            is_active = bool(sec and sec == active)
+            uses = "none" if not sess else ("same" if sess == sec else "other")
+            # Активную карточку не берём из вчерашнего кэша: «жива» со вчерашнего
+            # дня переживает сегодняшнюю блокировку учётки.
+            info = dict(_run(ta.account_info(acct, fresh=is_active)))
+            info["engine_session"] = uses
+            if is_active and uses != "same":
+                # Заголовок «активна» при мертвой качалке — та же ложь. Скажем,
+                # чем кончится следующая загрузка, если это известно.
+                why = ("у движка нет сессии Tidal — качать нечем" if uses == "none"
+                       else "движок качает другой учёткой")
+                if sess:
+                    live = _run(ta.account_info({"tidal-refresh": sess}, fresh=True))
+                    if live.get("alive") is False:
+                        why += f": {live.get('reason') or 'отклонена Tidal'}"
+                        info["alive"] = False
+                    elif live.get("country"):
+                        info.setdefault("engine_country", live["country"])
+                info["session_drift"] = why
             cards.append(_card("tidal", acct.get("label") or f"слот {i}", info,
-                               is_active=bool(sec and sec == active),
+                               is_active=is_active,
                                premium=bool(info.get("lossless")), masked=_mask(sec)))
         if cards:
             out["tidal"] = cards
