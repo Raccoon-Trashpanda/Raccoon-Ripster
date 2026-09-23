@@ -364,7 +364,9 @@ def taste_bias() -> dict:
 _ARTIST_TTL = 14 * 24 * 3600
 # Версия состава в кэше. Меняеться, когда меняется САМ ОТОРБОР: списки,
 # собранные старым правилом, новый отбор должен пересчитать, а не раздавать.
-_ARTIST_CACHE_V = 2
+# 2→3 (23.09.2026): _primary_genre_ok стал поджанро-осведомлённым, и кэш,
+# собранный ровным сравнением, держал «metal» пустым — его надо сбросить.
+_ARTIST_CACHE_V = 3
 _artist_cache: dict = {}
 _artist_loaded = False
 
@@ -502,10 +504,18 @@ def _primary_genre_ok(tag_rows: list, genre: str) -> Optional[bool]:
                    if c > 0 and _gs.looks_like_genre(n)), reverse=True)
     if not rows:
         return None
-    hit = next(((c, n) for c, n in rows if norm(n) == want), None)
-    if hit is None:
+    # СЕМЕЙСТВО жанра = ровно этот тег ИЛИ поджанр, в названии которого живёт
+    # искомое слово («thrash metal», «heavy metal», «metalcore» ⊂ «metal»;
+    # «ambient techno» ⊂ «techno»). Ровное совпадение (`norm(n) == want`)
+    # обломывалось на зонтичных жанрах: метал-группы помечены подами, голый тег
+    # «metal» у Metallica весит 33 при «thrash metal»=66 — и по 75%-порогу она
+    # объявлялась «не метал», как и все остальные (замер 23.09.2026: metal→0
+    # сидовых артистов, плитка пустая). Для techno/рок базовый тег обычный,
+    # поэтому правка их не ослабляет: поджанр обязан содержать само слово жанра.
+    fam = [(c, n) for c, n in rows if norm(n) == want or want in norm(n)]
+    if not fam:
         return None
-    weight = hit[0]
+    weight = fam[0][0]          # rows отсортированы по убыванию — fam[0] самый тяжёлый
     heavier = sum(1 for c, _n in rows if c > weight)
     return heavier <= 2 and weight >= 0.75 * rows[0][0]
 
@@ -576,7 +586,11 @@ async def artists_for_genre(genre: str, limit: int = 14) -> list[str]:
     print(f"[station] MB «{g}»: кандидатов {sum(1 for w, _n, _t in rows if w >= 1)},"
           f" жанр подтверждён у {len(strong)}, отвергнут как второстепенный у {dropped}",
           flush=True)
-    _artist_cache_put(g, strong)
+    # Пустой список НЕ кэшируем — по той же причине, что и `not rows` выше:
+    # «не ответили/не подтвердилось» и «артистов нет» — разные вещи, и запомнить
+    # первое на две недели значит убить жанр (так и стоял пустой metal).
+    if strong:
+        _artist_cache_put(g, strong)
     return strong[:limit]
 
 
@@ -684,7 +698,7 @@ async def _artist_tracks(service: str, artist: str, limit: int = 4) -> list[dict
     которым сервис знает несколько разных артистов, доказательством не
     считается — там решает идентификатор, см. [credited_confirmed].
     """
-    items = await _service_search(service, artist, limit * 3)
+    items, _ = await _service_search(service, artist, limit * 3)
     ids = await _service_artist_ids(service, artist)
     out = []
     rejected = 0
@@ -704,18 +718,24 @@ async def _artist_tracks(service: str, artist: str, limit: int = 4) -> list[dict
     return out
 
 
-async def _sc_chart(slug: str, limit: int) -> list[dict]:
-    """Чарт SoundCloud по жанру. Жанр здесь задан сервисом — сверять нечем."""
+async def _sc_chart(slug: str, limit: int) -> tuple[list, str]:
+    """Чарт SoundCloud по жанру. Возвращает (строки, ключ_причины).
+
+    Жанр здесь задан самим сервисом — сверять нечем, поэтому строки идут с
+    `curated`. `ключ_причины` непустой, когда чарт недоступен НЕ по нашей вине
+    (endpoint снят сервисом), чтобы станция показала это, а не молчаливый 0.
+    """
     if not slug:
-        return []
+        return [], ""      # у плитки просто нет чарта — это не отказ источника
     from ripster.routes import soundcloud as _sc
     from ripster import http_client as _HTTP
     cid = await _sc._get_client_id()
     if not cid:
         print("[station] soundcloud:chart: client_id не добыт — чарта не будет",
               flush=True)
-        return []
+        return [], ""
     out: list[dict] = []
+    dead = False
     async with _HTTP.ashared() as c:
         for kind in ("top", "trending"):
             r = await c.get("https://api-v2.soundcloud.com/charts", params={
@@ -728,6 +748,7 @@ async def _sc_chart(slug: str, limit: int) -> list[dict]:
                 # soundcloud.com/charts тоже мертва) — это чарт снят у сервиса,
                 # а не наши параметры. Молча возвращать [] нельзя: источник
                 # выглядит мёртвым по вине кода, когда он мёртв по вине сети.
+                dead = True
                 print(f"[station] soundcloud:chart: kind={kind} "
                       f"genre=soundcloud:genres:{slug}: ответ {r.status_code} "
                       f"— endpoint недоступен", flush=True)
@@ -748,7 +769,7 @@ async def _sc_chart(slug: str, limit: int) -> list[dict]:
                 out.append(n)
             if out:
                 break
-    return out
+    return out, ("st.src_chart_gone" if (dead and not out) else "")
 
 
 # У сервисов доступ к сети настраивает app.py, когда ставит роуты. Станцию
@@ -781,8 +802,14 @@ def _ensure_config() -> None:
               f"qobuz/tidal могут молчать", flush=True)
 
 
-async def _service_search(service: str, query: str, limit: int) -> list[dict]:
-    """Точный запрос у одного сервиса. Ошибка одного не трогает остальных."""
+async def _service_search(service: str, query: str, limit: int) -> tuple[list, str]:
+    """Точный запрос у одного сервиса. Возвращает (строки, ключ_причины).
+
+    `ключ_причины` — i18n-ключ честной причины, по которой источник не дал НИЧЕГО
+    рабочего: «нет учётки» (err.tidal_no_token_cfg, err.ya_no_token …) — либо ""
+    (источник жив, просто пусто/всё отфильтровано). Без него ноль неотличим от
+    «сервис не настроен», и владелец видит молчаливый 0 (претензия 23.09.2026).
+    """
     from ripster.routes import discovery as _d
     fn = {
         "deezer": _d._search_deezer,
@@ -796,19 +823,21 @@ async def _service_search(service: str, query: str, limit: int) -> list[dict]:
         elif service == "apple":
             res = await _d._search_apple(query, "song", limit, "")
         else:
-            return []
+            return [], ""
     except Exception as e:                                     # noqa: BLE001
         print(f"[station] {service}: {type(e).__name__}: {e}", flush=True)
-        return []
-    if (res or {}).get("error"):
+        return [], ""
+    res = res or {}
+    if res.get("error"):
         # Сервис ответил ПУСТО, но объяснил почему («токен не настроен»,
         # «истёк») — без этой строки ноль неотличим от «нет такой музыки».
         print(f"[station] {service}: {res['error']}", flush=True)
-    items = (res or {}).get("results") or []
+    items = res.get("results") or []
     for it in items:
         it.setdefault("service", service)
         it["curated"] = False
-    return items
+    # error_key — уже i18n-ключ из фетчера (err.tidal_no_token_cfg и т.п.).
+    return items, str(res.get("error_key") or "")
 
 
 def services_norm(services) -> Optional[set]:
@@ -880,9 +909,14 @@ async def pool(station_id: str, *, want: int = 40, knobs: Optional[dict] = None,
             names.append(f"artist:{svc}")
 
     got = await asyncio.gather(*tasks, return_exceptions=True)
-    sources: dict[str, int] = {}
+    sources: dict[str, object] = {}
     rows: list[dict] = []
     for name, res in zip(names, got):
+        # Fетчеры-«словарь» (поиск по жанру, чарт) возвращают пару
+        # (строки, i18n_ключ_причины); трек-фетчеры артиста — голый список.
+        reason = ""
+        if isinstance(res, tuple):
+            res, reason = res
         # Имя у источника треков артиста НЕ уникально: ten artists × три
         # сервиса дают десять «artist:deezer» подряд. Раньше каждое следующее
         # перезаписывало предыдущее, и расклад по источникам врал: в
@@ -891,7 +925,10 @@ async def pool(station_id: str, *, want: int = 40, knobs: Optional[dict] = None,
         if isinstance(res, Exception):
             print(f"[station] {name}: {type(res).__name__}: {res}", flush=True)
             continue
+        raw = len(res or [])
         if not res:
+            if reason and not sources[name]:
+                sources[name] = reason      # «нет учётки» вместо молчаливого 0
             continue
         kept = []
         for it in res:
@@ -914,8 +951,15 @@ async def pool(station_id: str, *, want: int = 40, knobs: Optional[dict] = None,
                     # жанр неизвестен.
                     continue
             kept.append(it)
-        sources[name] += len(kept)
-        rows.extend(kept)
+        if kept:
+            sources[name] += len(kept)
+            rows.extend(kept)
+        elif name in SEARCH_SERVICES and not sources[name]:
+            # Первичный жанровый поиск ВЕРНУЛ строки, но ни одна не доказала
+            # жанр (поиск по слову даёт заглавия). Это не крах сервиса и не
+            # «нет музыки жанра» — честно говорим, что именно произошло,
+            # иначе владелец видит неотличимый от смерти ноль.
+            sources[name] = reason or "st.src_genre_unproven"
 
     if not rows:
         return {"ok": False, "id": _id, "title": title, "candidates": [],
