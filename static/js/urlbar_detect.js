@@ -379,8 +379,6 @@ async function pairStart(){
       return;
     }
     if(codeEl) codeEl.textContent=d.code;
-    const shareEl=document.getElementById('pair-share');
-    if(shareEl && typeof d.share_credentials==='boolean') shareEl.checked=d.share_credentials;
     let left=(d.expires_in||300);
     if(window._pairTtlTimer) clearInterval(window._pairTtlTimer);
     const tick=()=>{
@@ -393,16 +391,61 @@ async function pairStart(){
   }catch(e){ if(msgEl){ msgEl.textContent=t('ui.net_err_pfx')+e.message; msgEl.style.color='var(--red)'; } }
 }
 
-async function pairShare(on){
+// Отдача учёток — НЕ общий переключатель на все телефоны: право разбирается по
+// каждому устройству, и по умолчанию оно выключено (24.09.2026). Прежний
+// глобальный тумблер отсутствовал в интерфейсе вовсе, поэтому телефон забирал
+// учётки владельца, которые он никогда не включал.
+async function pairShareDevice(devId,on,el){
   const msgEl=document.getElementById('pair-msg');
+  const revert=()=>{ if(el) el.checked=!on; };
+  if(on && !confirm(t('s.pair_share_warn'))) { revert(); return; }
   try{
-    const r=await fetch('/api/pair/share',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({enabled:!!on})});
+    const r=await fetch('/api/pair/share',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({device_id:devId,enabled:!!on})});
     const d=await r.json().catch(()=>({}));
-    if(msgEl){
-      msgEl.textContent = r.ok ? (on?t('s.pair_share_on'):t('s.pair_share_off')) : (d.detail||d.error||('HTTP '+r.status));
-      msgEl.style.color = r.ok ? 'var(--green)' : 'var(--red)';
+    if(!r.ok){
+      revert();   // сервер отказал — тумблер не имеет права остаться в том положении, которого нет
+      if(msgEl){ msgEl.textContent=(d.detail||d.error||('HTTP '+r.status)); msgEl.style.color='var(--red)'; }
+      return;
     }
-  }catch(e){ if(msgEl){ msgEl.textContent=t('ui.net_err_pfx')+e.message; msgEl.style.color='var(--red)'; } }
+    const dev=(window._pairDevices||[]).find(x=>x.device_id===devId);
+    if(dev) dev.share_credentials=!!d.share_credentials;
+    if(msgEl){
+      msgEl.textContent = on ? t('s.pair_share_on_dev') : t('s.pair_share_off_dev');
+      msgEl.style.color  = on ? 'var(--orange)' : 'var(--green)';
+    }
+    pairRenderDevices();
+  }catch(e){ if(msgEl){ msgEl.textContent=t('ui.net_err_pfx')+e.message; msgEl.style.color='var(--red)'; } revert(); }
+}
+
+function _pairDeviceMeta(d){
+  const parts=[];
+  if(d.online) parts.push(t('s.pair_now'));
+  else if(d.seen) parts.push(t('s.pair_lastseen')+' '+_pairRel(d.seen));
+  parts.push(d.share_credentials ? t('s.pair_creds_on')
+                                 : (d.synced_at ? t('s.pair_creds_off_after') : t('s.pair_creds_never')));
+  return parts.join(' · ');
+}
+
+// Список строится из снимка, который принёс /api/pair/status, — перерисовка
+// после смены языка не ходит в сеть.
+function pairRenderDevices(){
+  const wrap=document.getElementById('pair-devices-wrap');
+  const box=document.getElementById('pair-devices');
+  if(!wrap||!box) return;
+  const devs=window._pairDevices||[];
+  wrap.style.display = devs.length ? '' : 'none';
+  box.innerHTML = devs.map(d=>{
+    const id=escapeHtml(d.device_id||''), on=!!d.share_credentials;
+    return '<div class="toggle-row" style="margin-top:8px">'
+      + '<div class="toggle-info"><div class="toggle-label">'
+      +   (escapeHtml(d.name||'') || t('s.pair_unnamed'))
+      +   (d.online ? ' <span style="color:var(--green)">●</span>' : '')
+      + '</div><div class="toggle-sub">'+_pairDeviceMeta(d)+'</div></div>'
+      + '<label class="toggle-wrap"><input type="checkbox" class="toggle-inp" data-dev="'+id+'"'
+      +   (on?' checked':'')+' onchange="pairShareDevice(this.dataset.dev,this.checked,this)"'
+      +   ' aria-label="'+escapeHtml(t('s.pair_share'))+'"><div class="toggle-slider"></div></label>'
+      + '</div>';
+  }).join('');
 }
 
 async function pairRevokeAll(){
@@ -456,8 +499,6 @@ async function pairFillHint(){
   if(!el) return;
   try{
     const r=await fetch('/api/pair/status'); const d=await r.json().catch(()=>({}));
-    const shareEl=document.getElementById('pair-share');
-    if(shareEl && d && typeof d.share_credentials==='boolean') shareEl.checked=d.share_credentials;
 
     // Адреса ЭТОГО ПК — как их видит телефон (LAN / mDNS / внешний, если есть).
     const eps=(d.endpoints||[]);
@@ -471,16 +512,20 @@ async function pairFillHint(){
     if(d.pc_name) pcLine = '<div style="margin-top:4px;color:var(--muted)">'+t('s.pair_this_pc')+' <b>'+d.pc_name+'</b>'
       + (d.pc_id ? ' · <code>'+String(d.pc_id).slice(0,8)+'…</code>' : '') + '</div>';
 
-    let statusLine='';
+    // Каждое устройство — своей строкой с тумблером отдачи учёток; имена и
+    // «активность» отсюда убраны, чтобы не повторять список ниже.
     const devs=(d.devices||[]);
+    window._pairDevices = devs;
+    pairRenderDevices();
+    let statusLine='';
     if(devs.length){
       const online=d.online_devices||0;
-      const last=Math.max(0,...devs.map(x=>x.seen||0));
-      const names=devs.map(x=>x.name).filter(Boolean).slice(0,3).join(', ');
+      const sharing=('sharing_devices' in d) ? d.sharing_devices : devs.filter(x=>x.share_credentials).length;
       statusLine = '<div style="margin-top:6px;color:'+(online>0?'var(--green)':'var(--muted)')+'">📱 '
-        + ti('s.pair_devices',{n:devs.length}) + (names?(' — '+names):'')
+        + ti('s.pair_devices',{n:devs.length})
         + (online>0 ? ' · '+ti('s.pair_online',{n:online}) : '')
-        + (last ? ' · '+t('s.pair_lastseen')+' '+_pairRel(last) : '') + '</div>';
+        + ' · <span style="color:'+(sharing>0?'var(--orange)':'var(--muted)')+'">🔑 '
+        + ti('s.pair_sharing_count',{now:sharing,total:devs.length})+'</span></div>';
     }
     el.innerHTML = addrLine + pcLine + statusLine;
 
@@ -490,7 +535,7 @@ async function pairFillHint(){
       mw.style.display = devs.length ? 'block' : 'none';
       _pairApplyMode(d.mode||'mirror');
     }
-  }catch(e){ el.innerHTML = t('s.pair_addr_lan_only'); }
+  }catch(e){ el.innerHTML = t('s.pair_addr_lan_only'); window._pairDevices=[]; pairRenderDevices(); }
 }
 
 // country code → flag emoji

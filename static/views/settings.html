@@ -254,12 +254,10 @@
             <span id="pair-code-ttl" style="font-size:11px;color:var(--muted)"></span>
             <button class="btn-ghost btn-sm" onclick="pairRevokeAll()" data-i18n="s.pair_revoke" style="margin-left:auto">Отвязать все устройства</button>
           </div>
-          <div class="toggle-row" style="margin-top:12px">
-            <div class="toggle-info">
-              <div class="toggle-label" data-i18n="s.pair_share">Делиться учётками сервисов с телефоном</div>
-              <div class="toggle-sub" data-i18n="s.pair_share_sub">Телефон сможет разово скачать токены (Qobuz, Deezer, Tidal, Яндекс, SoundCloud, Spotify sp_dc) и storefront Apple.</div>
-            </div>
-            <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="pair-share" onchange="pairShare(this.checked)"><div class="toggle-slider"></div></label>
+          <div id="pair-devices-wrap" style="margin-top:12px;display:none">
+            <div class="toggle-label" data-i18n="s.pair_devs_title">Телефоны и доступ к учёткам</div>
+            <div class="toggle-sub" data-i18n="s.pair_devs_hint">Решение отдавать учётки принимается по каждому телефону отдельно. Выключено — телефон не получит ни одного токена, сопряжение продолжит работать без учёток.</div>
+            <div id="pair-devices"></div>
           </div>
           <div id="pair-mode-wrap" style="margin-top:12px;display:none">
             <div class="toggle-label" data-i18n="s.pair_mode">Режим связи с телефоном</div>
