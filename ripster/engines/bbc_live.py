@@ -6,8 +6,18 @@ is_finished), но источник другой: не on-demand HLS выпус�
 полосой до ~20 кГц (AAC-LC 320). On-demand версия того же эфира — 96..102 кбит/с
 HE-AAC, см. HANDOFF_2026-09-19_qoder_session_MASTER.md §4.
 
-Пишем ``ffmpeg -c copy`` в .m4a: поток и так AAC, а любое перекодирование было
-бы вторым lossy поверх честных 320.
+Пишем ``ffmpeg -c copy`` через промежуточный .ts, а в .m4a перекладываем в
+конце: поток и так AAC, любое перекодирование было бы вторым lossy поверх
+честных 320. Промежуточный транспортный контейнер нужен не для совместимости,
+а для устойчивости: у mp4 таблица кадров (moov) дописывается в конце, и
+убитая на середине запись была бы нечитаема вовсе; .ts переживает обрыв и
+поддаётся спасению (ripster/bbc_live_recovery.py).
+
+С 24.09.2026 запись ПЕРЕД вердиктом «готово» проходит decode-check: двухчасовой
+эфир D3A370FB пришёл «успешным» файлом, который не декодировался (7667 строк
+ошибок). Обещать человеку «done» по битому файлу движок больше не может:
+не прошёл проверку — задача падает с честной причиной, файл остаётся рядом с
+меткой «(повреждено)», а оркестратор запускает восстановление.
 
 url/конфиг: как у ``bbc``, планировщик кладёт ``_bbc_live_channel`` и
 ``_bbc_duration`` в per-task view конфига (runner.py), поэтому build_cmd
@@ -17,6 +27,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -32,6 +43,10 @@ _RE_STREAM_DOWN = re.compile(
     r"Input/output error|Protocol not on stream|error reading |: (404|410|403) Forbidden",
     re.IGNORECASE)
 _MIN_KEEP_RATIO = 0.2       # меньше этого запись считается неудачной, а не «недолитой»
+# Decode-check порождает служебную строку на старте каждого нового декодера
+# («channel element 0.0 duplicate») — это не повреждение.
+_MAX_DECODE_ERRORS = 2
+_MIN_KEPT_RATIO = 0.98      # rc=0 без полного таймлайна — тоже повреждение
 
 
 @register
@@ -42,10 +57,15 @@ class BBCLiveEngine(EngineBase):
         self._out_dir: str = ""
         self._cover: str = ""
         self._expected: Path | None = None
+        self._ts: Path | None = None
         self._duration: int = 0
         self._elapsed: int = 0
         self._channel: str = ""
+        self._artist: str = ""
+        self._title: str = ""
+        self._date: str = ""
         self.abort_reason: str = ""   # контракт ProcessRunner: непустая строка глушит процесс
+        self.recovery_info: dict = {}  # заполняется при verdict «повреждено»; читает runner
 
     def qualities(self) -> list[dict]:
         # «320» здесь — не обещание, а измерение: промер 21.09.2026 по всем десяти
@@ -92,29 +112,51 @@ class BBCLiveEngine(EngineBase):
                   flush=True)
 
         self._duration = duration
-        self._channel = channel
-        title = _safe(str(config.get("_bbc_title") or "")) or \
-            f"{_safe(_CH.label(channel)) or channel} " + \
-            datetime.now(timezone.utc).strftime("%Y-%m-%d %H%M")
+        self._channel  = channel
+        artist = str(config.get("_bbc_artist") or "").strip() or _CH.label(channel)
+        title  = str(config.get("_bbc_title") or "").strip()
+        date   = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        self._artist, self._title, self._date = artist, title, date
+        # Имя файла говорит сам за себя: «Канал - Выпуск (дата).m4a». Теги
+        # дописываются после проверки файла (is_finished), а переименование по
+        # тегам движок-эфира не касается — иначе общий ренеймер превращает
+        # эфир в «00. -» при первых же пустых тегах (24.09.2026).
+        safe_a, safe_t = _safe(artist), _safe(title)
+        stem = (f"{safe_a} - {safe_t} ({date})"
+                if safe_t and safe_t != safe_a else f"{safe_a} ({date})")
         pid = str(config.get("_bbc_pid") or "").strip()
         out_dir = ep_dir(str(config.get("save-path") or "downloads"),
-                         _CH.label(channel), title, pid or channel)
+                         artist, title or stem, pid or channel)
         self._out_dir = str(out_dir)
         self._cover = str(config.get("_bbc_cover") or "")
-        self._expected = out_dir / f"{title}.m4a"
+        self._expected = out_dir / f"{stem}.m4a"
+        self._ts = out_dir / f"{stem}.part.ts"
 
-        return [
+        hls = ".m3u8" in stream
+        cmd = [
             ffmpeg, "-hide_banner", "-loglevel", "info", "-progress", "pipe:2",
             "-timeout", "15000000",                # 15 с на сетевой паузе
-            "-reconnect", "1", "-reconnect_at_eof", "1",
-            "-reconnect_streamed", "1", "-reconnect_delay_max", "5",
+            "-reconnect", "1", "-reconnect_delay_max", "5",
+        ]
+        if not hls:
+            # eof/streamed-реконнект приложены к HLS, каждый сегмент которого —
+            # отдельное соединение, — он переносит в поток уже прочитанные байты
+            # (24.09.2026: двухчасовой эфир задекодировался в мусор). Для
+            # прогрессивного HTTP они по-прежнему нужны.
+            cmd += ["-reconnect_at_eof", "1", "-reconnect_streamed", "1"]
+        else:
+            # HLS: один держатель соединения на сегменты и старт со свежего
+            # края плейлиста вместо перемотки через весь хвост окна.
+            cmd += ["-http_persistent", "1", "-live_start_index", "-1"]
+        cmd += [
             "-i", stream,
             "-vn", "-sn", "-dn",
             "-c", "copy",
             "-t", str(duration),
-            "-f", "mp4", "-movflags", "+faststart",
-            "-y", str(self._expected),
+            "-f", "mpegts",
+            "-y", str(self._ts),
         ]
+        return cmd
 
     def iter_events(self, line: str, *, progress: tuple[int, int]):
         clean = _strip_ansi(line)
@@ -157,6 +199,54 @@ class BBCLiveEngine(EngineBase):
     def extract_save_dir(self, log_text: str) -> "str | None":
         return self._out_dir or None
 
+    # ── финализация и проверка ───────────────────────────────────────────────
+
+    def _remux_ts(self) -> bool:
+        """Промежуточный .ts → итоговый .m4a (copy + faststart). True — файл лег."""
+        ffmpeg = shutil.which("ffmpeg")
+        ts, dst = self._ts, self._expected
+        if not (ffmpeg and ts and ts.exists() and dst):
+            return dst.exists() if dst else False
+        try:
+            r = subprocess.run(
+                [ffmpeg, "-hide_banner", "-v", "error", "-y",
+                 "-i", str(ts), "-c", "copy", "-movflags", "+faststart", str(dst)],
+                capture_output=True, text=True, timeout=1800)
+        except Exception:
+            return False
+        return r.returncode == 0 and dst.exists() and dst.stat().st_size > 10_000
+
+    def _decode_errors(self, path: Path) -> int:
+        from ripster import bbc_live_recovery as _REC
+        return _REC.decode_errors(path)
+
+    def _file_duration(self, path: Path) -> float:
+        from ripster import bbc_live_recovery as _REC
+        return _REC.probe_duration(path)
+
+    def _write_tags(self, path: Path) -> None:
+        from ripster.tagger import write_tags
+        album = f"{self._artist} (live {self._date})"
+        write_tags(path, {"title":  self._title or self._artist,
+                          "artist": self._artist, "albumartist": self._artist,
+                          "album":  album, "year": self._date,
+                          "track": "1", "tracktotal": "1"})
+
+    def _mark_corrupt(self) -> Path:
+        """Битый файл остаётся в библиотеке с честным именем — его ещё может
+        спасти восстановление (ripster/bbc_live_recovery.py), а перезаписать или
+        выбросить его молча движок не вправе."""
+        src = self._expected
+        dst = src.with_name(f"{src.stem} (повреждено).{src.suffix.lstrip('.')}")
+        try:
+            if src.exists():
+                if dst.exists():
+                    dst.unlink()
+                src.rename(dst)
+        except OSError:
+            dst = src
+        return dst
+
     def _actual_quality(self, path) -> str:
         """«live320» только если файл действительно 320 кбит/с AAC-LC.
 
@@ -178,9 +268,36 @@ class BBCLiveEngine(EngineBase):
 
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
         got = self._expected if self._expected and self._expected.exists() else None
+        if (got is None or got.stat().st_size <= 10_000) and self._remux_ts():
+            got = self._expected
         size = got.stat().st_size if got else 0
         written = f" {size // 1024} КБ" if size else ""
         if rc == 0 and got and size > 10_000:
+            # Вердикт «готово» спрашивает у ФАЙЛА, а не у кода возврата: ffmpeg
+            # выходит с нулём и после того, как сеть подмешала в поток мусор.
+            errs = self._decode_errors(got)
+            fdur = self._file_duration(got)
+            short = self._duration and fdur + 1 < self._duration * _MIN_KEPT_RATIO
+            if errs > _MAX_DECODE_ERRORS or short:
+                bad = self._mark_corrupt()
+                self.recovery_info = {
+                    "file": str(bad), "channel": self._channel,
+                    "artist": self._artist, "title": self._title,
+                    "date": self._date, "duration": self._duration,
+                    "errors": errs, "file_duration": fdur}
+                why = (f"эфир записан, но файл не декодируется чисто "
+                       f"({errs} ошибок{' ' + f'{fdur:.0f} с из {self._duration}' if short else ''}) "
+                       f"— файл сохранён с меткой «повреждено», запускаю восстановление")
+                return EngineResult(success=False, tracks_err=1, error=why, corrupt=True)
+            try:
+                self._write_tags(got)
+            except Exception as e:
+                print(f"[bbc_live] теги не записаны: {e}", flush=True)
+            if self._ts and self._ts.exists():
+                try:
+                    self._ts.unlink()       # успешная запись: промежуточный ts не нужен
+                except OSError:
+                    pass
             _attach_cover(self._out_dir, self._cover)
             return EngineResult(success=True, tracks_ok=1,
                                 quality_actual=self._actual_quality(got))

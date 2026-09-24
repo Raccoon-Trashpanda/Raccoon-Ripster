@@ -556,7 +556,12 @@ def rename_from_tags(directory: Path, template: str) -> list[tuple[Path, Path]]:
 
         ext      = file.suffix.lstrip(".")
         new_name = render_filename(template, tags, ext)
-        if not new_name or new_name == file.name:
+        # Файл без единого осмысленного слова в имени — это не «имя по тегам»,
+        # а теги, которых нет: пустой artist/title даёт «00. -.m4a» (24.09.2026
+        # так именовался двухчасовой BBC live). Цифры номерка и пунктуация
+        # разделителей словом не считаются — требуется хотя бы одна буква.
+        stem = new_name.rpartition(".")[0] if new_name else ""
+        if not new_name or not any(ch.isalpha() for ch in stem) or new_name == file.name:
             used_names.add(file.name.lower())
             continue
 

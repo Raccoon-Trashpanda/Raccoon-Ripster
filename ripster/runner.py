@@ -876,6 +876,10 @@ def _add_to_history(task: dict) -> None:
     status = task.get("status", "done")
     if status not in ("done", "error", "cancelled"):
         return
+    # Canary-проверка удаляет свой файл сразу после замера — карточка
+    # «скачано» без файла в истории враньё; в логе прохода её видно целиком.
+    if task.get("source") == "download_canary":
+        return
     # Перебор учёток оставляет в задаче текст ПОСЛЕДНЕГО отказавшего слота, и
     # он доезжал до истории даже когда следующий слот всё скачал: 04.09.2026
     # запись «done» несла «Deezer: ARL не задан или протух» на 12 успешно
@@ -920,7 +924,37 @@ def _add_to_history(task: dict) -> None:
         "_dl_errors":      task.get("_dl_errors", 0),
     }
     _download_history[:] = [h for h in _download_history if h.get("id") != entry["id"]]
+    # ── Честная строка запасного пути ───────────────────────────────────────
+    # Задача, скачанная после отказа другой витрины, обязана говорить, ОТКУДА
+    # она перепрыгнула: «QOBUZ отказала → скачано из TIDAL (FLAC CD 16-44)».
+    # Без этой строки карточка-«error» у исходной задачи так и висит финальным
+    # диагнозом, а успех выглядит чудом. `switched_note_key` + параметры — для
+    # телефона (перевод), `switched_note` — русская строка ПК-истории.
+    fb_from = str(task.get("_fallback_from") or "")
+    fb_note = ""
+    if fb_from and status == "done":
+        try:
+            from ripster.service_config import _quality_folder_name
+            q_label = _quality_folder_name(entry["service"] or "", entry["quality"] or "")
+        except Exception:                                        # noqa: BLE001
+            q_label = entry["quality"] or ""
+        fb_note = (f"{fb_from.upper()} отказала → скачано из "
+                   f"{(entry['service'] or '').upper()} ({q_label})")
+        entry["switched_from"] = fb_from
+        entry["switched_quality"] = q_label
+        entry["switched_note"] = fb_note
+        entry["switched_note_key"] = "history.fb_resolved"
     _download_history.insert(0, entry)
+    if fb_note:
+        for h in _download_history:
+            if h.get("id") == task.get("_fallback_origin"):
+                # Структурой, а не строкой: отказ исходной задачи виден и
+                # гостю-иностранцу — телефон/веб переводят по ключу.
+                h["resolved_by"] = {"id": entry["id"],
+                                    "from": fb_from,
+                                    "service": entry["service"],
+                                    "quality": entry.get("switched_quality", "")}
+                break
     del _download_history[500:]
     _save_history(_download_history)
     print(
@@ -969,6 +1003,13 @@ def _add_to_history(task: dict) -> None:
     try:
         loop = asyncio.get_running_loop()
         loop.create_task(_broadcast({"type": "history_updated"}))
+        if fb_note:
+            # Тот же факт в консоли: без строки успех второй задачи выглядит
+            # чудом, а не переключением витрины.
+            loop.create_task(_broadcast(_i18n.log_event(
+                "console.fb_resolved", level="success", task_id=entry["id"],
+                origin=fb_from.upper(), svc=(entry["service"] or "").upper(),
+                quality=entry.get("switched_quality", ""))))
     except RuntimeError:
         pass
 
@@ -1272,6 +1313,307 @@ async def _sc_drm_fallback(orig_task: dict) -> None:
 _SP_FB_SERVICES = ("qobuz", "tidal", "deezer")
 
 
+async def _elsewhere_fallback(orig_task: dict, *, requested: str, url: str,
+                              upc: str, isrc: str, title: str, artist: str,
+                              miss_key: str, reason: str, added_event: str,
+                              seed: dict | None = None) -> None:
+    """Общий хвост запасного пути: матрица доступности → кандидаты → первый в очередь.
+
+    Разница между источниками только в том, ЧЕМ подтверждена идентичность и
+    какими словами сообщить о промахе — механизм «взять то же там, где дают»
+    один для Spotify (23.09.2026) и для Apple-отказа по CKC (24.09.2026).
+    """
+    tid = orig_task.get("id", "")
+    # Канареечный прогон — не клиент: его файлы удаляются сразу, а запасная
+    # задача легла бы в библиотеку владельца и в боевую историю, где её
+    # никто не разберёт. Canary проверяет СВОЙ сервис и отвечает сам.
+    if orig_task.get("source") == "download_canary":
+        return
+    try:
+        from ripster.routes.spotify import _convert_available_elsewhere
+        # Сид — сам альбом исходного сервиса: по нему матрица добывает ISRC
+        # треков ДО опроса витрин. Без него релиз с другим штрихкодом в магазине
+        # (24.09.2026, «Sweet Sacrifice (Remastered 2026)»: Spotify
+        # 00888072836037 против Deezer 888072836020) остался бы «нигде нет».
+        cands = await _convert_available_elsewhere(requested, upc, isrc, title, artist,
+                                                   seed=seed) or []
+    except Exception as e:
+        await _log_key("console.sp_fb_fail", "warn", tid, err=type(e).__name__)
+        return
+    cands = [c for c in cands
+             if c.get("service") in _SP_FB_SERVICES and (c.get("url") or "").strip()
+             and not any((q.get("url") or "") == c["url"] for q in _queue)]
+    # Порядок взятия — хозяйская лестница доступности, а не фиксированный
+    # список: `availability-preference` решает, куда идти первым и владельцу, и
+    # гостю. Apple из неё вырезается фильтром выше — публичный враппер остаётся
+    # ручным, запасной путь через него не протаскивается.
+    pref = [s for s in (str(x).strip().lower()
+                        for x in (_config.get("availability-preference") or []))
+            if s in _SP_FB_SERVICES]
+    if pref:
+        rank = {s: i for i, s in enumerate(pref)}
+        cands.sort(key=lambda c: rank.get(c.get("service"), len(pref)))
+    if not cands:
+        await _log_key(miss_key, "warn", tid, title=title or url)
+        return
+    # Полный список служит даже без взятия: телефон показывает по нему
+    # короткое «попробуй другой сервис» — названия сервисов интернациональны.
+    orig_task.setdefault("meta", {})["available_on"] = [c["service"] for c in cands]
+
+    cand = cands[0]
+    try:
+        from ripster.routes.queue import _make_task, _queue_snapshot
+        from ripster.service_layer import default_quality
+        from ripster.service_config import get_save_path as _gsp
+        svc = cand["service"]
+        t = _make_task(cand["url"], default_quality(svc), svc, svc, reason,
+                       session_id=orig_task.get("session_id", ""))
+        t["meta"] = {"service":          svc,
+                     "title":            cand.get("title") or title,
+                     "artist":           cand.get("artist") or artist,
+                     "artworkUrl":       cand.get("cover") or "",
+                     "fallback_origin":  tid}
+        t["_base_save_path"] = _gsp(_config, svc, t["quality"])
+        t["_fallback_origin"] = tid
+        # Откуда именно перепрыгнули — нужно честной строке в истории
+        # («Spotify отказала → скачано из Qobuz (FLAC CD 16-44)»).
+        t["_fallback_from"] = requested
+        _queue.append(t)
+        orig_meta = orig_task.setdefault("meta", {})
+        orig_meta.setdefault("fallback_targets", []).append(t["id"])
+        orig_meta["fallback_target"] = t["id"]
+        orig_task["_fallback_target"] = t["id"]
+        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+        await _broadcast({"type": added_event,
+                          "origin_task_id": tid,
+                          "new_task_id":    t["id"],
+                          "service":        svc,
+                          "title":          t["meta"]["title"],
+                          "artist":         t["meta"]["artist"]})
+        await _log_key("console.sp_fb_queued", "success", tid,
+                       svc=svc.upper(), title=t["meta"]["title"])
+        if not _qs.is_running:
+            _qs.start()
+            asyncio.create_task(process_queue())
+    except Exception as e:
+        await _log_key("console.sp_fb_fail", "warn", tid, err=type(e).__name__)
+
+
+async def _apple_ckc_fallback(orig_task: dict) -> None:
+    """Apple не отдала ключ на ЭТОТ релиз (свои сессии живы, все свои витрины
+    отказали) — взять то же самое на Qobuz/Tidal/Deezer.
+
+    Правила идентичности взяты у spotify-запасного пути дословно: только
+    ISRC (трек) / UPC (альбом) по `content_id`. Без кода вслепую по названию
+    не идём — ровно этим держат тесты честности подмен.
+    """
+    tid = orig_task.get("id", "")
+    url = (orig_task.get("url") or "").strip()
+    if "apple.com" not in url:
+        return
+    await _log_key("console.ap_fb_try", "info", tid)
+    try:
+        from ripster.metadata.apple import content_id
+        cid = (await content_id(url)) or ""
+    except Exception:
+        cid = ""
+    isrc = cid[5:] if cid.startswith("isrc:") else ""
+    upc  = cid[4:] if cid.startswith("upc:")  else ""
+    if not (isrc or upc):
+        await _log_key("console.ap_fb_no_id", "warn", tid)
+        return
+    meta = orig_task.get("meta") or {}
+    await _elsewhere_fallback(orig_task, requested="apple", url=url,
+                              upc=upc, isrc=isrc,
+                              title=meta.get("title", "") or "",
+                              artist=meta.get("artist", "") or "",
+                              miss_key="console.ap_fb_miss",
+                              reason="apple_ckc_fallback",
+                              added_event="apple_fallback_added")
+
+
+# ── Восстановление битой BBC-live записи (24.09.2026) ────────────────────────
+
+async def _bbc_live_recover(task: dict, tid: str, eng) -> None:
+    """Вердикт движка «файл битый» — не точка, а начало восстановления.
+
+    Порядок согласован с владельцем: 4a — спасти честные 320 кбит/с из самого
+    файла (на on-demand BBC Sounds их не бывает: 96..102 кбит/с HE-AAC, см.
+    HANDOFF §4), и только если спасать нечего — 4b запасная копия оттуда же,
+    явно подписанная как другая копия, НИКОГДА не вместо live-файла. Какую
+    копию человек получил — говорится в каждом исходе.
+    """
+    from ripster import bbc_live_recovery as _REC
+    info  = dict(getattr(eng, "recovery_info", None) or {})
+    src   = Path(info.get("file") or "")
+    if not src.exists():
+        await _log_key("console.bbc_live_recover_missing", "error", tid)
+        return
+    await _log_key("console.bbc_live_salvage_start", "info", tid, name=src.name)
+    try:
+        report = await asyncio.to_thread(_REC.salvage, src)
+    except Exception as e:                                   # noqa: BLE001
+        report = {"ok": False, "reason": f"{type(e).__name__}: {e}"[:200]}
+    if report.get("ok"):
+        out = Path(report["out"] or "")
+        # Теги спасённой копии — те же, что движок пишет честному файлу:
+        # библиотека не должна отличать восстановленный кусок от записанного.
+        try:
+            from ripster.tagger import write_tags
+            await asyncio.to_thread(write_tags, out, {
+                "title": info.get("title") or info.get("artist") or out.stem,
+                "artist": info.get("artist") or "",
+                "albumartist": info.get("artist") or "",
+                "album": f"{info.get('artist') or 'BBC'} (live {info.get('date') or ''})".strip(),
+                "year": info.get("date") or "",
+                "track": "1", "tracktotal": "1"})
+        except Exception:
+            pass
+        await _log_key("console.bbc_live_salvage_ok", "success", tid,
+                       clean=int((report.get("clean_s") or 0) // 60),
+                       damaged=int((report.get("damaged_s") or 0) // 60),
+                       total=int((report.get("total_s") or 0) // 60),
+                       out=out.name)
+        return
+    await _log_key("console.bbc_live_salvage_fail", "warn", tid,
+                   reason=report.get("reason") or "")
+    await _bbc_live_ondemand_copy(task, tid, info)
+
+
+_ONDEMAND_WAIT = 6 * 3600        # копия ждёт своей очереди не вечно
+
+
+async def _bbc_live_ondemand_copy(orig_task: dict, tid: str, info: dict) -> None:
+    """4b: тот же выпуск из BBC Sounds — ЗАПАСНАЯ подпись под битым эфиром.
+
+    Ищем эпизод по названию через RMS-поиск (у live-планов pid обычно нет),
+    ставим обычную задачу движка `bbc` и после её успеха переименовываем
+    приехавший MP3 с числом ИЗМЕРЕННОГО битрейта в имени — чтобы человек
+    перепутать копии не мог.
+    """
+    from ripster import bbc_live_recovery as _REC
+    title = info.get("title") or ""
+    if not title:
+        await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                       reason="у выпуска нет названия — искать не по чему")
+        return
+    hit = await asyncio.to_thread(_REC.find_episode, title)
+    if not hit:
+        await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                       reason=f"«{title}» в BBC Sounds не нашлось")
+        return
+    try:
+        from ripster.routes.queue import _make_task
+        from ripster.service_config import get_save_path as _gsp
+        t = _make_task(f"https://www.bbc.co.uk/sounds/play/{hit['pid']}",
+                       "mp3", "bbc", "bbc", source="bbc_live_recovery")
+        t["meta"] = {"service": "bbc", "title": hit.get("title") or title,
+                     "artist": info.get("artist") or "BBC Radio",
+                     "artworkUrl": ""}
+        t["_base_save_path"] = _gsp(_config, "bbc", "mp3")
+        _queue.append(t)
+        # СНАПШОТ — раннерский (инжектится в install), не routes.queue: тот же
+        # глобальный name там — None до boot-app, и путь постановки в очередь
+        # падал бы TypeError ровно там, где обязан пережить отказ.
+        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+        await _log_key("console.bbc_live_ondemand_queued", "warn", tid,
+                       title=t["meta"]["title"])
+        if not _qs.is_running:
+            _qs.start()
+            asyncio.create_task(process_queue())
+    except Exception as e:                                   # noqa: BLE001
+        await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                       reason=f"{type(e).__name__}: {e}"[:200])
+        return
+    # Ждём исхода задачи обычным путем очереди; следим за самим dict — его
+    # статус меняет на месте run_task.
+    waited = 0.0
+    while waited < _ONDEMAND_WAIT:
+        if t.get("status") == "done":
+            break
+        if t.get("status") in ("error", "cancelled"):
+            await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                           reason=str(t.get("error") or t.get("status"))[:200])
+            return
+        await asyncio.sleep(10)
+        waited += 10
+    else:
+        await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                       reason="копия не дождась своей очереди за 6 часов")
+        return
+    try:
+        from ripster.routes.download import _get_task_dir, _find_audio_files
+        d = _get_task_dir(t)
+        files = _find_audio_files(d) if d else []
+        if not files:
+            await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                           reason="файл копии не найден на диске")
+            return
+        f = max(files, key=lambda p: p.stat().st_size)
+        kbps = await asyncio.to_thread(_REC.measure_kbps, f)
+        dst = f.with_name(f"{f.stem} (BBC Sounds, {kbps or '?'} kbps){f.suffix}")
+        if not dst.exists():
+            try:
+                f.rename(dst)
+            except OSError:
+                dst = f
+        await _log_key("console.bbc_live_ondemand_done", "success", tid,
+                       out=dst.name, kbps=kbps or 0)
+    except Exception as e:                                   # noqa: BLE001
+        await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                       reason=f"{type(e).__name__}: {e}"[:200])
+
+
+# С каких сервисов запасной путь запускается автоматически при ПОСТОЯННОМ
+# отказе (Apple и Spotify ведут свои обработчики, SoundCloud — sc_fallback).
+_PR_FB_SERVICES = ("qobuz", "deezer", "tidal", "yandex", "beatport")
+# Что считать «постоянным отказом сервиса ПЕРЕД НАМИ»: отказ по правам
+# аккаунта, гео-лок, мёртвая сессия (пул учёток уже перебран и не помог),
+# релиз снят/недоступен, нет нужного битрейта. Сломанное окружение
+# (deps/decryption/postprocess) — НЕ повод: там чинить надо pip, а не
+# витрину менять.
+_PR_FB_REASONS = ("entitlement", "region", "session", "unavailable",
+                  "removed", "no-flac")
+
+
+async def _permanent_fail_fallback(orig_task: dict) -> None:
+    """Qobuz/Deezer/Tidal/Yandex/Beatport отказали ПОСТОЯННО — взять ту же
+    запись на другой витрине.
+
+    24.09.2026: весь день «Invalid CKC» на каждый релиз означал, что гости
+    получали «ни одна учётка не дала ключ» по каждому сервису по очереди —
+    молча, без запасного пути. Тот же механизм, что у Spotify и Apple-отказа
+    по CKC (матрица доступности → ISRC/UPC → первая доступная витрина),
+    теперь закрывает и остальные сервисы. Идентичность — ТОЛЬКО по кодам:
+    без ISRC/UPC остаётся туманное сравнение по названию, ровно то, из-за
+    чего релизы подменялись (тесты честности подмен).
+    """
+    tid = orig_task.get("id", "")
+    svc = str(orig_task.get("service") or "").lower()
+    url = (orig_task.get("url") or "").strip()
+    if svc not in _PR_FB_SERVICES or not url:
+        return
+    await _log_key("console.pr_fb_try", "info", tid, svc=svc.upper())
+    try:
+        from ripster.metadata import fetch_meta_any
+        meta = await fetch_meta_any(url, svc) or {}
+    except Exception:
+        meta = {}
+    isrc = str(meta.get("isrc") or "").strip()
+    upc = str(meta.get("upc") or "").strip()
+    if not (isrc or upc):
+        await _log_key("console.pr_fb_no_id", "warn", tid, svc=svc.upper())
+        return
+    ometa = orig_task.get("meta") or {}
+    await _elsewhere_fallback(
+        orig_task, requested=svc, url=url, upc=upc, isrc=isrc,
+        title=str(ometa.get("title") or ""),
+        artist=str(ometa.get("artist") or ""),
+        miss_key="console.pr_fb_miss",
+        reason=f"{svc}_fallback",
+        added_event="cross_service_fallback_added")
+
+
 async def _spotify_unavailable_fallback(orig_task: dict) -> None:
     """Spotify не отдаёт релиз ЭТОЙ УЧЁТКЕ — взять то же самое там, где он есть.
 
@@ -1322,54 +1664,13 @@ async def _spotify_unavailable_fallback(orig_task: dict) -> None:
         await _log_key("console.sp_fb_no_id", "warn", tid)
         return
 
-    try:
-        from ripster.routes.spotify import _convert_available_elsewhere
-        cands = await _convert_available_elsewhere("spotify", upc, isrc, title, artist) or []
-    except Exception as e:
-        await _log_key("console.sp_fb_fail", "warn", tid, err=type(e).__name__)
-        return
-    cands = [c for c in cands
-             if c.get("service") in _SP_FB_SERVICES and (c.get("url") or "").strip()
-             and not any((q.get("url") or "") == c["url"] for q in _queue)]
-    if not cands:
-        await _log_key("console.sp_fb_miss", "warn", tid, title=title or url)
-        return
-
-    cand = cands[0]
-    try:
-        from ripster.routes.queue import _make_task, _queue_snapshot
-        from ripster.service_layer import default_quality
-        from ripster.service_config import get_save_path as _gsp
-        svc = cand["service"]
-        t = _make_task(cand["url"], default_quality(svc), svc, svc,
-                       "spotify_unavailable_fallback",
-                       session_id=orig_task.get("session_id", ""))
-        t["meta"] = {"service":          svc,
-                     "title":            cand.get("title") or title,
-                     "artist":           cand.get("artist") or artist,
-                     "artworkUrl":       cand.get("cover") or "",
-                     "_sp_fallback_origin": tid}
-        t["_base_save_path"] = _gsp(_config, svc, t["quality"])
-        t["_sp_fallback_origin"] = tid
-        _queue.append(t)
-        orig_meta = orig_task.setdefault("meta", {})
-        orig_meta.setdefault("fallback_targets", []).append(t["id"])
-        orig_meta["fallback_target"] = t["id"]
-        orig_task["_fallback_target"] = t["id"]
-        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
-        await _broadcast({"type": "sp_fallback_added",
-                          "origin_task_id": tid,
-                          "new_task_id":    t["id"],
-                          "service":        svc,
-                          "title":          t["meta"]["title"],
-                          "artist":         t["meta"]["artist"]})
-        await _log_key("console.sp_fb_queued", "success", tid,
-                       svc=svc.upper(), title=t["meta"]["title"])
-        if not _qs.is_running:
-            _qs.start()
-            asyncio.create_task(process_queue())
-    except Exception as e:
-        await _log_key("console.sp_fb_fail", "warn", tid, err=type(e).__name__)
+    _sm = _re.search(r"open\.spotify\.com/(?:intl-[a-z-]+/)?album/([A-Za-z0-9]+)", url)
+    seed = {"id": _sm.group(1), "service": "spotify"} if (_sm and kind == "album") else None
+    await _elsewhere_fallback(orig_task, requested="spotify", url=url,
+                              upc=upc, isrc=isrc, title=title, artist=artist,
+                              miss_key="console.sp_fb_miss",
+                              reason="spotify_unavailable_fallback",
+                              added_event="sp_fallback_added", seed=seed)
 
 
 def _apply_rename(task: dict, tid: str) -> None:
@@ -2628,25 +2929,30 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # всяких рассуждений, поэтому диск спрашиваем ПЕРВЫМ. Ставка на
             # mtime (не старше начала прогона) отсекает остатки прошлых заходов.
             _salvaged = False
-            try:
-                from ripster.routes.download import (_get_task_dir as _gtd_pre,
-                                                     _find_audio_files as _faf_pre)
-                _dd_pre = _gtd_pre(task)
-                if _dd_pre:
-                    _st_pre = float(task.get("_start_time") or 0.0) - 5.0
-                    _fresh_pre = [f for f in _faf_pre(_dd_pre)
-                                  if f.stat().st_mtime >= _st_pre]
-                    if _fresh_pre:
-                        task.setdefault("log", []).append(
-                            f"[salvage] на диске {len(_fresh_pre)} свежих файл(ов) — "
-                            f"отдаю как частичную загрузку, а не как ошибку")
-                        result.success   = True
-                        result.tracks_ok = len(_fresh_pre)
-                        result.error     = ""
-                        task["partial"]  = True
-                        _salvaged = True
-            except Exception:
-                pass
+            # Диск первичен, НО не над файлом, который сам движок проверил
+            # декодером и признал бракованным (24.09.2026: BBC-эфир на 290 МБ
+            # лег «успешно», хотя 7667 строк ошибок декода). Для corrupt=True
+            # свежие файлы — это и есть тот брак, partial-зачёт врал бы.
+            if not getattr(result, "corrupt", False):
+                try:
+                    from ripster.routes.download import (_get_task_dir as _gtd_pre,
+                                                         _find_audio_files as _faf_pre)
+                    _dd_pre = _gtd_pre(task)
+                    if _dd_pre:
+                        _st_pre = float(task.get("_start_time") or 0.0) - 5.0
+                        _fresh_pre = [f for f in _faf_pre(_dd_pre)
+                                      if f.stat().st_mtime >= _st_pre]
+                        if _fresh_pre:
+                            task.setdefault("log", []).append(
+                                f"[salvage] на диске {len(_fresh_pre)} свежих файл(ов) — "
+                                f"отдаю как частичную загрузку, а не как ошибку")
+                            result.success   = True
+                            result.tracks_ok = len(_fresh_pre)
+                            result.error     = ""
+                            task["partial"]  = True
+                            _salvaged = True
+                except Exception:
+                    pass
 
             if _salvaged:
                 pass
@@ -2707,7 +3013,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                         from ripster.routes.download import (_get_task_dir as _gtd_chk,
                                                              _find_audio_files as _faf_chk)
                         _dd = _gtd_chk(task)
-                        if _dd:
+                        if _dd and not getattr(result, "corrupt", False):
                             _st = float(task.get("_start_time") or 0.0) - 5.0
                             _fresh = [f for f in _faf_chk(_dd) if f.stat().st_mtime >= _st]
                             if _fresh:
@@ -2892,7 +3198,10 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # skip-check → re-download → byte-identical _2/_3 duplicates. So don't
             # rename native-Spotify output (the bot delivers by embedded tags
             # anyway, so the on-disk filename doesn't matter for quality/labels).
-            if engine_name != "orpheus_spotify":
+            # bbc_live строит имя САМ («Канал - Выпуск (дата).m4a», 24.09.2026):
+            # шаблон «01. Artist - Title» ломает его, а пустые теги live-записей
+            # рождали «00. -.m4a». Именованные файлы движка не трогаем.
+            if engine_name not in ("orpheus_spotify", "bbc_live"):
                 _apply_rename(task, tid)
             # Uniform folder cover.jpg for every service (extract embedded art if
             # the engine didn't drop a sidecar). Before disc-split so it lands at
@@ -3195,6 +3504,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 and not _no_retry
                 and not _engine_aborted   # вердикт движка сильнее любой регулярки
                 and not task.get("_auto_retry")   # don't chain onto partial-fail retry
+                # Битый по decode-check файл повтором не лечится: эфир — окно
+                # в прошлом, и новый прогон писал бы ПРЯМО СЕЙЧАС совсем другую
+                # передачу под именем запланированной (24.09.2026). Судьба
+                # таких файлов — восстановление, а не повтор.
+                and not getattr(result, "corrupt", False)
             )
             if can_retry:
                 delay = _RETRY_BACKOFF[min(retry_n, len(_RETRY_BACKOFF) - 1)]
@@ -3237,7 +3551,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                         _d = Path(_relocate_to_service_folder(
                             str(_d), task.get("service") or "", quality, _config))
                     _audio = _faf(_d) if (_d and _d.is_dir()) else []
-                    if _audio:
+                    # Файл, который движок проверил декодером и признал браком,
+                    # — НЕ «реальные файлы на диске»: выдать его за partial
+                    # означало бы соврать второй раз. Для corrupt — путь
+                    # восстановления ниже, а не сюда.
+                    if _audio and not getattr(result, "corrupt", False):
                         task["_save_dir"] = str(_d)
                         task["_files"]    = [f.name for f in _audio]
                         _dm.record(tid, str(_d), _audio, task)
@@ -3315,11 +3633,30 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     # `cross_service` и кнопку конверта (раздел D отчёта).
                     if (engine_name == "orpheus_spotify"
                             and (_no_retry or _engine_aborted)
+                            and task.get("source") != "download_canary"
                             and not task.get("_sp_fb_tried")):
                         task["_sp_fb_tried"] = True
                         asyncio.create_task(_spotify_unavailable_fallback(task))
+                    # Тот же запасной путь для остальных сервисов: права/гео/
+                    # мёртвая сессия (пул учёток уже перебран и не помог).
+                    # Задача, которая САМА пришла из запасного пути, дальше не
+                    # прыгает: иначе два упрямых отказа гоняли бы релиз по
+                    # всему кругу.
+                    if (str(task.get("service") or "").lower() in _PR_FB_SERVICES
+                            and (_no_retry or _engine_aborted)
+                            and _fail_reason in _PR_FB_REASONS
+                            and task.get("source") != "download_canary"
+                            and not task.get("_fallback_origin")
+                            and not task.get("_pr_fb_tried")):
+                        task["_pr_fb_tried"] = True
+                        asyncio.create_task(_permanent_fail_fallback(task))
                     _try_advance_task(task, TaskStatus.ERROR)
                     await _broadcast({"type": "log", "msg": f"✗ {msg}", "level": "error", "task_id": tid})
+                    # Битый BBC-эфир не бросаем: сначала спасаем честные 320 из
+                    # самого файла, копия BBC Sounds — только подпись-запас
+                    # (24.09.2026, порядок 4a→4b согласован с владельцем).
+                    if getattr(result, "corrupt", False) and engine_name == "bbc_live":
+                        asyncio.create_task(_bbc_live_recover(task, tid, eng))
 
     except asyncio.CancelledError:
         r = _qs.get_runner(tid)
@@ -3655,7 +3992,11 @@ async def run_task(task: dict) -> None:
     task["_start_time"] = time.time()
     svc = task.get("service", svc)
     from ripster.service_config import get_save_path
-    task["_base_save_path"] = get_save_path(_config, svc, qid or "")
+    # Canary (tools/download_canary.py) несёт СВОЙ временный каталог: проверка
+    # «файл реально скачивается» не должна гадать в библиотеке владельца между
+    # своими же удалёнными файлами. Обычные задачи поле не ставят — путь как был.
+    task["_base_save_path"] = (task.get("_canary_save_path")
+                               or get_save_path(_config, svc, qid or ""))
     await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
 
     # Треклист — СРАЗУ при старте, параллельно скачиванию, а не по его итогам.
@@ -4001,6 +4342,16 @@ async def run_task(task: dict) -> None:
                         if _who:
                             # отчёт перебора важнее вердикта одной сессии
                             task["error"] = _msg
+                            # Короткий вердикт для телефона: абзац выше — для
+                            # ПК-истории, а на экран телефона он не ложится и
+                            # перевода не знает. `error_key` телефон меняет на
+                            # свою строку, список сервисов допишет запасной
+                            # путь (available_on, асинхронно — не дожидаясь
+                            # него, телефон покажет хотя бы короткую причину).
+                            task.setdefault("meta", {})["error_key"] = "apple_no_key"
+                            if not task.get("_ap_fb_tried"):
+                                task["_ap_fb_tried"] = True
+                                asyncio.create_task(_apple_ckc_fallback(task))
                         elif not task.get("error"):
                             task["error"] = _verdict_from_log(task) or (
                                 "Apple: ключ не выдан ни одной вашей учёткой; "

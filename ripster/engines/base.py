@@ -69,6 +69,10 @@ class EngineResult:
     tracks_err:    int = 0
     error:         str = ""
     quality_actual: str = ""   # detected actual quality ID (e.g. "6", "7", "27"); "" = unknown
+    # Файл лег на диск, но decode-проверка подтвердила брак (см. ripster/engines/
+    # bbc_live.py). runner обязан НЕ перекрашивать такую задачу в успех блоком
+    # «на диске свежие файлы — отдаю как частичную загрузку».
+    corrupt:       bool = False
 
 
 class EngineBase(ABC):

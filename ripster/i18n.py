@@ -67,6 +67,21 @@ FALLBACK: dict[str, str] = {
     "console.sp_fb_ratelimited": "🔁 Spotify просит паузу (429) — запасной путь пропущен, чтобы не продлевать бан",
     "console.sp_fb_try": "🔁 Spotify не отдаёт этот релиз — ищу его же на Qobuz/Tidal/Deezer…",
     "console.sp_fb_unsupported": "🔁 Spotify: запасной путь есть для трека или альбома, не для плейлиста",
+    # ── 24.09.2026: автоматический запасной путь при ПОСТОЯННОМ отказе ──────
+    # Тот же механизм, что у Spotify и Apple-отказа по CKC, для Qobuz/Deezer/
+    # Tidal/Yandex/Beatport: «не хватает прав», гео-лок и мёртвая сессия после
+    # перебора учёток — свойства ВИТРИНЫ, а не музыки; берём ту же запись
+    # (только ISRC/UPC) там, где её отдают.
+    "console.pr_fb_try": "🔁 {svc} не отдаёт этот релиз — ищу его же на Qobuz/Tidal/Deezer…",
+    "console.pr_fb_miss": "🔁 {svc}: {title} — на Qobuz/Tidal/Deezer не нашлось",
+    "console.pr_fb_no_id": "🔁 {svc}: у релиза нет ISRC/UPC — подтвердить идентичность нечем, вслепую не ищу",
+    "console.fb_resolved": "✅ {origin} отказала → скачано из {svc} ({quality})",
+    # ── 24.09.2026: тот же запасной путь для Apple (отказ по CKC на релизе) ──
+    # Сессия жива, все свои витрины отказали — значит отказ свойство релиза,
+    # а не учётки; берём ту же запись (только ISRC/UPC) там, где ключ дают.
+    "console.ap_fb_try":  "🔁 Apple не отдала ключ на этот релиз — ищу его же на Qobuz/Tidal/Deezer…",
+    "console.ap_fb_miss": "🔁 Apple: {title} — на Qobuz/Tidal/Deezer не нашлось",
+    "console.ap_fb_no_id":"🔁 Apple: у релиза нет ISRC/UPC — подтвердить идентичность нечем, вслепую не ищу",
     "console.wrapper_local_sf_retry": "⚠ Ключ не выдан: ссылка в витрине «{frm}», а свой аккаунт в «{to}». Пробую тот же релиз в своей витрине — публичный wrapper для этого не нужен.",
     "console.wrapper_other_slot": "⚠ Витрина «{frm}» ключ не дала — пробую свой аккаунт в «{to}» (слот {slot}). Публичный wrapper не нужен.",
     # ── transcode / disc organization ─────────────────────────────────────────
@@ -100,6 +115,14 @@ FALLBACK: dict[str, str] = {
     "console.error_retry":      "⚠ Ошибка: {msg} — повтор {n}/{max} через {delay}с…",
     "console.autoretry_n":      "⟳ Авто-повтор {n}/{max} — та же плитка",
     "console.salvaged_disk":    "⚠ Процесс прервался ({msg}), но на диске {n} файл(ов) — отдаю их",
+    # ── восстановление битой BBC-live записи (24.09.2026) ───────────────────
+    "console.bbc_live_recover_missing": "✗ Восстановление: повреждённый файл не найден на диске",
+    "console.bbc_live_salvage_start":   "🧹 {name}: ищу в повреждённой записи честные куски…",
+    "console.bbc_live_salvage_ok":      "✓ 320 спасено: {clean} мин чистых из {total} ({damaged} повреждено) → {out}",
+    "console.bbc_live_salvage_fail":    "✗ 320 спасти не удалось: {reason}",
+    "console.bbc_live_ondemand_queued": "⚠ Качаю копию «{title}» из BBC Sounds — это 96–102 кбит/с, запасная подпись, не замена эфира",
+    "console.bbc_live_ondemand_done":   "✓ Копия BBC Sounds: {out} — измерено {kbps} кбит/с",
+    "console.bbc_live_ondemand_fail":   "✗ Запасная копия BBC Sounds не получилась: {reason}",
     # ── wrapper / engine fallbacks ────────────────────────────────────────────
     "console.wrapper_local_drm_fail": "✗ Локальный wrapper не смог расшифровать (DRM/CKC). Публичный wrapper автоматически не подключается — перелогинь премиум-wrapper.",
     "console.wrapper_local_region_fail": "✗ Ключ на этот релиз не выдала ни одна своя Apple-учётка (у аккаунта нет прав в его регионе). Публичный wrapper автоматически не подключается — если он нужен, включи вручную: Настройки → Apple → Wrapper → «public». Либо возьми ссылку из своей витрины.",
