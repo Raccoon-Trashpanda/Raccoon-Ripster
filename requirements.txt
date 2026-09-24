@@ -50,3 +50,4 @@ pywebview==6.2.1
 tzdata==2026.4
 sounddevice==0.5.6
 soundfile==0.14.0
+temari==0.3.1

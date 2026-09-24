@@ -376,6 +376,15 @@ DEFAULT_CONFIG: dict = {
     "wrapper-mode": "docker-remote",
     "decrypt-port": "127.0.0.1:10020",
     "m3u8-port": "127.0.0.1:20020",
+    # ── Wrapper Lite (второй локальный бэкенд; apple-wrapper=lite включает) ──
+    # key-сервер стоит в контейнере ripster-wrapper-lite, публикуется СТРОГО на
+    # петлю (API без авторизации — аудит docs/WRAPPER_LITE_AUDIT_2026-09-24.md).
+    # Порты ниже — наш TCP-оракул для Go-загрузчика (ripster/lite_shim.py),
+    # тоже только 127.0.0.1. По умолчанию движок ВЫКЛЮЧЕН: Lite выбирается
+    # владельцем вручную, как и публичный пул.
+    "apple-lite-url": "http://127.0.0.1:12340",
+    "apple-lite-decrypt-port": "127.0.0.1:12345",
+    "apple-lite-m3u8-port": "127.0.0.1:12346",
     "max-memory": 256,
     "downloader-path": "apple-music-downloader",
     "use-go-run": True,

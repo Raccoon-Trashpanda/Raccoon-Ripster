@@ -333,7 +333,7 @@ def save_pending_queue():
 # ── Quality helper ─────────────────────────────────────────────────────────────
 def get_qualities() -> list:
     e = config.get("engine", "zhaarey")
-    if e in ("amd", "gamdl", "zhaarey"):
+    if e in ("amd", "gamdl", "zhaarey", "lite"):
         try:
             return get_engine(e).qualities()
         except KeyError:
@@ -420,7 +420,7 @@ _SVC_RE = _re.compile(r'^\s*\[([a-z][a-z0-9:_-]+)\]', _re.IGNORECASE)
 _KNOWN_SERVICES = (
     "apple", "qobuz", "tidal", "deezer", "spotify", "soundcloud",
     "bbc", "lucida", "orpheus", "amd", "gamdl", "zhaarey", "beatport", "jiosaavn",
-    "wrapper", "watchlist", "release", "guest", "stats", "tunnel",
+    "wrapper", "lite", "watchlist", "release", "guest", "stats", "tunnel",
     "ngrok", "tokens", "startup", "queue", "meta", "isrc", "csrf",
 )
 
