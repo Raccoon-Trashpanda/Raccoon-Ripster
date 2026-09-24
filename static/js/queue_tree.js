@@ -33,14 +33,14 @@ function _qtRows(task) {
   return Array.isArray(cached) ? cached : [];
 }
 
-// Пока задача живая, дерево раскрыто само: метаданные нужны человеку в момент
-// старта, а не после того, как он догадается нажать ⌄. Своё решение человека
-// (открыл или свернул) перекрывает это и помнится до смены статуса.
+// Дерево свёрнуто, пока человек сам не нажмёт ⌄. Раньше живые задачи
+// (queued/running) раскрывались сами — владелец 24.09.2026: «при постановке
+// задачи разворачивает треклист, много карточек = огромная портянка вниз;
+// не надо разворачивать самому, если мне надо — я разверну». Решение человека
+// помнится (_QT_MANUAL).
 function _qtIsOpen(task) {
   const manual = _QT_MANUAL.get(task.id);
-  if (manual !== undefined) return manual;
-  return _qtRows(task).length > 0 &&
-         (task.status === 'running' || task.status === 'queued');
+  return manual === true;
 }
 
 function _qtSig(task) {
