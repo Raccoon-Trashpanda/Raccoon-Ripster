@@ -200,6 +200,71 @@ def verify_session_cookie(cookie: str) -> bool:
     return hmac.compare_digest(mac_provided, mac_expected)
 
 
+# ── Bearer-токен: хозяинский пропуск для WebView, который не везёт куки ───────
+# Telegram Mini App на Android/iOS не сохраняет SameSite=None+Secure куку, и
+# хозяйская панель молча получала 401 на каждую ручку — «очередь не работает»
+# при живом сервере. Тот же пропуск, но в заголовке, который страница ставит
+# себе сама из памяти: кука — пассивный носитель, заголовок — нет.
+OWNER_BEARER_SCOPE = "tg-panel-owner"
+OWNER_BEARER_TTL_S = 3600
+
+
+def issue_bearer(scope: str = OWNER_BEARER_SCOPE, ttl: int = OWNER_BEARER_TTL_S,
+                 issued_at: int | None = None) -> str:
+    """Подписать bearer вида `scope.issued.ttl.mac`. Секрет — тот же, что у
+    сессий; наружу токен не печатается никогда."""
+    secret = _ensure_session_secret().encode()
+    body = "%s.%d.%d" % (scope,
+                         int(time.time()) if issued_at is None else int(issued_at),
+                         int(ttl))
+    mac = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()
+    return f"{body}.{mac}"
+
+
+def verify_bearer(token: str, scope: str = OWNER_BEARER_SCOPE) -> bool:
+    """True iff токен подписан нами, принадлежит нужной области и не просрочен.
+    MAC сверяем с конца строки (rpartition): в теле точек три, в MAC нет."""
+    if not token or "." not in token:
+        return False
+    body, _, mac_provided = token.rpartition(".")
+    parts = body.split(".")
+    if len(parts) != 3:
+        return False
+    got_scope, issued_s, ttl_s = parts
+    # Область — не секрет (MAC считается над телом, поэтому подделка всё равно
+    # не пройдёт), и сравнивать её через compare_digest нельзя: не-ASCII
+    # бросился бы TypeError раньше, чем мы вообще дошли до подписи.
+    if got_scope != scope:
+        return False
+    try:
+        issued, ttl = int(issued_s), int(ttl_s)
+    except ValueError:
+        return False
+    if ttl <= 0 or ttl > OWNER_BEARER_TTL_S:
+        return False
+    if time.time() > issued + ttl:
+        return False
+    secret = _ensure_session_secret().encode()
+    mac_expected = hmac.new(secret, body.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(mac_provided, mac_expected)
+
+
+def bearer_from_request(request) -> str:
+    """Значение Authorization: Bearer … (пусто, если заголовка нет)."""
+    header = request.headers.get("authorization", "")
+    if header[:7].lower() != "bearer ":
+        return ""
+    return header[7:].strip()
+
+
+def is_owner_request(request: Request) -> bool:
+    """Хозяин ли это — по куке сессии или по bearer-токену той же области.
+    Одна функция на все точки входа, чтобы пропуски не разъезжались."""
+    if verify_session_cookie(request.cookies.get("ripster-session", "")):
+        return True
+    return verify_bearer(bearer_from_request(request), OWNER_BEARER_SCOPE)
+
+
 def is_enabled() -> bool:
     """Whether the app currently requires a password."""
     return bool((_config.get("app-password-hash") or "").strip())
@@ -275,8 +340,15 @@ def _csrf_check(request: Request) -> bool:
     # нативный клиент, Origin он не шлёт. Ломалось всё сопряжение целиком —
     # /api/pair/claim, /mode, /activity, /touch (проверено 05.09.2026:
     # `remote-enabled: true`, ответ 403 на каждый).
-    if request.headers.get("authorization", "").lower().startswith("bearer "):
-        return True
+    #
+    # Хозяинский bearer — исключение из исключения: он выдаётся браузеру
+    # (панели Mini App), а значит ровно тем классом атак и не прикрыт —
+    # браузер сам довезёт Origin, и спрашиваем его как с кукой. Нативный
+    # клиент с device-токеном остаётся при своём пропуске.
+    auth_header = request.headers.get("authorization", "")
+    if auth_header[:7].lower() == "bearer ":
+        if not verify_bearer(auth_header[7:].strip(), OWNER_BEARER_SCOPE):
+            return True
 
     origin = request.headers.get("origin", "")
     if not origin:
@@ -381,6 +453,14 @@ def install(app, config: dict, save_config: Callable[[dict], None]) -> None:
             return await call_next(request)
 
         if verify_session_cookie(request.cookies.get("ripster-session", "")):
+            request.state.is_owner = True
+            return await call_next(request)
+
+        # Bearer принимается ровно как хозяйская кука: та же область, та же
+        # сверка подписи и срока. Нужен он там, где кука физически не доезжает
+        # (Telegram WebView), а правила CSRF/Origin для изменяющих запросов
+        # остаются общими — прослойка проходит их ДО этого места.
+        if verify_bearer(bearer_from_request(request), OWNER_BEARER_SCOPE):
             request.state.is_owner = True
             return await call_next(request)
 

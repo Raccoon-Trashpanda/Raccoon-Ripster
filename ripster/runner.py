@@ -1265,6 +1265,113 @@ async def _sc_drm_fallback(orig_task: dict) -> None:
             asyncio.create_task(process_queue())
 
 
+# Куда имеет смысл идти за Spotify-релизом. Apple в списке нет намеренно:
+# `/api/convert/spotify` уже проверяется тестом на честность подмен
+# (tests/test_convert_spotify_honesty.py), и «apple» для владельца — это враппер
+# с его же правами, а не другая витрина.
+_SP_FB_SERVICES = ("qobuz", "tidal", "deezer")
+
+
+async def _spotify_unavailable_fallback(orig_task: dict) -> None:
+    """Spotify не отдаёт релиз ЭТОЙ УЧЁТКЕ — взять то же самое там, где он есть.
+
+    Провод, которого не хватало (docs/SPOTIFY_UNAVAILABLE_2026-09-23.md, раздел
+    D): вся машинерия конверта — `availability.matrix` + `/api/convert/spotify` —
+    вызывалась ДО задачи, по кнопке. После вердикта «недоступно» не пробовалось
+    НИЧЕГО, хотя ровно тот вечер 20.09 владелец собрал бенгальский саундтрек с
+    Deezer: недоступность была свойством витрины Spotify для аккаунта, а не
+    свойством музыки.
+
+    Идентичность — только ISRC (трек) / UPC (альбом). Без кода остаётся
+    туманное сравнение по названию, а оно и рожало подмену релиза, за который
+    держат тест честности. Поэтому лучше честно сказать «не нашёл», чем притащить
+    чужую запись.
+    """
+    tid = orig_task.get("id", "")
+    url = (orig_task.get("url") or "").strip()
+    if not url or "spotify.com" not in url:
+        return
+    kind = "album" if "/album/" in url else "track" if "/track/" in url else ""
+    if not kind:
+        # Плейлист/артист — это не «тот же релиз», а набор; матрица по одному
+        # коду его не опознаёт.
+        await _log_key("console.sp_fb_unsupported", "warn", tid)
+        return
+
+    # Под 429 не молотим: фоллбэк стартует в момент, когда Spotify уже просил
+    # паузу, и добавленные туда запросы только продлевают бан.
+    try:
+        from ripster.routes.discovery import _sp_is_rate_limited
+        if _sp_is_rate_limited():
+            await _log_key("console.sp_fb_ratelimited", "warn", tid)
+            return
+    except Exception:
+        pass
+
+    await _log_key("console.sp_fb_try", "info", tid)
+    try:
+        from ripster.metadata.spotify import fetch_meta_spotify
+        meta = await fetch_meta_spotify(url) or {}
+    except Exception:
+        meta = {}
+    isrc  = (meta.get("isrc") or "").strip()
+    upc   = (meta.get("upc") or "").strip()
+    title = meta.get("title", "") or ""
+    artist = meta.get("artist", "") or ""
+    if not (upc if kind == "album" else isrc):
+        await _log_key("console.sp_fb_no_id", "warn", tid)
+        return
+
+    try:
+        from ripster.routes.spotify import _convert_available_elsewhere
+        cands = await _convert_available_elsewhere("spotify", upc, isrc, title, artist) or []
+    except Exception as e:
+        await _log_key("console.sp_fb_fail", "warn", tid, err=type(e).__name__)
+        return
+    cands = [c for c in cands
+             if c.get("service") in _SP_FB_SERVICES and (c.get("url") or "").strip()
+             and not any((q.get("url") or "") == c["url"] for q in _queue)]
+    if not cands:
+        await _log_key("console.sp_fb_miss", "warn", tid, title=title or url)
+        return
+
+    cand = cands[0]
+    try:
+        from ripster.routes.queue import _make_task, _queue_snapshot
+        from ripster.service_layer import default_quality
+        from ripster.service_config import get_save_path as _gsp
+        svc = cand["service"]
+        t = _make_task(cand["url"], default_quality(svc), svc, svc,
+                       "spotify_unavailable_fallback",
+                       session_id=orig_task.get("session_id", ""))
+        t["meta"] = {"service":          svc,
+                     "title":            cand.get("title") or title,
+                     "artist":           cand.get("artist") or artist,
+                     "artworkUrl":       cand.get("cover") or "",
+                     "_sp_fallback_origin": tid}
+        t["_base_save_path"] = _gsp(_config, svc, t["quality"])
+        t["_sp_fallback_origin"] = tid
+        _queue.append(t)
+        orig_meta = orig_task.setdefault("meta", {})
+        orig_meta.setdefault("fallback_targets", []).append(t["id"])
+        orig_meta["fallback_target"] = t["id"]
+        orig_task["_fallback_target"] = t["id"]
+        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+        await _broadcast({"type": "sp_fallback_added",
+                          "origin_task_id": tid,
+                          "new_task_id":    t["id"],
+                          "service":        svc,
+                          "title":          t["meta"]["title"],
+                          "artist":         t["meta"]["artist"]})
+        await _log_key("console.sp_fb_queued", "success", tid,
+                       svc=svc.upper(), title=t["meta"]["title"])
+        if not _qs.is_running:
+            _qs.start()
+            asyncio.create_task(process_queue())
+    except Exception as e:
+        await _log_key("console.sp_fb_fail", "warn", tid, err=type(e).__name__)
+
+
 def _apply_rename(task: dict, tid: str) -> None:
     """Rename audio files in the task's output directory so the filename matches
     the (corrected) tags — keeps names clean/ASCII across every engine."""
@@ -2810,7 +2917,8 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # serving endpoints read this first and never have to guess the folder.
             try:
                 from ripster import download_manifest as _dm
-                from ripster.routes.download import _get_task_dir as _gtd, _find_audio_files as _faf
+                from ripster.routes.download import (
+                    _get_task_dir as _gtd, _task_delivery_files as _tdf)
                 final_dir = task.get("_save_dir")
                 d = Path(final_dir) if final_dir else None
                 if not (d and d.is_dir()):
@@ -2841,7 +2949,12 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                         except Exception as _re_e:
                             import traceback as _tb
                             print(f"[qobuz-retag] FAILED: {_re_e}\n{_tb.format_exc()[:500]}", flush=True)
-                    audio = _faf(d)
+                    # Манифест = СПИСОК ЭТОЙ ЗАДАЧИ, а не россыпь папки качества:
+                    # сингл, скачанный до фикса раскладки deemix, лежит в
+                    # `<service>/<quality>/` среди чужих файлов, и слепой glob
+                    # записал бы соседей в выдачу гостю (routes/download.py:
+                    # `_task_delivery_files`). Обычную папку релиза он не меняет.
+                    audio = _tdf(task, d)
                     # Issue #19: if the engine reported the EXACT files it saved,
                     # keep only those so a shared output dir can't leak a parallel
                     # task's files. Rename-aware: a stale post-retag filter that
@@ -3190,6 +3303,21 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     except Exception as _e_afb:                     # noqa: BLE001
                         print(f"[account-fallback] не сработал: {_e_afb!r}", flush=True)
                     await _record_availability(task, _fail_reason)
+                    # ── Фоллбэк «взять то же в другом сервисе» ───────────────
+                    # Сюда доходит только ПОЛНЫЙ отказ: хоть один трек лежал бы на
+                    # диске — сработал salvage выше. Поэтому повтор релиза целиком
+                    # на Qobuz/Tidal/Deezer ничего не дублирует.
+                    # В ветке частичной недодачи (`elif _shortfall`) фоллбэк
+                    # намеренно НЕ зовётся: там Spotify уже отдал часть, а у
+                    # Spotify-меты нет поштучных ISRC (только UPC альбома), так что
+                    # единственным шагом был бы целый релиз заново — дубли того, что
+                    # лежит. Для таких задач карточка показывает список
+                    # `cross_service` и кнопку конверта (раздел D отчёта).
+                    if (engine_name == "orpheus_spotify"
+                            and (_no_retry or _engine_aborted)
+                            and not task.get("_sp_fb_tried")):
+                        task["_sp_fb_tried"] = True
+                        asyncio.create_task(_spotify_unavailable_fallback(task))
                     _try_advance_task(task, TaskStatus.ERROR)
                     await _broadcast({"type": "log", "msg": f"✗ {msg}", "level": "error", "task_id": tid})
 
@@ -4124,12 +4252,12 @@ async def process_queue() -> None:
                 if not _ok:
                     if time.time() - _disk_warn_ts > 60:
                         _disk_warn_ts = time.time()
-                        await _broadcast({
-                            "type": "log", "level": "warn",
-                            "message": (f"⚠ Low disk / Мало места: {_free_gb:.1f} GB free "
-                                        f"(floor {_DISK_MIN_FREE_GB:.0f} GB) — new downloads "
-                                        f"paused, will resume when space frees / "
-                                        f"новые загрузки на паузе до освобождения места.")})
+                        # `_log_key`, а не голый dict: клиент читает лог из полей
+                        # text/msg, а здесь стояло "message" — строка уходила в
+                        # пустую ячейку консоли и на любом языке была русской.
+                        await _log_key("console.low_disk", level="warn",
+                                       free=f"{_free_gb:.1f}",
+                                       floor=f"{_DISK_MIN_FREE_GB:.0f}")
                     pending = []
             # Fair-share: round-robin queued tasks across requesters so one user's
             # bulk batch can't monopolise a shared lane (issue #11). No-op for a

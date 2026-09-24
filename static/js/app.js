@@ -768,6 +768,12 @@ async function api(method, path, body, timeoutMs) {
       const s = errKeyText(data.msg_key, data.params);
       if (s) { if (data.msg_raw === undefined) data.msg_raw = data.msg; data.msg = s; }
     }
+    // И для поля `hint` (вход в сервисы): сервер несёт пару `hint_key`+`hint`,
+    // без развёртки английский интерфейс получает русскую подсказку.
+    if (data && data.hint_key) {
+      const s = errKeyText(data.hint_key, data.hint_args);
+      if (s) data.hint = s;
+    }
     return data;
   } catch (_) {
     throw new Error(!r.ok ? `${t('t.server_down')} (HTTP ${r.status})` : t('t.bad_server_resp'));

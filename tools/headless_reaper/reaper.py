@@ -498,7 +498,12 @@ def owned_playwright_context(chromium, *, headless: bool = True,
         with contextlib.suppress(Exception):
             sweep_stale(reap=True)
     udd = new_profile_dir(suffix="pw")
-    args = list(launch_kwargs.pop("args", ())) + [f"--user-data-dir={udd}"]
+    # Playwright sets --user-data-dir itself and REJECTS a duplicate in `args`
+    # ("Pass user_data_dir parameter ... instead of specifying '--user-data-dir'
+    # argument"), so the marker reaches the command line via the keyword. The
+    # ownership predicate reads the live command line, not our intent, so the
+    # proof of ownership survives unchanged.
+    args = list(launch_kwargs.pop("args", ()))
     ctx = chromium.launch_persistent_context(user_data_dir=udd,
                                              headless=headless,
                                              args=args, **launch_kwargs)

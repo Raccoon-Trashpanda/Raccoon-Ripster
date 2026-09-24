@@ -80,6 +80,7 @@ def install(app, ctx) -> None:
 async def targets():
     return {"targets": [
         {"service": k, "title": v["title"], "hint": v["hint"],
+         "hint_key": v.get("hint_key"),
          "config_key": v["config_key"], "has_token": _sl.has_token(k)}
         for k, v in _sl.TARGETS.items()
     ], "browser": _sl.find_browser()}

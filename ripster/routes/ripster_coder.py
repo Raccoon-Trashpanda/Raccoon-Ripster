@@ -312,6 +312,8 @@ async def coder_convert(body: dict, request: Request):
     out_dir = (body.get("out_dir") or "").strip() or str(d / "converted" / fmt.upper())
     if _broadcast:
         await _broadcast({"type": "log", "level": "info",
+                          "msg_key": "cd.log_convert_start",
+                          "params": {"n": len(files), "fmt": fmt.upper(), "bitrate": bitrate},
                           "msg": f"🎛 Ripster Coder: конвертирую {len(files)} → {fmt.upper()} {bitrate}…"})
     reset_cancel()
     _pg = _progress_bridge(asyncio.get_running_loop(), task_id, "convert")
@@ -321,6 +323,8 @@ async def coder_convert(body: dict, request: Request):
     if result.get("cancelled"):
         if _broadcast:
             await _broadcast({"type": "log", "level": "warn",
+                              "msg_key": "cd.log_convert_cancelled",
+                              "params": {"n": result.get('converted', 0)},
                               "msg": f"⏹ Ripster Coder: конвертация остановлена "
                                      f"({result.get('converted',0)} файл(ов) готово до отмены)"})
             await _broadcast({"type": "coder_cancelled", "op": "convert", "task_id": task_id})
@@ -328,13 +332,21 @@ async def coder_convert(body: dict, request: Request):
     if not result.get("ok"):
         if _broadcast:
             await _broadcast({"type": "log", "level": "error",
+                              "msg_key": "cd.log_convert_error",
+                              "params": {"err": result.get('error', '')},
                               "msg": f"Ripster Coder: ошибка конвертации — {result.get('error','')}"})
         raise HTTPException(500, _fail_detail(result, "err.cd_convert_failed",
                                               "Конвертация не удалась"))
     if _broadcast:
+        _failed = int(result.get('failed') or 0)
+        _ru = (f"✓ Ripster Coder: {result['converted']} файл(ов) → {fmt.upper()} в {out_dir}"
+               + (f" ({result['failed']} ошибок)" if _failed else ""))
         await _broadcast({"type": "log", "level": "success",
-                          "msg": f"✓ Ripster Coder: {result['converted']} файл(ов) → {fmt.upper()} в {out_dir}"
-                                 + (f" ({result['failed']} ошибок)" if result.get('failed') else "")})
+                          "msg_key": ("cd.log_convert_done_failed" if _failed
+                                      else "cd.log_convert_done"),
+                          "params": {"n": result['converted'], "fmt": fmt.upper(), "out": out_dir,
+                                     **({"failed": result['failed']} if _failed else {})},
+                          "msg": _ru})
         await _broadcast({"type": "coder_done", "out_dir": out_dir,
                           "converted": result["converted"]})
     return {"ok": True, **result}
@@ -361,6 +373,8 @@ async def coder_split(body: dict, request: Request):
     out_dir = (body.get("out_dir") or "").strip() or str(cue_path.parent / "split")
     if _broadcast:
         await _broadcast({"type": "log", "level": "info",
+                          "msg_key": "cd.log_split_start",
+                          "params": {"file": cue_path.name},
                           "msg": f"✂ Ripster Coder: режу «{cue_path.name}» по CUE…"})
     reset_cancel()
     _pg = _progress_bridge(asyncio.get_running_loop(), "", "split")
@@ -368,6 +382,8 @@ async def coder_split(body: dict, request: Request):
     if res.get("cancelled"):
         if _broadcast:
             await _broadcast({"type": "log", "level": "warn",
+                              "msg_key": "cd.log_split_cancelled",
+                              "params": {"n": res.get('converted', 0)},
                               "msg": f"⏹ Ripster Coder: сплит остановлен "
                                      f"({res.get('converted',0)} треков готово до отмены)"})
             await _broadcast({"type": "coder_cancelled", "op": "split", "task_id": ""})
@@ -375,12 +391,20 @@ async def coder_split(body: dict, request: Request):
     if not res.get("ok"):
         if _broadcast:
             await _broadcast({"type": "log", "level": "error",
+                              "msg_key": "cd.log_split_error",
+                              "params": {"err": res.get('error', '')},
                               "msg": f"Ripster Coder: сплит не удался — {res.get('error','')}"})
         raise HTTPException(500, _fail_detail(res, "err.cd_split_failed", "Сплит не удался"))
     if _broadcast:
+        _failed = int(res.get('failed') or 0)
+        _ru = (f"✓ Ripster Coder: {res['converted']} треков из CUE → {out_dir}"
+               + (f" ({res['failed']} ошибок)" if _failed else ""))
         await _broadcast({"type": "log", "level": "success",
-                          "msg": f"✓ Ripster Coder: {res['converted']} треков из CUE → {out_dir}"
-                                 + (f" ({res['failed']} ошибок)" if res.get('failed') else "")})
+                          "msg_key": ("cd.log_split_done_failed" if _failed
+                                      else "cd.log_split_done"),
+                          "params": {"n": res['converted'], "out": out_dir,
+                                     **({"failed": res['failed']} if _failed else {})},
+                          "msg": _ru})
         await _broadcast({"type": "coder_done", "out_dir": out_dir, "converted": res["converted"]})
     return {"ok": True, **res}
 
@@ -393,6 +417,7 @@ async def coder_cancel(body: dict = None, request: Request = None):
     request_cancel()
     if _broadcast:
         await _broadcast({"type": "log", "level": "warn",
+                          "msg_key": "cd.log_cancel_signal", "params": {},
                           "msg": "⏹ Ripster Coder: получен сигнал остановки…"})
     return {"ok": True}
 
@@ -410,10 +435,15 @@ async def coder_retag(body: dict, request: Request):
     logs: list = []
     if _broadcast:
         await _broadcast({"type": "log", "level": "info",
+                          "msg_key": "cd.log_retag_start",
+                          "params": {"dir": d.name},
                           "msg": f"🏷 Ripster Coder: ретег по ISRC в «{d.name}»…"})
     res = await _tg.retag_directory(d, _cfg, lambda m: logs.append(m))
     if _broadcast:
         await _broadcast({"type": "log", "level": "success",
+                          "msg_key": "cd.log_retag_done",
+                          "params": {"checked": res['checked'], "retagged": res['retagged'],
+                                     "skipped": res['skipped']},
                           "msg": f"✓ Ретег: проверено {res['checked']}, "
                                  f"перетеговано {res['retagged']}, пропущено {res['skipped']}"})
     return {"ok": True, **res, "log": logs[-30:]}
@@ -436,6 +466,8 @@ async def coder_mix(body: dict, request: Request):
     out_dir = coder_out_dir()
     if _broadcast:
         await _broadcast({"type": "log", "level": "info", "task_id": task_id,
+                          "msg_key": "cd.log_mix_start",
+                          "params": {"name": name, "n": len(files), "fmt": fmt},
                           "msg": f"🎚 Ripster Coder: склеиваю «{name}» ({len(files)} тр., {fmt})…"})
 
     # Multi-disc aware: one continuous file + CUE PER disc (' (CD N)' suffix) —
@@ -450,6 +482,7 @@ async def coder_mix(body: dict, request: Request):
     if res.get("cancelled"):
         if _broadcast:
             await _broadcast({"type": "log", "level": "warn", "task_id": task_id,
+                              "msg_key": "cd.log_mix_cancelled", "params": {},
                               "msg": "⏹ Ripster Coder: склейка остановлена (частичный файл удалён)"})
             await _broadcast({"type": "coder_cancelled", "op": "mix", "task_id": task_id})
         return {"ok": True, "cancelled": True, "out_dir": str(out_dir)}
@@ -458,6 +491,8 @@ async def coder_mix(body: dict, request: Request):
                    res.get("error") or "Ошибка склейки")
         if _broadcast:
             await _broadcast({"type": "log", "level": "error", "task_id": task_id,
+                              "msg_key": "cd.log_mix_error",
+                              "params": {"err": err},
                               "msg": f"Ripster Coder: ошибка — {err}"})
         raise HTTPException(500, err)
 

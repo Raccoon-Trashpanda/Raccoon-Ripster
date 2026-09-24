@@ -30,7 +30,13 @@ except Exception:
 
 _HERE  = os.path.dirname(os.path.abspath(__file__))
 _REPO  = os.path.dirname(_HERE)
-_CACHE = os.path.join(_REPO, "orpheus", "config", ".librespot_cache")
+# По умолчанию — основной слот (орpheus/config). Для мультиаккаунта бэкенд
+# вызывает хелпер с ORPHEUS_CONFIG_DIR=каталог конфига коридора, и blob
+# (вместе с маркерами url/done/err) пишется в .librespot_cache ЭТОГО коридора,
+# а не в основной — иначе вторая учётка перезаписала бы вход владельца.
+_ORPH_CONFIG_DIR = os.environ.get("ORPHEUS_CONFIG_DIR") or os.path.join(
+    _REPO, "orpheus", "config")
+_CACHE = os.path.join(_ORPH_CONFIG_DIR, ".librespot_cache")
 _BLOB  = os.path.join(_CACHE, "reusable_credentials.json")
 # librespot's Builder.oauth() starts with:
 #     if os.path.isfile(self.conf.stored_credentials_file): return self.stored_file(None)

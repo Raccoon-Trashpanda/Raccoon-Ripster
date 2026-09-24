@@ -72,10 +72,10 @@ def _ffprobe_for(ffmpeg: str) -> str:
                   ffmpeg) if ffmpeg else "ffprobe"
 
 
-def _sanitize(name: str) -> str:
+def _sanitize(name: str, default: str = "mix") -> str:
     name = _ILLEGAL.sub("", name)
     name = re.sub(r"\s+", " ", name).strip().strip(".")
-    return name[:180] or "mix"
+    return name[:180] or default
 
 
 def clean_mix_name(album: str, artist: str) -> str:
@@ -201,7 +201,9 @@ def _fmt_name(template: str, m: dict) -> str:
                  ("{artist}", m.get("artist", "")), ("{title}", m.get("title", "")),
                  ("{album}", m.get("album", ""))):
         out = out.replace(k, str(v or ""))
-    return _sanitize(out) or _sanitize(m.get("title", "") or "track")
+    # «mix» — дефолт _sanitize — в цепочке фоллбэков недопустим: он глушит
+    # ветку с title (пустой шаблон именовал все файлы скопом).
+    return _sanitize(out, "") or _sanitize(str(m.get("title") or ""), "mix")
 
 
 def _prepare_cover(ffmpeg: str, src_dir: Path, track0: Path,

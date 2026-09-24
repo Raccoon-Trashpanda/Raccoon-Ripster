@@ -140,5 +140,8 @@ async def survey(config: dict, fresh: bool = False) -> list[dict]:
     rows = []
     for i, e in enumerate(configured_tokens(config)):
         info = await token_info(e["token"], fresh=fresh)
-        rows.append({"slot": i, "label": e["label"], **info})
+        # primary проносим дальше: вызывающий иначе вынужден угадывать активный
+        # слот по label, а «primary» — валидное имя и для слота из пула.
+        rows.append({"slot": i, "label": e["label"], "primary": bool(e.get("primary")),
+                     **info})
     return rows

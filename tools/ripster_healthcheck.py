@@ -2466,6 +2466,7 @@ def check_errors_24h():
         buckets: dict = {}
         total = 0
         amz_ext = 0
+        _sp_tail_pending = False   # впереди идущий ERROR = отказ трека, ждём его хвост
         for ln in log.read_text(encoding="utf-8", errors="ignore").splitlines()[-8000:]:
             if " ERROR " not in ln:
                 continue
@@ -2505,6 +2506,26 @@ def check_errors_24h():
             if "[amazon] probe failed" in low and "amz.dezalty.com" in low:
                 amz_ext += 1
                 continue
+            # ОДИН отказ трека = одна ошибка, а не две. На недоступный этой
+            # учётке трек OrpheusDL печатает сначала «Episode download also
+            # failed …: Extended Metadata request failed: Status code 404»
+            # (запасная попытка взять то же как эпизод), а строкой ниже — своё же
+            # падение `'NoneType' object has no attribute 'download_type'`.
+            # Замер по всем четырём логам (13.09–23.09): 510 и 509 строк, и в 508
+            # случаях NoneType идёт СРАЗУ за episode-404; обратного порядка нет
+            # ни разу. Связывает эти строки только соседство — id в хвосте
+            # отсутствует, — поэтому хвостом считаем строго строку, следующую за
+            # уже посчитанным episode-404. Осиротевший NoneType остаётся в
+            # бакете: это уже необъяснённый провал, а не эхо.
+            # Зачем это здесь, а не «починим потом»: без этого разделения
+            # «spotify-unavailable ×96 за сутки» (docs/BACKLOG.md:26) прятал за
+            # удвоением ровно 26 настоящих отказов, и любая правка движка
+            # выглядела бы в сводке как ничего не изменившая.
+            if "attribute 'download_type'" in low and _sp_tail_pending:
+                _sp_tail_pending = False
+                buckets["noise-tail"] = buckets.get("noise-tail", 0) + 1
+                continue
+            _sp_tail_pending = "extended metadata request failed" in low
             total += 1
             tag = next((name for name, keys in _ERR_BUCKETS if any(k in low for k in keys)), "other")
             buckets[tag] = buckets.get(tag, 0) + 1

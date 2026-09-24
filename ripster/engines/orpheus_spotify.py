@@ -73,6 +73,32 @@ _RE_NEW_SETTINGS  = re.compile(r'New settings detected|configuration has been re
 # OrpheusDL prints this once, right after "=== Downloading playlist … ===" and
 # BEFORE the first track → lets us refuse an oversized native playlist up-front.
 _RE_PLAYLIST_COUNT = re.compile(r'Number of tracks:\s*(\d+)', re.I)
+# OrpheusDL печатает отказ «учётке не отдают» ДВУМЯ строками, и ни в одной нет
+# слова error/failed отдельно от слова: `SpotifyTrackUnavailableError` — слитное,
+# `\berror\b` его не берёт. До 23.09.2026 обе шли как `stdout`. На разбор бакета
+# это НЕ влиало — `task["log"]` в раннере пишет строку ЛЮБОГО уровня
+# (`runner.py:2439`, фильтра по levels там нет), то есть причина и так доезжала
+# до `_permanent_miss`. Мёртв был сам якорь: ветку про Spotify добавили только
+# 33f9351 (23.09). Здесь уровень нужен для другого — гостю панель сырой stdout
+# не показывает вовсе (`static/js/app.js:374`), и человек оставался с «частично»
+# без единой строки о причине. См. docs/SPOTIFY_UNAVAILABLE_2026-09-23.md.
+_RE_NO_LICENSE   = re.compile(r'is unavailable \(Cannot get alternative track\)|'
+                              r'Track/Episode is unavailable on Spotify', re.I)
+# Одна отказавшая ЗАДАЧА, а не одна строка: обе формы недоступности печатаются
+# на трек подряд, и построчный счёт удвоил бы серию.
+_RE_UNAV_ID      = re.compile(r'Track\s+([0-9A-Za-z]{16,32})', re.I)
+# Единственный честный признак «трек у нас»: `Downloading track file` печатается
+# БЕЗУСЛОВНО прямо перед отказом (ту же ловушку описывает orpheus_beatport.py).
+_RE_TRACK_SAVED  = re.compile(r'=== Track .+ downloaded ===', re.I)
+
+
+# Сколько отказов «не отдаёт учётка» ПОДРЯД (без единого сохранения) терпим,
+# прежде чем прекратить прогон. Числа не с потолка: за 7 суток в логах — 7
+# прогонов с таким отказом, в 6 из них не сохранился НИ ОДИН трек, а серии были
+# 100, 20, 14, 5, 2, 1 (медиана 14). Пять — заведомо больше любой единичной
+# недостачи и вместе с тем достаточно мало, чтобы не досматривать плейлист на
+# 100 треков, который заведомо не отдадут.
+_PERM_FAIL_LIMIT = 5
 
 
 def _playlist_cap() -> int:
@@ -350,6 +376,15 @@ def _update_orpheus_settings(quality: str, save_path: str, config: dict,
 class OrpheusSpotifyEngine(EngineBase):
     name = "orpheus_spotify"
 
+    def __init__(self):
+        # Раннер читает abort_reason после каждой строки и глушит процесс
+        # (ProcessRunner._engine_wants_abort). Экземпляр движка создаётся на
+        # каждую задачу (`get_engine()`), поэтому состояние прогона живёт здесь.
+        self.abort_reason = ""
+        self._saved = 0
+        self._unav_streak = 0
+        self._unav_ids: set = set()
+
     def qualities(self) -> list[dict]:
         return list(_QUALITIES)
 
@@ -433,9 +468,42 @@ class OrpheusSpotifyEngine(EngineBase):
                 )
                 return
 
+        # ── Отсечка «дальше бессмысленно» (тот же контракт, что у beatport/tidal).
+        # Каждый неотданный трек стоит ДВУХ обращений к Spotify (аудио-резолв
+        # librespot + запрос метаданных «как эпизода»), и до 23.09.2026 раннер
+        # к тому же переигрывал альбом до четырёх раз. Повторы внутри раннера
+        # заглушены якорем `_permanent_miss`; это — второй предохранитель, уже
+        # ВНУТРИ одного прогона: 15.08.2026 и 09.08.2026 показали, что движок,
+        # который досматривает заведомо гиблой релиз до конца, и есть риск бана.
+        if _RE_TRACK_SAVED.search(clean) or "already exists" in clean.lower():
+            self._saved += 1
+            self._unav_streak = 0     # «подряд» значит подряд: сохранённый трек
+                                      # обнуляет серию, иначе обычный альбом с
+                                      # парой региональных дырок рвался бы на 5-м
+        elif _RE_NO_LICENSE.search(clean):
+            _mid = _RE_UNAV_ID.search(clean)
+            _key = _mid.group(1) if _mid else clean
+            if _key not in self._unav_ids:
+                self._unav_ids.add(_key)
+                self._unav_streak += 1
+                # Условие с `not self._saved` обязательно: если хоть что-то
+                # сохранилось, отдельные отказ — это нормальная недоступность
+                # пары треков, и рвать из-за неё релиз нельзя.
+                if (self._unav_streak >= _PERM_FAIL_LIMIT
+                        and not self._saved and not self.abort_reason):
+                    self.abort_reason = (
+                        f"Spotify не отдал {self._unav_streak} треков подряд и не "
+                        "сохранил ни одного. Вход исправен и метаданные получены — "
+                        "это лицензии/регион этой учётки, повтор даст то же самое. "
+                        "Забери релиз из другого сервиса («Конверт»)."
+                    )
+
         yield from super().iter_events(clean, progress=progress)
 
     def classify_line(self, line: str) -> str:
+        # ПЕРВОЙ: строка недоступности обязана дойти до раннера как причина, а не
+        # утонуть в `stdout` (см. `_RE_NO_LICENSE` выше).
+        if _RE_NO_LICENSE.search(line):  return "warn"
         if _RE_ERROR.search(line):        return "error"
         if _RE_PREMIUM.search(line):      return "warn"
         if _RE_SKIP.search(line):         return "warn"

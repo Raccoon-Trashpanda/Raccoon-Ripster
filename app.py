@@ -657,7 +657,22 @@ async def log(text: str, level: str = "info"):
 
 
 def queue_snapshot():
-    return [{k: v for k, v in t.items() if k != "log"} for t in queue]
+    """Очередь так, как её видит человек.
+
+    Запланированная запись BBC-эфира ЗДЕСЬ НЕ ПОКАЗЫВАЕТСЯ. Она не качается и
+    не ждёт своей очереди — она ждёт своего ЧАСА, иногда несколько суток, и
+    висеть всё это время среди работающих задач ей незачем: запланируй пять
+    эфиров на неделю, и очередь превратится в доску объявлений.
+
+    Задача при этом продолжает существовать — её просто не видно. Когда час
+    настанет, `bbc_schedule.fire()` переведёт её в обычное состояние, и она
+    появится здесь сама, с прогрессом, историей и отдачей в бот, ничем не
+    отличаясь от остальных. Живёт и отменяется она на вкладке BBC, где её и
+    планировали; там же остаётся честный вердикт «пропущен», если машина
+    стояла в её час (см. `bbc_schedule._miss`).
+    """
+    return [{k: v for k, v in t.items() if k != "log"}
+            for t in queue if t.get("status") != TaskStatus.SCHEDULED.value]
 
 
 # ── FastAPI ────────────────────────────────────────────────────────────────────
@@ -1278,9 +1293,9 @@ async def _idle_restart_watcher():
 
 
 def _check_owner(request: Request) -> bool:
-    from ripster.auth import verify_session_cookie
+    from ripster.auth import is_owner_request
     from ripster.auth import is_enabled as _auth_enabled
-    if verify_session_cookie(request.cookies.get("ripster-session", "")):
+    if is_owner_request(request):
         return True
     try:
         return not _auth_enabled()

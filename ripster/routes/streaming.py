@@ -460,7 +460,7 @@ async def stream_tidal_dash(track_id: str, request: Request, quality: str = "LOS
     concatenated fMP4 (FLAC-in-MP4) via a plain <audio> element."""
     token, country = await _tidal_stream_token(track_id)
     if not token:
-        raise HTTPException(400, "Tidal token не настроен (Settings → Tidal)")
+        raise HTTPException(400, imsg("err.tidal_no_token", "Tidal token не настроен (Settings → Tidal)"))
     r = await _tidal_playbackinfo(track_id, quality, token, country)
     if r.status_code != 200:
         raise HTTPException(r.status_code if r.status_code in (401, 404) else 502,
@@ -578,9 +578,9 @@ async def stream_deezer(track_id: str, request: Request, quality: int = 3,
                     api_token     = ud.get("checkForm", "")
                     license_token = ((ud.get("USER") or {}).get("OPTIONS") or {}).get("license_token", "")
                     if not api_token:
-                        raise HTTPException(400,
+                        raise HTTPException(400, imsg("err.deezer_no_api_token",
                             "Deezer: не удалось получить api_token. ARL возможно истёк — "
-                            "обнови в Settings → Deezer.")
+                            "обнови в Settings → Deezer."))
                     if not license_token:
                         raise HTTPException(403,
                             imsg("err.deezer_no_license", "Deezer: нет license_token (нужна Premium-подписка для стриминга)."))

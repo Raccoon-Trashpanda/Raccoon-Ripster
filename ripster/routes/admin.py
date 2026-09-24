@@ -42,7 +42,12 @@ _started_at: float = time.time()
 def _require_owner(request: Request) -> None:
     """Reject any non-owner. Guest sessions are deny-by-default at the auth
     middleware, but this is a defence in depth: even if the allowlist ever
-    grows to include /api/admin/ accidentally, the route still rejects."""
+    grows to include /api/admin/ accidentally, the route still rejects.
+
+    Проверка ровно та же, что у прослойки: хозяйская кука ИЛИ хозяинский
+    bearer. Панель Mini App ходит сюда за `diagnostics` и `bot-overview` с
+    заголовком (WebView Telegram куку не везёт), и «только кука» означало бы
+    403 поверх уже пройденной прослойки — то есть тот же «не работает»."""
     try:
         from ripster.guest_manager import get_manager
         gm  = get_manager()
@@ -55,8 +60,8 @@ def _require_owner(request: Request) -> None:
         pass
 
     if _ctx is not None and getattr(_ctx, "owner_auth_fn", None):
-        cookie = request.cookies.get("ripster-session", "")
-        if not _ctx.owner_auth_fn(cookie):
+        from ripster import auth as _auth
+        if not _auth.is_owner_request(request):
             # If auth is disabled entirely, treat the local request as owner.
             try:
                 from ripster.auth import is_enabled
@@ -542,7 +547,9 @@ async def deps_update(body: dict, request: Request):
         except Exception as e:
             raise HTTPException(500, f"pip list failed: {e}")
         if not targets:
-            return {"ok": True, "updated": [], "msg": "Нечего обновлять (или всё закреплено)."}
+            return {"ok": True, "updated": [],
+                    "msg_key": "dep.nothing_to_update",
+                    "msg": "Нечего обновлять (или всё закреплено)."}
     else:
         if not _PKG_RE.match(pkg):
             raise HTTPException(400, "bad package name")
@@ -552,6 +559,7 @@ async def deps_update(body: dict, request: Request):
             # выглядит как обычное обновление. Кому действительно нужно — делает
             # это руками через pip, видя, что меняет.
             return {"ok": False, "pinned": True,
+                    "msg_key": "dep.pinned_locked", "params": {"pkg": pkg},
                     "msg": f"{pkg} обновлять отсюда нельзя: у него жёстко "
                            f"связанная версия, апгрейд ломает загрузки. "
                            f"Только вручную через pip, осознанно."}

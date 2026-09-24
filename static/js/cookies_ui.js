@@ -4,6 +4,14 @@
 // change). Loaded AFTER app.js in index.html, so it sees S/api/toast/etc.
 // ======================================================================
 
+// Карточки (поиск/артист/альбом) читаются прямым `fetch`, а не через `api()`,
+// поэтому пару `error_key`+`error_args` здесь никто центрально не разворачивает:
+// без этой подстановки в английский интерфейс приехала бы русская причина
+// отказа. Русский `error` движок отдаёт нарочно — его читают бот и healthcheck.
+function _engineError(d) {
+  return errKeyText(d.error_key, d.error_args) || d.error || '';
+}
+
 // ── COOKIES.TXT ────────────────────────────────────────────────
 async function importCookiesFile(input) {
   const file = input.files[0];
@@ -352,7 +360,7 @@ async function doSearch() {
         d = null;
       }
       if (d) {
-        if (d.error && !d.results?.length) { error = d.error; }
+        if (d.error && !d.results?.length) { error = _engineError(d); }
         else { items = d.results || []; }
       }
     }
@@ -705,7 +713,7 @@ async function openArtistPage(service, artistId){
     // Ask backend for every release type; we filter client-side for responsiveness.
     const r = await fetch(`/api/artist/${service}/${encodeURIComponent(artistId)}?types=album,single,ep,compilation,live`);
     const d = await r.json();
-    if(d.error){ _detailError(d.error); return; }
+    if(d.error){ _detailError(_engineError(d)); return; }
     Detail.currentArtist = {
       service, id: artistId,
       artist: d.artist || {name:'?'},
@@ -908,7 +916,7 @@ async function openAlbumPage(service, albumId){
   try {
     const r = await fetch(`/api/album/${service}/${encodeURIComponent(albumId)}`);
     const d = await r.json();
-    if(d.error){ _detailError(d.error); return; }
+    if(d.error){ _detailError(_engineError(d)); return; }
     Detail.currentAlbum  = {service, id: albumId, album: d.album||{}, tracks: d.tracks||[]};
     Detail.currentArtist = null;
     Detail.currentLabel  = null;

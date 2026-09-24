@@ -752,7 +752,7 @@ async def cancel_scheduled(sid: str, request: Request):
     from ripster import bbc_schedule as _bs
     ok = _bs.cancel_recording(sid)
     if not ok:
-        raise HTTPException(404, "план не найден")
+        raise HTTPException(404, detail=imsg("err.bbc_plan_not_found", "план не найден"))
     if _broadcast and _queue_snapshot:
         await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
     return {"ok": True}

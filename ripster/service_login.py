@@ -70,6 +70,8 @@ TARGETS: dict[str, dict] = {
         "cookie":     "oauth_token",
         "domains":    ("soundcloud.com",),
         "config_key": "soundcloud-oauth-token",
+        # `hint` — русский fallback, `hint_key` — то, что разворачивает api()
+        "hint_key":   "sl.hint_soundcloud",
         "hint":       "Войди в SoundCloud — токен подхватится сам.",
     },
     "deezer": {
@@ -78,6 +80,7 @@ TARGETS: dict[str, dict] = {
         "cookie":     "arl",
         "domains":    ("deezer.com",),
         "config_key": "deezer-arl",
+        "hint_key":   "sl.hint_deezer",
         "hint":       "Войди в Deezer — ARL подхватится сам.",
     },
     "apple": {
@@ -86,6 +89,7 @@ TARGETS: dict[str, dict] = {
         "cookie":     "media-user-token",
         "domains":    ("apple.com",),
         "config_key": "media-user-token",
+        "hint_key":   "sl.hint_apple",
         "hint":       "Войди с Apple ID — media-user-token подхватится сам.",
     },
     "yandex": {
@@ -99,6 +103,7 @@ TARGETS: dict[str, dict] = {
         "url_token":  "access_token",
         "domains":    ("yandex.ru",),
         "config_key": "yandex-token",
+        "hint_key":   "sl.hint_yandex",
         "hint":       "Войди в Яндекс и разреши доступ — токен подхватится сам.",
     },
 }
@@ -366,7 +371,8 @@ async def start(service: str) -> dict:
     _sessions[service] = {"state": "waiting", "proc": proc, "profile": profile,
                           "port": port, "started": time.time(), "cancelled": False}
     asyncio.create_task(_watch(service, port, proc))
-    return {"ok": True, "state": "waiting", "hint": spec["hint"], "title": spec["title"]}
+    return {"ok": True, "state": "waiting", "hint": spec["hint"],
+            "hint_key": spec.get("hint_key"), "title": spec["title"]}
 
 
 def status(service: str) -> dict:

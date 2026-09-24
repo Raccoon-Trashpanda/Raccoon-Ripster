@@ -41,7 +41,7 @@ async function updateDep(pkg) {
   if (box) box.innerHTML = ti('deps.updating', {pkg: esc(pkg)});
   try {
     const r = await api('POST', '/api/admin/deps/update', { package: pkg });
-    if (r.pinned) { alert(r.msg); loadDeps(); return; }
+    if (r.pinned) { alert(r.msg_key ? ti(r.msg_key, r.params) : r.msg); loadDeps(); return; }
     alert((r.ok ? '✅ ' : '⚠️ ') + pkg + ' — ' + (r.ok ? t('deps.updated_ok') : t('deps.update_fail')));
     loadDeps();
   } catch (e) { alert('⛔ ' + (e.message || e)); loadDeps(); }

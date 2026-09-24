@@ -306,9 +306,9 @@ def roster_cards(cfg: dict) -> dict:
         rows = _run(ya.survey(cfg, fresh=False))
         cards = []
         for r in rows or []:
-            # survey не проносит флаг primary — активной считаем слот с таким
-            # лейблом (его ставит _configured для основного токена).
-            is_primary = bool(r.get("primary")) or (r.get("label") == "primary")
+            # survey проносит флаг primary из configured_tokens — угадывать по
+            # label больше нечем: «primary» может назвать себя и слот из пула.
+            is_primary = bool(r.get("primary"))
             cards.append(_card("yandex", r.get("label") or "?", r,
                                is_active=is_primary,
                                premium=bool(r.get("plus")),

@@ -58,6 +58,15 @@ FALLBACK: dict[str, str] = {
     "console.sc_fb_queued": "🔁 SoundCloud, запасной путь: {n}/{total} поставлено в очередь",
     "console.sc_fb_search": "🔁 SoundCloud: ищу {n} трек(ов) на Deezer/Qobuz/Apple…",
     "console.sc_fb_try": "🔁 SoundCloud: пробую найти трек(и) на других сервисах…",
+    # ── 23.09.2026: запасной путь Spotify («не отдаёт ЭТОЙ УЧЁТКЕ») ──────────
+    # docs/SPOTIFY_UNAVAILABLE_2026-09-23.md, раздел D
+    "console.sp_fb_fail": "⚠ Spotify: запасной путь не удался ({err})",
+    "console.sp_fb_miss": "🔁 Spotify: {title} — на Qobuz/Tidal/Deezer не нашлось",
+    "console.sp_fb_no_id": "🔁 Spotify: у релиза нет ISRC/UPC — подтвердить идентичность нечем, вслепую не ищу",
+    "console.sp_fb_queued": "🔁 Запасной путь: {title} → {svc}",
+    "console.sp_fb_ratelimited": "🔁 Spotify просит паузу (429) — запасной путь пропущен, чтобы не продлевать бан",
+    "console.sp_fb_try": "🔁 Spotify не отдаёт этот релиз — ищу его же на Qobuz/Tidal/Deezer…",
+    "console.sp_fb_unsupported": "🔁 Spotify: запасной путь есть для трека или альбома, не для плейлиста",
     "console.wrapper_local_sf_retry": "⚠ Ключ не выдан: ссылка в витрине «{frm}», а свой аккаунт в «{to}». Пробую тот же релиз в своей витрине — публичный wrapper для этого не нужен.",
     "console.wrapper_other_slot": "⚠ Витрина «{frm}» ключ не дала — пробую свой аккаунт в «{to}» (слот {slot}). Публичный wrapper не нужен.",
     # ── transcode / disc organization ─────────────────────────────────────────
@@ -81,6 +90,7 @@ FALLBACK: dict[str, str] = {
     "console.done_tracks":      "✓ Done ({n} tracks)",
     "console.queue_finished":   "✓ Queue finished!",
     "console.reused_existing":  "⏭ Уже скачано ранее ({n} треков) — файлы переиспользованы, повторная загрузка пропущена",
+    "console.low_disk":         "⚠ Мало места: {free} GB свободно (порог {floor} GB) — новые загрузки на паузе, продолжатся, когда место освободится",
     # ── partial / retries ─────────────────────────────────────────────────────
     "console.topup_missing":    "⚠ {got}/{expected} — добираю {miss} недостающих автоматически (попытка {attempt}/{max})…",
     "console.partial_permanent": "⚠ Готово ЧАСТИЧНО: {got}/{expected} — {miss} трек(ов) недоступны через этот движок (AAC без wrapper не расшифровывает часть треков). Скачай альбом как ALAC, чтобы добрать остаток через wrapper.",

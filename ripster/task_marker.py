@@ -66,7 +66,12 @@ def find_dir_by_task_id(task_id: str, base: Path, max_depth: int = 4) -> Path | 
         marker = d / MARKER_FILENAME
         if marker.is_file():
             try:
-                if needle in marker.read_text(encoding="utf-8"):
+                # Маркер пишут и для людей, поэтому его перебивают блокнотом в
+                # cp1251 — жёсткий utf-8 бросал UnicodeDecodeError сквозь
+                # /api/download-file и вешал поиск папки на одном битом файле.
+                # Строка «task-id: <uuid>» остаётся ASCII, так что мягкое
+                # декодирование находит её и в битом маркере.
+                if needle in marker.read_text(encoding="utf-8", errors="replace"):
                     return d
             except OSError:
                 pass

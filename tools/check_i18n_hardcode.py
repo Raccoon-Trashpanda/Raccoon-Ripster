@@ -27,9 +27,10 @@ settings.html дала ЛОЖНОЕ «чисто»: pool-хинты Deezer/Sound
   G  модульный `const`-массив, зовущий `t()` на загрузке: значение вычисляется
      один раз и застывает в языке загрузки (чинится геттером);
   P  python: кириллица в носителе сообщения (`detail=`, `"error":`,
-     `HTTPException(`), а вокруг неё ни `imsg(` (±2 строки), ни `error_key`
-     (±4) — на экран уйдёт русский. Консольные логи, print и докстринги НЕ
-     считаем: их переводить не надо, а наивный греп по кириллице завышает в
+     `HTTPException(`), а вокруг неё ни `imsg(` (±2 строки), ни `error_key`/
+     `msg_key` (±4) — на экран уйдёт русский. Консольные логи, print и
+     докстринги НЕ считаем: их переводить не надо, а наивный греп по
+     кириллице завышает в
      разы (см. правило про auth.py: 46 из 52 уже были переведены);
   R  python: справочная таблица верхнего уровня с русскими ИМЕНАМИ (род
      `_COUNTRY_TZ = {'NZ': 'Новая Зеландия'}`) — продукт берёт из неё подпись
@@ -440,7 +441,7 @@ def scan_js(path: Path, ru, en) -> list[tuple[str, int, str, str]]:
 # Критерий взят из .claude/rules/api-messages-i18n.md и он же — урок: наивный
 # греп по кириллице ЗАВЫШАЕТ в разы (в auth.py из 52 «русских» строк 46 уже
 # имели error_key). Поэтому считаем находкой только строку-носитель сообщения,
-# вокруг которой нет ни imsg(, ни error_key.
+# вокруг которой нет ни imsg(, ни error_key/msg_key.
 PY_CARRIER = re.compile(
     r"""detail\s*=|["']error["']\s*:|["']message["']\s*:|["']msg["']\s*:|"""
     r"""HTTPException\s*\(|["']hint["']\s*:|["']desc["']\s*:""", re.X)
@@ -479,7 +480,11 @@ def scan_py(path: Path) -> list[tuple[str, int, str, str]]:
         if re.search(r"\bimsg\s*\(", near):
             continue
         near = "\n".join(lines[max(0, i - 4):i + 5])
-        if re.search(r"""["']error_key["']|\berror_key\b""", near):
+        # `error_key` — контракт dict-ответов, `msg_key` — контракт `msg`
+        # (он же у WS-логов, i18n.log_event), `hint_key` — контракт `hint`
+        # (вход в сервисы): клиент разворачивает ключ через ti() централизованно
+        # в api() (static/js/app.js), русский msg остаётся fallback.
+        if re.search(r"""\b(?:error_key|msg_key|hint_key)\b""", near):
             continue
         own = PY_CARRIER.search(code)
         carrier = own or any(PY_CARRIER.search(lines[j])
@@ -493,7 +498,7 @@ def scan_py(path: Path) -> list[tuple[str, int, str, str]]:
             cat, line, prev, note = findings[-1]
             findings[-1] = (cat, line, (prev + " …")[:150], note)
             continue
-        findings.append(("P", i + 1, txt, "уходит в UI без ключа (нет imsg/error_key рядом)"))
+        findings.append(("P", i + 1, txt, "уходит в UI без ключа (нет imsg/error_key/msg_key рядом)"))
     # R: справочные таблицы верхнего уровня — продукт берёт из них ИМЕНА вместо
     # кодов, и на экране они русские при любом языке (скилл: «ship codes, not names»)
     for i, raw in enumerate(lines):
@@ -692,6 +697,9 @@ def good2(row):
 def good3(name):                     # консольный лог — не текст на экране
     log.info("Загрузка завершена для %s", name)
     print("Сохраняю очередь")
+
+def good4(name):                     # msg-контракт: ключ рядом — перевод есть
+    return {"ok": False, "msg": "Токен не проверен", "msg_key": "acc.token_unverified"}
 '''
 # (категория, подстрока-маркер, в каком файле ждать)
 SEEDS = [
@@ -711,7 +719,8 @@ SEEDS = [
     ("R", "COUNTRY_TZ", "routes.py"),
 ]
 NEGATIVES = ["s.some", "OK =", "MACHINE", "Qobuz", "3.7.0", "🎧", "Русский", "Подсветка активной строки",
-             "imsg", "error_key", "Загрузка завершена для", "Сохраняю очередь"]
+             "imsg", "error_key", "msg_key", "Загрузка завершена для", "Сохраняю очередь",
+             "Токен не проверен"]
 
 
 def selftest() -> int:

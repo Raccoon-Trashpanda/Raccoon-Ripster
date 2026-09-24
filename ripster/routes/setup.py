@@ -1156,7 +1156,8 @@ async def tidal_accounts_remove(slot: int):
     existing = list(_cfg.get("tidal-accounts") or [])
     idx = slot - 1
     if idx < 0 or idx >= len(existing):
-        return {"ok": False, "msg": "Нет такой учётки"}
+        return {"ok": False, "msg": "Нет такой учётки",
+                "msg_key": "err.tidal_pool_gone", "params": {}}
     removed = existing.pop(idx)
     _cfg["tidal-accounts"] = existing
     if _save_config:
@@ -1556,7 +1557,8 @@ async def orpheus_login_start():
     global _oauth_proc, _oauth_url
 
     if not (_orpheus_dir() / "orpheus.py").exists():
-        return {"ok": False, "error": "OrpheusDL не установлен — OrpheusDL отсутствует в папке orpheus/"}
+        return {"ok": False, "error": "OrpheusDL не установлен — OrpheusDL отсутствует в папке orpheus/",
+                "error_key": "op.orpheus_missing", "error_args": {}}
 
     # Kill any existing OAuth process
     if _oauth_proc is not None:
@@ -1569,7 +1571,8 @@ async def orpheus_login_start():
 
     helper_p = _orpheus_dir() / "_auth_helper.py"
     if not helper_p.exists():
-        return {"ok": False, "error": f"Auth helper не найден: {helper_p}"}
+        return {"ok": False, "error": f"Auth helper не найден: {helper_p}",
+                "error_key": "op.helper_missing", "error_args": {"p": str(helper_p)}}
 
     # RIPSTER_RETURN_URL: the helper's callback page bounces the browser back
     # here when it's done, so the in-window login option has somewhere to
@@ -1604,7 +1607,8 @@ async def orpheus_login_start():
                     raise RuntimeError(line[len("ORPHEUS_AUTH_FAILED:"):])
         await asyncio.wait_for(_read_url(), timeout=15)
     except asyncio.TimeoutError:
-        return {"ok": False, "error": "Auth helper не выдал URL — возможно, порт 4381 занят"}
+        return {"ok": False, "error": "Auth helper не выдал URL — возможно, порт 4381 занят",
+                "error_key": "op.no_url", "error_args": {}}
     except RuntimeError as e:
         return {"ok": False, "error": str(e)}
 

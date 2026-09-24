@@ -539,7 +539,8 @@ async def sc_formats(track_id: str):
     try:
         track = r.json() or {}
     except Exception:
-        return {"ok": False, "error": "SoundCloud ответил не-JSON"}
+        return {"ok": False, "error_key": "err.sc_bad_json",
+                "error": "SoundCloud ответил не-JSON"}
 
     rel = _sc_release_quality((track.get("media") or {}).get("transcodings") or [])
     # Потолок аккаунта — из тех же измеренных данных, что и строка обзора.
@@ -879,8 +880,7 @@ async def sc_stream(track_id: str, request: Request, name: str = "", artist: str
                         "Track is DRM-protected - add an OAuth token in Settings -> SoundCloud.")
                 print(f"[soundcloud] all transcodings failed for {track_id} "
                       f"(last={last_status} body={last_body})", flush=True)
-                raise HTTPException(502, imsg(
-                    "err.sc_stream_failed",
+                raise HTTPException(502, imsg("err.sc_stream_failed",
                     f"SoundCloud stream {last_status} — "
                     f"возможно нужен OAuth (Settings → SoundCloud)",
                     code=last_status))

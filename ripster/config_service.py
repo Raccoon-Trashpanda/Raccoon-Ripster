@@ -378,6 +378,10 @@ DEFAULT_CONFIG: dict = {
     # ── JioSaavn (OrpheusDL module, no login) ────────────────────────────────
     "jiosaavn-quality":   "high",
     "jiosaavn-save-path": "",
+    # Сколько треков одного релиза качается одновременно (1 = последовательно,
+    # как было до 22.09.2026). Пишется в corridor settings.json перед прогоном,
+    # читает модуль; потолок 6 держит движок (orpheus_jiosaavn._jiosaavn_parallel).
+    "jiosaavn-parallel-count": 3,
 }
 
 

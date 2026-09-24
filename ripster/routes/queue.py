@@ -176,8 +176,7 @@ async def add_to_queue(body: dict, request: Request):
             print(f"[queue] REJECTED mismatch: link service 'apple', quality '{_q}' "
                   f"(source: {(body or {}).get('source') or 'unset'}) - {url[:110]}",
                   flush=True)
-            raise HTTPException(409, imsg(
-                "err.queue_service_quality_mismatch",
+            raise HTTPException(409, imsg("err.queue_service_quality_mismatch",
                 f"Ссылка на Apple с качеством «{_q}» — это код чужого сервиса. "
                 "Поставьте в очередь ссылку того сервиса, что выбрали, и его качество.",
                 q=_q))
@@ -201,11 +200,9 @@ async def add_to_queue(body: dict, request: Request):
     _ul = url.lower()
     if svc == "apple" and ("/station/" in _ul
                            or _ul.rstrip("/").split("/")[-1].split("?")[0].startswith("ra.")):
-        raise HTTPException(422, imsg(
-            "err.apple_radio_station",
-            "Apple-радио и станции (DJ-миксы, ссылки ra.*) скачать нельзя — это "
-            "защищённый DRM radio-поток, а не трек/альбом каталога. Дай ссылку на "
-            "трек, альбом или плейлист."))
+        raise HTTPException(422, imsg("err.apple_radio_station",
+            "Apple-радио и станции (DJ-миксы, ссылки ra.*) скачать нельзя — это защищённый "
+            "DRM radio-поток, а не трек/альбом каталога. Дай ссылку на трек, альбом или плейлист."))
 
     # Guests always use the owner's engine — they cannot switch
     sid = _guest_session_id(request)
@@ -625,7 +622,11 @@ async def retry_task(task_id: str, request: Request):
             from fastapi.responses import JSONResponse
             return JSONResponse({"error": "forbidden"}, status_code=403)
         if live.get("status") in ("queued", "running"):
-            return {"ok": False, "msg": "Задача уже в очереди", "duplicate": True}
+            # msg_key + params — контракт `msg` (см. i18n.log_event): api()
+            # разворачивает его centrally, coder.js показывает переведённым.
+            return {"ok": False, "duplicate": True,
+                    "msg_key": "st.dl_duplicate", "params": {},
+                    "msg": "Этот трек уже в очереди загрузок"}
         live["status"]   = "queued"
         live["progress"] = 0
         live["log"]      = []

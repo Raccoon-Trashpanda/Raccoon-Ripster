@@ -1,11 +1,18 @@
 """Отложенная запись BBC-эфиров.
 
 У выпусков BBC есть время начала эфира. Владелец ставит «отложенную запись» —
-задача ложится в очередь со статусом ``scheduled`` и зеркалируется в
-``bbc_scheduled.json`` рядом с конфигом. Цикл ``run_loop()`` (поднимается в
-lifespan) ждёт наступления времени и переводит задачу в ``queued`` — дальше её
-ведёт обычный ``process_queue``, то есть история, манифест и доставка ничем не
-отличаются от любой другой загрузки.
+она живёт КАЛЕНДАРЁМ в ``bbc_scheduled.json`` рядом с конфигом и показывается на
+вкладке BBC. В очередь загрузки план НЕ кладётся: висящая сутками карточка с 0 %
+превращает очередь в доску объявлений, а качаться в этот момент нечего. Цикл
+``run_loop()`` (поднимается в lifespan) ждёт наступления времени и лишь тогда
+создаёт обычную задачу-загрузку и заводит ``process_queue`` — дальше её ведёт
+обычный путь очереди, то есть история, манифест и доставка ничем не отличаются
+от любой другой загрузки и ничего не знают, что когда-то это был план.
+
+Наступившее во время простоя (выключенная машина, упавшее приложение) окно
+разбирает ``fire()``: свежий эфир дописывается с опозданием, а слишком
+опоздавший не пишется задним числом и не исчезает молча — план остаётся в
+календаре с честным вердиктом «пропущен», который видно на вкладке BBC.
 
 Время хранится в UTC. Файл пишется атомарно (tmp + os.replace), чтобы обрыв
 посреди записи не оставил полфайла вместо всех планов.
@@ -26,6 +33,10 @@ STORE_VERSION = 1
 MAX_LIVE_MINUTES = 8 * 60          # физический предел: дольше марафона BBC не пишем
 _GRACE_SECONDS = 600               # «уже поздно» — эфир начался слишком давно
 _LATENESS_SECONDS = 10             # допуск на дрейф часов и паузу цикла
+# Статус карточек, которые СТАРАЯ сборка клала в очередь загрузки. План больше
+# не карточка, но queue_pending.json переживает правку — их надо убрать при
+# старте (см. restore()).
+_LEGACY_CARD = "scheduled"
 
 
 def utcnow() -> datetime:
@@ -221,18 +232,18 @@ def get_store() -> ScheduledStore:
     return _store
 
 
-def task_for(store: ScheduledStore, row: dict) -> dict:
-    """Карточка «запланировано» в общей очереди. url — псевдо-ссылка эфира:
-    движок по ней понимает, какой канал писать, а статус ``scheduled`` не даёт
-    процессу очереди её трогать, пока не наступит время."""
+def new_task(row: dict) -> dict:
+    """Обычная задача-загрузка из плана. Ничем от ручной не отличается: тот же
+    ``queued``, тот же путь очереди. url — псевдо-ссылка эфира, по ней движок
+    понимает, какой канал писать."""
     from ripster import bbc_live_channels as _ch
     channel = row.get("channel") or ""
     task = _make_task(f"https://www.bbc.co.uk/sounds/live/{channel}",
                       "live320", "bbc_live", "bbc", source="bbc_schedule")
+    # Id плана = id задачи: по нему ``settle_finished`` находит запись в очереди
+    # и в истории, а отмена снятого ещё плана чистит след именно в очереди.
     task["id"]     = row["task_id"] = row["id"]
-    task["status"] = TaskStatus.SCHEDULED.value
-    task["scheduled_for"] = row["start_utc"]
-    task["schedule_id"]   = row["id"]
+    task["schedule_id"] = row["id"]
     task["meta"] = {
         "service":  "bbc",
         "title":    row.get("title") or _ch.label(channel),
@@ -241,7 +252,6 @@ def task_for(store: ScheduledStore, row: dict) -> dict:
         "duration": int(row.get("duration") or 0),
         "channel":  channel,
         "pid":      row.get("pid") or "",
-        "scheduled_for": row["start_utc"],
     }
     return task
 
@@ -249,55 +259,52 @@ def task_for(store: ScheduledStore, row: dict) -> dict:
 def schedule_recording(*, channel: str, start_utc: datetime, duration: int,
                        title: str = "", subtitle: str = "", cover: str = "",
                        pid: str = "", forecast: dict | None = None) -> dict:
-    """Создать план и задачу-«ожидание» в очереди (один вызов — обе записи)."""
-    store = get_store()
-    if store is None:
-        raise RuntimeError("bbc_schedule.install() has not run yet")
-    rows = store.add(channel=channel, start_utc=start_utc, duration=duration,
-                     title=title, subtitle=subtitle, cover=cover,
-                     pid=pid, forecast=forecast)
-    try:
-        _queue.append(task_for(store, rows))
-    except Exception as e:
-        print(f"[bbc-schedule] карточка очереди не создана: {e}", flush=True)
-    return rows
+    """Создать план. Только план: в очереди загрузки до наступления эфира
+    делать нечего (см. докстринг модуля)."""
+    return get_store().add(channel=channel, start_utc=start_utc, duration=duration,
+                           title=title, subtitle=subtitle, cover=cover,
+                           pid=pid, forecast=forecast)
+
+
+def _drop_card(sid: str) -> bool:
+    """Убрать из очереди карточку плана старого образца с этим id."""
+    gone = False
+    for t in list(_queue):
+        if (t.get("id") == sid and t.get("source") == "bbc_schedule"
+                and t.get("status") == _LEGACY_CARD):
+            _queue.remove(t)
+            gone = True
+    return gone
 
 
 def cancel_recording(sid: str) -> bool:
-    """Снять план. Снимается и карточка в очереди, пока задача не началась."""
+    """Снять план. Pending-план в очереди ничего не оставил — карточку убираем
+    только если её завела старая сборка. Исполненную запись (fired) отмена не
+    трогает: она уже обычная загрузка, и отменяют её средствами очереди."""
     store = get_store()
     row = store.get(sid)
     if row is None:
         return False
     store.remove(sid)
-    for t in list(_queue):
-        if t.get("id") == sid and t.get("status") in (
-                TaskStatus.SCHEDULED.value, TaskStatus.QUEUED.value):
-            _queue.remove(t)
-        elif t.get("id") == sid and t.get("status") == TaskStatus.RUNNING.value:
-            # Запись уже идёт — отменять процесс не будем, только план.
-            break
-    return True
+    return _drop_card(sid) or row.get("status") == "pending"
 
 
-def restore() -> int:
-    """После перезапуска: у каждого живого плана в очереди обязана быть карточка.
+async def restore() -> int:
+    """После перезапуска: в очереди загрузки планов быть не может.
 
-    ``queue_pending.json`` их обычно сохраняет сам, но очередь могли и
-    почистить — а план живёт в своём файле и переживает любую чистку.
-    Наступившие во время простоя строки не трогаем: их разберёт ``run_loop``
-    (он же честно пропустит слишком опоздавшие)."""
-    store = get_store()
-    ids = {t.get("id") for t in _queue}
-    n = 0
-    for row in store.pending():
-        if row["id"] in ids:
-            continue
-        try:
-            _queue.append(task_for(store, row))
-            n += 1
-        except Exception as e:
-            print(f"[bbc-schedule] restore {row.get('id')}: {e}", flush=True)
+    Старые сборки держали там карточку «запланировано на …» с нулём прогресса, и
+    ``queue_pending.json`` возвращает её и сейчас — такая карточка висела бы
+    сутками и не давала очереди умереть. Убираем: план живёт в своём файле и
+    дождётся своего часа сам. Наступившие за простой окна не трогаем — их
+    разберёт ``run_loop`` (он же честно отметит слишком опоздавшие)."""
+    n = sum(_drop_card(t.get("id", "")) for t in list(_queue)
+            if t.get("source") == "bbc_schedule"
+            and t.get("status") == _LEGACY_CARD)
+    # queue_update — единственный путь, который пишет queue_pending.json
+    # (app.py делает это в broadcast()): без него снятая карточка вернулась бы
+    # на следующем старте.
+    if n and _broadcast and _queue_snapshot:
+        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
     return n
 
 
@@ -308,35 +315,35 @@ def due_rows(store: ScheduledStore, now: datetime | None = None) -> list[dict]:
     return [r for r in store.pending() if (now - _dt(r)).total_seconds() >= -_LATENESS_SECONDS]
 
 
+async def _miss(row: dict, late: float) -> bool:
+    """Окно прошло, пока машина стояла. Писать задним числом нечего — но и
+    молча исчезать плану нельзя: человек планировал запись и вправе увидеть,
+    что её НЕ будет и почему. Вердикт «пропущен» остаётся в календаре."""
+    store = get_store()
+    minutes = int(late // 60)
+    _drop_card(row["id"])
+    store.mark(row["id"], status="missed",
+               verdict={"state": "missed", "late_minutes": minutes,
+                        "missed_utc": fmt_utc(utcnow())})
+    print(f"[bbc-schedule] {row.get('id')}: эфир начался {minutes} мин назад — "
+          f"пропущен, записан не был", flush=True)
+    if _broadcast:
+        await _broadcast({"type": "bbc_sched_update"})
+    return False
+
+
 async def fire(row: dict) -> bool:
-    """Наступило время — переводим задачу в обычную очередь."""
+    """Наступило время — план становится обычной задачей-загрузкой."""
     store = get_store()
     late = (utcnow() - _dt(row)).total_seconds()
     if late > _GRACE_SECONDS:
-        # Эфир начался слишком давно: писать его с этого момента — значит
-        # снять не то, что человек планировал. Снимаем план как пропущенный.
-        store.remove(row["id"])
-        for t in list(_queue):
-            if t.get("id") == row.get("id") and t.get("status") == TaskStatus.SCHEDULED.value:
-                _queue.remove(t)
-        print(f"[bbc-schedule] {row.get('id')}: эфир начался {int(late // 60)} мин назад — "
-              f"пропущен, план снят", flush=True)
-        if _broadcast:
-            await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
-        return False
-    task = next((t for t in _queue if t.get("id") == row.get("id")), None)
-    if task is None:
-        # Карточку удалили руками (✕ в очереди) — план больше нечем исполнить.
-        store.remove(row["id"])
-        print(f"[bbc-schedule] {row.get('id')}: задачи в очереди нет — план снят", flush=True)
-        return False
-    try:
-        task["status"] = TaskStatus.QUEUED.value
-    except Exception:
-        pass
+        return await _miss(row, late)
+    _drop_card(row["id"])
+    _queue.append(new_task(row))
     store.mark(row["id"], status="fired", fired_utc=fmt_utc(utcnow()))
     if _broadcast:
         await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+        await _broadcast({"type": "bbc_sched_update"})
     if _process_queue and _qs:
         async with _lock:
             should_start = _qs.start()

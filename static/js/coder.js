@@ -772,7 +772,7 @@ async function removeTask(id) {
 async function retryTask(id) {
   const r = await api('POST', `/api/queue/retry/${id}`);
   if(r.ok) toast(r.reused ? '↺ '+t('cd.retry_started') : '↺ '+t('t.added_q'));
-  else if(r.duplicate) toast(t('cd.in_queue'), 'var(--muted)');
+  else if(r.duplicate) toast(r.msg || t('cd.in_queue'), 'var(--muted)');
   else toast(r.msg || t('cd.retry_err'), 'var(--red)');
 }
 

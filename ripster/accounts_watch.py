@@ -139,7 +139,16 @@ async def _expiring(config: dict) -> list[str]:
     return out
 
 
-async def _default_notify(text: str) -> None:
+def _bot_cfg_path() -> Path:
+    return _BASE_DIR / "tgbot" / "config.json"
+
+
+def _bot_cfg_path(base_dir=None) -> Path:
+    """tgbot/config.json приложения — от BASE_DIR, а не от CWD (как telemetry._bot_cfg)."""
+    return (Path(base_dir) if base_dir else Path()) / "tgbot" / "config.json"
+
+
+async def _default_notify(text: str, base_dir=None) -> None:
     """Сообщить владельцу в его бот.
 
     Отдельная функция, а не переиспользование telemetry.notify_owner_bot: тот
@@ -150,9 +159,8 @@ async def _default_notify(text: str) -> None:
     import json as _j
     import urllib.parse as _up
     import urllib.request as _ur
-    from pathlib import Path as _P
     try:
-        cfg = _j.loads(_P("tgbot/config.json").read_text(encoding="utf-8-sig"))
+        cfg = _j.loads(_bot_cfg_path(base_dir).read_text(encoding="utf-8-sig"))
         data = _up.urlencode({"chat_id": str(cfg["owner_id"]), "text": text,
                               "disable_web_page_preview": "true"}).encode()
         await asyncio.to_thread(
@@ -168,7 +176,9 @@ async def run(config: dict, base_dir, notify=None) -> None:
     Исключения глушим намеренно и с записью: сторож, роняющий приложение при
     недоступности чужого API, хуже отсутствующего сторожа.
     """
-    notify = notify or _default_notify
+    # base_dir доезжает до доставки: конфиг бота лежит в каталоге приложения, а
+    # не там, откуда его запустили (планировщик/сервис меняют CWD).
+    notify = notify or (lambda text: _default_notify(text, base_dir))
     await asyncio.sleep(_FIRST_DELAY)
     while True:
         try:

@@ -58,6 +58,12 @@ def _settings_path() -> Path:
 _RE_DOWNLOADING = re.compile(r'===\s*Downloading\s+(track|album|playlist|artist)\s+(.+?)\s*(?:\(|===)', re.I)
 _RE_TRACK_FILE  = re.compile(r'Downloading track file', re.I)
 _RE_TRACK_N     = re.compile(r'^\s*Track\s+(\d+)\s*/\s*(\d+)', re.I)
+# Ядро ловит исключение закачки ОДНОГО трека и пишет эту строку, продолжая
+# альбом (music_downloader.py: 'Warning: Track download failed'). С параллельной
+# закачкой это штатный след частичной загрузки: считать по нему провалы треков.
+_RE_TRACK_FAILED = re.compile(r'Track download failed', re.I)
+# Сколько треков в релизе (строки 'Track N/M') — знаменатель честного вердикта.
+_RE_TRACK_TOTAL  = re.compile(r'^\s*Track\s+\d+\s*/\s*(\d+)', re.I | re.M)
 _RE_ERROR       = re.compile(r'\berror\b|\bfailed\b|\bexception\b|\bTraceback', re.I)
 _RE_SKIP        = re.compile(r'already exists|skipping', re.I)
 # CDN handed back an HTML error page instead of audio. mutagen's wording for it.
@@ -155,10 +161,31 @@ def _ensure_module_init() -> None:
         pass
 
 
-def _update_orpheus_settings(quality: str, save_path: str) -> None:
+#: Насколько широко модуль JioSaavn качает треки одного релиза одновременно.
+#: 3 — консервативно и вежливо по отношению к чужому сервису: девять треков
+#: едут примерно втрое быстрее последовательной закачки, а одновременных
+#: соединений меньше, чем у одного пользователя веб-плеера с двумя вкладками.
+_JIOSAAVN_PARALLEL_DEFAULT = 3
+_JIOSAAVN_PARALLEL_MAX     = 6
+
+
+def _jiosaavn_parallel(config: dict) -> int:
+    """Ширина параллельной закачки из config.yaml; наружу — только разумный
+    диапазон, потому что больше шести соединений на чужой CDN — уже хамство."""
+    try:
+        w = int(config.get("jiosaavn-parallel-count", _JIOSAAVN_PARALLEL_DEFAULT)
+                or _JIOSAAVN_PARALLEL_DEFAULT)
+    except (TypeError, ValueError):
+        w = _JIOSAAVN_PARALLEL_DEFAULT
+    return max(1, min(w, _JIOSAAVN_PARALLEL_MAX))
+
+
+def _update_orpheus_settings(quality: str, save_path: str,
+                             parallel: int | None = None) -> None:
     """Point this engine's OWN OrpheusDL settings (corridor copy, see
-    `_corridor_settings`) at this run's quality + folder. Only the two global
-    keys are touched (the module has no settings of its own)."""
+    `_corridor_settings`) at this run's quality + folder + download width.
+    Глобальных keys — два; третий, `modules.jiosaavn.parallel_tracks`, читает
+    уже сам модуль (`module_controller.module_settings`)."""
     sp = _settings_path()
     if not sp.exists():
         return
@@ -169,6 +196,12 @@ def _update_orpheus_settings(quality: str, save_path: str) -> None:
             gen["download_quality"] = quality
         if save_path:
             gen["download_path"] = save_path.rstrip("/\\") + "\\"
+        if parallel is not None:
+            mods = cfg.setdefault("modules", {})
+            if isinstance(mods, dict):
+                js = mods.setdefault("jiosaavn", {})
+                if isinstance(js, dict):
+                    js["parallel_tracks"] = parallel
         sp.write_text(json.dumps(cfg, indent=4, ensure_ascii=False), encoding="utf-8")
     except Exception:  # noqa: BLE001
         pass
@@ -214,7 +247,8 @@ class OrpheusJioSaavnEngine(EngineBase):
 
         save_path = config.get("jiosaavn-save-path") or config.get("save-path") or ""
         orpheus_quality = _QUALITY_ORPHEUS.get((quality or "").lower(), "high")
-        _update_orpheus_settings(orpheus_quality, save_path)
+        _update_orpheus_settings(orpheus_quality, save_path,
+                                 parallel=_jiosaavn_parallel(config))
         self._save_root = save_path.rstrip("/\\") if save_path else ""
         self._t0 = time.time()
         # ffprobe ищем рядом с настроенным ffmpeg — так же, как это делает
@@ -283,37 +317,8 @@ class OrpheusJioSaavnEngine(EngineBase):
         self.junk_removed = removed
         return removed
 
-    def _measured_tier(self) -> str:
-        """Какую ступень мы получили НА САМОМ ДЕЛЕ, по файлу.
-
-        320 есть не у каждого трека: `getCdnURL` спускается по лестнице
-        320→160→96 до первой существующей. Папка при этом уже названа по
-        ЗАПРОШЕННОМУ качеству и молча врёт — ровно та же ловушка, что была у
-        Яндекса 28.07.2026. Возвращаем измеренное в штатном поле, раннер
-        перепишет им качество задачи, и карточка, история и бот скажут правду.
-        Пустая строка означает «не смог измерить» — это не то же самое, что
-        «получил запрошенное», и выдумывать вместо неё ничего нельзя.
-        """
-        root = Path(self._save_root) if self._save_root else None
-        if not root or not root.is_dir():
-            return ""
-        since = self._t0 - 5 if self._t0 else 0
-        newest, newest_mt = None, since
-        try:
-            for p in root.rglob("*"):
-                if p.suffix.lower() not in (".m4a", ".mp4", ".aac"):
-                    continue
-                try:
-                    mt = p.stat().st_mtime
-                except OSError:
-                    continue
-                if mt >= newest_mt:
-                    newest, newest_mt = p, mt
-        except Exception:  # noqa: BLE001
-            return ""
-        if newest is None:
-            return ""
-
+    def _probe_kbps(self, path: Path) -> int:
+        """Битрейт одного файла через ffprobe; 0 = измерить не смог."""
         import re as _re
         import subprocess as _sp
         ffprobe = _re.sub(r"ffmpeg(\.exe)?$",
@@ -322,20 +327,66 @@ class OrpheusJioSaavnEngine(EngineBase):
         try:
             cp = _sp.run([ffprobe, "-v", "error", "-show_entries",
                           "format=bit_rate", "-of", "default=nw=1:nk=1",
-                          str(newest)], capture_output=True, timeout=30,
+                          str(path)], capture_output=True, timeout=30,
                          creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
-            kbps = int((cp.stdout or b"").decode("utf-8", "ignore").strip() or 0) // 1000
+            return int((cp.stdout or b"").decode("utf-8", "ignore").strip() or 0) // 1000
+        except Exception:  # noqa: BLE001
+            return 0
+
+    def _measured_tier(self) -> str:
+        """Какую ступень мы получили НА САМОМ ДЕЛЕ — по ВСЕМ файлам релиза.
+
+        320 есть не у каждого трека: `getCdnURL` спускается по лестнице
+        320→160→96 до первой существующей. Папка при этом уже названа по
+        ЗАПРОШЕННОМУ качеству и молча врёт — ровно та же ловушка, что была у
+        Яндекса 28.07.2026. С параллельной закачкой треки доезжают вразнобой,
+        поэтому ступенью релиза считается ХУДШАЯ из измеренных: объявить
+        альбом «320», когда один трек пришёл 160, — значит продать человеку
+        то, чего у него нет. Файл, который ffprobe не прочитал (обрывок,
+        битый контейнер), тоже считается худшим: молча исключить его из
+        наихудшего сценария — тот же обман, только вероятнее.
+        Пустая строка означает «измерять нечего» — это не то же самое, что
+        «получил запрошенное», и выдумывать вместо неё ничего нельзя.
+        """
+        root = Path(self._save_root) if self._save_root else None
+        if not root or not root.is_dir():
+            return ""
+        since = self._t0 - 5 if self._t0 else 0
+        files: list[Path] = []
+        try:
+            for p in root.rglob("*"):
+                if p.suffix.lower() not in (".m4a", ".mp4", ".aac"):
+                    continue
+                try:
+                    mt = p.stat().st_mtime
+                except OSError:
+                    continue
+                if mt >= since:
+                    files.append(p)
         except Exception:  # noqa: BLE001
             return ""
-        if kbps <= 0:
+        if not files:
             return ""
-        # Пороги стоят посередине между ступенями: замеры дают 97 / 161 / 321,
-        # так что запас в обе стороны большой и округление контейнера не вредит.
-        if kbps >= 240:
-            return "high"
-        if kbps >= 130:
-            return "medium"
-        return "low"
+
+        worst, worst_rank = "", 3
+        for p in files:
+            kbps = self._probe_kbps(p)
+            # Пороги стоят посередине между ступенями: замеры дают 97 / 161 /
+            # 321, так что запас в обе стороны большой и округление контейнера
+            # не вредит.
+            if kbps <= 0:
+                tier, rank = "low", 0
+            elif kbps < 130:
+                tier, rank = "low", 0
+            elif kbps < 240:
+                tier, rank = "medium", 1
+            else:
+                tier, rank = "high", 2
+            if rank < worst_rank:
+                worst, worst_rank = tier, rank
+            if worst_rank == 0:      # хуже уже не будет — остальные можно не мерить
+                break
+        return worst
 
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
         log_text = log_text or ""
@@ -347,7 +398,26 @@ class OrpheusJioSaavnEngine(EngineBase):
                 "или не импортируется (Настройки → Установка → JioSaavn)."))
 
         attempts = len(_RE_TRACK_FILE.findall(log_text))
+        failed = len(_RE_TRACK_FAILED.findall(log_text))
+        # ok — треки, дошедшие до конца (ядро печатает 'Downloading track file'
+        # до закачки и 'Track download failed', только если закачка сорвалась).
+        ok = max(0, attempts - failed)
         not_audio = bool(_RE_NOT_AUDIO.search(log_text))
+
+        # 0) ЧАСТИЧНО. С параллельной закачкой сорванный трек локализован ядром
+        #    ('Track download failed') и остальные восемь доезжают — но зелёного
+        #    «готово» над дыркой не будет никогда: вердикт честно называет
+        #    сохранённое из знаменателя релиза.
+        if ok and (failed or junk):
+            expected = max([attempts] + [int(m) for m in _RE_TRACK_TOTAL.findall(log_text)]
+                           + [ok + len(junk)])
+            reason = self._last_exc(log_text) or "см. лог"
+            if junk:
+                reason = "частью вместо аудио легла HTML-страница отказа CDN"
+            return EngineResult(False, tracks_ok=ok,
+                                tracks_err=max(1, expected - ok),
+                                error=(f"JioSaavn: сохранено {ok} из {expected} — {reason}"),
+                                quality_actual=self._measured_tier())
 
         # 1) GEO. Strongest proof: the "audio" on disk is the CDN's HTML refusal.
         #    Second: mutagen choked on the file right after a download attempt, or
@@ -367,12 +437,17 @@ class OrpheusJioSaavnEngine(EngineBase):
                                      or _RE_PARSE_EXC.search(log_text)):
             return EngineResult(False, error=_CONTENT_VERDICT)
 
-        # 4) Success: OrpheusDL aborts the WHOLE run on the first exception, so a
-        #    traceback anywhere means the release is incomplete.
+        # 4) Success. За пределами стадии закачки (тегирование, обложка, lyrics)
+        #    ядро по-прежнему роняет весь прогон traceback'ом — если он есть,
+        #    релиз неполон и это ветка 5, а не зелёный ответ.
         if attempts and not tb and rc in (0, -1):
-            return EngineResult(success=True, tracks_ok=attempts)
+            return EngineResult(success=True, tracks_ok=attempts,
+                                quality_actual=self._measured_tier())
         if rc == 0 and not tb and _RE_SKIP.search(log_text):
             return EngineResult(success=True, tracks_ok=0)
+        # 5) Abort by traceback: считать сохранённым можно только то, что ядро
+        #    успело обработать до падения (каждый трек до 'Traceback' прошёл
+        #    закачку; упавший — не прошёл).
         if attempts and tb:
             done = max(0, attempts - 1)
             return EngineResult(False, tracks_ok=done, tracks_err=1, error=(
@@ -396,7 +471,10 @@ class OrpheusJioSaavnEngine(EngineBase):
         d = await _webapi_get(_saavn_token(album_id), "album")
         err = d.pop("error", None)
         if err:
-            return {"error": err}
+            # Ключ и аргументы достаются из `_webapi_get`: без них интерфейс
+            # показал бы русскую фразу вместо перевода.
+            return {"error": err, "error_key": d.pop("error_key", None),
+                    "error_args": d.pop("error_args", None) or {}}
         # A wrong or removed id is NOT a 404: JioSaavn answers 200 with a filler
         # card (albumid "0", one fake "sample trailer" song). Only the fields the
         # card is built from say whether the release is real.
@@ -436,9 +514,11 @@ class OrpheusJioSaavnEngine(EngineBase):
             "album_page_size": "100", "artist_page_size": "100"})
         err = d.pop("error", None)
         if err:
-            return {"error": err, "releases": []}
+            return {"error": err, "error_key": d.pop("error_key", None),
+                    "error_args": d.pop("error_args", None) or {}, "releases": []}
         if not d.get("name") or d.get("artistId") in (None, ""):
-            return {"error": "JioSaavn: артист не найден", "releases": []}
+            return {"error_key": "js.err_artist_not_found",
+                    "error": "JioSaavn: артист не найден", "releases": []}
         want = {t.strip().lower() for t in (types or "").split(",") if t.strip()}
         releases, seen = [], set()
         # topAlbums сервиса отдают пустым; релизы артиста лежат в двух других
@@ -533,27 +613,34 @@ async def _webapi_get(token: str, typ: str, extra: dict | None = None) -> dict:
               "_format": "json", "_marker": "0", "ctx": "web6dot0"}
     params.update(extra or {})
     if not token:
-        return {"error": "JioSaavn: пустой id"}
+        return {"error_key": "js.err_empty_id", "error": "JioSaavn: пустой id"}
     try:
         async with httpx.AsyncClient(timeout=12, follow_redirects=True,
                                      headers={"User-Agent": "Mozilla/5.0"}) as c:
             r = await c.get(_API_URL, params=params)
     except (httpx.TransportError, OSError) as e:
-        return {"error": f"JioSaavn: сеть недоступна ({type(e).__name__})"}
+        return {"error_key": "js.err_network", "error_args": {"e": type(e).__name__},
+                "error": f"JioSaavn: сеть недоступна ({type(e).__name__})"}
     except Exception as e:  # noqa: BLE001
         return {"error": f"JioSaavn: {type(e).__name__}: {e}"}
     if r.status_code != 200:
-        return {"error": f"JioSaavn: карточка не открылась (HTTP {r.status_code}) — "
+        return {"error_key": "js.err_card_http",
+                "error_args": {"code": r.status_code, "token": repr(token)},
+                "error": f"JioSaavn: карточка не открылась (HTTP {r.status_code}) — "
                          f"сервис не принял id {token!r}"}
     try:
         data = r.json() or {}
     except Exception:  # noqa: BLE001
-        return {"error": "JioSaavn: сервис ответил не JSON"}
+        return {"error_key": "js.err_not_json", "error": "JioSaavn: сервис ответил не JSON"}
     if not isinstance(data, dict):
-        return {"error": "JioSaavn: неожиданный ответ сервиса"}
+        return {"error_key": "js.err_unexpected",
+                "error": "JioSaavn: неожиданный ответ сервиса"}
     err = data.get("error")
     if isinstance(err, dict):
-        return {"error": f"JioSaavn: {err.get('msg') or err.get('code') or 'ошибка сервиса'}"}
+        _svc = err.get('msg') or err.get('code') or 'ошибка сервиса'
+        # Переводим рамку фразы, а не причину: её сервис пишет по-своему.
+        return {"error_key": "js.err_service", "error_args": {"msg": _svc},
+                "error": f"JioSaavn: {_svc}"}
     return data
 
 
@@ -577,10 +664,14 @@ async def search_jiosaavn(q: str, ent: str, limit: int) -> dict:
                                      headers={"User-Agent": "Mozilla/5.0"}) as c:
             r = await c.get(_API_URL, params=params)
         if r.status_code != 200:
-            return {"results": [], "error": f"JioSaavn: поиск ответил HTTP {r.status_code}"}
+            return {"results": [], "error_key": "js.err_search_http",
+                    "error_args": {"code": r.status_code},
+                    "error": f"JioSaavn: поиск ответил HTTP {r.status_code}"}
         data = r.json() or {}
     except (httpx.TransportError, OSError) as e:
-        return {"results": [], "error": f"JioSaavn: сеть недоступна ({type(e).__name__})"}
+        return {"results": [], "error_key": "js.err_network",
+                "error_args": {"e": type(e).__name__},
+                "error": f"JioSaavn: сеть недоступна ({type(e).__name__})"}
     except Exception as e:  # noqa: BLE001
         return {"results": [], "error": f"JioSaavn: {type(e).__name__}: {e}"}
 

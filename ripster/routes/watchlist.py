@@ -345,10 +345,11 @@ async def wl_set_auto(body: dict):
     elif item_id:
         target = [e for e in items if str(e.get("id")) == item_id]
         if not target:
-            raise HTTPException(status_code=404, detail="Запись не найдена")
+            raise HTTPException(status_code=404, detail=imsg("err.entry_not_found", "Запись не найдена"))
     else:
         raise HTTPException(status_code=400,
-                            detail="Нужен scope (all/artist/label) или id записи")
+                            detail=imsg("err.wls_scope_or_id",
+                                        "Нужен scope (all/artist/label) или id записи"))
 
     changed = 0
     for e in target:
