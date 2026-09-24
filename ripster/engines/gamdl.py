@@ -78,6 +78,26 @@ def _flag(name: str, *args) -> list[str]:
     return []
 
 
+def _ensure_mv_audio_fallback() -> None:
+    """Запасной аудиопоток клипа обязан стоять в gamdl ДО первой MV-задачи.
+
+    Без него старый клип без `audio-stereo-256` даёт пустой ключ и падает
+    «invalid argument for --key» (см. ripster/gamdl_mv_patch.py). Сбой сам
+    себя не чинит молча: вердикт печатается в лог задачи одной строкой.
+    """
+    try:
+        from ripster import gamdl_mv_patch
+        v = gamdl_mv_patch.ensure()
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[gamdl] проба аудио-запаса MV не удалась: {type(e).__name__}",
+              flush=True)
+        return
+    if v.get("verdict") not in ("patched", "already"):
+        print(f"[gamdl] аудио-запас MV не применён ({v.get('verdict')}) — "
+              "клипы без audio-stereo-256 могут упасть «invalid argument "
+              "for --key»", flush=True)
+
+
 @register
 class GamdlEngine(EngineBase):
     name = "gamdl"
@@ -103,6 +123,8 @@ class GamdlEngine(EngineBase):
         # sends those to the AMD engine anyway, so gamdl effectively always uses
         # cookies here. See ripster/apple_router.py.
         is_mv = quality == "mv"
+        if is_mv:
+            _ensure_mv_audio_fallback()
         _COOKIES_OK = {"mv", "aac", "aac-legacy", "ask"}
         cookies = (config.get("gamdl-cookies-path") or "").strip() or str(base_dir / "cookies.txt")
         # Запоминаем на движке: `is_finished` конфига не получает, а объяснить

@@ -34,6 +34,8 @@ FALLBACK: dict[str, str] = {
     "console.amd_runner_missing": "✗ amd_runner.py не найден — переустанови AMD через Настройки",
     "console.amd_wm_checking": "🌐 Проверяю wrapper-manager: {instance}…",
     "console.amd_wm_down": "✗ Wrapper-manager недоступен: {err}",
+    "console.amd_wm_need_key": "✗ wm.wol.moe требует ключ — получи в @wm_auth_bot и впиши в Настройки → Apple → API-ключ wm.wol.moe",
+    "console.amd_wm_quota": "✗ Квота wm.wol.moe на сегодня исчерпана — повторим завтра, частыми попытками квоту не вернуть",
     "console.amd_wm_not_ready": "⚠ Wrapper-manager «{instance}» не готов (клиентов: {clients}, регионов: {regions}) — продолжаю",
     "console.amd_wm_ready": "✓ Wrapper-manager готов — регионы: {regions}",
     "console.bbc_api_fail": "✗ BBC: API программ ответил {code} для {pid}",
