@@ -575,6 +575,14 @@ async def _search_jiosaavn(q: str, ent: str, limit: int) -> dict:
         return {"results": [], "error": f"JioSaavn: {e}"}
 
 
+#: Кэш горячего поиска: (service, type, q, limit, country) -> (ответ, expire_ts).
+#: Ответы каталога за пару минут не меняются, поэтому выдача из кэша неотличима
+#: от свежего запроса; наружу не годится только явная ошибка — её не храним.
+_search_cache: dict = {}
+_SEARCH_TTL = 120.0        # сек
+_SEARCH_CACHE_MAX = 512    # потолок записей, чтобы листание не раздувало память
+
+
 @router.get("/api/search")
 async def api_search(q: str, service: str = "apple", type: str = "album", limit: int = 20, country: str = "",
                      request: Request = None):
@@ -583,6 +591,10 @@ async def api_search(q: str, service: str = "apple", type: str = "album", limit:
     Apple: iTunes Search API (public, no auth)
     Deezer: Deezer API (public, no auth)
     Qobuz: Qobuz API (needs app_id + secret from settings)
+
+    24.09.2026: Deezer тянул живой запрос на каждый показ (p50 3.7s). Один и тот
+    же запрос теперь читается из короткоживущего кэша; за TTL=2 мин каталог не
+    успевает измениться, так что поведение для клиента то же, только быстрее.
     """
     if not q.strip():
         return {"results": []}
@@ -603,6 +615,26 @@ async def api_search(q: str, service: str = "apple", type: str = "album", limit:
             if isinstance(exc, _HTTPException):
                 raise
 
+    now = _time.monotonic()
+    key = (service, type, q.strip().casefold(), int(limit), country)
+    hit = _search_cache.get(key)
+    if hit is not None and hit[1] > now:
+        return hit[0]
+
+    result = await _dispatch_search(q, service, type, limit, country)
+    if isinstance(result, dict) and "error" not in result:
+        if len(_search_cache) >= _SEARCH_CACHE_MAX:       # листание не раздувает память
+            for k in [k for k, (_, exp) in _search_cache.items() if exp <= now]:
+                _search_cache.pop(k, None)
+            while len(_search_cache) >= _SEARCH_CACHE_MAX:
+                _search_cache.pop(next(iter(_search_cache)), None)
+        _search_cache[key] = (result, now + _SEARCH_TTL)
+    return result
+
+
+async def _dispatch_search(q: str, service: str, type: str, limit: int, country: str) -> dict:
+    """Непосредственно прогон поиска по сервисам. Без кэша — кэш накладывает
+    `api_search`, чтобы сюда всегда приходили только за реальным ответом."""
     # Label search is its own thing: only some services can filter by label at
     # the API level, and for the rest we have to fall back to matching the label
     # field of album metadata. Handled before the per-service dispatch below.
