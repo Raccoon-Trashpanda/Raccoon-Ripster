@@ -58,6 +58,22 @@ def lite_url(config: dict) -> str:
     return raw.rstrip("/")
 
 
+def client_target(config: dict) -> tuple[str, str]:
+    """(адрес, токен) key-сервера для КЛИЕНТА: своё реле или прямой контейнер.
+
+    Реле включается только адресом из `relay-client-url`; ключа может и не
+    быть — тогда реле честно ответит 401, и молча переключаться на прямой
+    контейнер нельзя: настройка обещала ход через реле. Без адреса — как
+    ходило всегда: `apple-lite-url` напрямую."""
+    c = config or {}
+    url = str(c.get("relay-client-url") or "").strip()
+    if not url:
+        return lite_url(c), ""
+    if "://" not in url:
+        url = "https://" + url
+    return url.rstrip("/"), str(c.get("relay-client-key") or "").strip()
+
+
 def _entry_key(adam_id: str, uri: str) -> str:
     return hashlib.sha256(f"{adam_id}|{uri}".encode("utf-8")).hexdigest()
 
@@ -151,9 +167,13 @@ class LiteClient:
     """HTTP-клиент key-сервера lite (конверт ``{code,msg,data}``)."""
 
     def __init__(self, base_url: str, cache: LiteKeyCache | None = None,
-                 transport: httpx.BaseTransport | None = None):
+                 transport: httpx.BaseTransport | None = None,
+                 token: str = ""):
         self.base_url = base_url.rstrip("/")
-        self._http = httpx.Client(transport=transport, timeout=20.0)
+        self.token = (token or "").strip()
+        headers = {"Authorization": f"Bearer {self.token}"} if self.token else None
+        self._http = httpx.Client(headers=headers, transport=transport,
+                                  timeout=20.0)
         self.cache = cache
 
     def close(self):
@@ -265,18 +285,18 @@ class LiteClient:
 
 
 _default: LiteClient | None = None
-_default_url: str | None = None
+_default_target: tuple[str, str] | None = None
 _default_lock = threading.Lock()
 
 
 def get_client(config: dict) -> LiteClient:
-    """Клиент на процесс; пересоздаётся при смене адреса в конфиге."""
-    global _default, _default_url
-    url = lite_url(config)
+    """Клиент на процесс; пересоздаётся при смене адреса (или ключа) в конфиге."""
+    global _default, _default_target
+    target = client_target(config)
     with _default_lock:
-        if _default is None or _default_url != url:
+        if _default is None or _default_target != target:
             if _default is not None:
                 _default.close()
-            _default = LiteClient(url, cache=LiteKeyCache())
-            _default_url = url
+            _default = LiteClient(target[0], cache=LiteKeyCache(), token=target[1])
+            _default_target = target
         return _default

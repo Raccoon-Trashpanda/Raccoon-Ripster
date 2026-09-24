@@ -180,3 +180,58 @@ def test_cache_eviction_keeps_newest(tmp_path, monkeypatch):
 def test_lite_url_defaults_to_loopback():
     assert lite.lite_url({}) == "http://127.0.0.1:12340"
     assert lite.lite_url({"apple-lite-url": "127.0.0.1:12340/"}) == "http://127.0.0.1:12340"
+
+
+# ── своё реле: клиент ходит через /relay с Bearer-ключом ───────────────────
+
+def test_client_target_direct_by_default():
+    assert lite.client_target({}) == ("http://127.0.0.1:12340", "")
+    assert lite.client_target({"apple-lite-url": "127.0.0.1:9"}) == ("http://127.0.0.1:9", "")
+    # адрес реле без ключа — честно реле: молча откатиться на прямой
+    # контейнер означало бы «настройка есть, а выбора нет»
+    assert lite.client_target({"relay-client-url": "t.test/relay"}) == ("https://t.test/relay", "")
+
+
+def test_client_target_relay_wins_over_direct():
+    url, key = lite.client_target({"apple-lite-url": "127.0.0.1:12340",
+                                   "relay-client-url": "https://host/relay/",
+                                   "relay-client-key": "rk_x"})
+    assert (url, key) == ("https://host/relay", "rk_x")
+
+
+def test_relay_client_sends_bearer_key():
+    seen = []
+
+    def h(request):
+        seen.append(request.headers.get("authorization"))
+        return _env(KEY_DATA)
+
+    c = lite.LiteClient("http://relay.test/relay", token="rk_t",
+                        transport=httpx.MockTransport(h))
+    c.key("1720704575", KEY_DATA["keyUri"])
+    assert seen == ["Bearer rk_t"]
+
+
+def test_relay_client_without_key_sends_no_auth_header():
+    seen = []
+
+    def h(request):
+        seen.append(request.headers.get("authorization"))
+        return httpx.Response(401, json={"code": 401, "msg": "нужен ключ"})
+
+    with pytest.raises(lite.LiteError):
+        lite.LiteClient("http://relay.test/relay",
+                        transport=httpx.MockTransport(h)).key("1", "skd://x")
+    assert seen == [None]
+
+
+def test_get_client_follows_relay_config(monkeypatch):
+    monkeypatch.setattr(lite, "LiteKeyCache", lambda: None)
+    monkeypatch.setattr(lite, "_default", None)
+    monkeypatch.setattr(lite, "_default_target", None)
+    cfg = {"relay-client-url": "https://h/relay", "relay-client-key": "rk_a"}
+    c = lite.get_client(cfg)
+    assert (c.base_url, c.token) == ("https://h/relay", "rk_a")
+    assert lite.get_client(cfg) is c                          # тот же адрес — тот же клиент
+    assert lite.get_client({**cfg, "relay-client-key": "rk_b"}) is not c
+    assert lite.get_client({}).base_url == "http://127.0.0.1:12340"
