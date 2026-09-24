@@ -971,6 +971,44 @@ async def pair_lyrics_word(request: Request, title: str = "", artist: str = "", 
         return {"src": "", "lines": [], "error": str(e)}
 
 
+@router.get("/api/pair/lyrics")
+async def pair_lyrics(request: Request, artist: str = "", track: str = "",
+                      album: str = "", duration: int = 0, isrc: str = ""):
+    """Полная ПК-лестница текстов по запросу телефона.
+
+    Телефон видит LRCLIB — общественную базу, где нового и
+    нишевого трека часто просто нет. На ПК той же самый трек
+    ищется ещё и в подписках владельца (Tidal, Spotify, Deezer, Apple).
+    Отвечаем ТОЛЬКО текстом и именем источника: ключи, токены и
+    прочие подробности учёток за пределы ответа не уходят —
+    телефон получает результат поиска, а не доступ к учёткам.
+
+    Пословную (караоке) лирику здесь не просим: она у телефона
+    есть свой `/api/pair/lyrics-word`, и тянуть её повторно значит
+    удваивать задержку панели.
+    """
+    if not _token_valid(_bearer(request)) and not _owner_ok(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    a = (artist or "").strip()
+    t = (track or "").strip()
+    if not a or not t:
+        return {"synced": "", "plain": "", "source": ""}
+    try:
+        from ripster.routes.discovery import lyrics_ladder
+        got = await lyrics_ladder(artist=a, track=t, album=(album or "").strip(),
+                                  duration=max(0, int(duration or 0)),
+                                  isrc=(isrc or "").strip(), words=False)
+    except Exception as e:  # pragma: no cover
+        # Подробности — только в лог ПК. В ответе им не место: сообщение
+        # упавшего источника часто содержит URL учётки или токен запроса, а
+        # телефон — чужое устройство.
+        print(f"[pairing] lyrics ladder failed: {e}", flush=True)
+        return {"synced": "", "plain": "", "source": ""}
+    return {"synced": str(got.get("synced") or ""),
+            "plain": str(got.get("plain") or ""),
+            "source": str(got.get("source") or "")}
+
+
 @router.get("/api/pair/label")
 async def pair_label(request: Request, name: str = "", limit: int = 60):
     """Релизы лейбла для мобильного «перехода на лейбл» — та же форма ответа,

@@ -403,9 +403,24 @@ def _ttml_to_lyrics(ttml: str) -> dict:
 
 @router.get("/api/lyrics")
 async def lyrics(artist: str = "", track: str = "", album: str = "", duration: int = 0,
-                 path: str = "", apple_id: str = "",
+                 path: str = "", apple_id: str = "", isrc: str = "",
                  tidal_id: str = "", spotify_id: str = "", deezer_id: str = ""):
+    return await lyrics_ladder(artist=artist, track=track, album=album, duration=duration,
+                               path=path, apple_id=apple_id, isrc=isrc,
+                               tidal_id=tidal_id, spotify_id=spotify_id,
+                               deezer_id=deezer_id)
+
+
+async def lyrics_ladder(artist: str, track: str, album: str = "", duration: int = 0,
+                        path: str = "", apple_id: str = "", isrc: str = "",
+                        tidal_id: str = "", spotify_id: str = "", deezer_id: str = "",
+                        words: bool = True) -> dict:
     """Текст песни из первого источника, который его отдал.
+
+    Это ещё и чистая (не HTTP) точка входа: ею запускается
+    `/api/pair/lyrics` для телефона. `words=False` пропускает пословной
+    ход Apple — телефон берет его отдельным запросом, платить за
+    него здесь второй раз нечего.
 
     Лестница по убыванию точности:
 
@@ -430,10 +445,10 @@ async def lyrics(artist: str = "", track: str = "", album: str = "", duration: i
     # считали, что «пословной не дают», но она есть в storefront ПОДПИСКИ
     # (14.09.2026). Отдаём `words` для караоке-рендера + построчный `synced`/
     # `plain` как фолбэк, чтобы старый фронт (без word-режима) не сломался.
-    if track:
+    if words and track:
         try:
             from ripster import apple_lyrics
-            wl = await apple_lyrics.word_lyrics(track, artist)
+            wl = await apple_lyrics.word_lyrics(track, artist, isrc)
         except Exception:  # noqa: BLE001
             wl = None
         if wl and wl.get("lines"):
