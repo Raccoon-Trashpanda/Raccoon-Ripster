@@ -3431,6 +3431,9 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
               and not task.get("_auto_retry")
               and not _wrapper_down_empty
               and not _engine_aborted   # движок уже сказал «дальше бессмысленно»
+              # Брак по decode-check — не «недокачка»: второй прогон писал бы
+              # ПРЯМО СЕЙЧАС другую передачу под именем запланированной.
+              and not getattr(result, "corrupt", False)
               and not (engine_name == "soundcloud"
                        and "FairPlay" in (result.error or "")
                        and result.tracks_ok == 0)):
