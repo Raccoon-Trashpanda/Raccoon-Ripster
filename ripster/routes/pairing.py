@@ -16,9 +16,11 @@ Endpoints
                                                   → { pc_id, pc_name, device_group_id, token,
                                                       capabilities, endpoints[], mode }
     GET  /api/pair/ping         (public, no auth) → { ripster, pc_id, pc_name, version }
-    GET  /api/pair/credentials  Bearer <token>    → { updated_at, credentials{} }   (stamps synced_at)
+    GET  /api/pair/credentials  Bearer <token>    → { updated_at, credentials{} }   (stamps synced_at;
+                                                                                     only for a device the
+                                                                                     owner opted in)
     POST /api/pair/mode         Bearer | loopback { mode }   fan-out: mirror|initiator|isolation
-    POST /api/pair/share        (localhost only)  { enabled: bool }
+    POST /api/pair/share        (owner only)      { device_id, enabled: bool }  per-device credential opt-in
     POST /api/pair/unpair       Bearer <token>    device unpairs itself
     POST /api/pair/revoke-all   (localhost only)  drop every paired device
     GET  /api/pair/status       (localhost only)  → pc_id, pc_name, endpoints[], mode, devices[]
@@ -61,7 +63,8 @@ router = APIRouter()
 
 _s: dict = {}                      # config, save_config, base_dir, broadcast
 _state_path: Path | None = None
-_state: dict = {}                  # persisted: device_group_id, tokens[], share_credentials, pending, mode
+_state: dict = {}                  # persisted: device_group_id, pending, mode, tokens[]
+                                   # (каждый токен несёт свой device_id + share_credentials)
 _CODE_TTL = 300                    # seconds a pairing code is valid
 _MAX_UNSYNCED = 20                 # cap on device tokens that never pulled creds (test/re-pair churn)
 _SYNCED_STALE_DAYS = 180           # a device that HAS synced is dropped only after this long silent
@@ -90,11 +93,48 @@ def _load_state() -> None:
     mode = _state.get("mode")
     if mode not in _FANOUT_MODES:
         _state["mode"] = "mirror"
-    # ARCH says credential sharing must be an explicit opt-in on the PC. Default
-    # ON here is a deliberate first-cut tradeoff so pairing is useful out of the
-    # box on a single-owner local box; POST /api/pair/share flips it.
-    _state.setdefault("share_credentials", True)
+    _migrate_share_flags()
     _save_state()
+
+
+def _new_device_id() -> str:
+    """Непубличный ярлык устройства для UI: по нему владелец щёлкает отдачу
+    учёток. Токен показывать в интерфейс нельзя — это и есть секрет доступа."""
+    have = {t.get("device_id") for t in _state.get("tokens") or []}
+    while True:
+        d = uuid.uuid4().hex[:12]
+        if d not in have:
+            return d
+
+
+def _migrate_share_flags() -> None:
+    """Отдача учёток — ЯВНЫЙ выбор владельца, и на каждом устройстве свой.
+
+    До 24.09.2026 флаг был один на весь ПК и стоял в True: телефон забирал все
+    учётки владельца, даже когда он этого не выбирал и тумблера не видел
+    (BACKLOG → Security, ARCH_2026-08-29_pc_phone_pairing.md:299). Теперь флаг
+    живёт в записи устройства, новое сопряжение рождается выключенным.
+
+    Уже спаренные устройства наследуют то состояние, что действовало раньше, а
+    не слетают в False: правка безопасности не должна молча ронять телефон,
+    который сегодня работает. Ключа на живой машине просто не было — значит
+    действовал старый дефолт True.
+    """
+    legacy = _state.pop("share_credentials", None)
+    inherited = True if legacy is None else bool(legacy)
+    inherited_share = []
+    for t in _state.get("tokens") or []:
+        if "device_id" not in t:
+            t["device_id"] = _new_device_id()
+        if "share_credentials" not in t:
+            t["share_credentials"] = inherited
+            inherited_share.append(t.get("name") or t.get("mobile_id") or "устройство")
+    if inherited_share:
+        n = len(inherited_share)
+        names = ", ".join(inherited_share[:5]) + ("…" if n > 5 else "")
+        print(f"[pairing] миграция: отдача учёток теперь выбирается по устройству — "
+              f"{n} устр. ({names}) унаследовали «{'вкл' if inherited else 'выкл'}», "
+              f"новые сопряжения выключены по умолчанию", flush=True)
 
 
 def _save_state() -> None:
@@ -680,8 +720,7 @@ async def pair_start(request: Request):
     return {"code": code, "expires_in": _CODE_TTL,
             "pc_id": _pc_id(), "pc_name": _pc_name(),
             "device_group_id": _state["device_group_id"],
-            "endpoints": _endpoints(),
-            "share_credentials": _state["share_credentials"]}
+            "endpoints": _endpoints()}
 
 
 @router.post("/api/pair/claim")
@@ -720,12 +759,19 @@ async def pair_claim(body: dict, request: Request):
                 rec = t
                 break
     if rec is not None:
+        # Выбор владельца по ЭТОМУ устройству переживает перевыпуск ключа:
+        # слетевшее после переустановки приложения «вкл» означало бы молча
+        # вставший телефон. Новое устройство проходит мимо этой ветки — ему
+        # учётки не полагаются, пока владелец не включит тумблер сам.
         rec.update(token=tok, seen=int(now), ua=ua, name=name or rec.get("name", ""))
     else:
-        _state["tokens"].append({
-            "token": tok, "mobile_id": mobile_id, "name": name,
-            "created": int(now), "seen": int(now), "ua": ua,
-        })
+        # Новый телефон: учётки НЕ отдаём, пока владелец не включит явно по
+        # этому устройству (настройка → Сопряжение).
+        rec = {"mobile_id": mobile_id, "name": name,
+               "created": int(now), "seen": int(now), "ua": ua,
+               "device_id": _new_device_id(), "share_credentials": False,
+               "token": tok}
+        _state["tokens"].append(rec)
     _evict_tokens()
     _save_state()
 
@@ -737,7 +783,7 @@ async def pair_claim(body: dict, request: Request):
         "apple_storefront": _apple_storefront(),
         "endpoints": _endpoints(),
         "mode": _state.get("mode", "mirror"),
-        "share_credentials": _state["share_credentials"],
+        "share_credentials": bool(rec.get("share_credentials")),
     }
 
 
@@ -801,13 +847,17 @@ async def pair_credentials(request: Request):
     tok = _bearer(request)
     if not _token_valid(tok):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    if not _state.get("share_credentials"):
+    # Флаг — на УСТРОЙСТВЕ: один телефон может получать учётки, другой — нет.
+    # Записи без флага (чужой/ручной pairing_state.json) — отказ, а не раздача.
+    rec = _token_rec(tok)
+    if rec is None or not rec.get("share_credentials"):
         return JSONResponse({"error": "sharing_disabled",
-                             "detail": "enable credential sharing on the PC"}, status_code=403)
+                             "detail": "the owner has not enabled credential sharing "
+                                       "for this device (Settings → Pairing)"},
+                            status_code=403)
     # Устройство реально забрало учётки → помечаем: с этого момента оно НЕ
     # вытесняется молча (см. _evict_tokens).
-    rec = _token_rec(tok)
-    if rec is not None and not rec.get("synced_at"):
+    if not rec.get("synced_at"):
         rec["synced_at"] = int(time.time())
         _save_state()
     return {"updated_at": _config_mtime_ms(), "credentials": await _credentials_payload()}
@@ -950,11 +1000,28 @@ async def pair_activity_view(request: Request):
 
 @router.post("/api/pair/share")
 async def pair_share(body: dict, request: Request):
+    """Владелец на ПК включает отдачу учёток КОНКРЕТНОМУ устройству.
+
+    Глобального «включить всем» нет намеренно: право на чужие учётки
+    разбирается по одному телефону, а не разом со всеми спаренными.
+    Токен устройства в интерфейс не отдаём — знание его = доступ к учёткам,
+    поэтому UI работает по непубличному `device_id`."""
     if not _owner_ok(request):
         return JSONResponse({"error": "forbidden", "detail": "owner only"}, status_code=403)
-    _state["share_credentials"] = bool((body or {}).get("enabled", True))
+    b = body or {}
+    dev = str(b.get("device_id") or "").strip()
+    enabled = b.get("enabled")
+    if not dev or not isinstance(enabled, bool):
+        return JSONResponse({"error": "bad_request",
+                             "detail": "device_id and boolean enabled required"},
+                            status_code=400)
+    rec = next((t for t in _state.get("tokens", []) if t.get("device_id") == dev), None)
+    if rec is None:
+        return JSONResponse({"error": "no_device", "detail": "unknown device_id"},
+                            status_code=404)
+    rec["share_credentials"] = enabled
     _save_state()
-    return {"ok": True, "share_credentials": _state["share_credentials"]}
+    return {"ok": True, "device_id": dev, "share_credentials": enabled}
 
 
 # ── Apple Music (и другой «только-ПК» контент) через сопряжение ──────────────
@@ -1316,8 +1383,11 @@ async def pair_status(request: Request):
         return JSONResponse({"error": "forbidden"}, status_code=403)
     now = int(time.time())
     _prune_pending()
+    # Флаг отдачи — НА УСТРОЙСТВЕ: UI рисует по тумблеру на каждый телефон и
+    # щёлкает им по `device_id`. Токена в ответе нет — знание его = доступ.
     devices = [
         {
+            "device_id": t.get("device_id", ""),
             "name": t.get("name", "") or t.get("ua", "")[:24] or "телефон",
             "mobile_id": t.get("mobile_id", ""),
             "created": t.get("created", 0),
@@ -1325,6 +1395,7 @@ async def pair_status(request: Request):
             "synced_at": t.get("synced_at", 0),
             "ua": t.get("ua", ""),
             "online": (now - t.get("seen", 0)) < 90,   # был запрос за последние 1.5 мин
+            "share_credentials": bool(t.get("share_credentials")),
         }
         for t in _state.get("tokens", [])
     ]
@@ -1337,7 +1408,7 @@ async def pair_status(request: Request):
         "paired_devices": len(devices),
         "devices": devices,
         "online_devices": sum(1 for d in devices if d["online"]),
-        "share_credentials": _state["share_credentials"],
+        "sharing_devices": sum(1 for d in devices if d["share_credentials"]),
         "capabilities": _capabilities(),
         "apple_storefront": _apple_storefront(),
         "pending_code": bool(_state.get("pending")),
@@ -1381,6 +1452,8 @@ def install(app, ctx) -> None:
 
     app.include_router(router)
     eps = ", ".join(e["url"] for e in _endpoints()) or "loopback only"
+    devs = _state.get("tokens", [])
     print(f"[pairing] ready · pc_id={_pc_id()[:8]}… name={_pc_name()!r} "
-          f"mode={_state.get('mode')} devices={len(_state.get('tokens', []))} "
-          f"share_credentials={_state['share_credentials']} caps={_capabilities()} · {eps}")
+          f"mode={_state.get('mode')} devices={len(devs)} "
+          f"с учётками={sum(1 for t in devs if t.get('share_credentials'))} "
+          f"caps={_capabilities()} · {eps}")
