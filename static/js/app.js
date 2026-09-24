@@ -209,6 +209,9 @@ function connectWS() {
     pullQueue();   // resync queue from the authoritative REST on every (re)connect —
                    // a long-lived socket that silently missed queue_update events
                    // otherwise leaves S.queue frozen on a stale snapshot.
+    // Relay-транспорт внешней панели (трекер #37):declare ourselves as the
+    // rp host so the server routes panel↔main traffic to this socket.
+    if (typeof rpHostWsOpen === 'function') { try { rpHostWsOpen(); } catch (e) {} }
   };
   ws.onclose = () => {
     // A dropped socket is not the same thing as a dead server: we retry every 2s
@@ -262,6 +265,11 @@ function handleMessage(msg) {
   // и без payload их было бы негде прочитать.
   if(typeof _wsWaiters !== 'undefined' && _wsWaiters.has(msg.type)) {
     try { _wsWaiters.get(msg.type)(msg); } catch {}
+  }
+  // relay-транспорт внешней панели (трекер #37): сервер переложил rp-сообщение.
+  if (msg.type === 'rp') {
+    if (typeof rpHostWsMessage === 'function') { try { rpHostWsMessage(msg); } catch (e) {} }
+    return;
   }
   switch(msg.type) {
     case 'init':

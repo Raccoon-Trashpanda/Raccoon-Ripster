@@ -323,6 +323,11 @@ body:not(.rpwin) .phone {
 .pfmt .svc { color: var(--pink); text-transform: uppercase; letter-spacing: .5px; }
 .pfmt .i { color: var(--t3); padding: 2px 4px; }
 .pfmt .i:hover { color: var(--t1); }
+/* «LIVE» — прямой эфир BBC: не перематывается, качество не выбирают. */
+.live { display: inline-block; padding: 1px 6px; border-radius: var(--r-pill);
+  background: var(--bad); color: #fff; font: 700 10px/1.5 var(--mono); letter-spacing: .6px;
+  vertical-align: 1px; }
+#mini-title .live { vertical-align: 2px; }
 
 .seek { padding: 16px 0 6px; flex: none; cursor: pointer; touch-action: none; user-select: none; }
 .seek:hover { cursor: col-resize; }

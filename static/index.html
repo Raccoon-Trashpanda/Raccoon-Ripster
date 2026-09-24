@@ -337,6 +337,7 @@
         <div style="display:flex;align-items:center;gap:3px;flex-shrink:0">
           <button onclick="togglePlayerExpanded()" id="pp-expand-btn" data-i18n-title="pp.expand_collapse" title="Развернуть / Свернуть" class="pp-extra">⌃</button>
           <button onclick="rpPanelToggle()" id="pp-float-btn" data-i18n-title="panel.btn_hint" title="Мобильная панель внутри окна ПК" class="pp-extra">⧉</button>
+          <button onclick="rpOpenExternalPlayer()" id="pp-ext-btn" data-i18n-title="player.open_external" title="Открыть внешний плеер" class="pp-extra">🖥</button>
           <button id="pp-local-btn" onclick="document.getElementById('pp-local-input').click()" data-i18n-title="pp.local_file" title="Слушать локальный файл" class="pp-extra">📂</button>
           <button onclick="closePreview()" data-i18n-title="pp.close_player" title="Закрыть плеер" class="pp-extra">✕</button>
         </div>
@@ -451,7 +452,7 @@
   <button type="button" onclick="closeLightbox()" style="position:absolute;top:16px;right:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:none;cursor:pointer;font-size:16px;backdrop-filter:blur(4px)">✕</button>
 </div>
 
-<script src="/static/js/i18n.js?v=10220"></script>
+<script src="/static/js/i18n.js?v=10221"></script>
 <script src="/static/js/boot_splash.js?v=2"></script>
 <script src="/static/js/views.js?v=10113"></script>
 <script src="/static/js/scrolltop.js?v=1"></script>
@@ -460,7 +461,7 @@
 <script src="/static/js/artist_follow.js?v=2"></script>
 <script src="/static/js/render_perf.js?v=2"></script>
 <script src="/static/js/nudges.js?v=4"></script>
-<script src="/static/js/app.js?v=10148"></script>
+<script src="/static/js/app.js?v=10149"></script>
 <script src="/static/js/telemetry_consent.js?v=1"></script>
 <script src="/static/js/wrapper.js?v=8"></script>
 <script src="/static/js/coder.js?v=10"></script>
@@ -506,7 +507,7 @@
 <script src="/static/js/bbc.js?v=10019"></script>
 <script src="/static/js/sc.js?v=10025"></script>
 <script src="/static/js/fx_ui.js?v=9"></script>
-<script src="/static/js/panel_host.js?v=3"></script>
+<script src="/static/js/panel_host.js?v=4"></script>
 
 <!-- Mobile sidebar drawer overlay -->
 <div id="drawer-overlay" class="drawer-overlay" onclick="closeMobileDrawer()"></div>

@@ -142,8 +142,12 @@ function ago(ts) {
 var B = { live: false, caps: {}, state: null, queue: null, stamp: '', up: false };
 
 /* RPWIN — панель в OS-окне лаунчера (Python-хост по ту сторону pywebview).
-   IFRAME — доком в окне ПК. Иначе — отдельное окно: моста нет. */
+   IFRAME — доком в окне ПК. RELAY — внешнее окно (?transport=relay), у которого
+   хоста в-process нет: rp-сообщения перекладывает сервер через общий /ws, а
+   окном панель управляет сама через pywebview.api (📌/спрятать).
+   Иначе — отдельное окно: моста нет. */
 var RPWIN = /[?&]rpwin=1/.test(location.search);
+var RELAY = /[?&]transport=relay/.test(location.search);
 var IFRAME = (function () {
   try { return !!(window.parent && window.parent !== window); } catch (e) { return false; }
 })();
@@ -153,6 +157,14 @@ function rpApi() {
   try {
     var a = window.pywebview && window.pywebview.api;
     return (a && typeof a.host === 'function') ? a : null;
+  } catch (e) { return null; }
+}
+/* Собственное OS-окно панели (standalone relay): pin/hide, без хост-моста. */
+function rpWinApi() {
+  if (!RPWIN && !RELAY) return null;
+  try {
+    var a = window.pywebview && window.pywebview.api;
+    return (a && typeof a.pin === 'function') ? a : null;
   } catch (e) { return null; }
 }
 function rpSend(msg) {
@@ -166,6 +178,10 @@ function rpSend(msg) {
     } catch (e) { return false; }
   }
   if (RPWIN) return false;          // api ещё не подоспел — не притворяемся
+  if (RELAY) {
+    if (!_ws || _ws.readyState !== 1) return false;
+    try { _ws.send(JSON.stringify({ type: 'rp', msg: msg })); return true; } catch (e) { return false; }
+  }
   if (!IFRAME) return false;
   try { window.parent.postMessage(msg, location.origin); return true; } catch (e) { return false; }
 }
@@ -176,10 +192,21 @@ function hostToItem(x) {
   return {
     service: x.service, id: String(x.id || ''), title: x.title, artist: x.artist,
     cover: x.cover, duration: x.duration || 0, label: x.label || '',
-    album: x.album || '', hires: !!x.hires, host: true,
+    album: x.album || '', hires: !!x.hires, host: true, live: !!x.live,
     local: !!x.local || x.service === 'local',
     url: x.url || '', resolved: !!x.resolved
   };
+}
+
+/* «Что сейчас играет». Пока хост живёт в очереди — берём карточку оттуда
+   (она полная: album, url). Но BBC и станции играют ВНЕ Preview.queue —
+   тогда авторитетна карточка из state. Без этого фолбэка панель молчала
+   на BBC: очередь пуста, и рисовать было «нечего», хотя звук идёт. */
+function curItem() {
+  var it = S.queue[S.idx];
+  if (it) return it;
+  if (B.live && B.state && B.state.item) return hostToItem(B.state.item);
+  return null;
 }
 
 /* Часы: единственный источник «где мы в треке» для всех сред. */
@@ -191,7 +218,7 @@ function clock() {
   }
   var a = T.el;
   return { pos: a.currentTime || 0, dur: (a.duration && isFinite(a.duration)) ? a.duration : 0,
-           paused: a.paused, vol: a.volume, have: !!S.queue[S.idx], engine: 'local' };
+           paused: a.paused, vol: a.volume, have: !!curItem(), engine: 'local' };
 }
 
 /* Одно сообщение — два входа: pywebview зовёт rpRecv(строка), док шлёт
@@ -200,15 +227,29 @@ function onHost(d) {
   if (d.k === 'welcome') {
     B.live = true; B.caps = d.caps || {}; B.up = true; S.env = d.env || 'WebView2?';
     if (B.caps.oswin) S.env = 'WebView2/OS-window';
+    if (B.caps.relay) S.env = 'relay/' + (d.env || '?');
     readMirror();
     renderAll();
     if (currentScreen() === 'scr-home') renderHome();
     rpSend({ k: 'ready' });
     return;
   }
+  if (d.k === 'host-gone') {
+    /* Хост-страницу закрыли/перезагрузили вразрез с bye: мост мертв, и
+       притворяться живым панель не будет — плеер local, статус честный. */
+    B.live = false; B.state = null;
+    failToast(t('m.host.gone'));
+    rpHandshakeRetry();
+    renderAll();
+    return;
+  }
   if (d.k === 'state') {
     B.live = true; B.state = d;
     if (d.queue !== B.stamp && !B.queue) rpSend({ k: 'need-queue' });
+    /* Смена эфира (BBC играет вне очереди) — карточку и бейдж LIVE надо
+       перерисовать сразу, а не ждать, пока экран заново откроют. */
+    var ci = curItem();
+    if ((ci ? ci.service + ':' + ci.id : '') !== _playerKey) renderPlayer();
     renderTransport(); renderMini(); diag();
     return;
   }
@@ -944,12 +985,22 @@ function connectWS() {
   var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   try { _ws = new WebSocket(proto + location.host + '/ws'); }
   catch (e) { return; }
-  _ws.onopen = function () { S.wsOpen = true; _wsRetry = 0; diag(); };
+  _ws.onopen = function () {
+    S.wsOpen = true; _wsRetry = 0;
+    if (RELAY) {
+      /* Relay-режим: этот сокет и есть мост. Сообщаем серверу роль и
+       здороваемся с хостом — на каждом (пере)подключении. */
+      try { _ws.send(JSON.stringify({ type: 'rp-role', role: 'panel' })); } catch (e) {}
+      rpHandshake();
+    }
+    diag();
+  };
   _ws.onmessage = function (ev) {
     S.wsEv++;
     try {
       var d = JSON.parse(ev.data);
-      if (d.type === 'queue_update' || d.type === 'progress') {
+      if (d.type === 'rp' && d.msg && d.msg.rp === 1) { onHost(d.msg); }
+      else if (d.type === 'queue_update' || d.type === 'progress') {
         if (document.getElementById('scr-downloads').classList.contains('on')) loadDownloads();
       }
     } catch (e) {}
@@ -1027,6 +1078,7 @@ function closePlayer() { document.getElementById('scr-player').classList.remove(
 
 function specLine(it) {
   if (!it) return '';
+  if (it.live) return String(it.service || '').toUpperCase();  // у прямого эфира качество не выбирают
   var q = S.quality === 'hires' ? 'Hi-Res' : S.quality === 'lossless' ? 'FLAC' : 'MP3 320';
   var bits = [(it.service || ''), q];
   if (it.hires) bits.push(t('m.p.hires'));
@@ -1037,8 +1089,11 @@ function specLine(it) {
 var ENGINE_KEY = { native: 'm.eng.native', gapless: 'm.eng.gapless', bbc: 'm.eng.bbc',
                    paired: 'm.eng.paired', audio: 'm.eng.audio', local: 'm.eng.local' };
 
+var _playerKey = '';         // что сейчас на экране плеера (service:id)
+
 function renderPlayer() {
-  var it = S.queue[S.idx];
+  var it = curItem();
+  _playerKey = it ? (it.service + ':' + it.id) : '';
   var body = document.getElementById('player-body');
   if (!it) {
     body.innerHTML = '<button class="pgrab" id="p-close" title="' + esc(t('m.close')) + '"></button>' +
@@ -1050,7 +1105,9 @@ function renderPlayer() {
     return;
   }
   var key = it.service + ':' + it.id;
-  var navOk = !B.live || can('next');
+  // У BBC нет «следующего трека»: гасим кнопку честно (правило о настройках,
+  // которые ничего не меняют).
+  var navOk = !B.live || (can('next') && clock().engine !== 'bbc');
   body.innerHTML =
     '<button class="pgrab" id="p-close" title="' + esc(t('m.close')) + '"></button>' +
     '<div class="pcoverwrap"><img class="pcover" id="p-cover" src="' + esc(it.cover || '') + '" alt="" title="' + esc(t('m.p.zoom')) + '"></div>' +
@@ -1059,7 +1116,8 @@ function renderPlayer() {
         '<button class="pfav' + (S.fav[key] ? ' on' : '') + '" id="p-fav" title="' +
           esc(t(B.live && can('fav') ? 'm.p.fav_pc' : 'm.p.favorite')) + '">' + (S.fav[key] ? '♥' : '♡') + '</button></div>' +
       '<div class="partist">' + esc([it.artist, it.album].filter(Boolean).join(' · ')) + '</div>' +
-      '<div class="pfmt"><span class="svc">' + esc(it.service || '') + '</span> · ' + esc(specLine(it)) +
+      '<div class="pfmt"><span class="svc">' + esc(it.service || '') + '</span>' +
+        (it.live ? ' <span class="live">LIVE</span>' : '') + ' · ' + esc(specLine(it)) +
         (S.station ? ' · <span>' + esc(S.station) + '</span>' : '') +
         ' <button class="i" id="p-pass" title="' + esc(t('m.pass.title')) + '">ⓘ</button></div>' +
     '</div>' +
@@ -1232,7 +1290,7 @@ function bindVolume() {
 }
 
 function renderMini() {
-  var m = document.getElementById('mini'), it = S.queue[S.idx];
+  var m = document.getElementById('mini'), it = curItem();
   if (!it) {
     m.classList.remove('on');
     if (!B.live && !S.mirror) _homeKey = '';   // снимок обновился — карточку можно заново
@@ -1242,7 +1300,8 @@ function renderMini() {
   m.classList.add('on');
   var c = clock();
   document.getElementById('mini-cover').src = it.cover || '';
-  document.getElementById('mini-title').textContent = it.title || '';
+  var mt = document.getElementById('mini-title');
+  mt.innerHTML = (it.live ? '<span class="live">LIVE</span> ' : '') + esc(it.title || '');
   document.getElementById('mini-artist').textContent = [it.artist, it.service].filter(Boolean).join(' · ');
   var mb = document.getElementById('mini-play');
   mb.innerHTML = c.paused ? '&#9654;' : '&#10074;&#10074;';
@@ -1308,7 +1367,7 @@ function fillSettings() {
     '<div class="setrow"><div><div class="sl">' + esc(t('m.set.quality')) + '</div>' +
     '<div class="sh">' + esc(t('m.set.quality_hint')) + '</div></div></div>' +
     '<div class="chips" id="set-qual"></div>';
-  if (RPWIN && rpApi()) {
+  if ((RPWIN && rpApi()) || rpWinApi()) {
     html += '<div class="setrow"><div><div class="sl">' + esc(t('m.set.pin')) + '</div>' +
       '<div class="sh">' + esc(t('m.set.pin_hint')) + '</div></div>' +
       '<button class="sw' + (S.pinned ? ' on' : '') + '" id="set-pin" title="' + esc(t('m.set.pin')) + '"><i></i></button></div>';
@@ -1335,7 +1394,7 @@ function fillSettings() {
   if (pin) pin.onclick = function () {
     S.pinned = !S.pinned;
     pin.classList.toggle('on', S.pinned);
-    var a = rpApi();
+    var a = rpApi() || rpWinApi();
     try { if (a) a.pin(S.pinned); } catch (e) {}
   };
   var b1 = document.getElementById('go-digs'); if (b1) b1.onclick = function () { openInView('digs'); };
@@ -1417,9 +1476,9 @@ var _diagOn = false;
 function diag() {
   var el = document.getElementById('dipline'); if (!el || !_diagOn) return;
   var c = clock();
-  var env = RPWIN ? 'WebView2/OS-window' : IFRAME ? 'dock' : 'browser';
+  var env = RPWIN ? 'WebView2/OS-window' : IFRAME ? 'dock' : RELAY ? 'relay' : 'browser';
   var bridge = B.live ? 'live (' + c.engine + ')'
-             : (RPWIN || IFRAME) ? ((RPWIN ? 'oswin' : 'dock') + ', no answer')
+             : (RPWIN || IFRAME || RELAY) ? ((RPWIN ? 'oswin' : IFRAME ? 'dock' : 'relay') + ', no answer')
              : 'standalone';
   el.innerHTML = '<b>' + esc(t('m.dip.title')) + '</b>\n' +
     t('m.dip.env') + ': ' + env + '\n' +
@@ -1515,7 +1574,7 @@ function volStep(step, c) {
    событие pywebviewready. Если хост не ответил за 5 с — панели нечего выдавать
    за «мост»: остаёмся на локальном <audio> и говорим об этом. Спрятанное окно
    шлёт bye (хост перестает слать состояние), показанное — hello заново. */
-var _hs = false;
+var _hs = false, _hsRetry = null;
 function rpHandshake() {
   var sent = rpSend({ k: 'hello' });
   if (!sent) return false;
@@ -1527,18 +1586,30 @@ function rpHandshake() {
   }
   return true;
 }
+/* Хост перезагрузился (panel получила host-gone) — сама о себе не узнает,
+   пока мы не поздороваемся заново. Стучаемся раз в 4 с, пока не пустят. */
+function rpHandshakeRetry() {
+  if (!RELAY || _hsRetry) return;
+  _hsRetry = setInterval(function () {
+    if (B.live) { clearInterval(_hsRetry); _hsRetry = null; return; }
+    rpSend({ k: 'hello' });
+  }, 4000);
+}
 document.addEventListener('visibilitychange', function () {
-  if (!RPWIN) return;
+  if (!RPWIN && !RELAY) return;
   if (document.hidden) rpSend({ k: 'bye' });
   else if (_hs) rpSend({ k: 'hello' });
 });
 
 /* ── Старт ────────────────────────────────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', async function () {
-  var embedded = RPWIN || IFRAME;
+  var embedded = RPWIN || IFRAME || RELAY;
   _diagOn = !embedded;                       // в окне ПК диагностика по «d»
   document.documentElement.classList.add(embedded ? 'embedded' : 'standalone');
   if (RPWIN) document.body.classList.add('rpwin');
+  if (RELAY) window.addEventListener('pywebviewready', function () {
+    document.body.classList.add('rpwin');
+  });
   try { S.fav = JSON.parse(localStorage.getItem('ripster-panel-fav') || '{}') || {}; } catch (e) { S.fav = {}; }
   document.getElementById('sq').addEventListener('input', onSearch);
   document.getElementById('lq').addEventListener('input', function () {

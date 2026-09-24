@@ -1,7 +1,7 @@
 /* ============================================================================
    Хост мобильной панели (трекер #37).
 
-   Два транспорта, протокол сообщений ОДИН:
+   Три транспорта, протокол сообщений ОДИН:
    • «oswin» — отдельное OS-окно, созданное Python-ом (pywebview). Единственный
      способ, которым панель живёт при свёрнутом Ripster: DOM главного окна
      умирает вместе с прятанием в трей, окно — нет. Старый путь `floatPlayer()`
@@ -11,6 +11,11 @@
      rpRecv() в окне панели.
    • «iframe» — док внутри окна. Деградация для запуска в обычном браузере:
      там OS-окно создать нельзя в принципе, и док — честный максимум.
+   • «relay» — окно панели (?transport=relay) живёт СВОИМ процессом (standalone
+     ripster.player_window или OS-окно лаунчера), а главная страница — в обычной
+     вкладке браузера, где pywebview нет. Сообщения перекладывает сервер через
+     общий /ws (ripster/rp_relay.py): хост объявляет роль 'host', панель —
+     'panel'. Аудио по-прежнему принадлежит только главной странице.
 
    Собственного плеера панель НЕ имеет: состояние читается из плеера окна,
    команды идут через его же публичные функции. Правок в player.js нет — отказ
@@ -20,7 +25,8 @@
 var RP = {
   open: false, ready: false, mode: 'dock', frame: null, root: null,
   tick: null, watchdog: null, seq: 0, err: '', queueSent: null,
-  transport: 'iframe'          // 'iframe' | 'oswin'
+  _extBusy: false,
+  transport: 'iframe'          // 'iframe' | 'oswin' | 'relay'
 };
 
 var RP_SRC = '/static/panel/index.html?v=4';
@@ -79,9 +85,11 @@ function rpOswinAdopt(res, api) {
   rpPanelStartTick();
 }
 
-/* Принять хост-сторону при reload главного окна: панель живёт, а RP.* обнулились. */
-function rpAdoptFromPanel() {
-  RP.transport = 'oswin';
+/* Принять хост-сторону при reload главного окна: панель живёт, а RP.* обнулились.
+   via — какой канал принёс hello: именно он и становится транспортом (relay
+   переживает перезагрузку вкладки так же, как oswin — перезагрузку окна). */
+function rpAdoptFromPanel(via) {
+  RP.transport = (via === 'relay') ? 'relay' : 'oswin';
   RP.open = true; RP.ready = true; RP.err = ''; RP.queueSent = null;
   rpNavMark(true);
   rpPanelStartTick();
@@ -138,6 +146,58 @@ function rpPanelOpen(mode) {
 function rpNavMark(on) {
   var b = document.getElementById('nav-panel-btn');
   if (b) b.classList.toggle('rp-on', !!on);
+  var e = document.getElementById('pp-ext-btn');
+  if (e) e.classList.toggle('rp-on', !!(on && RP.transport === 'relay'));
+}
+
+/* ── «Открыть внешний плеер» (шаг 4) ────────────────────────────────────────
+   OS-окно панели из ЛЮБОЙ вкладки: сервер поднимает standalone-окно
+   (?transport=relay), мост — через /ws. Из окна лаунчера просим своё же
+   OS-окно старым путём (там pywebview-мост надёжнее ретранслятора).
+   Никакого тихого дока: не вышло — называем причину словами (panel.ext.*). */
+function rpOpenExternalPlayer() {
+  var api = rpApi();
+  if (api) { rpPanelToggleOswin(api); return; }
+  if (RP._extBusy) return;
+  RP._extBusy = true;
+  fetch('/api/player-window/open', {
+    method: 'POST', credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ launcher: false })
+  }).then(function (r) {
+    return r.json().catch(function () { return {}; })
+      .then(function (j) { return { st: r.status, j: j }; });
+  }).then(function (x) { RP._extBusy = false; rpExtResult(x.st, x.j); })
+    .catch(function () { RP._extBusy = false; rpExtSay(rpT('panel.ext.net')); });
+}
+
+function rpExtResult(st, j) {
+  if (st === 401 || st === 403) { rpExtSay(rpT('panel.ext.auth')); return; }
+  if (j && j.ok) {
+    /* Окно есть; готова ли связь — скажет hello: ждём 8 с и говорим вслух. */
+    RP.transport = 'relay'; RP.open = true; RP.ready = false;
+    RP.err = ''; RP.queueSent = null;
+    rpNavMark(true);
+    rpPanelStartTick();
+    clearTimeout(RP.watchdog);
+    RP.watchdog = setTimeout(function () {
+      if (!RP.ready) rpExtSay(rpT('panel.ext.silent'));
+    }, 8000);
+    rpExtSay(rpT(j.how === 'focus' ? 'panel.ext.focus' : 'panel.ext.opened'), true);
+    return;
+  }
+  var reason = (j && j.reason) || 'fail';
+  var why = rpT('panel.ext.' + reason);
+  if (why === 'panel.ext.' + reason) why = rpT('panel.ext.fail');
+  rpExtSay(why + (j && j.detail ? ' (' + String(j.detail).slice(0, 120) + ')' : ''));
+}
+
+function rpExtSay(msg, ok) {
+  try {
+    /* --ok/--bad есть только в panel.css; на главной — --green/--red. */
+    if (typeof toast === 'function') { toast(msg, ok ? 'var(--green)' : 'var(--red)'); return; }
+  } catch (e) {}
+  try { (window.__rpToast || function () {})(msg); } catch (e) {}
 }
 
 /* Сам iframe (и перевеска при «Повторить»). Watchdog — 6 с: панель обязана
@@ -250,17 +310,44 @@ function rpAudioEl() {
   return document.getElementById('pp-audio');
 }
 
+/* BBC играет ВНЕ Preview.queue (свой <audio id="bbc-audio">, см. bbc.js),
+   поэтому штатный item из очереди для него пуст. Собираем карточку прямо из
+   объекта BBC — те же поля, что видит развёрнутый плеер (_bbcFpItem), плюс
+   live-флаг: у прямого эфира audio.duration === Infinity, у on-demand микса —
+   конечная длительность. Панель по нему рисует бейдж «LIVE» и прячет скруббер. */
+function rpBbcItem() {
+  try {
+    if (typeof BBC === 'undefined' || !BBC.pid) return null;
+    var el = document.getElementById('bbc-audio');
+    var dur = 0, live = false;
+    try {
+      if (el && isFinite(el.duration) && el.duration > 0) dur = Math.round(el.duration);
+      else if (BBC.duration) dur = Math.round(BBC.duration);
+      if (el && !isFinite(el.duration)) live = true;
+    } catch (e) { live = true; }
+    return {
+      service: 'bbc', id: String(BBC.pid),
+      title: BBC.title || '', artist: BBC.artist || '',
+      cover: BBC.art || '', label: 'BBC Sounds',
+      duration: dur, live: live, hires: false, local: false
+    };
+  } catch (e) { return null; }
+}
+
 function rpState() {
   var q = [], idx = -1, item = null;
   try { q = (typeof Preview !== 'undefined' && Preview.queue) || []; idx = (Preview.idx | 0); } catch (e) {}
   item = q[idx] || null;
   var eng = rpEngine(), el = rpAudioEl();
   var pos = null, dur = null, paused = true, vol = null, muted = false;
-  try { if (typeof _stevLen === 'function' && item) dur = _stevLen(item); } catch (e) {}
+  // BBC вне очереди: карточку и длительность берём из объекта BBC.
+  if (eng === 'bbc' && !item) { item = rpBbcItem(); }
+  try { if (typeof _stevLen === 'function' && item && eng !== 'bbc') dur = _stevLen(item); } catch (e) {}
+  if (eng === 'bbc' && item) { dur = item.duration || dur; }
   try {
     if (eng === 'native' && typeof _NA !== 'undefined') { pos = _NA.cur; dur = _NA.dur || dur; paused = !!_NA.paused; }
     else {
-      if (typeof _stevPos === 'function') pos = _stevPos();
+      if (typeof _stevPos === 'function' && eng !== 'bbc') pos = _stevPos();
       if (pos == null && el && isFinite(el.currentTime)) pos = el.currentTime;
       paused = el ? !!el.paused : true;
     }
@@ -273,7 +360,7 @@ function rpState() {
       service: item.service || '', id: String(item.id == null ? '' : item.id),
       title: item.title || '', artist: item.artist || '', cover: item.cover || '',
       label: item.label || '', duration: Number(item.duration) || 0,
-      hires: !!item.hires, local: !!item.local
+      hires: !!item.hires, local: !!item.local, live: !!item.live
     } : null,
     pos: pos, dur: dur, paused: paused, volume: vol, muted: muted,
     queue: rpQueueStamp(q, idx)
@@ -304,7 +391,8 @@ function rpSlimQueue() {
   });
 }
 
-/* Один пост — два транспорта. В OS-окне адресат живёт по ту сторону Python. */
+/* Один пост — три транспорта. В OS-окне адресат живёт по ту сторону Python,
+   в relay — по ту сторону сервера: /ws перекладывает {type:'rp', msg}. */
 function rpPost(msg) {
   if (RP.transport === 'oswin') {
     var api = rpApi();
@@ -315,9 +403,52 @@ function rpPost(msg) {
     } catch (e) {}
     return;
   }
+  if (RP.transport === 'relay') {
+    rpRelaySend(msg);
+    return;
+  }
   var f = RP.frame;
   if (!f || !f.contentWindow) return;
   try { f.contentWindow.postMessage(msg, location.origin); } catch (e) {}
+}
+
+/* Общий сокет главной страницы живёт в app.js (`let ws`); глобальная лексическая
+   связь видна отсюда — но сам сокет может быть в переподключении, и это не беда:
+   панель при отсутствии ответа сама пришлёт need-queue, а цикл шлёт состояние
+   каждые 400 мс. Регистрируем роль ХОСТА при каждом открытии сокета (ниже). */
+function rpRelaySend(msg) {
+  try {
+    if (typeof ws !== 'undefined' && ws && ws.readyState === 1)
+      ws.send(JSON.stringify({ type: 'rp', msg: msg }));
+  } catch (e) {}
+}
+
+/* app.js зовёт это на каждом ws.onopen (свой сокет — своя роль на сервере). */
+function rpHostWsOpen() {
+  try {
+    if (typeof ws !== 'undefined' && ws && ws.readyState === 1)
+      ws.send(JSON.stringify({ type: 'rp-role', role: 'host' }));
+  } catch (e) {}
+}
+
+/* app.js зовёт это для каждого входящего {type:'rp'} — сервер переложил
+   сообщение панели. oswin/iframe живут своими каналами, relay-мошенничество
+   между ними невозможно: роль на сервере уже развела потоки. */
+function rpHostWsMessage(packet) {
+  var d = packet && packet.msg;
+  if (!d || d.rp !== 1) return;
+  if (RP.open && RP.transport !== 'relay') return;
+  rpHostMessage(d, 'relay');
+}
+
+/* Спрятать relay-окно по «✕» внутри панели. Окно переживает это (hide, не
+   destroy) — сервер при реальном закрытии сам пришлёт bye. */
+function rpCloseExternalWindow() {
+  try {
+    var p = fetch('/api/player-window/close', { method: 'POST', credentials: 'same-origin' });
+    if (p && p.catch) p.catch(function () {});
+  } catch (e) {}
+  RP.ready = false;
 }
 
 function rpPanelPush() {
@@ -413,6 +544,7 @@ var RP_CMD = {
     try { floatPlayer(); } catch (e) {}
   },
   close: function () {
+    if (RP.transport === 'relay') { rpCloseExternalWindow(); return; }
     if (RP.transport === 'oswin') { rpPanelToggleOswin(rpApi()); return; }
     rpPanelClose();
   }
@@ -453,21 +585,22 @@ function rpCaps() {
   try { c.station = (typeof stPlay === 'function') ? 1 : 0; } catch (e) { c.station = 0; }
   try { c.quality = (typeof setStreamQuality === 'function') ? 1 : 0; } catch (e) { c.quality = 0; }
   /* Document-PiP мёртв в WebView2, а в OS-окне он и вовсе не нужен. */
-  c.pip = (RP.transport === 'oswin' || rpEnv() === 'WebView2') ? 0 : has(floatPlayer);
+  c.pip = (RP.transport !== 'iframe' || rpEnv() === 'WebView2') ? 0 : has(floatPlayer);
   c.openView = 1;
   c.oswin = RP.transport === 'oswin' ? 1 : 0;
+  c.relay = RP.transport === 'relay' ? 1 : 0;
   c.shuffle = 0; c.repeat = 0;   // в окне ПК их нет — панель это скажет вслух
   return c;
 }
 
 /* Обработка одного сообщения от панели (общая для iframe и OS-окна). */
-function rpHostMessage(d) {
+function rpHostMessage(d, via) {
   if (d.k === 'bye') {                       // окно панели спрятали — цикл спит
     RP.ready = false;
     return;
   }
   if (!RP.open && (d.k === 'hello' || d.k === 'cmd' || d.k === 'need-queue')) {
-    rpAdoptFromPanel();                      // хост перезагрузился, панель живёт
+    rpAdoptFromPanel(via);                   // хост перезагрузился, панель живёт
   }
   if (d.k === 'hello') {
     RP.ready = true; RP.err = ''; RP.queueSent = null;
@@ -500,7 +633,7 @@ window.rpHostRecv = function (str) {
   var d = null;
   try { d = JSON.parse(str); } catch (e) { return; }
   if (!d || d.rp !== 1) return;
-  rpHostMessage(d);
+  rpHostMessage(d, 'oswin');
 };
 
 window.addEventListener('message', function (ev) {
@@ -509,7 +642,7 @@ window.addEventListener('message', function (ev) {
   var f = RP.frame;
   if (!f || ev.source !== f.contentWindow) return;          // чужое окно не хозяин
   if (ev.origin !== location.origin) return;                 // и не чужой origin
-  rpHostMessage(d);
+  rpHostMessage(d, 'iframe');
 }, false);
 
 function rpEnv() {

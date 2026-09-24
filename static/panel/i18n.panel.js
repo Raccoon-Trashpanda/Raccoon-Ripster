@@ -201,6 +201,7 @@
     'm.err.net':'Сервер недоступен',
     'm.err.cmd':'Окно ПК отказалось: {x}',
     'm.err.nocmd':'Здесь это доступно только через плеер окна ПК',
+    'm.host.gone':'Окно Ripster на ПК закрыто или перезагружено — панель больше не управляет им',
     'm.err.seek_nodur':'Длительность этого потока не известна — перематывать не по чему',
     'm.loading':'Загрузка…',
 
@@ -410,6 +411,7 @@
     'm.err.net':'Server unreachable',
     'm.err.cmd':'The PC window refused: {x}',
     'm.err.nocmd':'That works only through the PC window player here',
+    'm.host.gone':'The Ripster window on the PC was closed or reloaded — this panel no longer controls it',
     'm.err.seek_nodur':'This stream reports no duration — there is nothing to seek by',
     'm.loading':'Loading…',
 

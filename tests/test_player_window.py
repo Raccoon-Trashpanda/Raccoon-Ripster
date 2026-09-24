@@ -103,6 +103,74 @@ def test_open_external_falls_back_to_standalone(tmp_path, monkeypatch):
     assert pw.open_external(tmp_path, "http://h/p") == {"ok": True, "how": "standalone"}
 
 
+def test_open_external_from_browser_tab_never_asks_launcher(tmp_path, monkeypatch):
+    # Вкладка браузера (ask_launcher=False): лаунчерово окно управлялось бы
+    # главным окном ЛАУНЧЕРА, а не этой вкладкой — просим сразу standalone.
+    monkeypatch.setattr(pw, "focus_existing", lambda p: False)
+    asked = {"launcher": False}
+    monkeypatch.setattr(pw, "request_launcher",
+                        lambda p, url, **k: asked.__setitem__("launcher", True) or True)
+    monkeypatch.setattr(pw, "spawn_standalone",
+                        lambda p, base, url, **k: {"ok": True, "how": "standalone"})
+    res = pw.open_external(tmp_path, "http://h/p", ask_launcher=False)
+    assert res == {"ok": True, "how": "standalone"}
+    assert asked["launcher"] is False
+
+
+# ── HTTP-слой: флаг вкладами в теле запроса ─────────────────────────────────
+def _open_route(monkeypatch, tmp_path):
+    """Ставит роут с заглушками auth и open_external; возвращает (клиент, вызовы)."""
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import ripster.routes.player_window as R
+
+    calls = []
+    monkeypatch.setattr(R._auth, "is_owner_request", lambda req: True)
+    monkeypatch.setattr(R._auth, "is_enabled", lambda: True)
+    monkeypatch.setattr(pw, "open_external",
+                        lambda base, url, ask=True: (
+                            calls.append({"base": base, "url": url, "ask": ask}),
+                            {"ok": True, "how": "standalone"})[1])
+    app = FastAPI()
+    R.install(app, SimpleNamespace(base_dir=tmp_path))
+    return TestClient(app), calls
+
+
+@pytest.mark.parametrize("body,ask", [
+    ({"launcher": False}, False),        # вкладка браузера — только standalone
+    ({"launcher": True}, True),
+    ({}, True),                          # старая вкладка без тела не меняет поведения
+], ids=["browser-tab", "explicit", "no-flag"])
+def test_open_route_passes_launcher_flag(monkeypatch, tmp_path, body, ask):
+    cli, calls = _open_route(monkeypatch, tmp_path)
+    r = cli.post("/api/player-window/open", json=body)
+    assert r.status_code == 200 and r.json()["ok"] is True
+    origin = str(r.request.url).rsplit("/api/", 1)[0]   # окно грузит ТОТ ЖЕ сервер
+    assert calls == [{"base": tmp_path, "url": origin + pw.PANEL_QUERY, "ask": ask}]
+
+
+def test_open_route_garbage_body_still_asks_launcher(monkeypatch, tmp_path):
+    cli, calls = _open_route(monkeypatch, tmp_path)
+    r = cli.post("/api/player-window/open", content="не json".encode("utf-8"),
+                 headers={"Content-Type": "application/json"})
+    assert r.status_code == 200
+    assert calls[0]["ask"] is True
+
+
+def test_open_route_rejects_non_owner(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import ripster.routes.player_window as R
+
+    monkeypatch.setattr(R._auth, "is_owner_request", lambda req: False)
+    monkeypatch.setattr(R._auth, "is_enabled", lambda: True)
+    app = FastAPI()
+    R.install(app, SimpleNamespace(base_dir=tmp_path))
+    assert TestClient(app).post("/api/player-window/open", json={}).status_code == 403
+
+
 def test_request_launcher_dead_launcher_says_no(tmp_path):
     p = pw.win_paths(tmp_path)
     assert pw.request_launcher(p, "http://h", timeout=0.2) is False   # lock нет

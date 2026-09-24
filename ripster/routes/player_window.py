@@ -48,10 +48,20 @@ def install(app, ctx) -> None:
 async def player_window_open(request: Request):
     _require_owner(request)
     base = _ctx.base_dir
+    # Вкладка браузера просит НЕ звать лаунчер (body {"launcher": false}):
+    # её панель всё равно не смогла бы управляться из лаунчерова окна — там
+    # мост oswin замкнут на главное окно лаунчера. Окно лаунчера зовёт его.
+    ask_launcher = True
+    try:
+        body = await request.json()
+        if isinstance(body, dict) and body.get("launcher") is False:
+            ask_launcher = False
+    except Exception:
+        pass
     # Окно грузит ТОТ ЖЕ сервер, с которого нажали кнопку: request.base_url
     # честнее конфига — владелец может сидеть через туннель на другом имени.
     url = _pw.panel_url(str(request.base_url))
-    res = await asyncio.to_thread(_pw.open_external, base, url)
+    res = await asyncio.to_thread(_pw.open_external, base, url, ask_launcher)
     return res
 
 

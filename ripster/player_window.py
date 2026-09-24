@@ -239,13 +239,18 @@ def spawn_standalone(paths: dict, base_dir: Path, url: str,
             "detail": f"window did not register within {wait_s:.0f}s"}
 
 
-def open_external(base_dir: Path | str, url: str) -> dict:
+def open_external(base_dir: Path | str, url: str, ask_launcher: bool = True) -> dict:
     """Оркестрация кнопки: фокус → лаунчер → standalone. Возвращает
-    {ok, how} или {ok: False, reason} —Reason переводит в i18n интерфейс."""
+    {ok, how} или {ok: False, reason} — reason переводит в i18n интерфейс.
+
+    ask_launcher=False — звала ВКЛАДКА БРАУЗЕРА (хоста нет внутри pywebview,
+    и лаунчерово окно панели связалось бы с главным окном ЛАУНЧЕРА, а не с
+    этой вкладкой: мост oswin живёт только внутри pywebview). Такой просят
+    сразу standalone relay-окно — оно честно говорит с вкладкой через /ws."""
     paths = win_paths(base_dir)
     if focus_existing(paths):
         return {"ok": True, "how": "focus"}
-    if request_launcher(paths, url):
+    if ask_launcher and request_launcher(paths, url):
         return {"ok": True, "how": "launcher"}
     return spawn_standalone(paths, Path(base_dir), url)
 
