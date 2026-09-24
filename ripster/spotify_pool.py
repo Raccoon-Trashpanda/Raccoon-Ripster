@@ -55,6 +55,17 @@ def corridor_blob(i: int) -> Path:
     return corridor_config(i) / ".librespot_cache" / "reusable_credentials.json"
 
 
+def read_login(blob) -> str:
+    """Логин (username) из blob'а librespot — офлайн, без сети. Сам blob не
+    отдаём наружу: это секрет. Пусто, если файла нет или он читается плохо."""
+    import json
+    try:
+        return (json.loads(Path(blob).read_text(encoding="utf-8"))
+                .get("username") or "").strip()
+    except Exception:                                    # noqa: BLE001
+        return ""
+
+
 def ensure_corridor(i: int) -> Path:
     """Создать коридор и положить в него общие настройки, если их там нет.
 

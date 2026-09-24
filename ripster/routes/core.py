@@ -513,7 +513,7 @@ async def tidal_auth_poll(body: dict):
 # extension) which saves exactly that blob, so Spotify works out of the box.
 # The helper runs as a subprocess (librespot's global protobuf flag + a blocking
 # 127.0.0.1:5588 callback server must stay out of the app process).
-_SP_OAUTH: dict = {"proc": None}
+_SP_OAUTH: dict = {"proc": None, "slot": 0}
 
 
 def _return_url() -> str:
@@ -524,12 +524,22 @@ def _return_url() -> str:
     return f"http://127.0.0.1:{port}/?spotify_login=ok"
 
 
-def _sp_oauth_paths():
-    base = Path(__file__).resolve().parents[2]
-    cache = base / "orpheus" / "config" / ".librespot_cache"
+def _sp_oauth_paths(slot: int = 0):
+    """Пути входа для слота. Слот 0 — основной (orpheus/config), работает ровно
+    как до мультиаккаунта. Слот i>0 — коридор учётки: blob пишется в
+    ``corridor_blob(i)``, основные секреты владельца не затрагиваются."""
+    from ripster import spotify_pool as _sp
+    base = _sp._base_dir()
+    if slot and slot > 0:
+        cfg = _sp.corridor_config(slot)
+        blob = _sp.corridor_blob(slot)
+    else:
+        cfg = _sp.main_config_dir()
+        blob = _sp.live_blob()
+    cache = cfg / ".librespot_cache"
     return {
-        "base": base, "cache": cache,
-        "blob": cache / "reusable_credentials.json",
+        "base": base, "cache": cache, "config_dir": cfg, "slot": slot,
+        "blob": blob,
         "bak":  cache / "reusable_credentials.json.bak",
         "url":  cache / ".sp_oauth_url.txt",
         "done": cache / ".sp_oauth_done.txt",
@@ -538,12 +548,53 @@ def _sp_oauth_paths():
     }
 
 
+def _sp_blob_login(blob) -> str:
+    """Логин (username) из blob'а librespot — офлайн, без сети. Одно место
+    чтения blob'ов: `spotify_pool.read_login`."""
+    from ripster import spotify_pool as _sp
+    return _sp.read_login(blob)
+
+
+def _sp_existing_logins(exclude_slot: int = -1) -> dict:
+    """{логин: слот} для всех уже подключённых учёток (основная + коридоры с
+    blob'ом). Нужен, чтобы не пустить вторую копию той же учётки в пул."""
+    from ripster import spotify_pool as _sp
+    out: dict = {}
+    if exclude_slot != 0:
+        pl = _sp_blob_login(_sp.live_blob())
+        if pl:
+            out[pl.lower()] = 0
+    accounts = _cfg.get("spotify-accounts") or []
+    for k, a in enumerate(accounts):
+        slot = k + 1
+        if slot == exclude_slot:
+            continue
+        al = _sp_blob_login(_sp.corridor_blob(slot)) or (a.get("login") or "").strip()
+        if al:
+            out[al.lower()] = slot
+    return out
+
+
 @router.post("/api/spotify/auth/start")
 async def spotify_auth_start(body: dict = None):
     import os as _os, sys as _sys, subprocess, asyncio as _aio
-    P = _sp_oauth_paths()
+    slot = 0
+    try:
+        slot = int((body or {}).get("slot") or 0)
+    except (TypeError, ValueError):
+        slot = 0
+    P = _sp_oauth_paths(slot)
     if not P["helper"].exists():
         return {"ok": False, "error_key": "err.sp_oauth_script_missing", "error": "tools/spotify_oauth_login.py отсутствует"}
+    # Уточка в коридор: каталог создаётся до старта, чтобы хелперу было куда
+    # писать. Слот 0 коридора не требует (основной конфиг уже есть).
+    if slot > 0:
+        try:
+            from ripster import spotify_pool as _sp
+            _sp.ensure_corridor(slot)
+        except Exception as e:
+            return {"ok": False, "error_key": "err.login_start_failed",
+                    "error_args": {"e": str(e)}, "error": f"не удалось подготовить слот: {e}"}
     # Kill any prior helper so the 127.0.0.1:5588 callback port is free.
     prev = _SP_OAUTH.get("proc")
     if prev and prev.poll() is None:
@@ -574,6 +625,10 @@ async def spotify_auth_start(body: dict = None):
     # no popup to close, and `?spotify_login=ok` is what makes the UI re-check
     # auth immediately (it used to look logged-out until the app was restarted).
     env["RIPSTER_RETURN_URL"] = _return_url()
+    # Слот i>0: направляем хелпер в коридор через ORPHEUS_CONFIG_DIR. Слот 0
+    # остаётся без этой переменной — хелпер пишет в orpheus/config как раньше.
+    if slot > 0:
+        env["ORPHEUS_CONFIG_DIR"] = str(P["config_dir"])
     flags = subprocess.CREATE_NO_WINDOW if _os.name == "nt" else 0
     try:
         proc = subprocess.Popen([_sys.executable, str(P["helper"])],
@@ -581,6 +636,7 @@ async def spotify_auth_start(body: dict = None):
     except Exception as e:
         return {"ok": False, "error_key": "err.login_start_failed", "error_args": {"e": str(e)}, "error": f"не удалось запустить вход: {e}"}
     _SP_OAUTH["proc"] = proc
+    _SP_OAUTH["slot"] = slot
     # Wait for librespot to emit the auth URL (it writes it before blocking).
     for _ in range(50):   # ~25 s
         if P["url"].exists():
@@ -589,7 +645,7 @@ async def spotify_auth_start(body: dict = None):
             except Exception:
                 url = ""
             if url:
-                return {"ok": True, "auth_url": url}
+                return {"ok": True, "auth_url": url, "slot": slot}
         if proc.poll() is not None:
             break
         await _aio.sleep(0.5)
@@ -603,8 +659,13 @@ async def spotify_auth_start(body: dict = None):
 
 
 @router.post("/api/spotify/auth/status")
-async def spotify_auth_status():
-    P = _sp_oauth_paths()
+async def spotify_auth_status(body: dict = None):
+    slot = 0
+    try:
+        slot = int((body or {}).get("slot") or 0)
+    except (TypeError, ValueError):
+        slot = _SP_OAUTH.get("slot", 0)
+    P = _sp_oauth_paths(slot)
     # Success: a fresh blob plus the done marker.
     if P["blob"].exists() and P["done"].exists():
         try:
@@ -616,7 +677,11 @@ async def spotify_auth_status():
             from orpheus.modules.spotify import spotify_embed_api as _se  # noqa
         except Exception:
             pass
-        return {"ok": True, "done": True}
+        # Уточка в дополнительный слот: проверяем, что это НЕ второй экземпляр
+        # уже подключённой учётки, и запоминаем логин для панели/повторов.
+        if slot > 0:
+            return _sp_finalize_slot_login(slot, P)
+        return {"ok": True, "done": True, "slot": 0}
     proc = _SP_OAUTH.get("proc")
     failed = P["err"].exists() or (proc is not None and proc.poll() not in (None, 0))
     if failed:
@@ -634,6 +699,41 @@ async def spotify_auth_status():
                 pass
         return {"ok": False, "error_key": "err.login_failed", "error": msg or "вход не удался"}
     return {"ok": True, "pending": True}
+
+
+def _sp_finalize_slot_login(slot: int, P: dict) -> dict:
+    """После успешного входа в слот i>0: отбраковать дубль той же учётки и
+    записать логин в запись конфига. Основной blob (слот 0) здесь не трогается."""
+    from ripster import spotify_pool as _sp
+    login = _sp_blob_login(P["blob"])
+    known = _sp_existing_logins(exclude_slot=slot)
+    if login and login.lower() in known:
+        # Тот же аккаунт уже подключён — убираем свежий blob, чтобы не держать
+        # две записи на одну учётку, и объясняем человеку почему вход отменён.
+        try:
+            P["blob"].unlink()
+        except OSError:
+            pass
+        try:
+            P["done"].unlink()
+        except OSError:
+            pass
+        return {"ok": False, "duplicate": True, "slot": slot,
+                "error_key": "err.sp_account_exists",
+                "error_args": {"login": login, "slot": known[login.lower()]},
+                "error": f"Эта учётка ({login}) уже подключена"}
+    accounts = list(_cfg.get("spotify-accounts") or [])
+    idx = slot - 1
+    if 0 <= idx < len(accounts) and login:
+        accounts[idx] = {**accounts[idx], "login": login}
+        _cfg["spotify-accounts"] = accounts
+        if _save_cfg:
+            try:
+                _save_cfg(_cfg)
+            except Exception:
+                pass
+    return {"ok": True, "done": True, "slot": slot, "login": login}
+
 
 
 @router.get("/api/qualities")
