@@ -14,6 +14,7 @@ parent thinking it's a stray.
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 import time
@@ -25,12 +26,23 @@ from urllib.request import urlopen
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def launcher_log_path() -> Path:
+    """Куда писать диагностику запуска. Репозиторий этого файла — НЕ боевой
+    лог: тесты обязаны тыкать в tmp (иначе «webview halted» из-под monkeypatch
+    засоряет logs/launcher.log живому лаунчеру). RIPSTER_LAUNCHER_LOG — явный
+    override, им же пользуется базовый fixture тестов."""
+    env = os.environ.get("RIPSTER_LAUNCHER_LOG")
+    if env:
+        return Path(env)
+    return BASE_DIR / "logs" / "launcher.log"
+
+
 def _log(msg: str) -> None:
-    """Print AND append to logs/launcher.log so a flash-and-close run is still
+    """Print AND append to launcher.log so a flash-and-close run is still
     diagnosable after the window/console is gone."""
     print(msg, flush=True)
     try:
-        logf = BASE_DIR / "logs" / "launcher.log"
+        logf = launcher_log_path()
         logf.parent.mkdir(parents=True, exist_ok=True)
         with open(logf, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
@@ -86,17 +98,29 @@ def start_server(base_dir: Path = BASE_DIR) -> subprocess.Popen:
                             cwd=str(base_dir))
 
 
-def _first_run_tool_hint(base_dir: Path = BASE_DIR) -> list[str]:
+def _first_run_tool_hint(base_dir: Path = BASE_DIR, timeout: float = 8.0) -> list[str]:
     """Best-effort: list missing REQUIRED heavy tools so the user knows to open the
-    Setup tab. Never blocks launch."""
-    try:
-        import asyncio
-        from ripster import setup as _setup
-        tools = asyncio.run(_setup.check_tools())
-        return [t.get("label", k) for k, t in tools.items()
-                if t.get("required") and not t.get("found")]
-    except Exception:
-        return []
+    Setup tab. Never blocks launch — and now never CAN, with a hard wall-clock cap:
+    a hung tool-probe here used to stall the launcher BEFORE the backend was even
+    spawned, so the user stared at nothing (see docs/BOOT_AUTOSTART_2026-09-24.md).
+    The probe runs in a daemon thread the main flow does not wait past `timeout`."""
+    out: list[str] = []
+
+    def go():
+        try:
+            import asyncio
+            from ripster import setup as _setup
+            tools = asyncio.run(_setup.check_tools())
+            out.extend(t.get("label", k) for k, t in tools.items()
+                       if t.get("required") and not t.get("found"))
+        except Exception:
+            pass
+
+    import threading
+    th = threading.Thread(target=go, daemon=True)
+    th.start()
+    th.join(timeout)
+    return out
 
 
 def open_window(url: str, title: str = "Ripster") -> str:
@@ -118,29 +142,18 @@ def open_window(url: str, title: str = "Ripster") -> str:
         return "browser"
 
 
-def _seed_config(base_dir: Path = BASE_DIR) -> None:
-    """First run: copy config.example.yaml -> config.yaml so the user has a
-    template to fill in. Robust across every install method (installer, source,
-    bundled-Python) — no reliance on the installer seeding it."""
-    cfg = Path(base_dir) / "config.yaml"
-    ex = Path(base_dir) / "config.example.yaml"
-    if not cfg.exists() and ex.exists():
-        try:
-            cfg.write_bytes(ex.read_bytes())
-        except Exception:
-            pass
-
-
 def main(base_dir: Path = BASE_DIR) -> None:
-    _seed_config(base_dir)
     url = server_url(base_dir)
     proc = None
     if not server_alive(url):
+        # Спавн бэкенда — ПЕРВЫМ делом: всё, что ниже (подсказка про инструменты),
+        # только бы не задерживает старт. Раньше порядок был обратный, и зависший
+        # tool-probe оставлял пользователя перед закрытым портом.
+        proc = start_server(base_dir)
         missing = _first_run_tool_hint(base_dir)
         if missing:
             print("[launcher] Missing required tools — open the Setup tab to install: "
                   + ", ".join(missing), flush=True)
-        proc = start_server(base_dir)
         if not wait_for_server(url):
             print(f"[launcher] server did not come up on {url}", flush=True)
     mode = open_window(url)

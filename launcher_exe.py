@@ -52,11 +52,22 @@ def _echo(msg: str) -> None:
             pass
 
 
+def launcher_log_path() -> Path:
+    """Куда писать диагностику запуска. RIPSTER_LAUNCHER_LOG — явный override
+    для тестов: без него боевой logs/launcher.log засоряется записями, которых
+    лаунчер никогда не выдавал («webview halted» из-под monkeypatch)."""
+    env = os.environ.get("RIPSTER_LAUNCHER_LOG")
+    if env:
+        return Path(env)
+    return BASE / "logs" / "launcher.log"
+
+
 def _log(msg: str) -> None:
     _echo(msg)
     try:
-        (BASE / "logs").mkdir(parents=True, exist_ok=True)
-        with open(BASE / "logs" / "launcher.log", "a", encoding="utf-8") as f:
+        logf = launcher_log_path()
+        logf.parent.mkdir(parents=True, exist_ok=True)
+        with open(logf, "a", encoding="utf-8") as f:
             f.write(msg + "\n")
     except Exception:
         pass
