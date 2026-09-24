@@ -43,7 +43,10 @@ from fastapi import APIRouter, Query
 
 from ripster import artist_identity as _ident
 from ripster import compilations as _comps
+from ripster import namesake_audit as _audit
 from ripster import owner_anchor as _anchor
+from ripster import owner_feedback as _feedback
+from ripster.artist_xref import norm as _norm
 
 router = APIRouter()
 _s: dict = {}
@@ -74,6 +77,10 @@ def install(app, ctx) -> None:
     # Якорь владельца судит по его же фонотеке: `ripster_stats.db`,
     # `rel_favorites.json`, `stations.db` лежат рядом со складом радара.
     _anchor.configure(ctx.base_dir)
+    # Слово владельца («это не мой артист») и самоаудит склада — свои durable
+    # файлы рядом же: `owner_feedback.json`, `namesake_audit.json`.
+    _feedback.configure(ctx.base_dir)
+    _audit.configure(ctx.base_dir)
     _load_cache()
     app.include_router(router)
 
@@ -136,9 +143,12 @@ _STORE_CAP = 4000                 # на источник — чтобы фай�
 
 
 def _rel_uid(r: dict) -> str:
-    return (str(r.get("service") or "") + "|"
-            + str(r.get("id") or r.get("url")
-                  or f"{r.get('artist') or ''}~{r.get('title') or ''}"))
+    """Ключ карточки — один на весь радар: склад, лента и отметка «скрыто».
+
+    Формула живёт в `artist_identity.card_key`: аудит и возврат карточки по
+    слову владельца обязаны узнавать её по тому же адресу, что и склад.
+    """
+    return _ident.card_key(r)
 
 
 def _durable_load() -> dict:
@@ -255,6 +265,14 @@ async def identity_report():
     # победой: сколько карточек правило НЕ тронуло, потому что судить было нечем.
     rep["counters"] = _anchor.counters()
     rep["dropped"] = _ident.dropped_cards(30)
+    # Слово владельца и последний самоаудит: «однофамильцы: скрыто N,
+    # возвращено M, утечек L» — то, по чему проверяют, что лечили алгоритм.
+    rep["feedback"] = _feedback.counts()
+    rep["feedback_by_artist"] = {
+        a: _feedback.describe(a) for a in
+        sorted({str(e.get("name") or "") for e in entries if e.get("name")})}
+    rep["audit"] = _audit.report()
+    rep["hidden"] = _ident.hidden_cards(entries)
     return rep
 
 
@@ -286,6 +304,149 @@ async def identity_choice(body: dict):
         _s["save_watchlist"](entries)
     return {"ok": True, "updated": len(hit),
             "profile": _ident.identity_of(hit[0]).get("profile") or {}}
+
+
+# ── Слово владельца: «это не мой артист» / «Это мой» ─────────────────────────
+#
+# Якорь v5 выводит чужого из косвенных дел (что качал, что звучало). Одно
+# нажатие — единственное ПРЯМОЕ доказательство, и оно хранится своим файлом
+# (`owner_feedback.json`), переживает перепривязку подписки и перезапуск и
+# уезжает в резервную копию настроек. Нажатие лечит НЕ одну карточку: запомнив,
+# чем карточка выдала себя (id артиста в чужой витрине, лейбл, функциональный
+# узор заголовка), правило прячет всё похожее без новых жалоб.
+
+
+def _store_rows() -> list:
+    """Все карточки долгосрочного склада — одним списком."""
+    out = []
+    for bucket in (_durable_load() or {}).values():
+        if isinstance(bucket, dict):
+            out.extend(v for v in bucket.values() if isinstance(v, dict))
+    return out
+
+
+def _entries_named(name: str) -> list:
+    """Подписки этого ИМЕНИ. Имени, а не id витрины: отзыв принадлежит человеку,
+    которого владелец имел в виду, и обязан действовать и на перепривязанную
+    подписку, и на карточку без id."""
+    nm = _norm(name)
+    return [e for e in (_s.get("watchlist") or [])
+            if e.get("kind") != "label"
+            and _norm(str(e.get("name") or "")) == nm]
+
+
+@router.post("/api/identity/feedback")
+async def identity_feedback(body: dict):
+    """HTTP-дверь слова владельца (браузер). Логика — в `submit_feedback`."""
+    return await submit_feedback(body)
+
+
+async def submit_feedback(body: dict) -> dict:
+    """«Это не мой артист» (или обратный ход «это мой») по карточке радара.
+
+    Звено общее для веба (`/api/identity/feedback`) и телефона
+    (`/api/pair/feedback`): слово владельца — одни и те же данные, и две
+    версии ответа разошлись бы обязательно в пользу одной из витрин.
+
+      • слово ложится в durable-реестр и обобщается на тот же id/лейбл/узор;
+      • «не мой» по карточке, которую ПРАВИЛО пропустило, засчитывается как
+        утечка: метрика, по которой видно, что алгоритм лечат, а не замазывают;
+      • «это мой» дополнительно снимает отметку «скрыто» с подписки и возвращает
+        релиз через `choice.show_titles` — слово человека выше автоматики в обе
+        стороны;
+      • в ответе — сколько ЕЩЁ карточек на складе затронуло это нажатие, чтобы
+        владелец видел силу жеста, а не молчаливую правку одной строки.
+    """
+    item = dict(body.get("item") or {})
+    for k in ("artist", "title", "service", "label", "url", "id", "artist_id",
+              "genres", "genre", "date", "type"):
+        if body.get(k) is not None:
+            item.setdefault(k, body.get(k))
+    verdict = str(body.get("verdict") or "").strip().lower()
+    if verdict not in ("not_mine", "mine"):
+        return {"ok": False, "error": "verdict must be 'not_mine' or 'mine'"}
+    artist = str(item.get("artist") or "").strip()
+    title = str(item.get("title") or item.get("name") or "").strip()
+    if not artist or not title:
+        return {"ok": False, "error": "нужны артист и название релиза"}
+    if not item.get("genres") and not item.get("genre"):
+        item["genres"] = []
+
+    entries = _s.get("watchlist") or []
+    base_dir = _s.get("base_dir")
+    # Вердикт ПРАВИЛА до того, как записано слово владельца: «показал, и его
+    # отвергли» — вот и вся метрика утечки.
+    shown_by_rule = bool(_ident.feed_filter([dict(item)], entries, base_dir, None))
+    _feedback.record(artist, item, verdict)
+    if verdict == "not_mine" and shown_by_rule:
+        _feedback.mark_leak(artist, item)
+    why = _feedback.gate(item, artist)[1] or f"хозяин: {title}"
+
+    touched = 0
+    for e in _entries_named(artist):
+        if verdict == "mine":
+            _ident.set_choice(e, show_titles=[title])
+            _ident.hidden_clear(e, item)
+        else:
+            _ident.hidden_add(e, item, f"хозяин: {why}")
+        touched += 1
+    if touched and _s.get("save_watchlist"):
+        try:
+            _s["save_watchlist"](entries)
+        except Exception as e:                                 # noqa: BLE001
+            print(f"[identity] вишлист не сохранён: {e}", flush=True)
+
+    # Сколько ЕЩЁ карточек склада это нажатие спрячало (или вернуло): сила
+    # жеста обязана быть видна сразу, иначе «вылечено навсегда» — просто слова.
+    key = _ident.card_key(item)
+    same = [r for r in _store_rows()
+            if _norm(str(r.get("artist") or "")) == _norm(artist)
+            and _ident.card_key(r) != key]
+    kept = _ident.feed_filter([dict(r) for r in same], entries, base_dir, None)
+    kept_keys = {_ident.card_key(r) for r in kept}
+    _anchor.invalidate()
+    return {"ok": True, "verdict": verdict, "artist": artist, "title": title,
+            "reason": why, "subscriptions": touched,
+            "generalised": len([r for r in same
+                                if _ident.card_key(r) not in kept_keys]),
+            "affected": [str(r.get("title") or "") for r in same
+                         if _ident.card_key(r) not in kept_keys][:20],
+            "feedback": _feedback.counts(),
+            "what_we_learned": _feedback.describe(artist)}
+
+
+@router.get("/api/identity/hidden")
+async def identity_hidden():
+    """HTTP-дверь экрана «Скрытые» (браузер). Логика — в `hidden_view`."""
+    return await hidden_view()
+
+
+async def hidden_view() -> dict:
+    """Экран «Скрытые»: всё, что дверь не выпустила в ленту, — с причиной.
+
+    Скрытое без экрана — это молчаливая цензура: находка остаётся на складе,
+    но владелец о ней не знает и не может сказать «это мой». Здесь видно и кто
+    решил — автомат («авто: …») или он сам («хозяин: …»).
+    """
+    entries = _s.get("watchlist") or []
+    rows = _ident.hidden_cards(entries)
+    rep = _ident.summary(entries)
+    return {"ok": True, "items": rows, "count": len(rows),
+            "feedback": _feedback.counts(),
+            "auto_hidden": rep.get("auto_hidden") or [],
+            "audit": _audit.report()}
+
+
+@router.post("/api/identity/audit")
+async def identity_audit(body: dict | None = None):
+    """Пересобрать вердикты по всему складу сейчас (кнопка «проверить заново»).
+
+    Ночной прогон делает то же по расписанию; ручной нужен владельцу сразу
+    после правки правила — иначе «вылечено» выглядит как «не проверено».
+    """
+    rep = _audit.sweep(_s.get("watchlist") or [],
+                       save=_s.get("save_watchlist"), reason="вручную")
+    return {"ok": True, **(rep or {})}
 
 
 @router.get("/api/rel-favs")

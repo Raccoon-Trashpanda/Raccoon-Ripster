@@ -1420,6 +1420,35 @@ async def pair_radar(request: Request):
     return {"count": len(items), "items": items}
 
 
+@router.post("/api/pair/feedback")
+async def pair_feedback(request: Request):
+    """Слово владельца с телефона: «это не мой артист» / «это мой».
+
+    Тонкая дверь поверх вебской (`routes.radar.submit_feedback`): данные и
+    вердикт одни и те же, и вторая реализация неизбежно начала бы расходиться
+    с первой — ровно тот класс ошибок, из-за которого однофамильцев «лечили»
+    шесть раз и каждый раз только в одной витрине.
+    """
+    if not _token_valid(_bearer(request)):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:                                          # noqa: BLE001
+        body = {}
+    from ripster.routes import radar as _radar
+    return await _radar.submit_feedback(body if isinstance(body, dict) else {})
+
+
+@router.get("/api/pair/hidden")
+async def pair_hidden(request: Request):
+    """«Скрытые» на телефоне: то, что дверь не выпустила в ленту, — с причиной
+    и возможностью сказать «это мой» (см. `/api/identity/hidden`)."""
+    if not _token_valid(_bearer(request)):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    from ripster.routes import radar as _radar
+    return await _radar.hidden_view()
+
+
 @router.get("/api/pair/status")
 async def pair_status(request: Request):
     if not _owner_ok(request):
@@ -1487,6 +1516,7 @@ def install(app, ctx) -> None:
                   "/api/pair/ping", "/api/pair/mode", "/api/pair/activity",
                   "/api/pair/artist", "/api/pair/label",
                   "/api/pair/station", "/api/pair/taste",
+                  "/api/pair/feedback", "/api/pair/hidden",
                   "/api/pair/genre"):
             _auth.add_public_path(p)
             _auth._CSRF_EXEMPT_PATHS.add(p)
