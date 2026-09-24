@@ -119,6 +119,14 @@ def install(app, ctx) -> None:
         # downloaded (see _enqueue).
         "history":        getattr(ctx, "download_history", None),
     })
+    # Журнал тостов (одноразовость релиза) живёт рядом с остальными sidecar-файлами
+    # вотчлиста; без постоянного каталога тосты не помнили бы «уже показывали»
+    # между перезапусками.
+    try:
+        from ripster import notify as _notify
+        _notify.configure(ctx.base_dir)
+    except Exception:
+        pass
     app.include_router(router)
 
 
@@ -1219,6 +1227,17 @@ def _notify_release(artist: str, release: str, compilation: bool, queued: bool,
     if cfg.get("notify-on-release", True) is False:
         return
     r = rel or {}
+    # Устойчивая личность релиза для одноразового тоста: сервис+id из ссылки,
+    # а если ссылки нет — нормализованные артист+название. Без этого один и тот
+    # же Beatport-предзаказ мог вылезать тостом каждый проход (24.09.2026).
+    key = _url_key(r.get("url")) or ""
+    if not key:
+        ident = _rel_ident(artist, release)
+        if ident:
+            key = "n:" + "|".join(ident)
+    date = str(r.get("date") or r.get("year") or "")
+    preorder = bool(r.get("preorder")) or (
+        len(date) >= 8 and date > datetime.now().strftime("%Y-%m-%d"))
     try:
         from ripster import notify as _notify
         _notify.toast_new_release(
@@ -1227,7 +1246,8 @@ def _notify_release(artist: str, release: str, compilation: bool, queued: bool,
             cover=str(r.get("cover") or r.get("artwork") or r.get("artworkUrl") or ""),
             year=str(r.get("date") or r.get("year") or ""),
             label=str(r.get("label") or ""),
-            service=str(r.get("service") or ""))
+            service=str(r.get("service") or ""),
+            dedupe_key=key, preorder=preorder)
     except Exception as e:
         print(f"[watchlist] toast failed: {e}", flush=True)
 
@@ -1444,7 +1464,13 @@ async def _pick_download_url(rel: dict, want_svc: str, label: str, cfg: dict,
                              if x != want_svc]
         if nz:
             pref = nz + [x for x in pref if x not in nz]
-        m = await _av.matrix(upc=upc, title=title, artist=rel.get("artist", ""))
+        # `seed=rel` — чтобы матрица добыла ISRC треков ИЗ ИСТОЧНИКА до опроса
+        # витрин: у одного издания штрихкоды в магазинах разные (24.09.2026,
+        # Evanescence «Sweet Sacrifice (Remastered 2026)»: Spotify
+        # 00888072836037, Deezer 888072836020), и без ISRC радар врал
+        # «нет ни на одном сервисе» при живом Deezer.
+        m = await _av.matrix(upc=upc, title=title, artist=rel.get("artist", ""),
+                             seed=rel)
         best = _av.pick_source(m["services"], pref)
         if best:
             u = (m["services"][best] or {}).get("url", "")

@@ -10,12 +10,33 @@ other app is fullscreen, so we get "don't interrupt games" for free.
 
 Best-effort: silent no-op on non-Windows or any failure. Gated by the
 `notify-on-done` config flag (off by default).
+
+Спам-защита (24.09.2026, жалоба на повторяющийся тост про Beatport): все тосты
+идут через этот модуль, поэтому здесь же единый журнал («каждый тост — строка в
+лог»), одноразовость («каждый релиз — не чаще одного раза за всё время, отдельно
+для предзаказа и для дня выхода») и общий ограничитель («не больше 3 за 10 минут,
+дальше — одно итоговое уведомление»). Тост — только знакомство с находкой:
+пропущенный не теряет релиз, он остаётся в вотчлисте и в очереди.
 """
 from __future__ import annotations
 
 import base64
+import json
 import os
 import subprocess
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+# Консоль владельца — cp1251: заглушаем непереводимое (эмодзи тостов), сам
+# текст не подменяем. Иначе print() падает UnicodeEncodeError уже ПОСЛЕ того,
+# как уведомление ушло.
+for _s in (sys.stdout, sys.stderr):
+    try:
+        _s.reconfigure(errors="replace")
+    except Exception:
+        pass
 
 _CNW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
@@ -132,8 +153,10 @@ _TOAST_I18N = {
         "dl_tracks":   "{title} · {n} трек.",
         "rel_new":     "🎉 Новый релиз!",
         "rel_comp":    "🎉 Новый сборник!",
+        "rel_pre":     "🕝 Предзаказ!",
         "rel_body":    "{artist} — {release}",
         "rel_queued":  "{artist} — {release} · качаю",
+        "digest":      "🔕 Ещё релизов за 10 мин: {n}. Подробности — в приложении.",
     },
     "en": {
         "dl_ok":       "✅ Download complete",
@@ -141,8 +164,10 @@ _TOAST_I18N = {
         "dl_tracks":   "{title} · {n} tracks",
         "rel_new":     "🎉 New release!",
         "rel_comp":    "🎉 New compilation!",
+        "rel_pre":     "🕝 Pre-order!",
         "rel_body":    "{artist} — {release}",
         "rel_queued":  "{artist} — {release} · downloading",
+        "digest":      "🔕 {n} more releases in 10 min — see the app.",
     },
 }
 
@@ -153,19 +178,138 @@ def _tt(lang: str, key: str, **kw) -> str:
     return tmpl.format(**kw) if kw else tmpl
 
 
+# ── Журнал тостов + одноразовость + ограничитель ────────────────────────────────
+# Три вещи, которых не хватало 24.09, когда тост про Beatport вылез несколько раз
+# подряд:
+#   1. каждый тост пишется в лог (`[toast] kind=… service=… title=…`), чтобы
+#      повторяющуюся рассылку можно было увидеть и опознать источник;
+#   2. релиз уведомляет НЕ БОЛЕЕ ОДНОГО РАЗА за всё время — ключ живёт в файле
+#      рядом с остальными sidecar-состояниями и переживает перезапуск; предзаказ
+#      имеет два своих «раза»: один как предзаказ, один в день выхода;
+#   3. не больше 3 тостов за 10 минут, дальше — одно итоговое уведомление вместо
+#     individual-спама.
+_TOAST_WINDOW   = 600.0     # 10 минут
+_TOAST_MAX      = 3         # сколько тостов пропускаем в окне
+_LEDGER_KEEP_D  = 400       # дней помнить ключ релиза (~14 месяцев)
+_LEDGER_MAX     = 4000      # потолок записей, чтобы файл не распухал
+
+_BASE_DIR: "str | None" = None
+_ledger: "dict | None" = None
+#: Включён ли гейт. По умолчанию выключен: модуль обязан оставаться чистым
+#: best-effort no-op, пока его явно не настроили (`configure`) — иначе тесты
+#: контракта и любой вызов без инициализации упрели бы в накопленный журнал.
+#: Приложение настраивает гейт при install() вотчлиста.
+_ENABLED = False
+
+
+def configure(base_dir=None) -> None:
+    """Куда класть журнал тостов и включить одноразовость/ограничитель. Зовёт
+    вотчлист при install(); без вызова тосты проходят как раньше — one-shot."""
+    global _BASE_DIR, _ledger, _ENABLED
+    new = str(base_dir) if base_dir else None
+    if new != _BASE_DIR:
+        _BASE_DIR, _ledger = new, None
+    _ENABLED = True
+
+
+def configure_off() -> None:
+    """Явно выключить гейт (тесты/отладка): тосты снова идут без журнала."""
+    global _ENABLED, _ledger
+    _ENABLED, _ledger = False, None
+
+
+def _ledger_path() -> Path:
+    if _BASE_DIR:
+        return Path(_BASE_DIR) / "toast_ledger.json"
+    return Path(tempfile.gettempdir()) / "ripster_toast_ledger.json"
+
+
+def _load_ledger() -> dict:
+    global _ledger
+    if _ledger is not None:
+        return _ledger
+    try:
+        p = _ledger_path()
+        _ledger = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+    except Exception:
+        _ledger = {}
+    if not isinstance(_ledger, dict):
+        _ledger = {}
+    _ledger.setdefault("shown", {})      # "<ключ>#<стадия>" -> epoch
+    _ledger.setdefault("recent", [])     # [epoch, …] всех показанных тостов
+    return _ledger
+
+
+def _save_ledger() -> None:
+    try:
+        _ledger_path().write_text(
+            json.dumps(_load_ledger(), ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        print(f"[toast] ledger save failed: {e}", flush=True)
+
+
+def _log(kind: str, title: str, service: str = "", note: str = "") -> None:
+    msg = f"[toast] kind={kind} service={service or '-'} title={title}"
+    if note:
+        msg += f" ({note})"
+    print(msg, flush=True)
+
+
+def _prune(now: float) -> dict:
+    L = _load_ledger()
+    L["recent"] = [t for t in L["recent"] if now - t < _TOAST_WINDOW][-50:]
+    shown = L["shown"]
+    if len(shown) > _LEDGER_MAX:
+        cutoff = now - _LEDGER_KEEP_D * 86400
+        for k in [k for k, v in shown.items() if not isinstance(v, (int, float)) or v < cutoff]:
+            del shown[k]
+    return L
+
+
+def _in_window(L: dict, now: float) -> int:
+    return sum(1 for t in L["recent"] if now - t < _TOAST_WINDOW)
+
+
+def _show_and_count(L: dict, key: str, now: float) -> None:
+    """Отметить тост показанным: он тратит разрешение окна, а релизный ключ —
+    ещё и закрывает дорогу этому релизу навсегда."""
+    L["recent"].append(now)
+    if key:
+        L["shown"][key] = now
+
+
 def toast_download_done(title: str, ok: bool, got=None, lang: str = "en") -> None:
     """Toast for a finished download. `ok` False → error toast. Plays the default
-    Windows notification sound; auto-suppressed by Focus Assist over fullscreen games."""
+    Windows notification sound; auto-suppressed by Focus Assist over fullscreen games.
+
+    Ограничитель общий с релизными тостами (окно 10 минут), но без одноразовости:
+    каждая завершённая загрузка — законное новое событие."""
+    _log("download", title, note="ok" if ok else "error")
+    if not _ENABLED:
+        head = _tt(lang, "dl_ok" if ok else "dl_err")
+        body = (_tt(lang, "dl_tracks", title=title, n=got) if (ok and got)
+                else (title or "Ripster"))
+        _ps_toast(head, body)
+        return
+    now = time.time()
+    L = _prune(now)
+    if _in_window(L, now) >= _TOAST_MAX:
+        _show_and_count(L, "", now)     # тратим разрешение, но не плодим process
+        _save_ledger()
+        return
     head = _tt(lang, "dl_ok" if ok else "dl_err")
     body = (_tt(lang, "dl_tracks", title=title, n=got) if (ok and got)
             else (title or "Ripster"))
+    _show_and_count(L, "", now)
+    _save_ledger()
     _ps_toast(head, body)
 
 
 def toast_new_release(artist: str, release: str, compilation: bool = False,
                       queued: bool = False, lang: str = "en",
                       cover: str = "", year: str = "", label: str = "",
-                      service: str = "") -> None:
+                      service: str = "", dedupe_key: str = "",
+                      preorder: bool = False) -> None:
     """Toast for a watchlist hit. This is the whole point of the watchlist when
     the window is closed: the in-app toast and the WS broadcast only reach a page
     that is currently open, so without this a release found at 4am is discovered
@@ -173,9 +317,53 @@ def toast_new_release(artist: str, release: str, compilation: bool = False,
 
     Обложка и подробности не украшение: по одному названию не понять, тот ли это
     релиз и откуда он — а уведомление часто единственное, что владелец увидит.
-    """
-    head = _tt(lang, "rel_comp" if compilation else "rel_new")
+
+    `dedupe_key` — устойчивая личность релиза (сервис+id либо артист+название),
+    `preorder` — что это ещё не вышедший анонс. По ним решаем, показывать ли:
+    один релиз звенит один раз (предзаказ — ещё раз в день выхода), а когда за
+    10 минут их набилось больше трёх, остальные сворачиваются в одно итоговое."""
+    _log("release", f"{artist or '?'} — {release or ''}",
+         service=service or (label or "-"))
+    if not _ENABLED:
+        head = _tt(lang, "rel_comp" if compilation else "rel_new")
+        body = _tt(lang, "rel_queued" if queued else "rel_body",
+                   artist=artist or "?", release=release or "")
+        sub = " · ".join(x for x in (str(year or "")[:4], label, service) if x)
+        _ps_toast(head, body, sub=sub, image=_cover_file(cover))
+        return
+    if not dedupe_key:
+        # Без ключа нечем склеить повторы — не глушим насовсем, но и не даём
+        # разрастись журналу: просто проходим через общий ограничитель окна.
+        key = ""
+    else:
+        key = f"{dedupe_key}#{'preorder' if preorder else 'released'}"
+    now = time.time()
+    L = _prune(now)
+    if key and key in L["shown"]:
+        _log("skip", f"{artist or '?'} — {release or ''}",
+             service=service or "-", note="already toasted")
+        return
+    if _in_window(L, now) >= _TOAST_MAX:
+        if key:
+            L["shown"][key] = now       # съеден итогом — больше не повторит
+        L["suppressed"] = int(L.get("suppressed") or 0) + 1
+        if now - float(L.get("last_digest") or 0) >= _TOAST_WINDOW:
+            n = L["suppressed"]
+            L["suppressed"] = 0
+            L["last_digest"] = now
+            _log("digest", f"{n} suppressed releases", service=service or "-")
+            _show_and_count(L, "", now)
+            _save_ledger()
+            _ps_toast(_tt(lang, "rel_new"), _tt(lang, "digest", n=n))
+        else:
+            _save_ledger()
+        return
+    head = _tt(lang, "rel_pre" if preorder
+               else ("rel_comp" if compilation else "rel_new"))
     body = _tt(lang, "rel_queued" if queued else "rel_body",
                artist=artist or "?", release=release or "")
     sub = " · ".join(x for x in (str(year or "")[:4], label, service) if x)
-    _ps_toast(head, body, sub=sub, image=_cover_file(cover))
+    image = _cover_file(cover) if os.name == "nt" else ""
+    _show_and_count(L, key, now)
+    _save_ledger()
+    _ps_toast(head, body, sub=sub, image=image)

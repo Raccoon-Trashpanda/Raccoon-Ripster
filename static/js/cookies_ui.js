@@ -722,22 +722,6 @@ function _detailError(msg){
   if(c) c.innerHTML = `<div style="text-align:center;padding:80px 0;color:var(--red)">${t('t.error_c')}${esc(msg)}</div>`;
 }
 
-// Строки компиляций заводим здесь, а не в i18n.js: тот файл занят другой
-// задачей, и править его значило бы увязать чужую работу в свой коммит.
-// `t()` добирает ключи из LANG напрямую (падение на en→ru), так что
-// регистрация через Object.assign полностью совместима с общим механизмом;
-// заполняем все пять локателей разом.
-(function registerCompilationStrings(){
-  if (typeof LANG === 'undefined') return;
-  const add = {
-    ru: {'ck.comp_section':'Сборники и участие','ck.dl_only_tracks':'⬇ Только треки артиста','ck.as_alias':'как {name}','ck.tracks_here':'Выделены треки этого артиста ({n}) — «Скачать выбранное» заберёт только их','ck.tracks_here_none':'У артиста {name} на этом релизе нет собственного трека (только упоминание)'},
-    en: {'ck.comp_section':'Compilations & appearances','ck.dl_only_tracks':'⬇ This artist only','ck.as_alias':'as {name}','ck.tracks_here':"This artist's tracks are selected ({n}) — “Download selected” grabs only them",'ck.tracks_here_none':'{name} has no own track on this release (credit only)'},
-    hi: {'ck.comp_section':'संग्रह और उपस्थिति','ck.dl_only_tracks':'⬇ केवल इस कलाकार','ck.as_alias':'के रूप में {name}','ck.tracks_here':'इस कलाकार के ट्रैक चयनित हैं ({n}) — “चयनित डाउनलोड” केवल उन्हें लेगा','ck.tracks_here_none':'इस रिलीज़ पर {name} का अपना ट्रैक नहीं है'},
-    ja: {'ck.comp_section':'オムニバス / 参加作品','ck.dl_only_tracks':'⬇ このアーティストのみ','ck.as_alias':'({name} 名義)','ck.tracks_here':'このアーティストの曲を選択中です（{n}）—「選択をダウンロード」でこの曲のみ取得','ck.tracks_here_none':'この作品に {name} 自身の曲はありません'},
-    zh: {'ck.comp_section':'合辑与参与','ck.dl_only_tracks':'⬇ 仅此艺人','ck.as_alias':'以 {name} 名义','ck.tracks_here':'已选中该艺人的曲目（{n}）—「下载所选」只取这些','ck.tracks_here_none':'该发行中 {name} 没有自己的曲目'},
-  };
-  for (const lang in add) if (LANG[lang]) Object.assign(LANG[lang], add[lang]);
-})();
 
 // Открытие страницы релиза из дискографии: несём, какие дорожки принадлежат
 // ЭТОМУ артисту (подсветка) и под каким именем он там указан (алиас), чтобы
@@ -871,7 +855,6 @@ function _discoGridHTML(list, ownerName){
     : `<div class="card-grid">
         ${(list || []).map(r => {
           const comp = r.is_compilation || r.type === 'compilation' || r.type === 'appears_on';
-          // Настоящий альбом-артист компилы, а не артист дискографии.
           const shownArtist = comp ? (r.album_artist || ownerName || '') : (r.album_artist || ownerName || '');
           const alias = comp && r.credited_as ? ti('ck.as_alias', {name: esc(r.credited_as)}) : '';
           const typeBadge = comp ? t('rl.comp_badge') : (r.type || '?');

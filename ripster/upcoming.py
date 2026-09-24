@@ -78,14 +78,20 @@ SOURCES: dict = {
     "deezer":     {"tier": 1, "state": "planned", "note": "разбор есть, отбор по дате не написан"},
     "qobuz":      {"tier": 1, "state": "planned", "note": "то же"},
     "tidal":      {"tier": 1, "state": "planned"},
-    "beatport":   {"tier": 1, "state": "planned", "note": "api.beatport.com/v4 требует ключ (401)"},
+    "beatport":   {"tier": 1, "state": "live",
+                   "note": "upcoming_preorders.beatport_preorders — label/artist "
+                           "предзаказы по `publish_date` и `is_pre_order` "
+                           "(24.09.2026)"},
     "musicbrainz":{"tier": 1, "state": "planned", "note": "нужен User-Agent и rate-limit 1 rps"},
     # ── ярус 2: витрины ──────────────────────────────────────────────────────
     "juno":       {"tier": 2, "state": "planned",
                    "note": "отдельный ежедневный sitemap пре-ордеров, проверен 21.08"},
     "junodownload":{"tier": 2, "state": "planned", "note": "закрыт для краулера, нужен свой клиент"},
     "traxsource": {"tier": 2, "state": "planned", "note": "/genre/<id>/<name>/upcoming — 200"},
-    "bandcamp":   {"tier": 2, "state": "planned", "note": "разрешены 4 эндпоинта /api/"},
+    "bandcamp":   {"tier": 2, "state": "live",
+                   "note": "ripster/bandcamp.py: JSON-LD + data-tralbum страницы "
+                           "релиза и сетка /music; разбор зафиксирован тестом на "
+                           "живой странице SEMANTICA 199 (24.09.2026)"},
     "deejayde":   {"tier": 2, "state": "planned"},
     "boomkat":    {"tier": 2, "state": "planned"},
     "bleep":      {"tier": 2, "state": "planned"},
@@ -238,6 +244,81 @@ def merge(records: list) -> list:
             if not cur.get(f) and r.get(f):
                 cur[f] = r[f]
     return list(out.values())
+
+
+def soft_key(rec: dict) -> str:
+    """Ключ «похоже, это ТОТ ЖЕ релиз» — для показа, не для склада.
+
+    Склад склеивает только по UPC/ISRC (`identity`), и право это не отменяется:
+    свести записью двух источников по названию — значит породить релиз, которого
+    нет ни в одном каталоге.
+
+    Ленте же человек показывает ОДИН анонс, а не четыре ссылки на него: предзаказ
+    с Bandcamp через месяц встает в Apple и Deezer, и без свёртки он выглядел бы
+    как четыре ожидания. Поэтому здесь совпадение строгое: название И артист И
+    дата (или точный UPC). Разошлась дата — это два разных анонса, и пусть их
+    будет два.
+    """
+    upc = str(rec.get("upc") or "").strip()
+    if upc:
+        return f"upc:{upc}"
+    a, t = _norm(rec.get("artist")), _norm(rec.get("title"))
+    d = str(rec.get("date") or "")
+    if not (a and t and d):
+        return ""
+    return f"cat:{a}|{t}|{d}"
+
+
+def fold_duplicates(records: list) -> list:
+    """Свернуть дубли одного анонса в одну карточку, ссылки сохранить все.
+
+    Первой оставляется запись с БОЛЕЕ надёжным источником (ярус 1 выше витрины),
+    остальные уезжают в `also_on` — их URL и даты остаются видимыми, свёртка
+    ничего не прячет.
+    """
+    order = {"apple": 0, "spotify": 0, "beatport": 0, "tidal": 0,
+             "qobuz": 0, "deezer": 0, "label": 1, "bandcamp": 2}
+    by_key: dict = {}
+    out: list = []
+    for r in records or []:
+        k = soft_key(r)
+        if not k:
+            out.append(r)
+            continue
+        cur = by_key.get(k)
+        if cur is None:
+            by_key[k] = r
+            out.append(r)
+            continue
+        if order.get(str(r.get("src")), 3) < order.get(str(cur.get("src")), 3):
+            # Новая запись надёжнее — головой становится она, прежняя уезжает
+            # в `also_on`. Голова меняет и дату, и ссылку: показываем то, где
+            # релиз можно взять.
+            out[out.index(cur)] = r
+            by_key[k] = r
+            cur, r = r, cur
+        cur.setdefault("also_on", [])
+        cur["also_on"].append({"src": r.get("src"), "url": r.get("url") or "",
+                               "date": r.get("date") or "",
+                               "label": r.get("label") or ""})
+        for s in (r.get("confirmed_by") or []):
+            if s and s not in (cur.get("confirmed_by") or []):
+                cur.setdefault("confirmed_by", []).append(s)
+        if not cur.get("cover") and r.get("cover"):
+            cur["cover"] = r["cover"]
+        if not cur.get("upc") and r.get("upc"):
+            cur["upc"] = r["upc"]
+        # интерес наследуется: свёртка не имеет права унести карточку вниз
+            # только потому, что более надёжный источник её не оценил
+        cur["score"] = max(int(cur.get("score") or 0), int(r.get("score") or 0))
+        keep = {(w.get("key"), json.dumps(w.get("args"), sort_keys=True, ensure_ascii=False))
+                for w in (cur.get("why") or [])}
+        for w in (r.get("why") or []):
+            sig = (w.get("key"), json.dumps(w.get("args"), sort_keys=True, ensure_ascii=False))
+            if sig not in keep:
+                cur.setdefault("why", []).append(w)
+                keep.add(sig)
+    return out
 
 
 def in_horizon(rec: dict, today: str = "") -> bool:

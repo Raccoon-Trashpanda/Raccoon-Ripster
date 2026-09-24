@@ -308,7 +308,9 @@ async def admin_issue(request: Request):
     body = await _json_body(request)
     cap = _int_cfg("relay-max-keys", 50)
     if cap > 0 and relay_store.count_active() >= cap:
-        return JSONResponse({"code": 429, "msg": f"потолок активных ключей {cap}"},
+        return JSONResponse({"code": 429,
+                             "msg_key": "err.relay_cap", "params": {"cap": cap},
+                             "msg": f"потолок активных ключей {cap}"},
                             status_code=429)
     q = body.get("quota") if isinstance(body.get("quota"), dict) else body
     plain, ref = relay_store.issue(
@@ -328,7 +330,7 @@ async def admin_revoke(request: Request):
     body = await _json_body(request)
     out = relay_store.revoke(str(body.get("ref") or body.get("label") or ""))
     return JSONResponse({"code": 0 if out.get("ok") else 404,
-                         "msg": "" if out.get("ok") else "не нашлось",
+                         "msg": "",
                          "data": out},
                         status_code=200 if out.get("ok") else 404)
 

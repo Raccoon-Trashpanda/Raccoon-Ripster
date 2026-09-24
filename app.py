@@ -812,6 +812,15 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         print(f"[bbc-schedule] wiring error: {type(_e).__name__}: {_e}", flush=True)
 
+    # Предзаказы: планы «докачать после выхода» живут в preorder_waits.json и
+    # переживают перезапуск (та же форма, что у bbc_schedule: карточек в
+    # очереди нет, наступивший план цикл сам ставит обычной задачей).
+    # Проспанные за простой окна не теряются — первый тик снимает их в очередь.
+    try:
+        asyncio.create_task(_preorder_waits.run_loop())
+    except Exception as _e:
+        print(f"[preorder] wiring error: {_e}", flush=True)
+
     asyncio.create_task(_startup_sync_orpheus())
     asyncio.create_task(_apple_bearer_keeper())
     asyncio.create_task(_soundcloud_routes._prewarm_client_id())
@@ -898,6 +907,17 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_ns_audit.run_loop(watchlist, save_watchlist, BASE_DIR))
     except Exception as _e:
         print(f"[namesake] wiring error: {_e}", flush=True)
+
+    # Предзаказы Bandcamp/Beatport по watched-лейблам: круговой обход по
+    # несколько имён за проход, складывает найденное в тот же склад
+    # `upcoming_store.json`, что читает радар грядущего. В ответ радара сбор не
+    # вынесен — страница Bandcamp медленная, а правило вежливости (не чаще
+    # запроса в 2 с) превратило бы открытие вкладки в получасовое ожидание.
+    try:
+        from ripster import upcoming_watch as _upw
+        asyncio.create_task(_upw.run_loop(config, BASE_DIR, watchlist))
+    except Exception as _e:
+        print(f"[preorders] wiring error: {_e}", flush=True)
 
     # Deferred "restart when guests idle" watcher (no-op until staged via
     # /api/admin/restart-when-idle).
@@ -1212,6 +1232,13 @@ from ripster.routes import queue as _queue_mod
 BBC_SCHEDULE_FILE = BASE_DIR / "bbc_scheduled.json"
 _bbc_sched.install(
     store=_ScheduledStore(BBC_SCHEDULE_FILE),
+    queue=queue, qs=_qs, config=config, broadcast=broadcast,
+    process_queue=process_queue, queue_snapshot=queue_snapshot,
+    make_task=lambda *a, **k: _queue_mod._make_task(*a, **k),
+)
+from ripster import preorder_waits as _preorder_waits
+_preorder_waits.install(
+    path=BASE_DIR / "preorder_waits.json",
     queue=queue, qs=_qs, config=config, broadcast=broadcast,
     process_queue=process_queue, queue_snapshot=queue_snapshot,
     make_task=lambda *a, **k: _queue_mod._make_task(*a, **k),

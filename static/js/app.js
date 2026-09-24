@@ -1368,6 +1368,12 @@ function applyConfig() {
   setVal('s-rename-tmpl',  c['file-rename-template']||'');
   setChk('s-embedcover', c['embed-cover']);
   setChk('s-savecover',  c['save-cover-to-folder']);
+  // Источники тостов Windows: отразить РЕАЛЬНОЕ состояние. Дефолты взяты оттуда
+  // же, где их читает бэкенд: `notify-on-done` выключен, `notify-on-release`
+  // включён, пока явно не false. Без этих строк переключатель всегда рисовался
+  // пустым и не показывал владельцу, что на самом деле шлёт уведомления.
+  setChk('s-notify-on-done',    c['notify-on-done'] === true);
+  setChk('s-notify-on-release', c['notify-on-release'] !== false);
   setVal('s-coversize',  c['cover-size']||'3000x3000');
   setVal('s-coverfmt',   c['cover-format']||'jpg');
   setChk('s-embedlrc',   c['embed-lrc']);

@@ -46,6 +46,7 @@ from ripster import compilations as _comps
 from ripster import namesake_audit as _audit
 from ripster import owner_anchor as _anchor
 from ripster import owner_feedback as _feedback
+from ripster import upcoming_taste as _taste
 from ripster.artist_xref import norm as _norm
 
 router = APIRouter()
@@ -720,6 +721,15 @@ async def releases_upcoming(days: int = Query(120, ge=1, le=400),
                 fresh.append(r)
         used.add("label")
 
+    # ── Bandcamp / Beatport: предзаказы watched-лейблов ───────────────────────
+    # Отдельного списка нет: эти записи лежат В ЭТОМ ЖЕ складе
+    # (`upcoming_store.json`), который наполняет фоновый обход
+    # `ripster/upcoming_watch.py`, и оттуда же попадают в `out` ниже. В ответ
+    # радара они не собираются на живую по-честному: страница Bandcamp отдаётся
+    # медленная, а правило вежливости — не чаще запроса в 2 секунды, и двадцать
+    # лейблов превратили бы открытие вкладки в получасовое ожидание.
+    await _preorders_refresh(cfg)
+
     # ── Слияние, склад, «наступило» ──────────────────────────────────────────
     merged = _up.merge(fresh)
     path = _s.get("upcoming_file")
@@ -730,12 +740,16 @@ async def releases_upcoming(days: int = Query(120, ge=1, le=400),
 
     out = [r for r in store.values()
            if not r.get("released") and today < (r.get("date") or "") <= horizon]
-    out.sort(key=lambda r: r.get("date", ""))
-    # Та же дверь, что и у остальных источников: предзаказ чужого однофамильца
-    # владельцу не нужен, а «скрытый» кластер из грядущего возвращался бы каждый
-    # раз, когда витрина показывает его заранее.
+    # ── Порядок: «исключительно интересное» вперёд ────────────────────────────
+    # Дата была единственным критерием, и лента превращалась в календарь чужих
+    # релизов. Теперь карточка несёт `score` и `why` — причину, по которой она
+    # показана первой («лейбл Semantica в наблюдении»), — и то, и другое
+    # считается по подпискам, загрузкам, похожим артистам и слову владельца
+    # («интересно» / «не то») в `ripster/upcoming_taste.py`.
+    out = _up.fold_duplicates(out)
     await _anchor_evidence(out)
     out = _identity_filter("upcoming", out)
+    out = _taste.rank(out, _s.get("watchlist") or [])
 
     if added or released:
         print(f"[upcoming] источников {len(used)}, новых {added}, "
@@ -746,7 +760,75 @@ async def releases_upcoming(days: int = Query(120, ge=1, le=400),
         # Числа, а не «готово»: обход без счётчика неотличим от обхода вхолостую.
         "added": added, "released_today": released,
         "registry": _up.source_report(),
+        "feedback": _taste.feedback_counts(),
     })
+
+
+#: Раз в столько секунд радар имеет право пнуть фоновый сбор предзаказов.
+_PREORDER_KICK_EVERY = 6 * 3600.0
+_preorder_last_kick = 0.0
+
+
+async def _preorders_refresh(cfg: dict) -> None:
+    """Попросить фоновый обход предзаказов поработать, если он заспался.
+
+    Не ждём: предзаказ — вещь не сегодняшняя, а вкладка радара не должна
+    становиться медленной из-за чужого сайта. Первый проход после старта
+    приложения и так происходит через минуту (`upcoming_watch.run_loop`);
+    этот пинок нужен только после долгого простоя.
+    """
+    global _preorder_last_kick
+    if time.time() - _preorder_last_kick < _PREORDER_KICK_EVERY:
+        return
+    _preorder_last_kick = time.time()
+    try:
+        from ripster import upcoming_watch as _uw
+        base = _s.get("base_dir")
+        if not base:
+            return
+        asyncio.create_task(_uw.pass_once(base, _s.get("watchlist") or []))
+        print("[upcoming] сбор предзаказов запущен фоном", flush=True)
+    except Exception as e:
+        print(f"[upcoming] предзаказы: пинек не удался — {e}", flush=True)
+
+
+@router.post("/api/releases/upcoming/feedback")
+async def releases_upcoming_feedback(body: dict):
+    """Кнопки «интересно» / «не то» на карточке грядущего.
+
+    Отзыв — единственное, что отличает персональную ленту от рассылки. Слово
+    владельца весит больше всех сигналов (см. WEIGHTS в `upcoming_taste.py`),
+    и хранится оно отдельно от «это не мой артист»: там отказ от однофамильца,
+    здесь отказ от ожидания.
+    """
+    verdict = str(body.get("verdict") or "").strip()
+    if verdict not in _taste.VERDICTS:
+        raise HTTPException(400, imsg(
+            "err.verdict_required",
+            "нужен verdict: interesting или not_it"))
+    rec = {k: body.get(k) for k in ("ident", "id", "artist", "title", "src",
+                                     "url", "label", "date")}
+    res = _taste.set_feedback(rec, verdict)
+    if not res.get("ok"):
+        raise HTTPException(400, imsg("err.card_unidentified",
+                                      "карточка не опознана — нет идентификатора"))
+    return res
+
+
+@router.get("/api/releases/upcoming/preorders")
+async def releases_upcoming_preorders(names: str = Query(""), batch: int = Query(0, ge=0, le=12)):
+    """Диагностика сбора предзаказов: что увидено по каждому имени.
+
+    Нужна именно отдельной ручкой: «лейбл не найден на Bandcamp» и «мы его не
+    спрашивали» для владельца неразличимы, а молчаливый пропуск источника —
+    ровно та ошибка, из-за которой SEMANTICA 199 не появилась в ленте.
+    """
+    from ripster import upcoming_preorders as _upo
+    want = [n.strip() for n in names.split(",") if n.strip()]
+    recs, log = await _upo.collect(_s.get("watchlist") or [], only=want or None,
+                                   with_beatport=bool(batch or not want))
+    return {"ok": True, "found": len(recs), "items": recs, "log": log,
+            "shops_not_parsed": _upo.SHOP_FEEDS}
 
 
 @router.get("/api/releases/upcoming/suggest")

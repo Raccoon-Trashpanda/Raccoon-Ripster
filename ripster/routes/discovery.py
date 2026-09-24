@@ -1082,7 +1082,14 @@ async def _label_seeds_ex(label: str, limit: int) -> tuple[list[dict], dict]:
     отправляли исправлять правильно набранное имя.
 
     `info` — {candidates, verify_failed, unverified}: сколько релизов вернул
-    поиск, сломалась ли сверка и что именно она не смогла подтвердить."""
+    поиск, сломалась ли сверка и что именно она не смогла подтвердить.
+
+    24.09.2026: к списку добавился второй этап — `fallback`. Spotify подтверждал
+    лейбл по `/v1/albums`, а этот эндпоинт нашему токену отказывает; две подписки
+    («Semantica Records», «Night Time Stories (NTS)») висели непроверенными
+    ВООБЩЕ. Теперь, когда Spotify не подтвердил, спрашиваем остальные каталоги
+    (`ripster/label_sources.py`) — и отмечаем `last_check` по ЛЮБОМУ ответившему
+    пути, иначе «не проверено» снова станет неотличимо от «проверено и пусто»."""
     seeds, seen = [], set()
     info = {"candidates": 0, "verify_failed": False, "unverified": []}
     for svc in _LABEL_NATIVE:
@@ -1112,7 +1119,119 @@ async def _label_seeds_ex(label: str, limit: int) -> tuple[list[dict], dict]:
             seeds.append(r)
         if len(seeds) >= limit * 2:
             break
+    if seeds:
+        _note_label_artists(label, seeds)
+        # Отметка по УСПЕШНОМУ пути, а не только по обходу вишлиста: радар и
+        # страница лейбла звали ту же сверку и молчали, из-за чего подписки
+        # «Semantica Records» и «Night Time Stories (NTS)» висели с
+        # `last_check = null`, хотя их проверяли каждый проход.
+        _stamp_label_check(label, ["spotify"])
+    # ── второй этап: другие каталоги ─────────────────────────────────────────
+    # Зовём и когда сверка ОТКАЗАЛА, и когда Spotify просто ничего не отдал:
+    # андеграундный лейбл может отсутствовать в его каталоге вовсе, а на Bandcamp
+    # иметь предзаказ, которого нет больше нигде.
+    if not seeds:
+        # «лейбл не найден» и «сверка не отработала» — разные ответы; второй
+        # теперь чинится не одним Spotify-эндпоинтом, а цепочкой каталогов.
+        seeds, info = await _label_fallback(label, limit, info, seen)
     return seeds, info
+
+
+async def _label_fallback(label: str, limit: int, info: dict,
+                          seen: set) -> tuple[list, dict]:
+    """Подтвердить релизы лейбла любым источником, кроме отказавшего Spotify.
+
+    Пустой ответ здесь означает ровно то, что написан в `info["health"]`:
+    «источники не ответили», «нет учётки Beatport» — но НИКОГДА «проверь
+    написание имени». За одно и то же сообщение 23.08 человека отправляли
+    исправлять правильно набранный лейбл.
+    """
+    from ripster import label_sources as _ls
+    seeds: list = []
+    try:
+        more, finfo = await _ls.label_releases_any(label, limit,
+                                                   band_url=_bandcamp_url_of(label))
+    except Exception as e:
+        info["fallback"] = {"error": f"{type(e).__name__}: {e}"}
+        print(f"[label] fallback «{label}» failed: {e}", flush=True)
+        return [], info
+    sources = finfo.get("sources") or {}
+    info["fallback"] = {"via": finfo.get("via") or [],
+                        "sources": sources,
+                        "health": finfo.get("health") or ("", {})}
+    for r in (more or []):
+        key = (_wl_norm(r.get("artist", "")), _wl_norm(r.get("title", "")))
+        if not key[1]:
+            continue
+        info["candidates"] += 1
+        if r.get("metadata_only"):
+            # Метаданные (MusicBrainz/Discogs) подтверждают ФАКТ релиза, но не
+            # его дату — будущее по ним радар показывать не имеет права.
+            info.setdefault("metadata_only", []).append(r)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        # Промолчавший Spotify больше не делает выдачу «непроверенной»: у нас
+        # есть подтверждение из источника, который ответил.
+        info["verify_failed"] = False
+        seeds.append(r)
+    if info["fallback"]["via"]:
+        _note_label_artists(label, seeds)
+        _stamp_label_check(label, info["fallback"]["via"])
+        print(f"[label] «{label}»: подтверждено источником "
+              f"{', '.join(info['fallback']['via'])}, релизов {len(seeds)}", flush=True)
+    elif not seeds:
+        # Ни один источник не подтвердил: честная строка вместо «лейбла нет».
+        key, args = info["fallback"].get("health") or ("lbl.health_unverified", {})
+        info["health_key"] = key
+        info["health_args"] = args or {}
+        refused = ", ".join(f"{k}:{v.get('status')}" for k, v in sorted(sources.items()))
+        print(f"[label] «{label}»: не подтверждено ни одним источником ({refused})",
+              flush=True)
+    return seeds, info
+
+
+def _bandcamp_url_of(label: str) -> str:
+    """Ручная ссылка на страницу Bandcamp из подписки (поле `bandcamp_url`).
+
+    Имя лейбла и его страница на Bandcamp совняются не всегда — у владельца
+    было именно так, поэтому поле заведено, и оно важнее автопоиска.
+    """
+    try:
+        from ripster.routes import watchlist as _wl
+        want = _wl_norm(label)
+        for e in (_wl._s.get("items") or []):
+            if (e.get("kind") == "label"
+                    and _wl_norm(e.get("name") or "") == want):
+                return str(e.get("bandcamp_url") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _note_label_artists(label: str, seeds: list) -> None:
+    """Запомнить артистов лейбла — из них позже растёт «артист из твоих
+    лейблов» в ранжировании грядущего."""
+    try:
+        from ripster import upcoming_taste as _ut
+        _ut.note_label_artists(label, [s.get("artist", "") for s in seeds])
+    except Exception:
+        pass
+
+
+def _stamp_label_check(label: str, via: list) -> None:
+    """Отметить `last_check` у подписки на лейбл: сверка сработала."""
+    try:
+        from ripster import label_sources as _ls
+        from ripster.routes import watchlist as _wl
+        items = _wl._s.get("items") or []
+        if _ls.stamp_label_checks(items, label, {"via": via}):
+            save = _wl._s.get("save")
+            if save:
+                save(items)
+    except Exception as e:
+        print(f"[label] stamp last_check «{label}»: {e}", flush=True)
 
 
 async def _label_seeds(label: str, limit: int) -> list[dict]:

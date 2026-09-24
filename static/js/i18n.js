@@ -2,6 +2,10 @@
 var LANG = {
   ru: {
     'err.loopback_only':'только с этой машины','err.config_reload':'не удалось перечитать конфиг: {e}','err.prefs_no_pool':'у сервиса {svc} нет пула учёток','err.priority_number':'приоритет должен быть числом','err.seek_seconds':'нужны секунды (sec)','err.url_required':'нужен URL релиза','ff.not_configured':'feature.fm не настроен — добавь вход в настройках','ff.session':'сессия feature.fm истекла — войди заново в настройках',
+    'err.relay_cap':'потолок активных ключей: {cap}',
+    'err.verdict_required':'нужен verdict: interesting или не то','err.card_unidentified':'карточка не опознана — нет идентификатора',
+    'ck.comp_section':'Сборники и участие','ck.dl_only_tracks':'⬇ Только треки артиста','ck.as_alias':'как {name}',
+    'ck.tracks_here':'Выделены треки этого артиста ({n}) — «Скачать выбранное» заберёт только их','ck.tracks_here_none':'У артиста {name} на этом релизе нет собственного трека (только упоминание)',
     'dlorb.title':'Индикатор загрузки: круг показывает текущую загрузку, силуэты позади — что стоит следом','dlorb.more':'+{n}','dlorb.section':'🌀 Круг загрузки в панели','dlorb.enable':'Показывать круг загрузки','dlorb.enable_sub':'Выкатывается в пустом низу левой панели, когда вкладка задач не открыта. Только свои ручные загрузки — гости и автоматика его не запускают.','dlorb.variant':'Оформление круга','dlorb.variant_sub':'Семь вариантов одной системы: отличаются тем, как ведёт себя рассеивающийся свет (дышит, пульсирует, льётся ровно, гаснет) и как кольцо читает прогресс (тонкая/толстая дуга, бегущая точка). Цвет берётся из обложки: доминирующий тон или её средний цвет.','dlorb.v_neon':'Неон','dlorb.v_aurora':'Сияние','dlorb.v_vinyl':'Винил','dlorb.v_mono':'Кольцо','dlorb.v_ember':'Уголь','dlorb.v_halo':'Ореол','dlorb.v_pulse':'Пульс','dlorb.mode_dominant':'доминирующий тон','dlorb.mode_average':'средний цвет',
     // Поле метаданных слева от круга загрузки (dlorb.js). Строка «своих» верна и
     // для владельца, и для гостя: у обоих в снимке очереди только их задачи.
@@ -2417,6 +2421,10 @@ var LANG = {
   },
   en: {
     'err.loopback_only':'only from this machine','err.config_reload':'could not reload the config: {e}','err.prefs_no_pool':'{svc} has no account pool','err.priority_number':'priority must be a number','err.seek_seconds':'seconds required (sec)','err.url_required':'release URL required','ff.not_configured':'feature.fm is not set up — add a login in Settings','ff.session':'feature.fm session expired — sign in again in Settings',
+    'err.relay_cap':'active key limit: {cap}',
+    'err.verdict_required':'verdict is required: interesting or not_it','err.card_unidentified':'card not identified — no identifier',
+    'ck.comp_section':'Compilations & appearances','ck.dl_only_tracks':'⬇ This artist only','ck.as_alias':'as {name}',
+    'ck.tracks_here':"This artist's tracks are selected ({n}) — “Download selected” grabs only them",'ck.tracks_here_none':'{name} has no own track on this release (credit only)',
     'dlorb.title':'Download orb: the coloured circle is the current download, the silhouettes behind it are what comes next','dlorb.more':'+{n}','dlorb.section':'🌀 Download orb in the sidebar','dlorb.enable':'Show the download orb','dlorb.enable_sub':'Rolls out in the empty bottom of the left sidebar while the tasks tab is not open. Your own manual downloads only — guests and automation never trigger it.','dlorb.variant':'Orb design','dlorb.variant_sub':'Seven variants of one system: they differ in how the diffused light behaves (breathes, pulses, flows evenly, goes out) and how the ring reads progress (thin/thick arc, a travelling dot). Colour comes from the cover: its dominant hue or its average colour.','dlorb.v_neon':'Neon','dlorb.v_aurora':'Aurora','dlorb.v_vinyl':'Vinyl','dlorb.v_mono':'Ring','dlorb.v_ember':'Ember','dlorb.v_halo':'Halo','dlorb.v_pulse':'Pulse','dlorb.mode_dominant':'dominant hue','dlorb.mode_average':'average colour',
     'dlmeta.running':'Downloading','dlmeta.finishing':'Finishing','dlmeta.queued':'Queued','dlmeta.last':'Last download',
     'dlmeta.failed':'Last attempt','dlmeta.idle':'No downloads of your own in the queue',
@@ -5053,6 +5061,9 @@ var LANG = {
     'console.amd_no_instances':'⚠ पब्लिक wrapper-manager: पूल में अभी कोई भी लाइव इंस्टेंस नहीं है (हमारी गलती नहीं, थर्ड-पार्टी सर्विस) — रूटिंग से अस्थायी रूप से हटाया गया',
     'err.slots_required':'a non-empty slots list is required',
     'err.slot_range':'slot {i} is outside 0..{max}',
+    'err.verdict_required':'verdict is required: interesting or not_it','err.card_unidentified':'card not identified — no identifier',
+    'ck.comp_section':'संग्रह और उपस्थिति','ck.dl_only_tracks':'⬇ केवल इस कलाकार','ck.as_alias':'के रूप में {name}',
+    'ck.tracks_here':'इस कलाकार के ट्रैक चयनित हैं ({n}) — “चयनित डाउनलोड” केवल उन्हें लेगा','ck.tracks_here_none':'इस रिलीज़ पर {name} का अपना ट्रैक नहीं है',
     'err.cfg_save_unavailable':'saving the config is unavailable',
     'err.cfg_save_failed':'could not save the config: {e}',
     's.retry':'फिर जाँचें',
@@ -5312,6 +5323,9 @@ var LANG = {
     'console.amd_no_instances':'⚠ パブリックwrapper-manager: プールに現在稼働中のインスタンスがありません(こちらの不具合ではなく外部サービスの問題)— 一時的にルーティングから除外されました',
     'err.slots_required':'a non-empty slots list is required',
     'err.slot_range':'slot {i} is outside 0..{max}',
+    'err.verdict_required':'verdict is required: interesting or not_it','err.card_unidentified':'card not identified — no identifier',
+    'ck.comp_section':'オムニバス / 参加作品','ck.dl_only_tracks':'⬇ このアーティストのみ','ck.as_alias':'({name} 名義)',
+    'ck.tracks_here':'このアーティストの曲を選択中です（{n}）—「選択をダウンロード」でこの曲のみ取得','ck.tracks_here_none':'この作品に {name} 自身の曲はありません',
     'err.cfg_save_unavailable':'saving the config is unavailable',
     'err.cfg_save_failed':'could not save the config: {e}',
     's.retry':'再確認',
@@ -5571,6 +5585,9 @@ var LANG = {
     'console.amd_no_instances':'⚠ 公共 wrapper-manager:池中当前没有任何在线实例(不是我们的问题,是第三方服务)— 已临时从路由中排除',
     'err.slots_required':'a non-empty slots list is required',
     'err.slot_range':'slot {i} is outside 0..{max}',
+    'err.verdict_required':'verdict is required: interesting or not_it','err.card_unidentified':'card not identified — no identifier',
+    'ck.comp_section':'合辑与参与','ck.dl_only_tracks':'⬇ 仅此艺人','ck.as_alias':'以 {name} 名义',
+    'ck.tracks_here':'已选中该艺人的曲目（{n}）—「下载所选」只取这些','ck.tracks_here_none':'该发行中 {name} 没有自己的曲目',
     'err.cfg_save_unavailable':'saving the config is unavailable',
     'err.cfg_save_failed':'could not save the config: {e}',
     's.retry':'重新检查',

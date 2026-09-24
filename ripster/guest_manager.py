@@ -170,7 +170,9 @@ class GuestManager:
         quota_limit: int = 0,
         token_mode: str = "owner",
     ) -> dict:
-        if len(self.active_links()) >= MAX_LINKS:
+        # Telegram Mini App links are auto-provisioned per tg-user (kind=="tg")
+        # and must not count against the owner's manual share-link budget.
+        if len([l for l in self.active_links() if l.get("kind") != "tg"]) >= MAX_LINKS:
             raise ValueError(f"Максимум {MAX_LINKS} активных ссылок")
         token = secrets.token_hex(16)   # 32 hex chars
         now   = _utcnow()
