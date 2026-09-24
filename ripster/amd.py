@@ -29,6 +29,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Optional
 
@@ -50,6 +51,10 @@ _wrapper_log_task:   Optional[asyncio.Task]               = None
 _wrapper_direct_proc: Optional[asyncio.subprocess.Process] = None
 # Interactive login process (docker run -i) whose STDIN receives the 2FA code.
 _wrapper_login_proc: Optional[asyncio.subprocess.Process] = None
+# Диалог «Invalid store» печатается на КАЖДЫЙ запрос ключа, пока аккаунт не в
+# своей стране — без глушилки владелец получил бы спам в боте каждые несколько
+# секунд. Храним момент последней отправки, чтобы повторить не чаще раза в час.
+_last_store_alert_ts: float = 0.0
 
 
 def _redact(text: str) -> str:
@@ -647,6 +652,52 @@ async def check_wrapper_running() -> bool:
         return False
 
 
+async def _handle_invalid_store(text: str) -> None:
+    """Диалог Apple «Invalid store» → внятная ошибка владельцу + сигнал в бот.
+
+    Это НЕ «ключа нет по незнанию»: Apple прямо говорит, что аккаунт закреплён
+    не за той страной, где оформлена подписка. Лечится только на стороне Apple
+    (сменить страну учётной записи либо взять аккаунт нужной страны), поэтому
+    говорим это вслух и не ждём, пока человек сам догадается.
+    """
+    global _last_store_alert_ts
+    from ripster import i18n as _i18n
+    from ripster import wrapper_storefront as _wsf
+    info = _wsf.parse_invalid_store(text)
+    if not info:
+        return
+    signed = info.get("signed_in") or "?"
+    allowed = info.get("allowed") or "?"
+    signed_cc = info.get("signed_in_cc") or "?"
+    allowed_cc = info.get("allowed_cc") or "?"
+    if _broadcast:
+        try:
+            await _broadcast(_i18n.log_event(
+                "console.wrapper_store_mismatch", level="error",
+                signed_in=signed, allowed=allowed,
+                signed_cc=signed_cc, allowed_cc=allowed_cc))
+        except Exception:
+            pass
+    # В бот — не на каждый трек, а раз в час на один и тот же диагноз.
+    now = time.time()
+    if now - _last_store_alert_ts < 3600:
+        return
+    _last_store_alert_ts = now
+    try:
+        from ripster import accounts_watch as _aw
+        bot_text = (
+            "🔴 Apple: аккаунт wrapper'а не в своей стране.\n"
+            f"Wrapper вошёл в витрину «{signed}» ({signed_cc}), а покупать этому "
+            f"аккаунту разрешено только в «{allowed}» ({allowed_cc}).\n"
+            "Ключ на такие релизы Apple не выдаст, и перелогин/смена ссылки не "
+            "помогут — это настройка страны самой учётной записи Apple. "
+            "Нужно либо сменить страну аккаунта на странице Apple ID, либо "
+            "использовать аккаунт той страны, где оформлена подписка.")
+        await _aw._default_notify(bot_text, _base_dir)
+    except Exception:
+        pass
+
+
 async def _monitor_wrapper_logs() -> None:
     """Stream container logs via 'docker logs -f'; reconnects on restart."""
     ok, docker_path = check_docker_installed()
@@ -666,6 +717,10 @@ async def _monitor_wrapper_logs() -> None:
                 low  = text.lower()
                 if text and _broadcast:
                     await _broadcast({"type": "wrapper_log", "text": _redact(text)})
+                if "invalid store" in low or "not valid for use in the" in low:
+                    # Apple прямо говорит про чужую страну аккаунта — это не
+                    # «релиза нет в витрине», и лестница слотов тут не поможет.
+                    await _handle_invalid_store(text)
                 if _is_2fa_prompt(low):
                     if _broadcast:
                         await _broadcast({"type": "wrapper_2fa_needed"})
@@ -696,6 +751,7 @@ async def _monitor_wrapper_logs() -> None:
                         or "lease code 3062" in low):
                     if _broadcast:
                         await _broadcast({"type": "wrapper_login_failed",
+                            "msg_key": "w.device_limit", "params": {},
                             "msg": "Apple: у аккаунта исчерпан лимит устройств "
                                    "(«device limit»). Перелогин НЕ поможет — каждый "
                                    "вход занимает ещё один слот, а Apple освобождает "
@@ -716,6 +772,7 @@ async def _monitor_wrapper_logs() -> None:
                         or _login_tries >= 3):
                     if _broadcast:
                         await _broadcast({"type": "wrapper_login_failed",
+                            "msg_key": "w.login_loop", "params": {},
                             "msg": "Логин не удался / зациклился — wrapper остановлен. "
                                    "Скорее всего у аккаунта нет подписки Apple Music, либо неверный пароль."})
                     ok2, dp2 = check_docker_installed()
@@ -785,6 +842,7 @@ async def _start_wrapper_docker(force_login: bool = False) -> dict:
     if need_login:
         if not (apple_id and apple_pwd):
             return {"ok": False,
+                    "msg_key": "w.no_apple_id", "params": {},
                     "msg": "Apple ID и пароль не заданы в Settings → Apple Music → Wrapper"}
         return await _docker_login(docker_path, image, dec_port, m3u_port,
                                    rootfs, apple_id, apple_pwd, force_login)
@@ -875,6 +933,7 @@ async def _read_login_stream(proc: "asyncio.subprocess.Process") -> None:
             if _is_login_failed(text):
                 if _broadcast:
                     await _broadcast({"type": "wrapper_login_failed",
+                        "msg_key": "w.login_rejected", "params": {},
                         "msg": "Логин отклонён Apple (неверный пароль) — остановлено, чтобы не залочить аккаунт"})
                 try:
                     proc.terminate()
@@ -951,8 +1010,10 @@ async def _docker_login(docker_path: str, image: str, dec_port: str, m3u_port: s
             if _broadcast:
                 await _broadcast({"type": "wrapper_started"})
             await _harvest_wrapper_token()
-            return {"ok": True, "msg": "Враппер залогинен и запущен"}
-    return {"ok": True, "msg": "Логин идёт — введи 2FA-код в открывшемся поле"}
+            return {"ok": True, "msg_key": "w.logged_in", "params": {},
+                    "msg": "Враппер залогинен и запущен"}
+    return {"ok": True, "msg_key": "w.login_pending_2fa", "params": {},
+            "msg": "Логин идёт — введи 2FA-код в открывшемся поле"}
 
 
 async def stop_wrapper_docker() -> dict:
@@ -1000,7 +1061,8 @@ async def _start_wrapper_direct(force_login: bool = False) -> dict:
 
     bin_path = _wrapper_bin()
     if not bin_path.exists():
-        return {"ok": False, "msg": f"Бинарник не найден: {bin_path}"}
+        return {"ok": False, "msg_key": "w.bin_missing", "params": {"path": str(bin_path)},
+                "msg": f"Бинарник не найден: {bin_path}"}
 
     # A forced re-login must tear the running wrapper down and log in fresh —
     # otherwise a stale/expired Apple session keeps serving and every decrypt
@@ -1020,7 +1082,8 @@ async def _start_wrapper_direct(force_login: bool = False) -> dict:
     wrapper_args = ["-H", "0.0.0.0", "-D", str(dec_p), "-M", str(m3u_p)]
     if force_login:
         if not apple_id or not apple_pwd:
-            return {"ok": False, "msg": "Apple ID и пароль не заданы в Settings → Apple Music → Wrapper"}
+            return {"ok": False, "msg_key": "w.no_apple_id", "params": {},
+                    "msg": "Apple ID и пароль не заданы в Settings → Apple Music → Wrapper"}
         wrapper_args += ["-L", f"{apple_id}:{apple_pwd}", "-F"]
     elif not has_session and apple_id and apple_pwd:
         wrapper_args += ["-L", f"{apple_id}:{apple_pwd}"]
@@ -1030,7 +1093,8 @@ async def _start_wrapper_direct(force_login: bool = False) -> dict:
 
     if _is_windows:
         if not check_wsl_available():
-            return {"ok": False, "msg": "WSL не найден. Установи WSL 2 для запуска non-docker враппера на Windows."}
+            return {"ok": False, "msg_key": "w.wsl_missing", "params": {},
+                    "msg": "WSL не найден. Установи WSL 2 для запуска non-docker враппера на Windows."}
         wsl_bin = _to_wsl_path(bin_path)
         wsl_cwd = _to_wsl_path(dist_dir)
         cmd = ["wsl", "--cd", wsl_cwd, "--", wsl_bin] + wrapper_args
@@ -1055,11 +1119,13 @@ async def _start_wrapper_direct(force_login: bool = False) -> dict:
                 if _wrapper_log_task and not _wrapper_log_task.done():
                     _wrapper_log_task.cancel()
                 _wrapper_log_task = asyncio.create_task(_monitor_wrapper_proc_logs())
-                return {"ok": True, "msg": "Wrapper (non-docker) запущен"}
+                return {"ok": True, "msg_key": "w.nondocker_started", "params": {},
+                        "msg": "Wrapper (non-docker) запущен"}
             if _broadcast:
                 await _broadcast({"type": "wrapper_log",
                                    "text": f"Waiting for wrapper… ({i+1}/15)"})
-        return {"ok": False, "msg": "Wrapper не ответил на порту после 15s"}
+        return {"ok": False, "msg_key": "w.port_silent", "params": {},
+                "msg": "Wrapper не ответил на порту после 15s"}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
 
@@ -1076,7 +1142,8 @@ async def _stop_wrapper_direct() -> dict:
             except Exception:
                 pass
         _wrapper_direct_proc = None
-    return {"ok": True, "msg": "Wrapper остановлен"}
+    return {"ok": True, "msg_key": "s.wrapper_stopped", "params": {},
+            "msg": "Wrapper остановлен"}
 
 
 # ── Public dispatcher ──────────────────────────────────────────────────────────
@@ -1109,7 +1176,8 @@ async def build_wrapper_image() -> dict:
         return {"ok": False, "msg": docker_path}
     dist = _dist_dir("docker-local")
     if not (dist / "Dockerfile").exists():
-        return {"ok": False, "msg": f"Dockerfile не найден в {dist}"}
+        return {"ok": False, "msg_key": "w.dockerfile_missing", "params": {"dir": str(dist)},
+                "msg": f"Dockerfile не найден в {dist}"}
     if _broadcast:
         await _broadcast({"type": "wrapper_log",
                            "text": f"🔨 Building {WRAPPER_LOCAL_IMAGE} из {dist}…"})
@@ -1131,7 +1199,9 @@ async def build_wrapper_image() -> dict:
                                    "text": f"✓ Image {WRAPPER_LOCAL_IMAGE} собран",
                                    "level": "success"})
                 await _broadcast({"type": "wrapper_built"})
-            return {"ok": True, "msg": f"Image {WRAPPER_LOCAL_IMAGE} собран"}
+            return {"ok": True, "msg_key": "w.image_built",
+                    "params": {"image": WRAPPER_LOCAL_IMAGE},
+                    "msg": f"Image {WRAPPER_LOCAL_IMAGE} собран"}
         return {"ok": False, "msg": f"docker build failed (exit {proc.returncode})"}
     except Exception as e:
         return {"ok": False, "msg": str(e)}
