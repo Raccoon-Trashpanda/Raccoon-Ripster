@@ -74,7 +74,83 @@ def _detect_actual_quality(log_text: str) -> str:
     return "6"
 
 
-def _write_config(user_cfg: dict, save_path: str, cfg_override: str = "") -> Path:
+def _album_identity(album_id: str, app_id: str, token: str = "") -> tuple[str, str]:
+    """(title, version) релиза по /album/get, 3-секундным таймаутом.
+    ''-ы при любой осечке — суффикс тогда подберёт только коллизионный путь."""
+    import httpx as _httpx
+    try:
+        headers = {"X-User-Auth-Token": token} if token else {}
+        with _httpx.Client(timeout=3.0) as c:
+            r = c.get("https://www.qobuz.com/api.json/0.2/album/get",
+                      params={"album_id": album_id, "app_id": app_id}, headers=headers)
+            if r.status_code != 200:
+                return "", ""
+            d = r.json()
+        return (d.get("title") or ""), (d.get("version") or "")
+    except Exception:
+        return "", ""
+
+
+def _folder_suffix(save_path: str, album_id: str, config: dict,
+                   task_id: str = "") -> str:
+    """Хвост имени папки, отделяющий ЭТОТ релиз от одноимённого другого.
+
+    Два разных релиза могут дать ОДИНАКОВОЕ имя папки: MIXED и UNMIXED
+    «NORTHERN EXPOSURE REDUX» Sasha & John Digweed (qobuz uvxkonsapjsbb и
+    e6r7vcsf378jq) — один артист, тайтл, год и качество. streamrip открывает
+    файл 'wb' без проверки существования — вторая загрузка молча стирает треки
+    первой, а авто-чистка по записи одной задачи сносит всю папку (24.09.2026
+    так потеряли уже скачанный релиз). Поэтому: есть у релиза поле version
+    (Mixed/Unmixed/Deluxe…) — дописываем его ВСЕГДА; нет — только если папка с
+    таким именем уже занята ДРУГИМ релизом (манифест или файлы на диске); в
+    обоих коллизионных случаях различаем коротким идентом « [qobuz-<id>]».
+    Лучево: любая осечка возвращает '' — страховка separate_collided_files
+    разнесёт папки после загрузки."""
+    if not album_id:
+        return ""
+    try:
+        from ripster import release_folders as _rf
+        from ripster import download_manifest as _dm
+        app_id = (config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+        token  = (config.get("qobuz-auth-token") or "").strip()
+        title, version = _album_identity(album_id, app_id, token)
+        if version:
+            return _rf.fmt_suffix("qobuz", "", version)
+        if not title:
+            return ""                       # API недоступен — решит страховка
+        tl = title.lower()
+        rid = _dm.release_id_of(f"https://open.qobuz.com/album/{album_id}") or album_id
+        candidates = {e.get("dir") or "" for e in _dm.all_entries().values()}
+        try:
+            parent = Path(save_path)
+            if parent.is_dir():
+                candidates |= {str(p) for p in parent.iterdir() if p.is_dir()}
+        except Exception:
+            pass
+        foreign = False
+        for raw in candidates:
+            if not raw:
+                continue
+            p = Path(raw)
+            try:
+                if tl not in _rf.base_of(p.name).lower():
+                    continue
+                claimed = bool(_dm.dir_claims(p, exclude_task_id=task_id))
+                if claimed and not _rf.foreign_claims(p, task_id, "qobuz", rid):
+                    return ""               # здесь лежит ОН САМ — повтор/добор
+                has_audio = any(
+                    f.suffix.lower() in _rf._AUDIO
+                    for f in p.iterdir() if f.is_file()) if p.is_dir() else False
+                foreign = foreign or claimed or has_audio
+            except Exception:
+                continue
+        return _rf.fmt_suffix("qobuz", rid, "") if foreign else ""
+    except Exception:
+        return ""
+
+
+def _write_config(user_cfg: dict, save_path: str, cfg_override: str = "",
+                  folder_suffix: str = "") -> Path:
     """Write a minimal streamrip config.toml with the user's Qobuz creds."""
     user_id     = str(user_cfg.get("qobuz-user-id")    or "").strip()
     auth_token  = str(user_cfg.get("qobuz-auth-token") or "").strip()
@@ -115,6 +191,9 @@ def _write_config(user_cfg: dict, save_path: str, cfg_override: str = "") -> Pat
         secrets_toml = "[" + ", ".join(parts) + "]"
 
     safe_save = save_path.replace("\\", "/")
+    # суффикс попадает в TOML только в безопасном алфавите (fmt_suffix режет
+    # кавычки и пути) — на всякий случай фильтр здесь же
+    folder_suffix = re.sub(r'["\\\r\n]', "", folder_suffix or "")
 
     # Qobuz FLAC has no in-track segments (one file / one GET per track), so speed
     # comes from downloading more TRACKS at once. streamrip already does this; we
@@ -162,7 +241,11 @@ def _write_config(user_cfg: dict, save_path: str, cfg_override: str = "") -> Pat
         # at a time) get their own folder instead of landing loose in the
         # save-path root, where /api/download-file cannot find them.
         'add_singles_to_folder = true\n'
-        'folder_format = "{albumartist} - {title} ({year}) [{container}] [{bit_depth}B-{sampling_rate}kHz]"\n'
+        # `{version}` в streamrip не поддержан, поэтому издание/идент релиза
+        # дописываются в шаблон готовым суффиксом (_folder_suffix) — иначе два
+        # разных релиза пишут в одну папку и затирают друг друга.
+        'folder_format = "{albumartist} - {title} ({year}) [{container}] '
+        '[{bit_depth}B-{sampling_rate}kHz]' + folder_suffix + '"\n'
         'track_format = "{tracknumber:02}. {artist} - {title}{explicit}"\n'
         'restrict_characters = false\n'
         'truncate_to = 120\n\n'
@@ -263,11 +346,19 @@ class QobuzEngine(StreamripMixin, EngineBase):
 
         cfg_copy = dict(config)
         cfg_copy["quality"] = quality
+        # Отличаем этот релиз от одноимённого другого ДО старта загрузки:
+        # издание (version) или короткий идент в имени папки.
+        _mab = re.search(r'open\.qobuz\.com/album/([A-Za-z0-9]+)', url)
+        folder_suffix = _folder_suffix(save_path, _mab.group(1) if _mab else "",
+                                       config, config.get("_task_id") or "")
+        if folder_suffix:
+            print(f"[qobuz] folder suffix: {folder_suffix}", flush=True)
         # `qobuz-*` fields and `_qobuz_cfg_dir` may be overridden per-task by the
         # multi-account pool dispatch (ripster/runner.py, ripster/qobuz_pool.py) —
         # a plain single-account setup never sets `_qobuz_cfg_dir`, so this is a
         # no-op (behaves exactly as before the pool existed).
-        cfg_path = _write_config(cfg_copy, save_path, cfg_override=config.get("_qobuz_cfg_dir") or "")
+        cfg_path = _write_config(cfg_copy, save_path, cfg_override=config.get("_qobuz_cfg_dir") or "",
+                                 folder_suffix=folder_suffix)
         # Diagnostic: record the credential SHAPE (booleans only, no values) so a
         # 0-tracks failure can name the real cause via telemetry instead of guessing
         # — the #1 unknown was "did the tester set token correctly / a custom app_id".
@@ -585,8 +676,10 @@ class QobuzEngine(StreamripMixin, EngineBase):
         try:
             async with _HTTP.ashared() as c:
                 headers = {"X-User-Auth-Token": token} if token else {}
+                # limit: без него Qobuz отдаёт первую страницу (~50) — трёхдисковые
+                # релизы молча теряли хвост треклиста (24.09.2026, NORTHERN EXPOSURE).
                 r = await c.get("https://www.qobuz.com/api.json/0.2/album/get", params={
-                    "album_id": album_id, "app_id": app_id,
+                    "album_id": album_id, "app_id": app_id, "limit": 500,
                 }, headers=headers)
                 a = r.json()
             if a.get("status") == "error":

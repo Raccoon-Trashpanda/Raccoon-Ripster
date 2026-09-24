@@ -2633,6 +2633,10 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 _yx_pool = None
                 _yx_slot = None
                 print(f"[yandex-pool] acquire failed → single-account fallback: {_yxe}", flush=True)
+        # Идентичатор задачи доезжает до движка: Qobuz по нему снимает СВОЮ
+        # прошлую папку с коллизии при повторе (иначе повтор ушёл бы в новый
+        # суффикс и перекачал релиз заново в чужую рядом стоящую папку).
+        _cfg_view["_task_id"] = tid
         cmd = eng.build_cmd(url, quality, _cfg_view)
         task["log"].append(f"▶ {' '.join(cmd)}")
         await _broadcast(_i18n.log_event("console.cmd_start", level="info", task_id=tid, cmd=' '.join(cmd[:3])))
@@ -3267,6 +3271,44 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     d = _gtd(task)          # robust resolver at the freshest moment
                 if d and d.is_dir():
                     task["_save_dir"] = str(d)
+                    # ── Одна папка — один релиз (страховка). Движок не смог
+                    # отличить издание до старта (нет version, манифест был пуст)
+                    # — и чужой релиз сидит в этой же папке: уносим СВОИ файлы
+                    # в соседнюю папку с суффиксом. Ничего чужого не удаляется
+                    # и не перезаписывается (24.09.2026, NORTHERN EXPOSURE).
+                    try:
+                        from ripster import release_folders as _rfs
+                        _spl = await asyncio.to_thread(
+                            _rfs.separate_collided_files, task, d,
+                            (task.get("service") or "release").lower(),
+                            task.get("url") or url or "")
+                        if _spl:
+                            print(f"[release-split] {_dm.short_id(tid)} → {_spl.name}", flush=True)
+                            await _broadcast(_i18n.log_event("console.release_split",
+                                                             level="info", task_id=tid,
+                                                             dir=_spl.name))
+                            d = _spl
+                            task["_save_dir"] = str(d)
+                            try:
+                                from ripster.task_marker import write_marker as _wm
+                                _wm(d, tid, task)
+                            except Exception:
+                                pass
+                    except Exception as _sp_e:
+                        print(f"[release-split] {_sp_e}", flush=True)
+                    # Разнодисковые у streamrip сюда доходят впервые: ранний
+                    # блок disc-subfolders работает по task["_save_dir"], а
+                    # движок его не выдаёт (extract_save_dir пуст). Идемпотентно:
+                    # уже разобранный релиз вернёт 0.
+                    if _config.get("disc-subfolders", True):
+                        try:
+                            _nd = await asyncio.to_thread(_organize_discs, str(d))
+                            if _nd:
+                                await _broadcast(_i18n.log_event("console.discs_organized",
+                                                                 level="info",
+                                                                 task_id=tid, n=_nd))
+                        except Exception as _e:
+                            print(f"[discs] {_e}", flush=True)
                     # Qobuz: streamrip tags only the primary `performer` → collabs
                     # land with ONE artist and no composer. Re-derive the FULL credits
                     # from the Qobuz API (per-track credits) and rewrite ARTIST +

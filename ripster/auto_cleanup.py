@@ -168,6 +168,29 @@ async def run(config: dict) -> None:
                       flush=True)
                 continue
 
+            # Папка может принадлежать НЕ ОДНОМУ релизу: два разных релиза с
+            # одинаковым именем (MIXED/UNMIXED-издания) дают две манифестные
+            # записи в один каталог — 24.09.2026 так сгорел NORTHERN EXPOSURE
+            # REDUX. Чистка вправе снести ТОЛЬКО то, что записано на эту задачу:
+            # чужихclaim-записей нет → удаляем папку, есть → удаляем свои файлы.
+            try:
+                claims = _dm.dir_claims(d, exclude_task_id=tid)
+            except Exception:
+                claims = []
+            if claims:
+                n_files = 0
+                for p in _dm.owned_files(tid):
+                    try:
+                        Path(p).unlink(missing_ok=True)
+                        n_files += 1
+                    except Exception:
+                        pass
+                removed.append(tid)
+                print(f"[autodelete] {d}: shared with {len(claims)} other "
+                      f"release(s) - removed only this task's {n_files} file(s)",
+                      flush=True)
+                continue
+
             try:
                 # Delete ONLY this task's own folder — never climb to shared
                 # parents (e.g. 'ALAC (Lossless)/' holds many tasks' content).

@@ -88,6 +88,7 @@ FALLBACK: dict[str, str] = {
     "console.wrapper_other_slot": "⚠ Витрина «{frm}» ключ не дала — пробую свой аккаунт в «{to}» (слот {slot}). Публичный wrapper не нужен.",
     # ── transcode / disc organization ─────────────────────────────────────────
     "console.transcode_start":  "⏳ Конвертирую в {label}…",
+    "console.release_split":    "📂 Релиз лежал в одной папке с одноимённым другим релизом — файлы перенесены в «{dir}»",
     "console.transcode_done":   "✓ {label}: сконвертировано {n} файл(ов)",
     "console.discs_organized":  "🗂 Многодисковый релиз: разложено по папкам ({n} трек(ов))",
     "console.integrity_fixed":  "✓ Автопроверка: починено {n} файл(ов) (дефект ALAC-потока)",

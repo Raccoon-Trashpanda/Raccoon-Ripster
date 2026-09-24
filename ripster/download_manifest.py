@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from threading import Lock
@@ -24,6 +25,30 @@ _LOCK = Lock()
 _MANIFEST_FILE: Path = Path("downloads_manifest.json")
 _MAX = 4000
 _cache: dict | None = None
+
+# Тип-идентификатор релиза в URL движка: /album/<id>, /track/<id>… Последний
+# сегмент пути годится и для Qobuz (uvxkonsapjsbb), и для числовых Tidal/Deezer.
+_RE_RELEASE_ID = re.compile(r'/(?:album|track|playlist|song|media)[-_/]([A-Za-z0-9_-]+)/?(?:\?.*)?$', re.I)
+
+
+def release_id_of(url: str) -> str:
+    """Идентик релиза внутри URL (для раскладки «одна папка — один релиз»).
+    '' — URL не похож на релиз (поиск, artist-страница), не угадываем."""
+    u = (url or "").split("#")[0]
+    m = _RE_RELEASE_ID.search(u)
+    if m:
+        return m.group(1)
+    tail = [p for p in u.split("?")[0].strip("/").split("/") if p]
+    return tail[-1] if tail and tail[-1].isalnum() and len(tail[-1]) >= 4 else ""
+
+
+def entry_release_id(ent: dict) -> str:
+    """Идент релиза для ЗАПИСИ манифеста. Поля engine_id нет в записях,
+    написанных до его появления, — для них считаем из URL. Одна функция на
+    всех (движок, self-heal, health-check): своя регулярка у каждого читающего
+    уже раз расходилась с этой."""
+    ent = ent or {}
+    return ((ent.get("engine_id") or release_id_of(ent.get("url") or ""))).lower()
 
 
 def init(base_dir) -> None:
@@ -79,6 +104,10 @@ def record(task_id: str, directory, files, task: dict) -> bool:
         "service": task.get("service") or "",
         "quality": task.get("quality") or "",
         "url":     task.get("url") or "",
+        # Кто ЭТОТ релиз: идент из URL. По нему (плюс url) отличают соседнюю
+        # загрузку, севшую в ту же папку, от своей — иначе манифест врезается
+        # в чужую папку молча (24.09: два релиза NORTHERN EXPOSURE REDUX).
+        "engine_id": release_id_of(task.get("url") or ""),
         # Partial-download bookkeeping (issue #5). Usually unset at record time —
         # the silent-partial detection runs AFTER the manifest is first written —
         # so these default empty and get patched in by set_partial() below once
@@ -167,6 +196,66 @@ def all_entries() -> dict:
     time-based disk cleanup to find finished releases past their retention age."""
     with _LOCK:
         return dict(_load())
+
+
+def dir_claims(directory, exclude_task_id: str = "") -> list[tuple[str, dict]]:
+    """Записи манифеста, чья папка — ЭТА (или её предок/потомок), кроме самой
+    задачи exclude_task_id. По ним чистка решает, есть ли в папке чужие релизы:
+    один каталог могут делить задачи с разными URL (коллизия имён релизов), и
+    сносить его тогда — это удалить чужую работу (24.09.2026, NORTHERN EXPOSURE)."""
+    try:
+        d = str(Path(directory).resolve())
+    except Exception:
+        return []
+    out = []
+    with _LOCK:
+        entries = _load().items()
+    for tid, ent in list(entries):
+        if tid == exclude_task_id:
+            continue
+        raw = (ent or {}).get("dir") or ""
+        if not raw:
+            continue
+        try:
+            e = str(Path(raw).resolve())
+        except Exception:
+            continue
+        # пересечение = одна из папок внутри другой (папка релиза ↔ папка диска)
+        if e == d or d.startswith(e + os.sep) or e.startswith(d + os.sep):
+            out.append((tid, ent))
+    return out
+
+
+def dir_claims_by_base(base_name: str, exclude_task_id: str = "") -> list[tuple[str, dict]]:
+    """Манифестные записи, чьё имя папки (без суффикса издания/релиза) равно
+    base_name. Нужно движку ДО загрузки: папку выбирает streamrip по формату,
+    и суффикс надо успеть подставить до первого же врезания в чужую папку."""
+    out = []
+    with _LOCK:
+        entries = dict(_load())
+    for tid, ent in entries.items():
+        if tid == exclude_task_id:
+            continue
+        raw = (ent or {}).get("dir") or ""
+        if not raw:
+            continue
+        try:
+            from ripster.release_folders import base_of
+            if base_of(Path(raw).name) == base_name:
+                out.append((tid, ent))
+        except Exception:
+            continue
+    return out
+
+
+def owned_files(task_id: str) -> list[str]:
+    """Пути файлов, записанных за этой задачей (имена из её манифестной папки).
+    Только они и принадлежат задаче: чистка обязана трогать ИСКЛЮЧИТЕЛЬНО их."""
+    ent = lookup(task_id)
+    if not ent:
+        return []
+    d = ent.get("dir") or ""
+    return [os.path.join(d, f) for f in (ent.get("files") or []) if f]
 
 
 def remove(task_ids) -> None:

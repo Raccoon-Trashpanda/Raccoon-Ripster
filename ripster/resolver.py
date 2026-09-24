@@ -356,7 +356,9 @@ async def _qobuz_album(album_id: str, app_id: str, headers: dict) -> list[dict]:
     async with _HTTP.ashared() as c:
         r = await c.get(
             "https://www.qobuz.com/api.json/0.2/album/get",
-            params={"album_id": album_id, "app_id": app_id},
+            # limit: по умолчанию Qobuz отдаёт первую страницу (~50 треков) —
+            # трёхдисковый релиз молча терял хвост (24.09.2026, NORTHERN EXPOSURE).
+            params={"album_id": album_id, "app_id": app_id, "limit": 500},
             headers=headers,
         )
     if r.status_code != 200:
