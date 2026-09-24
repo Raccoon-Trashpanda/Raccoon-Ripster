@@ -184,6 +184,10 @@ function _histRender() {
     if(h.status === 'done' && h.public_wrapper){
       fbLine += ` <span style="color:var(--orange)">${esc(t('history.public_wrapper',{region:h.public_wrapper}))}</span>`;
     }
+    // Тихое понижение качества, которое страж не дал замолчать.
+    if(h.status === 'done' && h.quality_downgraded){
+      fbLine += ` <span style="color:var(--orange)">${esc(t('history.qd_downgraded',{got:h.quality_downgraded, want:h.quality_wanted||''}))}</span>`;
+    }
     const art = h.artworkUrl ? `<img src="${esc(h.artworkUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:6px" loading="lazy"/>` : lbl;
     return `
     <div class="hist-row" style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px">

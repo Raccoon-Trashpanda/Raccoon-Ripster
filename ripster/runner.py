@@ -49,7 +49,16 @@ _RE_NO_RETRY = _re.compile(
     # Повтор шлёт ТОТ ЖЕ пустой запрос — три прогона вместо одной честной строки.
     r'в\s+каталоге\s+ничего\s+нет|'
     # Beatport territory restriction is permanent for this account/region.
-    r'Territory\s+Restricted|недоступен в регионе|region\s+locked|'
+    # Гео-формулировки остальных витрин — тоже постоянные для этой учётки:
+    # Tidal/Deezer «not available in your region/country», Qobuz «not streamable
+    # in your territory», русский вердикт Deezer «закрыт для страны аккаунта».
+    # 24.09.2026: без этих строк постоянный отказ молча крутили три автоповтора,
+    # а фоллбэк заперт условием `_no_retry or _engine_aborted` — без совпадения
+    # он не запускался вовсе.
+    r'Territory\s+Restricted|недоступен\w*\s+в\s+регионе|region\s+locked|'
+    r'not\s+available\s+in\s+your\s+(?:country|region)|'
+    r'not\s+streamable\s+in\s+your\s+territory|'
+    r'закрыт\w*\s+для\s+страны|'
     # Отказ по правам аккаунта (Beatport/Tidal: «You do not have permission»)
     # постоянен до смены учётки или тарифа. 09.08.2026 отсечка честно обрывала
     # прогон на 10-м отказе — но раннер повторял задачу ТРИЖДЫ, и вместо одной
@@ -247,6 +256,7 @@ _PARTIAL_REASON_PATTERNS = [
     ("region",     _re.compile(r"not available in your country|region|"
                                r"unavailable in|geo|Territory\s+Restricted|"
                                r"from your current country|гео-?блок|"
+                               r"not streamable|territor|недоступн\w*\s+в\s+регионе|"
                                r"закрыт\w*\s+для\s+страны", _re.I)),
     ("no-flac",    _re.compile(r"desired bitrate|no\s+FLAC|not.*available.*bitrate", _re.I)),
     ("removed",    _re.compile(r"Resource not found|no longer available|"
@@ -944,6 +954,21 @@ def _add_to_history(task: dict) -> None:
         entry["switched_quality"] = q_label
         entry["switched_note"] = fb_note
         entry["switched_note_key"] = "history.fb_resolved"
+    # Молчаливое понижение качества (страж _guard_quality_mismatch не дал ему
+    # остаться молчаливым) — карточка истории говорит об этом прямым текстом.
+    qd = str(task.get("quality_downgraded") or "")
+    if qd and status == "done":
+        entry["quality_downgraded"] = qd
+        entry["quality_wanted"] = str(task.get("quality_wanted") or "")
+        entry["quality_note_key"] = "history.qd_downgraded"
+    # Файл пришёл не из своей учётки — человек вправе это видеть в истории
+    # (выбор 24.09.2026): region+ключ перевода, как у строки отказа выше.
+    _pub_region = str(task.get("_public_wrapper") or "") if status == "done" else ""
+    if _pub_region:
+        entry["public_wrapper"] = _pub_region.upper()
+        entry["public_note"] = (f"скачано через публичный враппер "
+                                f"({_pub_region.upper()})")
+        entry["public_note_key"] = "history.public_wrapper"
     _download_history.insert(0, entry)
     if fb_note:
         for h in _download_history:
@@ -1354,7 +1379,8 @@ async def _elsewhere_fallback(orig_task: dict, *, requested: str, url: str,
         rank = {s: i for i, s in enumerate(pref)}
         cands.sort(key=lambda c: rank.get(c.get("service"), len(pref)))
     if not cands:
-        await _log_key(miss_key, "warn", tid, title=title or url)
+        await _log_key(miss_key, "warn", tid, title=title or url,
+                       svc=requested.upper())
         return
     # Полный список служит даже без взятия: телефон показывает по нему
     # короткое «попробуй другой сервис» — названия сервисов интернациональны.
@@ -1576,7 +1602,10 @@ _PR_FB_REASONS = ("entitlement", "region", "session", "unavailable",
                   "removed", "no-flac")
 
 
-async def _permanent_fail_fallback(orig_task: dict) -> None:
+async def _permanent_fail_fallback(orig_task: dict, *,
+                                   try_key: str = "console.pr_fb_try",
+                                   miss_key: str = "console.pr_fb_miss",
+                                   try_params: dict | None = None) -> None:
     """Qobuz/Deezer/Tidal/Yandex/Beatport отказали ПОСТОЯННО — взять ту же
     запись на другой витрине.
 
@@ -1593,23 +1622,24 @@ async def _permanent_fail_fallback(orig_task: dict) -> None:
     url = (orig_task.get("url") or "").strip()
     if svc not in _PR_FB_SERVICES or not url:
         return
-    await _log_key("console.pr_fb_try", "info", tid, svc=svc.upper())
+    await _log_key(try_key, "info", tid,
+                   **{"svc": svc.upper(), **(try_params or {})})
     try:
         from ripster.metadata import fetch_meta_any
         meta = await fetch_meta_any(url, svc) or {}
     except Exception:
         meta = {}
-    isrc = str(meta.get("isrc") or "").strip()
-    upc = str(meta.get("upc") or "").strip()
+    ometa = orig_task.get("meta") or {}
+    isrc = str(meta.get("isrc") or ometa.get("isrc") or "").strip()
+    upc = str(meta.get("upc") or ometa.get("upc") or "").strip()
     if not (isrc or upc):
         await _log_key("console.pr_fb_no_id", "warn", tid, svc=svc.upper())
         return
-    ometa = orig_task.get("meta") or {}
     await _elsewhere_fallback(
         orig_task, requested=svc, url=url, upc=upc, isrc=isrc,
         title=str(ometa.get("title") or ""),
         artist=str(ometa.get("artist") or ""),
-        miss_key="console.pr_fb_miss",
+        miss_key=miss_key,
         reason=f"{svc}_fallback",
         added_event="cross_service_fallback_added")
 
@@ -1682,7 +1712,19 @@ def _apply_rename(task: dict, tid: str) -> None:
         d = _get_task_dir(task)
         if not d:
             return
-        renamed = rename_from_tags(d, _RENAME_TEMPLATE)
+        # Папка может принадлежать не одному релизу: имена соседей по каталогу
+        # передаём в переименовальщик защитным множеством, чтобы чужой файл не
+        # был стёрт как «дубликат» и не переименован чужой задачей.
+        protect: set = set()
+        try:
+            from ripster import download_manifest as _dm, release_folders as _rf
+            _rid = _dm.release_id_of(task.get("url") or "")
+            protect = {str(fn) for _t, ent in _rf.foreign_claims(
+                d, tid, (task.get("service") or "").lower(), _rid)
+                for fn in (ent.get("files") or [])}
+        except Exception:
+            pass
+        renamed = rename_from_tags(d, _RENAME_TEMPLATE, protect=protect)
         if renamed:
             print(f"[tagger] renamed {len(renamed)} file(s) in {d}", flush=True)
     except Exception as e:
@@ -2637,6 +2679,17 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         # прошлую папку с коллизии при повторе (иначе повтор ушёл бы в новый
         # суффикс и перекачал релиз заново в чужую рядом стоящую папку).
         _cfg_view["_task_id"] = tid
+        # Пер-таск оверрайд из диалога загрузки («скачать через публичный
+        # враппер») и ручной регион доезжают до движка через конфиг-вью:
+        # build_cmd получает конфиг, а не задачу.
+        if (task.get("service") or "apple") == "apple":
+            try:
+                from ripster.apple_router import public_decision
+                _pub_ok, _pub_mode, _ = public_decision(_config, url, task)
+                _cfg_view["_public_allowed"] = _pub_ok
+                _cfg_view["_public_mode"] = _pub_mode
+            except Exception:
+                pass
         cmd = eng.build_cmd(url, quality, _cfg_view)
         task["log"].append(f"▶ {' '.join(cmd)}")
         await _broadcast(_i18n.log_event("console.cmd_start", level="info", task_id=tid, cmd=' '.join(cmd[:3])))
@@ -3372,14 +3425,10 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                 task["_integrity_corrupt"] = _iv["corrupt"]
                                 await _broadcast(_i18n.log_event("console.integrity_corrupt", level="warn",
                                                                  task_id=tid, n=len(_iv["corrupt"])))
-                            # Обещанное качество ≠ полученное. Сервис отдаёт что
-                            # есть на конкретный трек, а папка называется по
-                            # ЗАПРОШЕННОМУ качеству и потому врёт сама: 28.07.2026
-                            # при запросе FLAC приехал AAC 268 kbps в папку «FLAC».
-                            # Спрашиваем сам файл и сверяем с тем, что движок
-                            # ОБЕЩАЛ для этого качества — Atmos, например, тоже не
-                            # lossless по кодеку (EC-3), и ругаться на него нельзя.
-                            await _warn_quality_mismatch(task, audio, tid)
+                            # Страж понижения качества: не молчать, если вместо
+                            # запрошенного lossless приехал lossy (подробности и
+                            # лестница действий — в докстринге _guard_quality_mismatch).
+                            await _guard_quality_mismatch(task, audio, tid)
                         except Exception as _iv_e:
                             print(f"[integrity] verify skipped: {_iv_e}", flush=True)
                 else:
@@ -3959,13 +4008,24 @@ def _sanity_route(task: dict, svc: str, engine: str, url: str) -> tuple[str, str
 
 
 
-async def _warn_quality_mismatch(task: dict, audio: list, tid: str) -> None:
-    """Сказать вслух, если файл оказался не того качества, что просили.
+async def _guard_quality_mismatch(task: dict, audio: list, tid: str) -> bool:
+    """Страж понижения качества: FLAC просили — AAC приехал — молчать нельзя.
 
-    Это не придирка: папки называются по ЗАПРОШЕННОМУ качеству, поэтому молчание
-    означает, что человек считает свою фонотеку lossless, а там lossy. Сверяем с
-    обещанием САМОГО движка (поле badge у качества), иначе Atmos — законный EC-3,
-    то есть по кодеку не lossless — попадал бы в нарушители.
+    Молчание стоило фонотеке правды: папка называется по ЗАПРОШЕННОМУ качеству,
+    и lossy внутри неё выглядит как lossless (28.07.2026 AAC 268 в папке «FLAC»;
+    24.09.2026 14:01Z канарейка поймала AAC на beatport/hifi — прогон был
+    помечен зелёным). Причина того случая установлена из лога движка: в 17:01:09
+    «не удалось подтвердить тариф аккаунта» — живой запрос тарифа упал, кэш
+    known-good был пуст, OrpheusDL при неизвестном тарифе откатывается на
+    «medium» = AAC 128 (orpheus_beatport.py, _apply_settings). Через 6 минут
+    тариф подтвердился снова — то есть это транзиентный сбой токена/сети,
+    который надо лечить повтором, а не принимать как норму.
+
+    Лестница: один повтор со свежей сессией (битые-не-мы убиваются, движок
+    докачивает только их) → фоллбэк «взять то же на другой витрине» → честная
+    метка «скачано в пониженном качестве» + одно письмо владельцу в сутки.
+    True — задача снята с «готово» и перезапущена, дальше её судьбу решает
+    повторный проход.
     """
     try:
         from ripster.integrity_verify import probe_codec
@@ -3973,31 +4033,136 @@ async def _warn_quality_mismatch(task: dict, audio: list, tid: str) -> None:
         qid = str(task.get("quality") or "")
         eng = str(task.get("engine") or "")
         if not qid or not eng or not audio:
-            return
+            return False
+        # Канарейка — сама сигнал: страж её не залечивает, нечего подменять
+        # проверяемый прогон собственными повторами (несовпадение кодека она
+        # честно валит сама, tools/download_canary.py).
+        if task.get("source") == "download_canary":
+            return False
         try:
             quals = get_engine(eng).qualities() or []
         except Exception:
-            return
-        badge = next((str(q.get("badge") or "").upper()
-                      for q in quals if q.get("id") == qid), "")
-        if badge not in ("LOSSLESS", "HI-RES"):
-            return                       # lossy/spatial просили осознанно
-        info = await asyncio.to_thread(probe_codec, audio[0])
-        if not info or info.get("lossless"):
-            return
-        got = info.get("codec", "?")
-        kbps = ""
+            return False
+        q = next((x for x in quals if x.get("id") == qid), None)
+        if q is None:
+            return False
+        badge = str(q.get("badge") or "").upper()
+        ext = str(q.get("ext") or "").lower()
+        # Просили lossless? Опознаём и по РАСШИРЕНИЮ, и по badge — одного badge
+        # мало: у Beatport «hifi» стоит badge="FLAC", а не "LOSSLESS", и прежняя
+        # проверка по badge-слову молча пропускала ровно тот молчаливый
+        # AAC-даунгрейд 24.09 (и молчание 28.07 — он и тогда бы не сработал).
+        # ALAC — законный lossless внутри m4a (badge LOSSLESS у накрывает).
+        if not (ext in ("flac", "alac", "wav", "aiff")
+                or badge in ("LOSSLESS", "HI-RES", "24-BIT")):
+            return False                       # lossy/spatial просили осознанно
+        want_lbl = str(q.get("label") or qid)
+        lossy = []
+        for f in audio:
+            try:
+                info = await asyncio.to_thread(probe_codec, f)
+            except Exception:
+                info = None
+            if info and not info.get("lossless"):
+                lossy.append((f, info))
+        if not lossy:
+            return False
+        info = lossy[0][1]
+        got = str(info.get("codec") or "?").upper()
         try:
-            kbps = f" {int(info['bit_rate']) // 1000} kbps" if info.get("bit_rate", "").isdigit() else ""
-        except Exception:
-            kbps = ""
-        task["quality_actual_codec"] = got
-        msg = (f"⚠ Просили {qid} ({badge}), а в файле {got}{kbps} — сервис отдал "
-               f"lossy. Файл сохранён, но папка называется по запрошенному качеству.")
-        task.setdefault("log", []).append(msg)
-        await _broadcast({"type": "log", "level": "warn", "task_id": tid, "text": msg})
+            kbps = int(info.get("bit_rate") or 0) // 1000
+        except (TypeError, ValueError):
+            kbps = 0
+        got_lbl = f"{got} {kbps}" if kbps else got
+        svc = str(task.get("service") or eng).upper()
+        task["quality_actual_codec"] = got.lower()
+
+        # ── Ступень 1: один повтор со свежей сессией ─────────────────────────
+        if not task.get("_qd_retry"):
+            task["_qd_retry"] = True
+            await _qd_refresh_credentials(task)
+            for f, _ in lossy:
+                try:
+                    f.unlink()                 # движок пропускает готовые файлы —
+                except OSError:                # без удаления повтор принёс бы то же AAC
+                    pass
+            dropped = {f.name for f, _ in lossy}
+            task["_files"] = [n for n in (task.get("_files") or [])
+                              if n not in dropped]
+            await _log_key("console.qd_retry", "warn", tid,
+                           svc=svc, got=got_lbl, want=want_lbl)
+            await asyncio.sleep(3)
+            task["status"]   = "queued"
+            task["progress"] = 0
+            task["log"]      = []
+            for _k in ("_start_time", "_done_time", "_save_dir",
+                       "_prog_total", "_prog_current"):
+                task.pop(_k, None)
+            task["_in_retry"] = True   # finally пропустит историю
+            await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+            return True
+
+        # ── Ступень 2: то же самое, но на витрине, которая отдаёт FLAC ───────
+        if (not task.get("_qd_fb_tried") and not task.get("_fallback_origin")
+                and str(task.get("service") or "").lower() in _PR_FB_SERVICES):
+            task["_qd_fb_tried"] = True
+            await _permanent_fail_fallback(
+                task, try_key="console.qd_fb_try",
+                try_params={"got": got_lbl, "want": want_lbl})
+            if task.get("_fallback_target"):
+                return False       # спасатель качает ту же запись в requested quality
+
+        # ── Ступень 3: заменить нечем — сказать прямо и позвать владельца ────
+        task["quality_downgraded"] = got_lbl
+        task["quality_wanted"]     = want_lbl
+        await _log_key("console.qd_downgraded", "warn", tid,
+                       svc=svc, got=got_lbl, want=want_lbl)
+        await _qd_owner_notice(task, svc, got_lbl, want_lbl)
     except Exception as e:                                    # noqa: BLE001
-        print(f"[quality-check] skipped: {e}", flush=True)
+        print(f"[quality-guard] skipped: {e}", flush=True)
+    return False
+
+
+async def _qd_refresh_credentials(task: dict) -> None:
+    """Сбросить сессию сервиса перед повтором: чаще всего битый тариф/токен
+    и есть причина, по которой витрина отдала lower tier."""
+    eng = str(task.get("engine") or "")
+    if eng == "orpheus_beatport":
+        try:
+            from ripster.engines.orpheus_beatport import (
+                _invalidate_bp_session, _BP_AT_CACHE)
+            _BP_AT_CACHE["exp"] = 0.0
+            _invalidate_bp_session()
+        except Exception:
+            pass
+
+
+_QD_NOTICE_FILE = "logs/quality_downgrade_notice.json"
+
+
+async def _qd_owner_notice(task: dict, svc: str, got: str, want: str) -> None:
+    """Письмо владельцу о молчаливом понижении качества — не чаще раза в сутки,
+    иначе библиотека из 50 таких пролетов превращает уведомления в шум."""
+    import json as _j
+    try:
+        p = _BASE_DIR / _QD_NOTICE_FILE
+        last = ""
+        if p.exists():
+            last = str(_j.loads(p.read_text(encoding="utf-8")).get("date") or "")
+        today = datetime.now().strftime("%Y-%m-%d")
+        if last == today:
+            return
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(_j.dumps({"date": today}), encoding="utf-8")
+        except Exception:
+            pass
+        text = (f"🎧 {svc}: скачали отдали {got} вместо {want} — повтор и другие "
+                f"витрины не помогли\n{(task.get('url') or '')[:160]}")
+        from ripster.accounts_watch import _default_notify
+        await _default_notify(text, _BASE_DIR)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[quality-guard] owner notice skipped: {e}", flush=True)
 
 
 # Как враппер объясняет своё молчание — по-человечески в одну строку. Те же
@@ -4057,6 +4222,108 @@ def _rung_text(d: dict) -> str:
 _TRACKLIST_TASKS: set = set()
 
 
+def _own_storefronts(config: dict, extra=()) -> set:
+    """Витрины, в которых у нас ЕСТЬ свой аккаунт (для режима «резерв по
+    региону»). Пустое множество честнее догадки: вызывающий тогда не утверждает,
+    что релиз «недоступен нигде у своих»."""
+    out: set = set()
+    try:
+        from ripster import wrapper_pool as _wp
+        for a in _wp.all_accounts(config or {}):
+            cc = str(a.get("country") or "").strip().lower()
+            if cc:
+                out.add(cc)
+    except Exception:                                       # noqa: BLE001
+        pass
+    for x in extra:
+        cc = str(x or "").strip().lower()
+        if cc:
+            out.add(cc)
+    return out
+
+
+def _public_region_for(config: dict, url: str) -> str:
+    """Какую витрину мы попросим у публичного пула — для честной строки в
+    истории («скачано через публичный враппер (NZ)»), а не для решения."""
+    cc = str(config.get("amd-region-force") or "").strip().lower()
+    if cc:
+        return cc
+    try:
+        from ripster import apple_router as _ar
+        want = _ar.url_storefront(url) or str(config.get("storefront") or "us")
+        return (_ar.public_pool_pick_region(config, want) or want).lower()
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def _public_fallback_reason(mode: str, task: dict, url: str, config: dict,
+                            avail: dict | None) -> str:
+    """ПОЧЕМУ после честного перебора своих задача имеет право уйти на публичный
+    wrapper. Пустая строка — не имеет (режим `off`, или условие режима не
+    выполнено). Возвращает короткую причину для лога и истории.
+
+    Правило 03.09 («публичный — только по явному выбору») здесь не нарушается:
+    сюда доходит только тот выбор, который владелец сделал сам в Настройках
+    (или чекбоксом задачи), а не догадка кода."""
+    if task.get("public_wrapper"):
+        return "по запросу этой задачи"
+    if mode == "on_fail":
+        return "все свои учётки отказали"
+    if mode == "on_region":
+        # Нужен факт: релиз ЕСТЬ в какой-то витрине, и ни одна своя её не
+        # покрывает. Каталог молчит (пусто) — значит не выяснили, и утверждать
+        # «у нас нет» нельзя.
+        own = _own_storefronts(config, task.get("_slots_tried") or [])
+        have = {str(c).lower() for c in (avail or {})}
+        fresh = have - own
+        if not fresh:
+            return ""
+        return ("релиза нет ни в одной витрине своих аккаунтов "
+                f"(есть в {', '.join(sorted(have))})")
+    if mode == "on_limit":
+        rung = [d for d in (task.get("_ladder") or []) if d.get("outcome") == "down"]
+        try:
+            from ripster.apple_router import apple_pacing_blocked
+            if apple_pacing_blocked(config):
+                return "свои упёрлись в лимит запросов Apple"
+        except Exception:                                   # noqa: BLE001
+            pass
+        if rung:
+            return "свои слоты на паузе/лимите устройств"
+        return ""
+    return ""
+
+
+async def _public_wrapper_attempt(task: dict, url: str, qid: str,
+                                  reason: str, config: dict) -> bool:
+    """Один запасной заход через публичный wrapper. Возвращает True, если
+    скачалось. Никакого смешивания источников внутри альбома: AMD берёт релиз
+    ЦЕЛИКОМ (свои ступени к этому моменту уже ничего не дали)."""
+    region = _public_region_for(config, url)
+    task["log"].append(
+        f"─── {reason} → один запасной заход через публичный wrapper"
+        + (f" (витрина '{region.upper()}')" if region else "") + " ───")
+    await _broadcast(_i18n.log_event("console.public_fallback", level="warn",
+                                     reason=reason,
+                                     region=(region or "pool").upper(),
+                                     task_id=task.get("id", "")))
+    _revive_task(task)
+    _advance_task(task, TaskStatus.RUNNING)
+    task["progress"] = 0
+    await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+    try:
+        await _run_engine_task(task, "amd", url, qid)
+    except (_NeedAMDFallback, _NeedZhaareyFallback):
+        pass
+    ok = _attempt_succeeded(task)
+    if ok:
+        # Честная строка истории: человек вправе знать, что файл пришёл не из
+        # его аккаунта. Ключ + параметры — для перевода на телефоне.
+        task["_public_wrapper"] = region or "pool"
+        task["_public_reason"] = reason
+    return ok
+
+
 async def run_task(task: dict) -> None:
     """Dispatch a single task to the correct engine runner."""
     svc    = task.get("service", "apple")
@@ -4090,16 +4357,30 @@ async def run_task(task: dict) -> None:
     engine = engine or _config.get("engine", "zhaarey")
 
     # The public wm.wol.moe wrapper is MANUAL-ONLY (owner, 03.09.2026): it is
-    # used only when apple-wrapper == "public" is set explicitly. Every other
-    # value ("local", "auto", unset) is treated as local-only here — NEVER
-    # silently auto-switch an Apple task to the public wrapper on a wrapper-down
-    # / DRM-CKC failure. The local pool starts its own container on acquire(),
-    # so "wrapper not running" is not a reason to leave the premium account; a
-    # foreign-region key failure is handled by rotating the owner's own Apple
-    # account slots (below), not by hopping to the public pool.
+    # used only when the owner explicitly asked for it. With the mode group of
+    # 24.09.2026 that choice comes in six flavours (`apple-public-mode`), and
+    # they split into two DIFFERENT permissions:
+    #   _apple_public_ok     — задача может идти на публичный сразу, минуя свои
+    #                          слоты (only / manual_region / чекбокс задачи /
+    #                          on_limit при активном лимите своих);
+    #   _apple_fallback_ok   — публичный разрешён ПОСЛЕ честного перебора своих
+    #                          (on_fail, on_region, on_limit, чекбокс задачи).
+    # Всё остальное (режим off и отсутствие выбора) — local-only: NEVER silently
+    # auto-switch an Apple task to the public wrapper on a wrapper-down /
+    # DRM-CKC failure.
     _apple_wrapper_pref = str(_config.get("apple-wrapper") or "auto").strip().lower()
-    _apple_public_ok    = (_apple_wrapper_pref == "public")
-    _apple_local_only   = not _apple_public_ok
+    try:
+        from ripster.apple_router import public_decision, public_mode
+        _apple_public_ok, _apple_mode, _apple_public_block = \
+            public_decision(_config, url, task)
+    except Exception:
+        _apple_public_ok, _apple_mode, _apple_public_block = (
+            _apple_wrapper_pref == "public", "off", "")
+    _apple_fallback_ok = bool(task.get("public_wrapper")) or _apple_mode in (
+        "on_fail", "on_region", "on_limit", "only", "manual_region")
+    _apple_local_only = not _apple_public_ok
+    if _apple_public_block:
+        task["log"].append(f"─── публичный wrapper: {_apple_public_block} ───")
 
     try:
         # Sanity gate found no engine able to speak this URL — fail cleanly here,
@@ -4163,7 +4444,7 @@ async def run_task(task: dict) -> None:
         try:
             await _run_engine_task(task, engine, _first_url, qid)
         except _NeedAMDFallback:
-            if _apple_local_only:
+            if not _apple_public_ok:
                 # Local-only: do NOT salvage via the public wrapper. Surface the
                 # local-wrapper DRM/CKC failure as a real error so the owner can
                 # re-login the premium wrapper instead of silently going public.
@@ -4258,6 +4539,9 @@ async def run_task(task: dict) -> None:
                     # не находит DJ-миксы → `_avail` пуст → не проверена ни
                     # одна GB-учётка. Пустой ответ каталога — «не
                     # выяснили», а не «прав нет» (см. ladder_order).
+                    # Каталог мог и не опроситься (упал импорт или сам запрос) —
+                    # тогда «не выяснили», а не NameError в аварийном обработчике.
+                    _avail = {}
                     if not _retried_sf:
                         try:
                             from ripster import apple_accounts as _AA
@@ -4415,6 +4699,19 @@ async def run_task(task: dict) -> None:
                                 f"─── перебор своих Apple-аккаунтов не состоялся: "
                                 f"{type(_e_slot).__name__}: {_e_slot} ───")
                             print(f"[runner] slot-pick failed: {_e_slot!r}", flush=True)
+                    if not _retried_sf and _apple_fallback_ok:
+                        # Режимы 2/3/4 (и чекбокс задачи): свои честно перебраны
+                        # и не дали ключ — теперь очередь публичного враппера.
+                        # Один заход на весь релиз, смешивания источников
+                        # внутри альбома нет.
+                        _pub_reason = _public_fallback_reason(
+                            _apple_mode, task, url, _config,
+                            _avail if isinstance(_avail, dict) else None)
+                        if _pub_reason:
+                            task["_pub_fb_tried"] = True
+                            if await _public_wrapper_attempt(
+                                    task, url, qid, _pub_reason, _config):
+                                _retried_sf = True
                     if not _retried_sf:
                         # РАНЬШЕ здесь была последняя ступень — уход на публичный
                         # wm.wol.moe. 03.09.2026 владелец запретил это категорически:

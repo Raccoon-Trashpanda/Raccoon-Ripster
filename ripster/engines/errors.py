@@ -20,7 +20,12 @@ _PATTERNS: list[tuple[str, "re.Pattern[str]", str]] = [
          r"region[\s\-]?lock|geo[\s\-]?block|geo[\s\-]?restrict|region[\s\-]?restrict"
          r"|not available in (your|this) (country|region)"
          r"|unavailable in (your|this) (country|region)"
-         r"|not available in your country", re.I),
+         r"|not available in your country"
+         # 24.09.2026: формулировки витрин, которые раньше не покрывались —
+         # Qobuz «not streamable in your territory», Beatport «Territory
+         # Restricted» без слова region, русский вердикт Deezer.
+         r"|not streamable in your territory|territory[\s\-]?restricted"
+         r"|закрыт\w* для страны|недоступн\w* в регионе", re.I),
      "недоступно в регионе твоего аккаунта (гео-блок) — попробуй другой сервис "
      "(Apple/Qobuz/Deezer/Tidal) или смени регион аккаунта в Настройках."),
     # Go-загрузчик Apple: каталог не отдал альбом. Ловим ДО общего «gone», потому

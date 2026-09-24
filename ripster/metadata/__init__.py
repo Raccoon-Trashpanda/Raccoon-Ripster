@@ -13,6 +13,7 @@ Setup (call once at app startup, before any fetch):
 """
 from __future__ import annotations
 
+import re as _re
 from typing import Optional, Callable
 
 from .apple   import fetch_meta as fetch_meta_apple, auto_fetch_bearer, install as _install_apple
@@ -316,6 +317,9 @@ async def fetch_meta_tidal(url: str) -> Optional[dict]:
         "trackCount": d.get("numberOfTracks", 0) if typ == "albums" else 0,
         "isrc":       d.get("isrc", ""),
         "year":       (d.get("releaseDate") or d.get("streamStartDate") or "")[:4],
+        # Полная дата релиза — по ней preorder.detect решает, что треклистовая
+        # недостача это «ещё не вышел», а не битая витрина (24.09.2026).
+        "date":       (d.get("releaseDate") or d.get("streamStartDate") or "")[:10],
         "service":    "tidal",
     }
 
@@ -418,20 +422,90 @@ async def fetch_meta_soundcloud(url: str) -> Optional[dict]:
     }
 
 
-async def fetch_meta_beatport(url: str) -> Optional[dict]:
-    """Metadata for a Beatport track/release URL via the authenticated catalog
-    API (api.beatport.com/v4). Reuses the access_token minted from OrpheusDL's
-    saved Beatport session — Beatport has no public/anonymous metadata API, which
-    is why the dispatcher used to skip it and every card came back depersonalised
-    ('beatport · <id>', no cover). Best-effort: returns None on any failure."""
+_RE_BP_PAGE_ISRC = _re.compile(r'"isrc":\s*"([A-Z0-9]{12})"', _re.I)
+_RE_BP_PAGE_UPC = _re.compile(r'"upc":\s*"(\d{8,14})"')
+#: Как далеко за «track_id":<id>» / «release_id":<id>» ещё может лежать
+#: собственный isrc/upc сущности (у релиза с десятками треков поле upc идёт
+#: после треклиста). За предел — это уже другой объект, берём из него нельзя.
+_BP_PAGE_WINDOW = 120000
+
+
+def _beatport_page_identity(url: str) -> dict:
+    """ISRC/UPC релиза со СТРАНИЦЫ www.beatport.com без авторизации.
+
+    24.09.2026, «Xtasy» и «Total 26»: аккаунтский Beatport API закрыт регионом
+    («region locked») — и метаданные через него не достать, хотя сама страница
+    отдаётся по всему миру и несёт коды в __NEXT_DATA__. Без кода запасной путь
+    честнее всего молчит («вслепую не ищу») — и гость остаётся ни с чем там,
+    где та же запись лежит на Qobuz.
+
+    Идентичность подтверждаем ТОЛЬКО окном вокруг якоря собственной сущности
+    ("track_id":<id> / "release_id":<id>): карусели рекомендаций тоже несут
+    isrc/upc, и взять первый попавшийся — значит подменить релиз. Встретили
+    до кода якорь ДРУГОЙ сущности — вернули пустоту.
+    """
     import re as _re, httpx
+    m_tr = _re.search(r"/track/(?:[^/]+/)?(\d+)", url)
+    m_rl = _re.search(r"/release/(?:[^/]+/)?(\d+)", url)
+    if m_tr:
+        anchor, pat, key = f'"track_id":{m_tr.group(1)}', _RE_BP_PAGE_ISRC, "isrc"
+    elif m_rl:
+        # Привязка к `"release_id":` НЕгодится: на страницах релизов этим ключом
+        # помечены ЧУЖИЕ релизы карусели (проверено на «Total 26» 24.09.2026 —
+        # первым за тем якорем лежит upc стороннего EP). Собственный объект
+        # релиза в __NEXT_DATA__ начинается с каноничного `"id":<num>`.
+        anchor, pat, key = f'"id":{m_rl.group(1)}', _RE_BP_PAGE_UPC, "upc"
+    else:
+        return {}
+    try:
+        # Beatport отдаёт 403 голым запросам — нужен браузерный UA.
+        r = httpx.get(url.split("?")[0], follow_redirects=True, timeout=12,
+                      headers={"user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                                             "AppleWebKit/537.36 (KHTML, like Gecko) "
+                                             "Chrome/126.0 Safari/537.36"})
+        html = r.text if r.status_code == 200 else ""
+    except Exception:
+        html = ""
+    return _parse_beatport_page(html, anchor, pat, key)
+
+
+def _parse_beatport_page(html: str, anchor: str, pat, key: str) -> dict:
+    """Код идентичности из якоря собственного объекта страницы (чисто, без сети).
+
+    «Свой» объект кончается там, где начинается следующий: карусели рекомендаций
+    на той же странице несут isrc/upc ЧУЖИХ релизов, и взять первый попавшийся
+    — значит подменить релиз.
+    """
+    import re as _re
+    i = (html or "").find(anchor)
+    if i < 0:
+        return {}
+    seg = html[i + len(anchor): i + len(anchor) + _BP_PAGE_WINDOW]
+    other = _re.search(r'"(?:track_id|release_id)":', seg)
+    cut = other.start() if other else len(seg)
+    m = pat.search(seg[:cut])
+    if not m:
+        return {}
+    return {key: m.group(1)}
+
+
+async def fetch_meta_beatport(url: str) -> Optional[dict]:
+    """Metadata for a Beatport track/release URL.
+
+    Основной путь — аутентифицированный каталог API (api.beatport.com/v4), он
+    даёт карточку целиком. Но 24.09.2026 он же и врал: аккаунт, закрытый
+    регионом («region locked»), не отвечает НИЧЕГО — и запасной путь молчал
+    («нет ISRC/UPC — вслепую не ищу») там, где та же запись лежала на Qobuz.
+    Публичная страница www.beatport.com при этом открывается из любой страны и
+    несёт ISRC/UPC в __NEXT_DATA__ — поэтому при отказе API (или когда API
+    промолчал о коде) идентичность добираем оттуда. Best-effort: None on any
+    failure."""
+    import asyncio, re as _re, httpx
     try:
         from ripster.engines.orpheus_beatport import _beatport_access_token
     except Exception:
-        return None
-    tok = await _beatport_access_token()
-    if not tok:
-        return None
+        _beatport_access_token = None
+    tok = (await _beatport_access_token()) if _beatport_access_token else ""
 
     m_tr = _re.search(r"/track/(?:[^/]+/)?(\d+)", url)
     m_rl = _re.search(r"/release/(?:[^/]+/)?(\d+)", url)
@@ -444,34 +518,43 @@ async def fetch_meta_beatport(url: str) -> Optional[dict]:
 
     api = "https://api.beatport.com/v4/"
     headers = {"user-agent": "libbeatport/v2.8.2", "authorization": f"Bearer {tok}"}
-    try:
-        # Beatport 301-redirects /tracks/<id> → /tracks/<id>/ (trailing slash);
-        # httpx does NOT follow redirects by default (requests does), so without
-        # this every call came back 301 and the card stayed blank.
-        async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
-            r = await c.get(api + endpoint, headers=headers)
-            if r.status_code == 401:
-                # Stored token just expired — force a refresh and retry once.
-                from ripster.engines.orpheus_beatport import _BP_AT_CACHE
-                _BP_AT_CACHE["exp"] = 0.0
-                tok = await _beatport_access_token()
-                headers["authorization"] = f"Bearer {tok}"
+    d = None
+    if tok:
+        try:
+            # Beatport 301-redirects /tracks/<id> → /tracks/<id>/ (trailing slash);
+            # httpx does NOT follow redirects by default (requests does), so without
+            # this every call came back 301 and the card stayed blank.
+            async with httpx.AsyncClient(timeout=10, follow_redirects=True) as c:
                 r = await c.get(api + endpoint, headers=headers)
-            if r.status_code != 200:
-                return None
-            d = r.json()
-    except Exception:
-        return None
+                if r.status_code == 401:
+                    # Stored token just expired — force a refresh and retry once.
+                    from ripster.engines.orpheus_beatport import _BP_AT_CACHE
+                    _BP_AT_CACHE["exp"] = 0.0
+                    tok = await _beatport_access_token()
+                    headers["authorization"] = f"Bearer {tok}"
+                    r = await c.get(api + endpoint, headers=headers)
+                if r.status_code == 200:
+                    d = r.json()
+        except Exception:
+            d = None
 
     def _artists(o: dict) -> str:
         return ", ".join(a.get("name", "") for a in (o.get("artists") or []) if a.get("name"))
 
     def _img(o: dict) -> str:
-        uri = (o.get("image") or {}).get("uri", "") if isinstance(o.get("image"), dict) else ""
-        # Beatport encodes the size in the path (…/image_size/500x500/…). The
+        uri = (o.get("image") or {}).get("uri", "") if isinstance(o.get("image"), dict) else ""        # Beatport encodes the size in the path (…/image_size/500x500/…). The
         # release object embedded in a track only carries 500px — bump every card
         # cover to 1400px so it isn't blurry on retina/web.
         return _re.sub(r"/image_size/\d+x\d+/", "/image_size/1400x1400/", uri) if uri else ""
+
+    if d is None:
+        # API молчит (регион-лок аккаунта, нет токена, сеть) — последняя
+        # возможность дать запасному пути идентичность: публичная страница.
+        ident = await asyncio.to_thread(_beatport_page_identity, url)
+        if not ident:
+            return None
+        return {"id": str(_id), "type": "track" if typ == "track" else "album",
+                "service": "beatport", **ident}
 
     if typ == "track":
         rel   = d.get("release") or {}
@@ -482,6 +565,10 @@ async def fetch_meta_beatport(url: str) -> Optional[dict]:
         title = d.get("name", "")
         if d.get("mix_name"):
             title = f"{title} ({d['mix_name']})"
+        isrc = str(d.get("isrc", "") or "")
+        if not isrc:
+            isrc = str((await asyncio.to_thread(
+                _beatport_page_identity, url)).get("isrc", "") or "")
         return {
             "id":         str(_id),
             "type":       "track",
@@ -490,7 +577,7 @@ async def fetch_meta_beatport(url: str) -> Optional[dict]:
             "album":      rel.get("name", ""),
             "artworkUrl": _img(rel) or _img(d),   # release art is 1400px; track art 500px
             "trackCount": 1,
-            "isrc":       d.get("isrc", ""),
+            "isrc":       isrc,
             "genre":      genre.get("name", "") if isinstance(genre, dict) else "",
             "label":      (rel.get("label") or {}).get("name", "") if isinstance(rel.get("label"), dict) else "",
             "year":       date[:4],
@@ -500,6 +587,10 @@ async def fetch_meta_beatport(url: str) -> Optional[dict]:
 
     # release / album
     date = str(d.get("new_release_date") or d.get("publish_date") or "")
+    upc = str(d.get("upc", "") or "")
+    if not upc:
+        upc = str((await asyncio.to_thread(
+            _beatport_page_identity, url)).get("upc", "") or "")
     return {
         "id":         str(_id),
         "type":       "album",
@@ -508,6 +599,7 @@ async def fetch_meta_beatport(url: str) -> Optional[dict]:
         "album":      d.get("name", ""),
         "artworkUrl": _img(d),
         "trackCount": d.get("track_count", 0),
+        "upc":        upc,
         "label":      (d.get("label") or {}).get("name", "") if isinstance(d.get("label"), dict) else "",
         "year":       date[:4],
         "date":       date[:10],
