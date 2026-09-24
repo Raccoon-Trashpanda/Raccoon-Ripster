@@ -149,7 +149,13 @@ _DEFAULT_TOKEN = "OtHdzmO7GiZPTPjxSaj9lEUCy0A__rhW"
 
 
 def ingest_url() -> str:
-    return ((_cfg.get("telemetry-url") or "").strip() or _DEFAULT_URL).rstrip("/")
+    """Куда стучаться. Свой `telemetry-url` главнее всего; иначе — адрес из
+    discovery-файла (ripster/endpoint.py, кэш на сутки), а его нет — вшитый."""
+    cfg = (_cfg.get("telemetry-url") or "").strip()
+    if cfg:
+        return cfg.rstrip("/")
+    from ripster import endpoint
+    return endpoint.resolve(_DEFAULT_URL)
 
 
 def ingest_token() -> str:
@@ -340,7 +346,12 @@ def _enqueue_heartbeat() -> None:
 
 async def run_forwarder() -> None:
     """Background loop: flush the client buffer every ~15 s, plus a presence
-    heartbeat on launch and every ~10 min. No-op if disabled."""
+    heartbeat on launch and every ~10 min. No-op if disabled.
+
+    Раз в сутки заодно освежает discovery-адрес приёмника — но ТОЛЬКО когда
+    согласие уже дано: опрос GitHub сам по себе означает «эта установка есть»,
+    а спрашивать адрес нам не у кого, пока пользователь не сказал «да».
+    """
     global _started
     if _started:
         return
@@ -349,22 +360,29 @@ async def run_forwarder() -> None:
         import httpx
     except Exception:
         return
+    from ripster import endpoint
     async with httpx.AsyncClient() as client:
         if forwarding_enabled():
             _enqueue_heartbeat()                 # announce presence the moment we start
             try:
+                await endpoint.refresh(_DEFAULT_URL, client=client)
                 await _flush_once(client)
             except Exception:
                 pass
         _since_hb = 0
+        _since_ep = 0
         while True:
             try:
                 await asyncio.sleep(15)
                 if forwarding_enabled():
                     _since_hb += 15
+                    _since_ep += 15
                     if _since_hb >= 600:         # heartbeat every ~10 min
                         _enqueue_heartbeat()
                         _since_hb = 0
+                    if _since_ep >= endpoint.TTL_S:
+                        await endpoint.refresh(_DEFAULT_URL, client=client)
+                        _since_ep = 0
                     await _flush_once(client)
             except asyncio.CancelledError:
                 return

@@ -188,6 +188,13 @@ async def send_report(cfg: dict, base_dir: Path, version: str, note: str = "") -
     }
     try:
         import httpx
+        # Явное нажатие — значит адрес приёмника можно переспросить прямо сейчас,
+        # не дожидаясь суточного кэша: туннель мог сменить имя пять минут назад.
+        # Свой `telemetry-url` при этом не переспрашиваем и не трогаем.
+        from ripster import endpoint
+        if not (_t._cfg.get("telemetry-url") or "").strip():
+            async with httpx.AsyncClient(timeout=10) as c:
+                base = await endpoint.refresh(base, client=c) or base
         async with httpx.AsyncClient(timeout=120) as client:
             r = await client.post(f"{base}/api/telemetry/report", content=blob, headers=headers)
         if r.status_code != 200:
