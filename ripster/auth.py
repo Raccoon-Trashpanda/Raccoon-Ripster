@@ -134,7 +134,7 @@ _CSRF_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 # be called cross-origin — e.g. the browser-extension Spotify token push, and the
 # telemetry ingest webhook that tester builds POST to from their own machines).
 _CSRF_EXEMPT_PATHS = {"/api/spotify-token-push", "/api/telemetry/ingest",
-                      "/api/telemetry/report"}
+                      "/api/telemetry/report", "/api/telemetry/crash"}
 
 # Module-level state set by ``install()``. These are small enough that holding
 # references here rather than threading them through every helper is cleaner.

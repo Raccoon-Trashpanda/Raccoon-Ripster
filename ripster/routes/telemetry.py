@@ -5,6 +5,10 @@ Telemetry routes.
                                         warn/error lines here. Публичная константа
                                         из сборки принимается, но под жёсткими
                                         лимитами (пустой/чужой токен — отказ).
+  POST /api/telemetry/report          — PUBLIC (token): полный архив логов.
+  POST /api/telemetry/crash           — PUBLIC, БЕЗ ключа: аварийный отчёт
+                                        мобилки. Тот же публичный ярус и те же
+                                        лимиты, только потолок тела покроекчее.
   GET  /api/telemetry/instances       — OWNER: list reporting instances.
   GET  /api/telemetry/instance/{id}   — OWNER: stored lines for one instance.
   DELETE /api/telemetry/instance/{id} — OWNER: forget one instance.
@@ -22,6 +26,12 @@ router = APIRouter()
 # Soft anti-abuse: cap ingest body + rate windows.
 _MAX_BODY = 256 * 1024
 _MAX_REPORT = 12 * 1024 * 1024      # полный архив логов, а не строчки
+# Аварийный отчёт мобилки — стек + хвост журнала: десятки килобайт. Крышка в
+# полмегабайта покрывает и самый длинный стек, и 200 строк журнала, и не даёт
+# анонимному каналу стоять на одном потолке с архивом, который человек собрал
+# руками. Лимиты публичного яруса (байт в сутки, архивов в сутки, общий диск)
+# действуют поверх неё.
+_MAX_CRASH = 512 * 1024
 _rate: dict = {}          # сырой peer -> {"win": t, "n": всего, "inst": {iid: [t, n]}}
 _RATE_MAX = 30            # батчей в минуту на экземпляр
 _RATE_MAX_PEER = 300      # и суммарно на сырой peer — потолок при переборе id
@@ -118,12 +128,13 @@ async def ingest(request: Request):
     return _t.store_ingest(payload, client_ip=ip, owner=_owner_ok(request))
 
 
-@router.post("/api/telemetry/report")
-async def report_ingest(request: Request):
-    """PUBLIC (token-gated): приём полного архива логов от чужой установки.
+async def _archive_ingest(request: Request, force_tier: str = "",
+                          cap: int = _MAX_REPORT) -> dict:
+    """Общая часть двух приёмов архива: лимит по сырому пиру, размер, заголовки.
 
-    Отдельно от /ingest, потому что тут не строчки, а zip на мегабайты — свой
-    лимит и своё хранилище. Метаданные идут заголовками, тело — сам архив.
+    `force_tier` пустой = пускать только по токену (обычный `/report`); непустой
+    = канал, где ключа нет по построению (`/crash` от мобилки). Граница там —
+    объём, а не секрет: см. лимиты публичного яруса в ripster/telemetry.py.
     """
     from ripster import diagnostics as _diag
     # Лимит по СЫРОМУ пиру (см. ingest выше): XFF подделывается → крутя его,
@@ -132,7 +143,7 @@ async def report_ingest(request: Request):
     if not _rate_ok(peer):                       # до чтения тела: 12 МБ не качаем
         return {"ok": False, "error": "rate"}
     blob = await request.body()
-    if len(blob) > _MAX_REPORT:
+    if len(blob) > cap:
         return {"ok": False, "error": "too big"}
     h = request.headers
     if not _rate_ok(peer, _t._clean_iid(h.get("x-ripster-instance")) or "-"):
@@ -146,7 +157,36 @@ async def report_ingest(request: Request):
         "name":        _diag.decode_hdr(h.get("x-ripster-name", "")),
         "note":        _diag.decode_hdr(h.get("x-ripster-note", "")),
     }
-    return _t.store_report(meta, blob, client_ip=ip, owner=_owner_ok(request))
+    return _t.store_report(meta, blob, client_ip=ip, owner=_owner_ok(request),
+                           force_tier=force_tier)
+
+
+@router.post("/api/telemetry/report")
+async def report_ingest(request: Request):
+    """PUBLIC (token-gated): приём полного архива логов от чужой установки.
+
+    Отдельно от /ingest, потому что тут не строчки, а zip на мегабайты — свой
+    лимит и своё хранилище. Метаданные идут заголовками, тело — сам архив.
+    """
+    return await _archive_ingest(request)
+
+
+@router.post("/api/telemetry/crash")
+async def crash_ingest(request: Request):
+    """PUBLIC, без ключа: аварийный отчёт мобилки (стек + хвост журнала, zip).
+
+    Мобильный клиент намеренно НЕ возит токен: чужой APK распаковывается дешевле,
+    чем чинится, а ключ сборки от этого не становится секретом. Поэтому вместо
+    того, чтобы отменять решение 23.09 («пустой токен — отказ») на общем гейте,
+    у аварийного канала свой маршрут: ярус задан явно, потолок тела — крышка на
+    строчку стека, а не 12 МБ, и все лимиты публичного яруса действуют целиком.
+    Чужой/непонятный токен тут не при чём и не принимается молча: запрос либо
+    анонимный, либо с публичным ключом сборки.
+    """
+    got = str(request.headers.get("x-ripster-token") or "").strip()
+    if got and got != _t._DEFAULT_TOKEN:
+        return {"ok": False, "error": "bad token"}
+    return await _archive_ingest(request, force_tier="public", cap=_MAX_CRASH)
 
 
 @router.post("/api/diag/send-report")

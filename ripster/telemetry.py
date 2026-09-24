@@ -724,13 +724,20 @@ def _report_code() -> str:
 
 
 def store_report(meta: dict, blob: bytes, client_ip: str = "",
-                 owner: bool = False) -> dict:
-    """Owner side: сохранить присланный архив логов. Никогда не бросает."""
+                 owner: bool = False, force_tier: str = "") -> dict:
+    """Owner side: сохранить присланный архив логов. Никогда не бросает.
+
+    `force_tier` — для канала, где ключа нет по построению (аварийные отчёты
+    мобилки, см. `/api/telemetry/crash`). Ярус задаётся явным аргументом, а не
+    «пустой токен = пустить»: гейт `token_tier()` остаётся единственной
+    границей для всех остальных, и его решение от 23.09.2026 («пустой и чужой
+    токен — отказ») не размывается. Пустое имя = как раньше, по токену.
+    """
     if not _cfg.get("telemetry-ingest-enabled"):
         return {"ok": False, "error": "ingest disabled"}
     if not isinstance(meta, dict):
         return {"ok": False, "error": "bad payload"}
-    tier = token_tier(meta.get("token"), owner=owner)
+    tier = force_tier or token_tier(meta.get("token"), owner=owner)
     if not tier:
         _log_reject(meta.get("token"), meta.get("instance_id"))
         return {"ok": False, "error": "bad token"}

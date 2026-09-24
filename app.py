@@ -798,7 +798,7 @@ async def lifespan(app: FastAPI):
     # очереди (файл планов переживает и перезапуск, и чистку очереди), и должен
     # жить цикл, который переводит наступившие планы в queued.
     try:
-        _n_sched = _bbc_sched.restore()
+        _n_sched = await _bbc_sched.restore()
         if _n_sched:
             print(f"[bbc-schedule] restored {_n_sched} scheduled recording(s)", flush=True)
         asyncio.create_task(_bbc_sched.run_loop())
@@ -1226,6 +1226,9 @@ _app_auth.add_public_path("/api/telemetry/ingest")
 # Полный архив логов, который пользователь отправляет кнопкой. Тоже публичный и
 # token-gated: он приходит с чужой машины, сессии у неё быть не может.
 _app_auth.add_public_path("/api/telemetry/report")
+# Аварийные отчёты мобилки: тот же публичный ярус и те же лимиты, но ключа в
+# клиенте нет вовсе — APK тестера распаковывается дешевле, чем чинится.
+_app_auth.add_public_path("/api/telemetry/crash")
 
 # ── Hot-restart ────────────────────────────────────────────────────────────────
 def _spawn_restart(delay: float = 0.4) -> None:
