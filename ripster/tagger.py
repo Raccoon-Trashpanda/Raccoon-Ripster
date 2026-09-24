@@ -529,16 +529,24 @@ def render_filename(template: str, tags: dict, ext: str) -> str:
     return f"{name}.{(ext or '').lstrip('.')}"
 
 
-def rename_from_tags(directory: Path, template: str) -> list[tuple[Path, Path]]:
+def rename_from_tags(directory: Path, template: str,
+                     protect: "set[str] | None" = None) -> list[tuple[Path, Path]]:
     """Rename all audio files in *directory* (non-recursive) using *template*.
 
     Returns list of (old_path, new_path) for files that were actually renamed.
     Files that would get an empty name or whose new name equals the old name
     are silently skipped.  Duplicate resulting names get ``_2``, ``_3``
     suffixes to avoid overwriting.
+
+    *protect* — имена файлов, которые ЭТОЙ задаче не принадлежат (записаны в
+    манифесте за другим релизом, лежащим в этой же папке). Чужой файл не
+    переименовываются и НЕ удаляются: скан папки иначе забирает соседний релиз
+    как «дубликат» (24.09.2026 NORTHERN EXPOSURE REDUX — MIXED и UNMIXED в
+    одной папке, байт-в-байт совпавший трек был стёрт как лишняя копия).
     """
     if not template or not directory.is_dir():
         return []
+    protect = {str(p).lower() for p in (protect or ())}
 
     results: list[tuple[Path, Path]] = []
     used_names: set[str] = set()
@@ -550,6 +558,9 @@ def rename_from_tags(directory: Path, template: str) -> list[tuple[Path, Path]]:
     )
 
     for file in files:
+        if file.name.lower() in protect:
+            used_names.add(file.name.lower())
+            continue                              # чужой релиз — не трогаем
         tags = read_tags(file)
         if not tags:
             continue
@@ -576,6 +587,7 @@ def rename_from_tags(directory: Path, template: str) -> list[tuple[Path, Path]]:
         desired = directory / new_name
         if (desired.exists() and desired != file
                 and desired.name.lower() != file.name.lower()
+                and not (protect and desired.name.lower() in protect)
                 and _same_content(desired, file)):
             try:
                 file.unlink()
