@@ -168,7 +168,12 @@ async def export_config():
     """Downloadable settings backup — every preference/path/toggle EXCEPT
     credentials (tokens, passwords, ARLs, multi-account pool lists, account
     identity fields). Re-importable via POST /api/config, which already
-    whitelist-filters what it accepts — no separate import endpoint needed."""
+    whitelist-filters what it accepts — no separate import endpoint needed.
+
+    Сюда же кладётся реестр отзывов владельца («это не мой артист»): это тоже
+    настройка — то, что человек уже решил о своих подписках. Теряется при
+    переносе — и однофамильцы возвращаются в ленту молча.
+    """
     from fastapi.responses import JSONResponse
     import time as _time
     payload = {
@@ -177,6 +182,11 @@ async def export_config():
         "_app_version": _app_info.get("version", ""),
         "settings": _export_config(_cfg),
     }
+    try:
+        from ripster import owner_feedback as _fb
+        payload["owner_feedback"] = _fb.export()
+    except Exception as e:                                   # noqa: BLE001
+        print(f"[config] отзыв владельца не вывезен: {e}", flush=True)
     return JSONResponse(
         payload,
         headers={"Content-Disposition": "attachment; filename=ripster-settings.json"},
@@ -187,6 +197,18 @@ async def export_config():
 async def post_config(body: dict):
     if not isinstance(body, dict):
         raise HTTPException(400, "Expected JSON object")
+    # Реестр отзывов — не настройка витрины, а отдельный durable-файл: его
+    # сливает в себя `owner_feedback.apply_export`, и в `_cfg` ему делать
+    # нечего (иначе whitelist снёс бы его как «blocked»).
+    fb = body.pop("owner_feedback", None)
+    fb_added = 0
+    if isinstance(fb, dict):
+        try:
+            from ripster import owner_feedback as _fb
+            fb_added = _fb.apply_export(fb)
+            _fb.invalidate()
+        except Exception as e:                               # noqa: BLE001
+            print(f"[config] отзыв владельца не ввезён: {e}", flush=True)
     safe    = {k: v for k, v in body.items() if _config_key_allowed(k)}
     blocked = [k for k in body if k not in safe]
     for k in list(safe):
@@ -195,9 +217,17 @@ async def post_config(body: dict):
     if blocked:
         print(f"[config] blocked non-whitelisted keys: {blocked}", flush=True)
     _cfg.update(safe)
+    if "apple-public-mode" in safe:
+        # Перевыбор режима владельцем — явное действие, оно снимает автопаузу
+        # 429 (router живёт молчанием, пауза — не приговор выбору человека).
+        try:
+            from ripster import apple_router as _ar
+            _ar.clear_public_pause()
+        except Exception:                                    # noqa: BLE001
+            pass
     if _save_cfg:
         _save_cfg(_cfg)
-    return {"ok": True, "blocked": blocked}
+    return {"ok": True, "blocked": blocked, "feedback_added": fb_added}
 
 
 @router.post("/api/config/reload")

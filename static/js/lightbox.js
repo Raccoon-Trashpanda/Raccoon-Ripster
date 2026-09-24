@@ -172,6 +172,18 @@ function _histRender() {
     const title = esc(h.title || _titleFromUrl(h.url));
     const artist = esc(h.artist || '');
     const tracksInfo = h.tracks > 0 ? ' · '+tplural('h.tracks', h.tracks) : '';
+    // Честная строка запасного пути: у отказавшей задачи — «скачано из X»,
+    // у взятшей оттуда же — «вместо X». Обе структурой + переводом по ключу.
+    let fbLine = '';
+    if(h.status === 'error' && h.resolved_by && h.resolved_by.service){
+      fbLine = ` <span style="color:var(--green)">${esc(t('history.fb_resolved',{origin:(h.service||'?').toUpperCase(), svc:(h.resolved_by.service||'').toUpperCase(), quality:h.resolved_by.quality||''}))}</span>`;
+    } else if(h.status === 'done' && h.switched_from){
+      fbLine = ` <span style="color:var(--muted)">${esc(t('history.fb_from',{origin:(h.switched_from||'').toUpperCase()}))}</span>`;
+    }
+    // Скачано через публичный враппер — не своя учётка, и история говорит прямо.
+    if(h.status === 'done' && h.public_wrapper){
+      fbLine += ` <span style="color:var(--orange)">${esc(t('history.public_wrapper',{region:h.public_wrapper}))}</span>`;
+    }
     const art = h.artworkUrl ? `<img src="${esc(h.artworkUrl)}" style="width:100%;height:100%;object-fit:cover;border-radius:6px" loading="lazy"/>` : lbl;
     return `
     <div class="hist-row" style="display:flex;align-items:center;gap:12px;padding:10px 12px;background:var(--surface);border:1px solid var(--border);border-radius:10px">
@@ -181,7 +193,7 @@ function _histRender() {
           ${statusIcon(h.status || 'done')} <span style="overflow:hidden;text-overflow:ellipsis">${title}</span>
         </div>
         <div style="font-size:11px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
-          ${artist ? artist + ' · ' : ''}${ts} · ${(h.quality||'?').toUpperCase()}${tracksInfo}
+          ${artist ? artist + ' · ' : ''}${ts} · ${(h.quality||'?').toUpperCase()}${tracksInfo}${fbLine}
         </div>
       </div>
       <button onclick="redownload(${esc(JSON.stringify(h.url))}, ${esc(JSON.stringify(h.quality||''))})"

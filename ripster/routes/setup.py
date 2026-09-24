@@ -419,6 +419,14 @@ async def amd_wrapper_status_ep():
     """
     probe = await asyncio.to_thread(_router.public_wrapper_probe, _cfg)
     probe.update(_router.public_wrapper_state())
+    # Карточка режимов (24.09.2026) показывает честное состояние выбора:
+    # какой режим живёт в конфиге, сколько РАЗНЫХ релизов сегодня уже ушло
+    # в пул, какой кап выставлен и сколько осталось до самовозврата после 429.
+    probe["mode"] = _router.public_mode(_cfg)
+    probe["used_today"] = _router.public_daily_used(_cfg)
+    probe["daily_cap"] = int(_cfg.get("amd-daily-cap") or 0)
+    probe["pause_remaining_h"] = int(_router.public_pause_remaining() // 3600)
+    probe["regions_pool"] = probe.get("regions") or []
     if probe.get("state") != "working":
         # `error` — для старых потребителей интерфейса (cookies_ui.js); без него
         # они молча показали бы «не готово» без причины.
@@ -461,6 +469,53 @@ async def wrapper_relogin():
         "msg_key": "setup.wrapper_relogin_started",
         "msg": "Re-login started — ожидай 2FA на телефоне",
     }
+
+
+@router.post("/api/wrapper/device-info")
+async def wrapper_set_device_info():
+    """Явное действие владельца: назначить слоту 0 уникальный `-I` отпечаток.
+
+    Слот 0 — единственная живая учётка, и новый device-info для Apple = новое
+    устройство (риск device_limit), поэтому молча подставлять отпечаток нельзя
+    (см. ripster/amd.py::_slot0_device_info — он читает реестр, но сам ничего не
+    вычисляет). Сюда значение кладёт ТОЛЬКО владелец по кнопке. Применяется при
+    следующем «Войти заново (2FA)»: перелогин за владельца не делаем — он жжёт
+    слот устройства и требует 2FA.
+
+    Солёмка генерится один раз и пишется штатным конфиг-райтером; в ответ и в
+    логи не попадает (печатается только сам отпечаток — он не секрет).
+    """
+    apple_id = str(_cfg.get("wrapper-apple-id") or "").strip()
+    if not apple_id:
+        raise HTTPException(400, imsg("w.fingerprint_no_account",
+                                      "Apple ID слота 0 не задан — назначать отпечаток не для кого."))
+    salt = str(_cfg.get("apple-device-salt") or "")
+    if not salt:
+        import secrets as _sec
+        salt = _sec.token_hex(16)
+        _cfg["apple-device-salt"] = salt
+        if not _save_config:
+            raise HTTPException(500, imsg("err.cfg_save_unavailable",
+                                          "сохранение конфига недоступно"))
+        try:
+            _save_config(_cfg)
+        except Exception as e:                              # noqa: BLE001
+            raise HTTPException(500, imsg("err.cfg_save_failed",
+                                          "не сохранил конфиг: {e}", e=str(e)))
+    # Локаль берём по фактической витрине аккаунта (не по ссылке). Синхронно,
+    # без сети-бросания: при отсутствии сессии вернёт '' — тогда конфиг-витрина.
+    cc = ""
+    try:
+        cc = _router.local_wrapper_storefront(_cfg) or ""
+    except Exception:                                       # noqa: BLE001
+        cc = ""
+    cc = cc or str(_cfg.get("storefront") or "")
+    from ripster import wrapper_device_info as _di
+    fp = _di.owner_reroll(apple_id, salt, cc)
+    return {"ok": True, "msg_key": "w.fingerprint_set", "params": {"fp": fp},
+            "msg": f"Отпечаток назначен: {fp}. Нажми «Войти заново (2FA)», "
+                   f"чтобы он применился.",
+            "device_info": fp}
 
 
 @router.get("/api/wrapper/session-status")

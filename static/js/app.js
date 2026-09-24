@@ -100,6 +100,9 @@ function setLang(lang) {
   try { if(typeof wlPopulateSvc === 'function') wlPopulateSvc(); }   catch {}
   try { if(typeof _wlSugRender  === 'function') _wlSugRender(); }    catch {}
   try { if(typeof _histRender   === 'function') _histRender(); }     catch {}
+  // Список спаренных телефонов (тумблер отдачи учёток) собирается через t()
+  // в момент отрисовки из снимка /api/pair/status — перерисовка в сеть не ходит.
+  try { if(typeof pairRenderDevices === 'function') pairRenderDevices(); } catch {}
 }
 
 const _LANG_ORDER = ['ru','en','hi','ja','zh'];
@@ -626,12 +629,19 @@ function handleMessage(msg) {
       appendWrapperLog(msg.text);
       appendLog('[WRAPPER] '+msg.text, msg.level||'info');
       break;
-    case 'wrapper_login_failed':
+    case 'wrapper_login_failed': {
       _wrapperStarting = false;
-      toast(t('t.wrong_apple_pw'), 'var(--red)', t('t.check_wrapper_path'));
-      appendLog('[WRAPPER] ✗ Login failed — '+t('t.wrapper_fix_pw'), 'error');
+      // Сервер знает причину, клиент — нет: раньше любой отказ подписывался
+      // «неверный пароль», а для лимита устройств этот совет ВРЕДЕН (каждый
+      // перелогин сжигает ещё один слот Apple ID). Если приехал переводимый
+      // msg_key — показываем его, иначе остаётся прежняя подпись.
+      const _why = errKeyText(msg.msg_key, msg.params);
+      toast(_why || t('t.wrong_apple_pw'), 'var(--red)',
+            _why ? '' : t('t.check_wrapper_path'), _why ? 15000 : 6000);
+      appendLog('[WRAPPER] ✗ ' + (_why || t('t.wrapper_fix_pw')), 'error');
       checkWrapperStatus();
       break;
+    }
     case 'wrapper_started':
       _wrapperStarting=false;
       toast(t('t.wrapper_up'),'var(--green)');
@@ -1350,6 +1360,7 @@ function applyConfig() {
     if(_adv) _adv.textContent = (_ad === 0 ? t('gp.off') : _ad + ' ' + t('gp.min')); }
   { const _ap = +(c['amd-parallel'] || 2);
     setVal('s-amd-parallel', _ap); }
+  setVal('s-amd-wm-key', c['amd-wm-api-key']||'');
   setChk('s-apple-parallel', c['apple-parallel-tracks']);
   setChk('s-quality-subfolders', c['quality-subfolders']);
   setVal('s-transcode-format', c['transcode-format'] || (c['transcode-flac'] ? 'flac' : c['transcode-mp3'] ? 'mp3' : ''));
@@ -1373,6 +1384,9 @@ function applyConfig() {
   // Apple wrapper selector (local/public/auto) — reflect the saved choice.
   // _hlAppleWrapper lives in settings.html's inline script (executed by views.js).
   try{ if(typeof _hlAppleWrapper==='function') _hlAppleWrapper(c['apple-wrapper']||'public'); }catch(e){}
+  // Режимы публичного враппера (24.09.2026) — тот же принцип: только отразить
+  // сохранённый выбор, никогда не перезаписывать конфиг при отрисовке.
+  try{ if(typeof _hlPublicMode==='function') _hlPublicMode(c['apple-public-mode']||'off'); }catch(e){}
   setVal('s-mem',        c['max-memory']||256);
   setVal('s-atmosmax',   c['atmos-max']||2448);
   // gamdl
@@ -2111,7 +2125,9 @@ async function albumDownloadSelected(){
   if(b){ b.disabled = true; b.textContent = t('t.adding'); }
   let ok = 0;
   for(const cb of sel){
-    try { const r = await api('POST','/api/queue/add',{url: cb.dataset.url, quality: q}); if(r && r.ok) ok++; } catch {}
+    try { const _b = {url: cb.dataset.url, quality: q};
+          if(_albumPubwChecked()) _b.public_wrapper = true;
+          const r = await api('POST','/api/queue/add',_b); if(r && r.ok) ok++; } catch {}
   }
   toast(`+ ${ok}/${sel.length} ${t('ck.trk_to_queue')}`, ok ? 'var(--green)' : 'var(--red)');
   if(b){ b.textContent = '⬇ '+ti('ck.dl_sel_n',{n:sel.length}); b.disabled = false; b.style.opacity = '1'; }
@@ -2168,7 +2184,9 @@ async function albumAddTrack(urlOrId, title, artist){
   if(!urlOrId || !urlOrId.startsWith('http')){
     toast(t('t.no_trk_url'),'var(--red)'); return;
   }
-  const r = await api('POST', '/api/queue/add', {url: urlOrId, quality: resolveQuality(detectSvcFromUrl(urlOrId) || 'apple'), title, artist});
+  const _b = {url: urlOrId, quality: resolveQuality(detectSvcFromUrl(urlOrId) || 'apple'), title, artist};
+  if(_albumPubwChecked()) _b.public_wrapper = true;
+  const r = await api('POST', '/api/queue/add', _b);
   if(r.ok) toast(`+ ${title}`);
   else toast(t('t.error_c')+(r.detail||'?'),'var(--red)');
 }

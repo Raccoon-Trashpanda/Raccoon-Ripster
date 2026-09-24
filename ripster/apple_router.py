@@ -38,6 +38,33 @@ def url_storefront(url: str) -> str:
     return m.group(1).lower() if m else ""
 
 
+def key_request_storefront(url: str, acct_sf: str) -> tuple[str, bool]:
+    """Витрина, в которую надо слать ЗАПРОС КЛЮЧА (расшифровки).
+
+    Факт из переписки авторов wrapper'а (и разбор docs/APPLE_STOREFRONT_-
+    MISMATCH_2026-09-24.md): DRM-ключ Apple выдаёт по фактической витрине
+    АККАУНТА, а не по витрине ссылки. Метаданные могут браться из другой
+    витрины — ключ нет. Раньше первый заход локального враппера шёл по витрине
+    ССЫЛКИ (ручка `/ru/` при `gb`-аккаунте) и получал заведомый «Invalid store /
+    Invalid CKC», который лестница потом исправляла реактивно.
+
+    Возвращает `(cc, changed)`:
+      · аккаунт известен и отличается от ссылки → (витрина_аккаунта, True) —
+        ключ просим в своей витрине, ССЫЛКУ на ключ не пускаем;
+      · витрина аккаунта неизвестна ('' — не спросили/нет сессии) →
+        (витрина_ссылки, False): не выдумываем, прежняя лестница разрулит;
+      · витрина аккаунта = витрине ссылки → она же, False (менять нечего).
+
+    Чистая функция без сети: переписывание URL на найденный номер альбома —
+    отдельный шаг (`rewrite_storefront_resolved`) у вызывающего.
+    """
+    acct = (acct_sf or "").strip().lower()
+    url_sf = url_storefront(url)
+    if acct and url_sf and acct != url_sf:
+        return acct, True
+    return (acct or url_sf), False
+
+
 # ── Availability-aware region resolution (pre-release handling) ───────────────
 # A release can be live in one storefront before another (e.g. out in /nz/ days
 # before our /gb/ account). iTunes flags this per region via `isStreamable`. If
@@ -144,6 +171,11 @@ async def resolve_available_url(url: str, config: dict):
             if await _streamable(c, cc):
                 new = _rewrite_storefront(url, cc)
                 _AVAIL_CACHE[aid] = (now, new)
+                # Кэш по adamId и для публичного враппера: подобранный адрес
+                # релиза запоминается под его собственным номером, чтобы
+                # повторный заход (пер-таск оверрайд, режим on_region) не
+                # начинал поиск витрин заново.
+                _AVAIL_CACHE[_apple_id(new)] = (now, new)
                 return new, (f"⚠ недоступно в '{url_sf}' — беру регион '{cc}' "
                              f"(пре-релиз; нужна учётка этой страны)")
     except Exception:
@@ -391,6 +423,10 @@ def _public_wrapper_ok(config: dict) -> bool:
     # pool has nobody connected (see public_wrapper_healthy below).
     if not public_wrapper_healthy():
         return False
+    if public_pause_remaining():
+        # 24-часовая пауза после череды 429: сколько бы /status ни отвечал
+        # «готов», мы сами к нему сейчас не ходим.
+        return False
     return public_wrapper_probe(config)["state"] == "working"
 
 
@@ -574,6 +610,225 @@ def public_wrapper_state() -> dict:
             "fail_streak": _public_fail_streak}
 
 
+# ── РЕЖИМЫ ПУБЛИЧНОГО WRAPPER'А (выбор владельца, 24.09.2026) ────────────────
+# Владелец велел: тумблер публичного враппера на странице настроек Apple несёт
+# МНОЖЕСТВО сценариев и по умолчанию ВЫКЛЮЧЕН. Прежний `apple-wrapper: public`
+# означал «всё Apple — через wm.wol.moe»; теперь это режим `only` той же
+# группы. Правило 03.09 («публичный — только по явному выбору владельца») здесь
+# НЕ отменяется: ни один режим не включает публичный путь по коду, только по
+# настройке (или по чекбоксу конкретной задачи в диалоге загрузки).
+#
+#   off            — только свои учётки (поведение до 24.09, значение по умолчанию);
+#   on_fail        — свои слоты отказали терминально (лестница runner исчерпана)
+#                    → один запасной заход через публичный; следующий релиз — снова свои;
+#   on_region      — релиза нет ни в одной витрине своих аккаунтов (пре-релиз,
+#                    как nz-случай 24.09) → публичный с регионом, где он есть;
+#   on_limit       — свои упёрлись в лимиты/пейсинг (429, device-limit, пауза
+#                    входа) → публичный, пока свои не отойдут;
+#   only           — всё Apple через публичный (свои учётки мертвы); наследует
+#                    старое значение `apple-wrapper: public`;
+#   manual_region  — то же, но витрина принудительно берётся из
+#                    `amd-region-force` (список регионов из /status).
+PUBLIC_MODES = ("off", "on_fail", "on_region", "on_limit", "only", "manual_region")
+
+
+def public_mode(config: dict) -> str:
+    """Режим из настройки `apple-public-mode`; пусто/неизвестно → 'off'.
+    Legacy `apple-wrapper: public` читается как `only`: старый явный выбор
+    владельца не должен молча исчезнуть с апгрейдом."""
+    m = str((config or {}).get("apple-public-mode") or "").strip().lower()
+    if m in PUBLIC_MODES:
+        return m
+    if str((config or {}).get("apple-wrapper") or "").strip().lower() == "public":
+        return "only"
+    return "off"
+
+
+# Автоотключение после череда 429: несколько отказов по квоте подряд — режим
+# НЕ ОТКЛЮЧАЕТСЯ ЗАПИСЬЮ В КОНФИГ (код не воюет с тумблером владельца), а
+# вставляется пауза на 24 часа: маршрутизатор ведёт себя как `off`, карточка
+# настроек честно показывает причину и срок, по истечении выбор владельца
+# возвращается сам. Метка на диске — перезапуск приложения её не стирает.
+PUBLIC_PAUSE_S = 24 * 3600.0
+_429_STREAK = 3
+_public_429_at: list = []           # отметки отказов 429 за последние 15 минут
+_public_paused_until: float = 0.0   # кэш файла, чтобы не читать его на каждой задаче
+
+
+def _public_pause_path():
+    from pathlib import Path as _P
+    import os as _os
+    base = _P(_os.environ.get("RIPSTER_BASE_DIR") or _P(__file__).resolve().parent.parent)
+    return base / "dist" / "public_wrapper_pause.json"
+
+
+def _pause_on_disk(now: float) -> float:
+    try:
+        import json as _j
+        return float(_j.loads(_public_pause_path().read_text(encoding="utf-8")).get("until") or 0)
+    except Exception:
+        return 0.0
+
+
+def mark_public_429(config: dict) -> bool:
+    """Отказ публичного API по квоте (HTTP 429). Возвращает True, если достигнута
+    черед из `_429_STREAK` и режим автоматически выключен на 24 часа — вызывающий
+    обязан сообщить об этом владельцу ОДИН раз, а не при каждом отказе."""
+    global _public_429_at, _public_paused_until
+    now = time.time()
+    _public_429_at = [t for t in _public_429_at + [now] if now - t < 900]
+    if len(_public_429_at) < _429_STREAK:
+        return False
+    _public_429_at = []
+    _public_paused_until = now + PUBLIC_PAUSE_S
+    try:
+        import json as _j
+        p = _public_pause_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(_j.dumps({"until": _public_paused_until,
+                                 "reason": "quota_429"},
+                                ensure_ascii=False), encoding="utf-8")
+        tmp.replace(p)
+    except Exception as e:                                # noqa: BLE001
+        print(f"[apple-router] паузу 429 не записал: {e}", flush=True)
+    return True
+
+
+def public_pause_remaining() -> float:
+    global _public_paused_until
+    if _public_paused_until <= time.time():
+        _public_paused_until = _pause_on_disk(time.time())
+    return max(0.0, _public_paused_until - time.time())
+
+
+def clear_public_pause() -> None:
+    """Явное действие владельца (перевыбор режима в Настройках) снимает паузу."""
+    global _public_paused_until, _public_429_at
+    _public_paused_until = 0.0
+    _public_429_at = []
+    try:
+        _public_pause_path().unlink()
+    except Exception:
+        pass
+
+
+# ── Суточный счётчик запросов и кэш повторов (по adamId релиза) ──────────────
+# Файл `dist/public_wrapper_usage.json`:
+#   {"day": "ГГГГ-ММ-ДД", "releases": {adamId: сколько раз просили сегодня},
+#    "last": {adamId: unix-время последней отправки}}
+# Одновременно счётчик дневной квоты (`amd-daily-cap`, 0 = не ограничивать) и
+# кэш «этот релиз уже уходил в публичный враппер N минут назад» — повторная
+# отправка того же adamId волонтёрскому сервису на второй круг бессмысленна.
+def _usage_path():
+    from pathlib import Path as _P
+    import os as _os
+    base = _P(_os.environ.get("RIPSTER_BASE_DIR") or _P(__file__).resolve().parent.parent)
+    return base / "dist" / "public_wrapper_usage.json"
+
+
+def _usage_load(roll_day: bool) -> tuple:
+    import json as _j
+    today = time.strftime("%Y-%m-%d")
+    try:
+        d = _j.loads(_usage_path().read_text(encoding="utf-8"))
+        if not isinstance(d, dict):
+            d = {}
+    except Exception:
+        d = {}
+    if d.get("day") != today and roll_day:
+        d = {"day": today, "releases": {}, "last": {}}
+    d.setdefault("releases", {})
+    d.setdefault("last", {})
+    return d, today
+
+
+def public_daily_used(config: dict) -> int:
+    """Сколько РАЗНЫХ релизов сегодня ушло в публичный враппер (0 — неспрошено
+    или пусто). Для счётчика в карточке настроек."""
+    d, _ = _usage_load(roll_day=False)
+    return len(d.get("releases") or {})
+
+
+def public_dispatch_guard(config: dict, url: str) -> dict:
+    """Учёт повторных отправок релиза в публичный враппер (кэш по adamId).
+    Возвращает {"dup": bool, "blocked": bool, "used_today": int}:
+      blocked — суточный кап выбран, нового релиза сегодня просить нельзя;
+      dup     — этот релиз уже уходит в враппер прямо сейчас (окно 10 минут):
+                отправку не блокируем (владетель жмёт «повтори» осознанно), но
+                помечаем в маршруте честно и кап о дубль не расходуем."""
+    try:
+        cap = int(config.get("amd-daily-cap") or 0)
+    except (TypeError, ValueError):
+        cap = 0
+    d, today = _usage_load(roll_day=True)
+    releases, last = d["releases"], d["last"]
+    aid = _apple_id(url)
+    now = time.time()
+    dup = bool(aid) and now - float(last.get(aid) or 0) < 600.0
+    # Блокируем ТОЛЬКО новый релиз при исчерпанном капле: сравнение с числом
+    # уже учтённых, а не «любой неучтённый» — иначе кап=5 запрещал и первый
+    # запрос дня (поймано тестом 24.09.2026).
+    if cap and aid and aid not in releases and not dup and len(releases) >= cap:
+        return {"dup": False, "blocked": True, "used_today": len(releases)}
+    try:
+        if aid:
+            if not dup:
+                releases[aid] = int(releases.get(aid) or 0) + 1
+            last[aid] = now
+            tmp = _usage_path().with_suffix(".tmp")
+            tmp.parent.mkdir(parents=True, exist_ok=True)
+            import json as _j
+            tmp.write_text(_j.dumps({"day": today, "releases": releases, "last": last},
+                                    ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_usage_path())
+    except Exception as e:                                # noqa: BLE001
+        print(f"[apple-router] счётчик публичного враппера не записан: {e}", flush=True)
+    return {"dup": dup, "blocked": False, "used_today": len(releases)}
+
+
+def public_decision(config: dict, url: str = "", task: dict | None = None) -> tuple:
+    """Можно ли ПУБЛИЧНЫЙ враппер для этой задачи и какой режим это разрешило.
+    (public, режим, причина-блок). Режим on_fail проявляется НЕ здесь, а в
+    раннере: он разрешает запасной заход ПОСЛЕ терминального отказа всех своих
+    слотов (см. runner.run_task)."""
+    mode = public_mode(config)
+    if (task or {}).get("public_wrapper"):
+        # Пер-таск оверрайд из диалога загрузки — явное действие человека,
+        # работает при любом режиме, кроме выключенного паузой 429.
+        mode = "only" if mode in ("off", "on_fail", "on_region", "on_limit") else mode
+    else:
+        if mode == "on_fail":
+            return False, mode, ""
+        if mode == "off":
+            return False, "off", ""
+    left = public_pause_remaining()
+    if left:
+        return False, mode, ("публичный враппер отключён на 24 ч после "
+                             f"{_429_STREAK}×429 (осталось {int(left / 3600)} ч)")
+    if mode in ("on_region",):
+        # Режим решает раннер/роутер ПОСЛЕ проверки витрин: здесь только то,
+        # что выбор в принципе сделан; ветка маршрута «свой враппер» остаётся
+        # основной, публичный — по факту отсутствия релиза в своих витринах.
+        return False, mode, ""
+    if mode == "on_limit":
+        # Публичный подхватывает отказы пейсинга (`apple_pacing_blocked`) —
+        # ниже они не мешают, но и не включают amd заранее.
+        return bool(apple_pacing_blocked(config)), mode, ""
+    return True, mode, ""
+
+
+def apple_pacing_blocked(config: dict) -> bool:
+    """Наши СОБСТВЕНные пейсинг-лимиты Apple сейчас кусаются (429/403 в
+    penalty у ripster.pacing) — для режима `on_limit` это признак «свои на
+    лимите, пустить публичный»."""
+    try:
+        from ripster import pacing
+        return pacing.wait_seconds("apple", config=config or {}) > 0
+    except Exception:
+        return False
+
+
 def _local_wrapper_ok(config: dict) -> bool:
     # Honour the CKC health gate first — a wrapper that just failed to decrypt
     # is treated as down even though its socket is still listening.
@@ -607,6 +862,54 @@ def _cookies_ok(config: dict) -> bool:
         return False
 
 
+# ── WRAPPER LITE (второй локальный бэкенд) ─────────────────────────────────
+# lite — свой контейнер на петле (127.0.0.1:12340), аудит
+# docs/WRAPPER_LITE_AUDIT_2026-09-24.md. Выбран ТОЛЬКО владельцем вручную
+# (apple-wrapper = lite); недоступный Lite не уезжает на публичный пул —
+# `_decide` его туда и не выпустит — а честно возвращается на локальный
+# враппер с пояснением в заметке.
+_lite_state: dict = {}
+_lite_state_ts: float = 0.0
+_LITE_TTL = 60.0
+
+
+def lite_wrapper_state(config: dict, force: bool = False) -> dict:
+    """{reachable, logged_in, regions, temari, error}; кэш 60 с, force — «ещё раз»."""
+    global _lite_state, _lite_state_ts
+    now = time.time()
+    if not force and _lite_state and now - _lite_state_ts < _LITE_TTL:
+        return dict(_lite_state)
+    from ripster import lite as _lite
+    st = {"reachable": False, "logged_in": False, "regions": [],
+          "temari": True, "error": ""}
+    try:
+        import temari  # noqa: F401  — локальная расшифровка обязательна
+    except Exception:
+        st["temari"] = False
+    try:
+        data = _lite.get_client(config).status()
+        st["reachable"] = True
+        st["regions"] = [str(r) for r in (data.get("regions") or [])]
+        # без токенов lite отвечает пустыми регионами — это «жив, но не залогинен»
+        st["logged_in"] = bool(st["regions"])
+    except _lite.LiteError as e:
+        st["error"] = str(e)
+    _lite_state, _lite_state_ts = st, now
+    return dict(st)
+
+
+def _lite_ready(config: dict) -> tuple:
+    """(готов, почему-не-готов) — годный Lite для этой задачи."""
+    st = lite_wrapper_state(config)
+    if not st["temari"]:
+        return False, "нет Temari"
+    if not st["reachable"]:
+        return False, "сервер недоступен"
+    if not st["logged_in"]:
+        return False, "учётка не залогинена"
+    return True, ""
+
+
 # ── ЕДИНСТВЕННЫЙ ВЫХОД ИЗ МАРШРУТИЗАТОРА ─────────────────────────────────────
 # Правило «не уезжать с локального враппера само по себе» чинится не первый раз,
 # и ломается каждый раз одинаково: его переписывают в КАЖДОЙ ветке, а новая
@@ -617,18 +920,27 @@ def _cookies_ok(config: dict) -> bool:
 # Поэтому решение принимает ветка, а ВЫПУСКАЕТ его только `_decide`. Он знает
 # два запрета и умеет их восстановить:
 #
-#   • `amd` (публичный wm.wol.moe) — только при `apple-wrapper = public`;
+#   • `amd` (публичный wm.wol.moe) — только по явному выбору владельца: режим
+#     `apple-public-mode` (24.09.2026), legacy `apple-wrapper = public`, или
+#     чекбокс конкретной задачи;
 #   • `gamdl` (куки) — только для видео, либо когда локальный wrapper реально
 #     не отвечает И владелец не прибил движок к локальному.
 #
 # Нарушение не молчит: печатается «маршрут исправлен», по строке видно, какая
 # ветка разъехалась. Тихая коррекция превратила бы сторожа в украшение.
 def _decide(engine: str, quality: str, *, pref: str, local_ok: bool,
-            is_video: bool, note: str = "", degraded: bool = False) -> dict:
-    """Проверить решение ветки на два запрета и вернуть маршрут."""
+            is_video: bool, note: str = "", degraded: bool = False,
+            public_ok: bool | None = None) -> dict:
+    """Проверить решение ветки на два запрета и вернуть маршрут.
+
+    `public_ok` — разрешение публичного враппера от `public_decision` (режимы
+    24.09.2026). Переданной None (все старые вызовы и тесты) считается по
+    прежнему правилу: `pref == "public"`."""
+    if public_ok is None:
+        public_ok = (pref == "public")
     fixed = ""
-    if engine == "amd" and pref != "public":
-        fixed = "публичный wrapper выбирается только вручную"
+    if engine == "amd" and not public_ok:
+        fixed = "публичный wrapper выбирается только владельцем (режим off)"
         engine = "zhaarey"
     elif engine == "gamdl" and not is_video and (local_ok or pref == "local"):
         fixed = ("локальный wrapper доступен" if local_ok
@@ -640,7 +952,67 @@ def _decide(engine: str, quality: str, *, pref: str, local_ok: bool,
     return {"engine": engine, "quality": quality, "degraded": degraded, "note": note}
 
 
-def route_apple(quality: str, config: dict, url: str = "") -> dict:
+_MODE_LABELS = {"only": "режим «только публичный»",
+                "manual_region": "режим «ручной регион»",
+                "on_limit": "режим «резерв при лимите своих»",
+                "on_region": "режим «резерв по региону»",
+                "on_fail": "режим «резерв при отказе своих»"}
+
+
+def _public_route(q: str, config: dict, url: str, url_sf: str, acct_sf: str,
+                  foreign: bool, cookies: bool, pref: str, pub_mode: str) -> dict:
+    """Ветка публичного wrapper'а: честная заметка, учёт повторных отправок
+    (кэш по adamId) и суточный кап. Единственный выход — снова `_decide`."""
+    if is_apple_music_video(url):
+        # Движок AMD audio-only: клипы публичный враппер не умеет ни в каком
+        # режиме — остаётся gamdl с cookies.
+        note = "" if cookies else "⚠ нет cookies.txt — видео не скачается"
+        if pub_mode in _MODE_LABELS:
+            note = (note + " · " if note else "") + \
+                f"клипы публичный враппер не отдаёт ({_MODE_LABELS[pub_mode]} → gamdl)"
+        return _decide("gamdl", "mv", pref=pref, local_ok=_local_wrapper_ok(config),
+                       is_video=True, note=note)
+    guard = public_dispatch_guard(config, url)
+    if guard["blocked"]:
+        return _decide("zhaarey", q, pref=pref, local_ok=_local_wrapper_ok(config),
+                       is_video=False,
+                       note=(f"⚠ суточный кап публичного враппера выбран "
+                             f"({config.get('amd-daily-cap')}) — сегодня больше "
+                             f"чужих релизов нет; локальный wrapper"))
+    label = _MODE_LABELS.get(pub_mode, "выбран вручную")
+    note = f"{q.upper()} · публичный wrapper · {label} (выбран вручную)"
+    if not _public_wrapper_ok(config):
+        note = (f"{q.upper()} · публичный wrapper в очереди · "
+                f"{label} (выбран вручную)")
+    if guard["dup"]:
+        note += " · ⚠ этот релиз уходил в публичный враппер меньше 10 минут назад"
+    # ГЛАВНОЕ СКАЗАТЬ СРАЗУ, А НЕ ПОСЛЕ ПРОВАЛЕННОЙ ЗАГРУЗКИ.
+    #
+    # Пул может быть совершенно здоров и всё равно бесполезен именно нам:
+    # устройства в него подключают волонтёры, и витрин там ровно столько,
+    # сколько их стран. Замер 06.09.2026 — пул готов, 19 клиентов, регионы
+    # cn/in/th/br/sg/jp/nz/tw/it/id/kr/tr/my; нашей витрины `us` и
+    # канадского аккаунта в списке нет. Без этой строки человек узнавал бы
+    # об этом из «0 треков» через полминуты перебора.
+    want_sf = (url_sf or acct_sf or config.get("storefront") or "us")
+    forced = str(config.get("amd-region-force") or "").strip().lower()
+    if pub_mode == "manual_region" and forced:
+        note += f" · витрина принуждена '{forced}'"
+    elif public_pool_serves(config, want_sf) is False:
+        alt = public_pool_pick_region(config, want_sf)
+        if alt and config.get("amd-region-rewrite", True) is not False:
+            note += f" · витрины '{want_sf}' в пуле нет → берём '{alt}'"
+        elif alt:
+            note += (f" · ⚠ витрины '{want_sf}' в пуле нет "
+                     f"(есть, например, '{alt}'), смена региона выключена")
+    if foreign:
+        note += f" · регион {url_sf}"
+    return _decide("amd", q, pref=pref, local_ok=_local_wrapper_ok(config),
+                   is_video=False, note=note, public_ok=True)
+
+
+def route_apple(quality: str, config: dict, url: str = "",
+                task: dict | None = None) -> dict:
     """Pick the best (engine, quality) for an Apple download of ``quality``.
 
     Returns ``{engine, quality, degraded, note}``. ``degraded`` is True when the
@@ -650,7 +1022,9 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
     the *account's* storefront. A foreign-region link is kept on the local
     wrapper (zhaarey) for lossless; if its account can't mint the key, runner.py
     rotates through the owner's other Apple account slots. The public AMD
-    wrapper is reached only when the owner explicitly set apple-wrapper=public.
+    wrapper is reached only by an explicit owner choice: the mode group
+    `apple-public-mode` (24.09.2026) or the legacy `apple-wrapper = public`
+    (= режим `only`), or the per-task checkbox of the download dialog.
     """
     q = (quality or "").lower().strip()
     # A /music-video/ link is always video, regardless of the requested codec.
@@ -667,19 +1041,40 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
     foreign = bool(url_sf and url_sf != acct_sf)
 
     pref = (config.get("apple-wrapper") or "auto").strip().lower()
+    # Режимы публичного враппера (выбор владельца 24.09.2026): можно ли этой
+    # задаче уходить на `amd`, какой режим это разрешил, и чем заблокирован.
+    pub, pub_mode, pub_block = public_decision(config, url, task)
+    _pub_all = pub_mode in ("only", "manual_region") and pub
 
     # Публичный wm.wol.moe (engine "amd") подключается ТОЛЬКО когда владелец сам
-    # выбрал его в Настройках (apple-wrapper = public). 03.09.2026 владелец
-    # потребовал прямо: НИКОГДА не переводить задачу на публичный wrapper
-    # автоматически — он ненадёжен, может быть уже мёртв, включается только
-    # вручную. Поэтому чужой регион больше НЕ уводит задачу на публичный пул:
-    # она остаётся на локальном враппере, а несовпадение витрины разруливает
-    # перебор Apple-аккаунтов в runner.py (своя витрина → другие свои слоты →
-    # честная ошибка). local_wrapper_storefront() выше по-прежнему даёт реальный
-    # регион аккаунта (config['storefront'] врёт), просто вывод из этого теперь
-    # другой.
-    if q in _LOSSLESS and pref != "public":
+    # выбрал его в Настройках — legacy `apple-wrapper = public` или режим
+    # `apple-public-mode` (24.09.2026), либо чекбокс конкретной задачи. 03.09.2026
+    # владелец потребовал прямо: НИКОГДА не переводить задачу на публичный wrapper
+    # автоматически — он ненадёжен, может быть уже мёртв. Поэтому чужой регион
+    # больше НЕ уводит задачу на публичный пул: она остаётся на локальном
+    # враппере, а несовпадение витрины разруливает перебор Apple-аккаунтов в
+    # runner.py (своя витрина → другие свои слоты → честная ошибка).
+    # Исключения — режимы, которые владелец ВЫБРАЛ САМ: on_limit подхватывает
+    # отказ своих лимитов, on_region — отсутствие релиза в своих витринах
+    # (решение принимает runner после лестницы), only/manual_region — весь звук.
+    if q in _LOSSLESS and pref == "lite":
+        ready, why = _lite_ready(config)
+        if ready:
+            note = f"{q.upper()} · Wrapper Lite (ключ и расшифровка локально)"
+            if foreign:
+                regions = ", ".join(lite_wrapper_state(config)["regions"]) or "?"
+                note += (f" · ссылка витрины '{url_sf}', витрины Lite: {regions}"
+                         " — при отказе ключа сработает перебор учёток")
+            return _decide("lite", q, pref=pref, local_ok=_local_wrapper_ok(config),
+                           is_video=False, note=note)
+        return _decide("zhaarey", q, pref=pref, local_ok=_local_wrapper_ok(config),
+                       is_video=False, degraded=True,
+                       note=f"{q.upper()} · Wrapper Lite ({why}) → локальный wrapper")
+
+    if q in _LOSSLESS and not pub:
         note = f"{q.upper()} · локальный wrapper (премиум)"
+        if pub_block:
+            note += f" · {pub_block}"
         if foreign:
             note = (f"{q.upper()} · локальный wrapper · ссылка витрины '{url_sf}', "
                     f"аккаунт '{acct_sf}' — при отказе ключа сработает перебор учёток")
@@ -694,37 +1089,22 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
         return _decide("gamdl", "mv", pref=pref, local_ok=_local_wrapper_ok(config),
                        is_video=True, note=note)
 
+    # ── «Только публичный» / «Ручной регион»: ВЕСЬ звук через wm.wol.moe ────
+    # Режимы 5-6 (24.09.2026): свои учётки мертвы или владелец принуждает
+    # витрину. Видео — исключение: у публичного враппера нет Widevine-пути,
+    # клипы по-прежнему только gamdl (движок audio-only).
+    if _pub_all and q not in _VIDEO:
+        return _public_route(q, config, url, url_sf, acct_sf, foreign,
+                             cookies, pref, pub_mode)
+
     # ── Lossless / spatial — a wrapper is mandatory ──────────────────────────
-    # KEEP lossless (never silently fall back to lossy AAC). Non-public prefs are
-    # already handled above (early `pref != "public"` return → local wrapper +
-    # account rotation downstream). The ONLY way execution reaches here is
-    # pref == "public": the owner explicitly picked the public wm.wol.moe
-    # wrapper-manager in Settings → Apple → Wrapper. It is never chosen
-    # automatically — that's a hard rule (03.09.2026).
+    # KEEP lossless (never silently fall back to lossy AAC). Сюда доходят только
+    # задачи, для которых публичный враппер РАЗРЕШЁН явным выбором владельца
+    # (режим only/manual_region, legacy public, чекбокс задачи, on_limit при
+    # лимите своих). Никогда автоматически — жёсткое правило 03.09.2026.
     if q in _LOSSLESS:
-        note = f"{q.upper()} · публичный wrapper (выбран вручную)"
-        if not _public_wrapper_ok(config):
-            note = f"{q.upper()} · публичный wrapper в очереди (выбран вручную)"
-        # ГЛАВНОЕ СКАЗАТЬ СРАЗУ, А НЕ ПОСЛЕ ПРОВАЛЕННОЙ ЗАГРУЗКИ.
-        #
-        # Пул может быть совершенно здоров и всё равно бесполезен именно нам:
-        # устройства в него подключают волонтёры, и витрин там ровно столько,
-        # сколько их стран. Замер 06.09.2026 — пул готов, 19 клиентов, регионы
-        # cn/in/th/br/sg/jp/nz/tw/it/id/kr/tr/my; нашей витрины `us` и
-        # канадского аккаунта в списке нет. Без этой строки человек узнавал бы
-        # об этом из «0 треков» через полминуты перебора.
-        want_sf = (url_sf or acct_sf or config.get("storefront") or "us")
-        if public_pool_serves(config, want_sf) is False:
-            alt = public_pool_pick_region(config, want_sf)
-            if alt and config.get("amd-region-rewrite", True) is not False:
-                note += f" · витрины '{want_sf}' в пуле нет → берём '{alt}'"
-            elif alt:
-                note += (f" · ⚠ витрины '{want_sf}' в пуле нет "
-                         f"(есть, например, '{alt}'), смена региона выключена")
-        if foreign:
-            note += f" · регион {url_sf}"
-        return _decide("amd", q, pref=pref, local_ok=_local_wrapper_ok(config),
-                       is_video=False, note=note)
+        return _public_route(q, config, url, url_sf, acct_sf, foreign,
+                             cookies, pref, pub_mode)
 
     # ── AAC / lossy ──────────────────────────────────────────────────────────
     # РАНЬШЕ AAC жёстко уходил в gamdl (cookies) — а куки могут быть от аккаунта
@@ -747,8 +1127,18 @@ def route_apple(quality: str, config: dict, url: str = "") -> dict:
         # враппере и скачался. Владелец видел только первую, отсюда и ощущение,
         # что Ripster «постоянно уезжает» с дефолтного движка. Перебор учёток
         # (runner.py) умеет чужую витрину и для AAC — пусть он и работает.
-        if local_ok and pref != "public":
+        if local_ok and not pub:
+            if pref == "lite":
+                ready, why = _lite_ready(config)
+                if ready:
+                    return _decide("lite", q or "aac", pref=pref, local_ok=local_ok,
+                                   is_video=False, note="AAC · Wrapper Lite")
+                return _decide("zhaarey", q or "aac", pref=pref, local_ok=local_ok,
+                               is_video=False, degraded=True,
+                               note=f"AAC · Wrapper Lite ({why}) → локальный wrapper")
             note = "AAC · локальный wrapper"
+            if pub_block:
+                note += f" · {pub_block}"
             if foreign:
                 note += (f" · ссылка витрины '{url_sf}', аккаунт '{acct_sf}' — "
                          f"при отказе ключа сработает перебор учёток")

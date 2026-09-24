@@ -734,6 +734,32 @@
             <a href="#" id="aw-public-recheck" onclick="refreshPublicWrapperStatus(true);return false"
                style="color:var(--blue);text-decoration:none;white-space:nowrap" data-i18n="s.pubw_recheck">Проверить снова</a>
           </div>
+          <!-- РЕЖИМЫ ПУБЛИЧНОГО WRAPPER'А (выбор владельца, 24.09.2026).
+               Тумблер «включить/выключить» оказался беднее реальности: враппер
+               нужен в шести разных сценариях — от «только когда свои мертвы»
+               до «принудь витрину NZ». По умолчанию ВЫКЛЮЧЕНО, и код сам его
+               не включает никогда (правило 03.09): решение только человека. -->
+          <div id="aw-pub-modes" style="margin-top:10px;padding:10px;border-radius:9px;border:1px solid var(--border);background:var(--surface2)">
+            <div style="font-size:11px;font-weight:700" data-i18n="s.pubmode_for">Публичный враппер: когда обращаться</div>
+            <div id="aw-pubmode-list" style="margin-top:6px;display:flex;flex-direction:column;gap:4px"></div>
+            <div id="aw-pub-region-row" style="display:none;margin-top:8px;font-size:11px;align-items:center;gap:8px">
+              <span data-i18n="s.pubmode_region">Витрина для публичных запросов</span>
+              <select id="aw-pub-region" onchange="saveSetting('amd-region-force', this.value)"
+                style="background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 8px;font-size:11px">
+                <option value="" data-i18n="s.pubmode_region_auto">— из живого пула —</option>
+              </select>
+            </div>
+            <div style="margin-top:8px;font-size:11px;display:flex;align-items:center;gap:8px">
+              <span data-i18n="s.pubmode_cap">Суточный потолок релизов через пул</span>
+              <input id="aw-pub-cap" type="number" min="0" step="1" value="50" onchange="saveSetting('amd-daily-cap', Math.max(0, parseInt(this.value||'0',10)))"
+                style="width:64px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:7px;padding:4px 6px;font-size:11px">
+              <span style="color:var(--muted)" data-i18n="s.pubmode_cap_hint">0 — без лимита</span>
+            </div>
+            <!-- Честная обратная связь: квота/регионы с /status, счётчик дня и
+                 пауза после 429 — без них настройка обещала бы выбор, который
+                 ничего не показывает. -->
+            <div id="aw-pub-mode-state" style="display:none;margin-top:8px;font-size:11px;line-height:1.55;color:var(--muted)"></div>
+          </div>
           <!-- Advanced reveal for the own-premium local wrapper -->
           <div id="aw-advanced-link" style="margin-top:6px;font-size:11px">
             <a href="#" onclick="revealLocalWrapper();return false" style="color:var(--blue);text-decoration:none"><span data-i18n="s.own_premium">⚙️ Свой premium-wrapper (advanced)</span></a>
@@ -847,6 +873,78 @@
             txt.textContent = line;
             box.style.color = tone;
             box.style.borderColor = tone;
+            try{ _pubModeState(r); }catch(e){}
+          }
+          // ── РЕЖИМЫ ПУБЛИЧНОГО WRAPPER'А (выбор владельца 24.09.2026) ──────
+          const PUB_MODES = ['off','on_fail','on_region','on_limit','only','manual_region'];
+          function _renderPubModes(){
+            var list = document.getElementById('aw-pubmode-list');
+            if(!list || list.childElementCount) return;
+            PUB_MODES.forEach(function(m){
+              var lab = document.createElement('label');
+              lab.style.cssText = 'display:flex;gap:7px;align-items:flex-start;font-size:11px;line-height:1.45;cursor:pointer';
+              var inp = document.createElement('input');
+              inp.type = 'radio'; inp.name = 'apple-public-mode'; inp.value = m;
+              inp.style.marginTop = '2px';
+              inp.onchange = function(){ applyPublicMode(m); };
+              var sp = document.createElement('span');
+              sp.setAttribute('data-i18n', 's.pubmode_' + m);
+              sp.textContent = t('s.pubmode_' + m);
+              lab.appendChild(inp); lab.appendChild(sp);
+              list.appendChild(lab);
+            });
+          }
+          function _hlPublicMode(v){
+            _renderPubModes();
+            if(PUB_MODES.indexOf(v) < 0) v = 'off';
+            PUB_MODES.forEach(function(m){
+              var i = document.querySelector('input[name="apple-public-mode"][value="'+m+'"]');
+              if(i) i.checked = (m === v);
+            });
+            var rr = document.getElementById('aw-pub-region-row');
+            if(rr) rr.style.display = (v === 'manual_region') ? 'flex' : 'none';
+          }
+          function applyPublicMode(v){
+            try{ saveSetting('apple-public-mode', v); }catch(e){}
+            _hlPublicMode(v);
+            // «ручной регион» без витрины — это тумблер, который ничего не
+            // меняет: спросим живые регионы пула сразу и подставим в список.
+            if(v !== 'off'){ try{ refreshPublicWrapperStatus(true); }catch(e){} }
+          }
+          function _pubModeState(r){
+            var box = document.getElementById('aw-pub-mode-state');
+            if(!box) return;
+            var mode = (r && r.mode) || 'off';
+            _hlPublicMode(mode);
+            var capEl = document.getElementById('aw-pub-cap');
+            if(capEl && document.activeElement !== capEl && r && r.daily_cap != null)
+              capEl.value = r.daily_cap;
+            if(mode === 'off'){ box.style.display = 'none'; return; }
+            var parts = [];
+            if(r && r.used_today != null){
+              var u = ti('s.pubmode_used', {n: r.used_today});
+              if(r.daily_cap) u += ' / ' + r.daily_cap;
+              parts.push(u);
+            }
+            if(r && r.pause_remaining_h > 0)
+              parts.push(ti('s.pubmode_paused', {h: r.pause_remaining_h}));
+            var sel = document.getElementById('aw-pub-region');
+            if(sel && r && Array.isArray(r.regions_pool)){
+              var have = {};
+              Array.prototype.forEach.call(sel.options, function(o){ have[o.value] = 1; });
+              r.regions_pool.forEach(function(cc){
+                cc = String(cc || '').toLowerCase();
+                if(cc && !have[cc]){
+                  var o = document.createElement('option');
+                  o.value = cc; o.textContent = cc.toUpperCase();
+                  sel.appendChild(o); have[cc] = 1;
+                }
+              });
+            }
+            var saved = ((window.S && S.config) || {})['amd-region-force'];
+            if(sel && saved) sel.value = saved;
+            box.textContent = parts.join(' · ');
+            box.style.display = parts.length ? '' : 'none';
           }
           // Поллинг — только пока настройки реально на экране: вечный опрос чужого
           // сервиса из фоновой вкладки не нужен ни нам, ни ему.
@@ -868,6 +966,7 @@
           // back to 'auto'.) applyConfig() also calls _hlAppleWrapper once config
           // arrives, so this is just an immediate best-effort on view load.
           try{ _hlAppleWrapper(((window.S && S.config) || {})['apple-wrapper'] || 'public'); }catch(e){}
+          try{ _hlPublicMode(((window.S && S.config) || {})['apple-public-mode'] || 'off'); }catch(e){}
           try{ if(typeof renderAccountsOverview==='function') renderAccountsOverview(); }catch(e){}
           </script>
         </div>
@@ -1298,6 +1397,14 @@
             </div>
           </div>
 
+          <!-- wm.wol.moe API key (с 10.09.2026 обязателен; секрет, гостям маскируется) -->
+          <div class="field-group">
+            <label class="lbl" data-i18n-html="as.amd_wm_key">API-ключ wm.wol.moe</label>
+            <input id="s-amd-wm-key" type="password" placeholder="••••••••" data-i18n-ph="as.amd_wm_key_ph"
+              oninput="saveSetting('amd-wm-api-key',this.value)"
+              style="width:100%;box-sizing:border-box;font-family:var(--mono);font-size:11px"/>
+          </div>
+
           <!-- Wrapper-manager live status -->
           <div id="amd-wm-status" style="display:none;margin-top:6px;border-radius:8px;padding:9px 12px;font-size:11px;line-height:1.6">
             <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
@@ -1347,6 +1454,11 @@
                 style="flex-shrink:0;background:rgba(239,159,39,.1);border:1px solid rgba(239,159,39,.3);border-radius:8px;padding:7px 14px;font-size:11px;font-weight:600;color:var(--orange);cursor:pointer;font-family:var(--font);white-space:nowrap"
                 data-i18n-title="as.relogin_title" title="Принудительная переавторизация — пришлёт 2FA на телефон" data-i18n="as.relogin">
                 🔄 Войти заново (2FA)
+              </button>
+              <button id="btn-device-fingerprint" onclick="changeDeviceFingerprint()"
+                style="flex-shrink:0;background:rgba(252,60,68,.08);border:1px solid rgba(252,60,68,.3);border-radius:8px;padding:7px 14px;font-size:11px;font-weight:600;color:#fc3c44;cursor:pointer;font-family:var(--font);white-space:nowrap"
+                data-i18n-title="as.device_fingerprint_title" data-i18n="as.device_fingerprint">
+                🔑 Сменить отпечаток устройства
               </button>
               <div id="wrapper-starting" style="display:none;font-size:11px;color:var(--muted)">
                 ⏳ <span id="wrapper-start-msg" data-i18n="s.starting">Запускаю…</span>

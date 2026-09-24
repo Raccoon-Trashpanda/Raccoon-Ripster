@@ -108,25 +108,42 @@ class AMDEngine(EngineBase):
 
         # ВИТРИНА ПОД ПУЛ.
         #
-        # Устройства в публичный пул подключают волонтёры, поэтому витрин там
-        # ровно столько, сколько их стран — на замере 06.09.2026 тринадцать, и
-        # нашей `us` среди них нет, а `nz` есть. Просить у пула ключ для
-        # витрины, которой он не обслуживает, — гарантированный «0 треков»
-        # через полминуты перебора.
+        # «Ручной регион» (режим 6, 24.09.2026): владелец сам указал витрину в
+        # Настройках → просим именно её, никакого подбора.
+        #
+        # Иначе — подбор по пулу. Устройства в публичный пул подключают
+        # волонтёры, поэтому витрин там ровно сколько их стран — на замере
+        # 06.09.2026 тринадцать, и нашей `us` среди них нет, а `nz` есть. Просить
+        # у пула ключ для витрины, которой он не обслуживает, — гарантированный
+        # «0 треков» через полминуты перебора.
         #
         # Каталог у Apple по странам почти общий, поэтому релиз почти всегда
         # достаётся из другой витрины; номер альбома там свой, и его
         # пересчитывает `rewrite_storefront_resolved` (у одного релиза
         # ca/us/jp — три разных номера).
         #
-        # Выключается ключом `amd-region-rewrite: false`; порядок витрин —
+        # Выключается подбор ключом `amd-region-rewrite: false`; порядок витрин —
         # `amd-region-preference`. Это вспомогательная опция, а не поведение
         # по умолчанию для всего Apple: сюда попадают только задачи, для
         # которых владелец сам выбрал публичный wrapper.
-        if config.get("amd-region-rewrite", True) is not False:
+        try:
+            from ripster import apple_router as _ar
+            want = _ar.url_storefront(clean_url) or str(config.get("storefront") or "us")
+        except Exception:                                  # noqa: BLE001
+            _ar = None
+            want = ""
+        forced = str(config.get("amd-region-force") or "").strip().lower()
+        if _ar is not None and forced and want and forced != want:
             try:
-                from ripster import apple_router as _ar
-                want = _ar.url_storefront(clean_url) or str(config.get("storefront") or "us")
+                moved = _ar.rewrite_storefront_resolved(clean_url, forced)
+                if moved and moved != clean_url:
+                    print(f"[amd] ручной регион '{want}' → '{forced}': {moved}",
+                          flush=True)
+                    clean_url = moved
+            except Exception as e:                         # noqa: BLE001
+                print(f"[amd] ручной регион не применён: {e!r}", flush=True)
+        elif _ar is not None and config.get("amd-region-rewrite", True) is not False:
+            try:
                 if _ar.public_pool_serves(config, want) is False:
                     alt = _ar.public_pool_pick_region(config, want)
                     if alt and alt != want:
@@ -327,6 +344,15 @@ class AMDEngine(EngineBase):
         return None
 
     def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
+        # wm.wol.moe требует API-ключ (Bearer) — amd_runner проверил /status и
+        # умер до gRPC. Терминальное: без вписанного ключа повтор всё равно
+        # ничего не даст, поэтому не отдаём эту строку общему AMD_FATAL.
+        if "AMD_WM_NEED_KEY" in log_text:
+            return EngineResult(False, error="AMD: wm.wol.moe требует ключ — получи в @wm_auth_bot "
+                                             "и впиши в Настройки → Apple → API-ключ wm.wol.moe")
+        if "AMD_WM_QUOTA" in log_text:
+            return EngineResult(False, error="AMD: квота wm.wol.moe на сегодня исчерпана — "
+                                             "повтори завтра, частыми попытками квоту не вернуть")
         # Preflight abort: Bento4 (mp4decrypt/mp4extract) missing → amd_runner exits
         # early with AMD_FATAL instead of rotating ~17 regions. Surface it clearly.
         if "AMD_FATAL" in log_text or "Bento4 не найден" in log_text:

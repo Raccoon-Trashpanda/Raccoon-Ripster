@@ -116,11 +116,21 @@ async function checkAMDWrapperStatus() {
   try {
     const r = await api('GET', '/api/amd/wrapper-status');
     if(r.error) {
+      // «Жив, но не пускает» — не то же самое, что «сервер упал». Без ключа
+      // владельцу нужна не запись в логах, а строка «где этот ключ взять».
+      const needKey = r.reason === 'api_key';
+      const quota   = r.reason === 'quota';
       el.style.background = 'rgba(255,69,58,.1)';
       el.style.border = '1px solid rgba(255,69,58,.2)';
-      if(dotEl) { dotEl.textContent='●'; dotEl.style.color='var(--red)'; }
-      if(txtEl) { txtEl.textContent=t('as.amd_unavailable'); txtEl.style.color='var(--red)'; }
-      if(cliEl)  cliEl.textContent = r.error;
+      if(dotEl) { dotEl.textContent='●'; dotEl.style.color = (needKey||quota) ? 'var(--orange)' : 'var(--red)'; }
+      if(txtEl) {
+        txtEl.textContent = needKey ? t('as.wm_need_key')
+                          : quota   ? t('as.wm_quota')
+                          :           t('as.amd_unavailable');
+        txtEl.style.color = (needKey||quota) ? 'var(--orange)' : 'var(--red)';
+      }
+      if(cliEl)  cliEl.textContent = r.detail || r.error;
+      if(regEl)  regEl.textContent = '';
       return;
     }
     if(r.ready) {
@@ -143,6 +153,14 @@ async function checkAMDWrapperStatus() {
     if(cliEl) cliEl.textContent = ti('as.amd_clients', {n: r.client_count || 0});
     if(regEl && r.regions?.length) regEl.textContent = ti('as.amd_regions', {list: r.regions.join(', ')});
     else if(regEl) regEl.textContent = t('as.amd_no_accounts');
+    // /status отдаёт счётчики квоты целыми числами — показываем их как есть,
+    // без имён аккаунтов и ключей.
+    if(regEl && typeof r.quota_remaining === 'number') {
+      const qt = typeof r.quota_limit === 'number'
+        ? ti('as.wm_quota_left', {n: r.quota_remaining, m: r.quota_limit})
+        : ti('as.wm_quota_left_n', {n: r.quota_remaining});
+      regEl.textContent = regEl.textContent ? regEl.textContent + ' · ' + qt : qt;
+    }
   } catch(e) {
     if(txtEl) txtEl.textContent = ti('as.amd_error', {msg: e.message});
   }
@@ -1069,11 +1087,17 @@ function renderAlbumPage(){
   const _selBtnCss = 'padding:5px 11px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)';
   // Precomputed: the per-track template below shadows `t` (map param = track).
   const _TT = {sel:t('ck.sel_for_dl'), full:t('ck.full_play'), prev:t('ck.prev30'), q:t('ck.to_queue')};
+  const _pubwCb = (service === 'apple' && !S.guestMode) ? `
+      <label title="${esc(t('ck.pubw_tip'))}" style="display:flex;align-items:center;gap:5px;font-size:10px;color:var(--muted);cursor:pointer;padding:5px 8px;border:1px solid var(--border);border-radius:7px">
+        <input type="checkbox" id="alb-pubw-cb" style="width:auto;margin:0;padding:0;background:none;border:none;cursor:pointer">
+        ${t('ck.pubw_override')}
+      </label>` : '';
   const _selToolbar = tracks.length === 0 ? '' : `
     <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:10px">
       <button onclick="albumSelectAll(true)" style="${_selBtnCss}">☑ ${t('ck.sel_all')}</button>
       <button onclick="albumSelectAll(false)" style="${_selBtnCss}">☐ ${t('ck.sel_none')}</button>
       ${_discsSet.length>1 ? _discsSet.map(d=>`<button onclick="albumSelectDisc('${d}')" style="${_selBtnCss}">💿 ${t('ck.disc_word')} ${d}</button>`).join('') : ''}
+      ${_pubwCb}
       <button id="alb-dl-sel" onclick="albumDownloadSelected()" disabled style="margin-left:auto;padding:6px 14px;background:var(--red);color:#fff;border:none;border-radius:7px;font-size:11px;font-weight:700;cursor:pointer;font-family:var(--font);opacity:.5">⬇ ${ti('ck.dl_sel_n',{n:0})}</button>
     </div>`;
   const tracksList = tracks.length === 0
@@ -1173,10 +1197,20 @@ function fmtDur(s){
   return `${m}:${sec.toString().padStart(2,'0')}`;
 }
 
+// Галка «через публичный враппер» одной задачи (тулбар Apple-релиза).
+// Владелец — про ЭТУ загрузку; настройку `apple-public-mode` она не меняет.
+// Гость галку не видит, а бэкенд и так вырезает флаг у чужой сессии.
+function _albumPubwChecked(){
+  try { const c = document.getElementById('alb-pubw-cb'); return !!(c && c.checked); }
+  catch { return false; }
+}
+
 async function albumAddAll(){
   const {album} = Detail.currentAlbum;
   if(!album?.url){ toast(t('t.no_alb_url'),'var(--red)'); return; }
-  const r = await api('POST', '/api/queue/add', {url: album.url, quality: resolveQuality(detectSvcFromUrl(album.url) || 'apple'), title: album.title, artist: album.artist});
+  const body = {url: album.url, quality: resolveQuality(detectSvcFromUrl(album.url) || 'apple'), title: album.title, artist: album.artist};
+  if(_albumPubwChecked()) body.public_wrapper = true;
+  const r = await api('POST', '/api/queue/add', body);
   if(r.ok) toast('+ '+album.title+' → '+t('q.queue_word'));
   else toast(t('t.error_c')+(r.detail||'?'),'var(--red)');
 }
