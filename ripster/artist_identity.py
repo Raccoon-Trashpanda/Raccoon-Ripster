@@ -66,6 +66,19 @@ def tkey(title: str) -> str:
     return norm(t)
 
 
+def card_key(rel: dict) -> str:
+    """Ключ карточки склада — тот же, что считает радар (`routes/radar._rel_uid`).
+
+    Аудиту и «вернуть карточку» нужно узнавать её по одному адресу в ленте, на
+    складе и в отметке «скрыто»; разъехаться ключами — значит прятать одно, а
+    возвращать другое.
+    """
+    r = rel or {}
+    return (str(r.get("service") or "") + "|"
+            + str(r.get("id") or r.get("url")
+                  or f"{r.get('artist') or ''}~{r.get('title') or ''}"))
+
+
 _LABEL_YEAR_RE = re.compile(r"\b(19|20)\d{2}s?\b")
 # Юрдыка авторской строки: то, что витрины пишут вокруг лейбла, а не сам лейбл.
 _LABEL_BOILER_RE = re.compile(
@@ -390,6 +403,64 @@ def _home_families(anchor: dict) -> set:
     return out
 
 
+def _feedback_gate(entry: dict, rel: dict) -> tuple:
+    """Слово владельца («это не мой артист» / «это мой») против этой карточки.
+
+    Стоит ВЫШЕ якоря и выше профиля витрины: якорь — вывод из косвенных дел
+    (что качал, что звучало), а здесь прямое утверждение человека, и оно не
+    перекрывается никаким правилом. `own_ids` — подтверждённые id самой
+    подписки: обобщать «не мой» на них нельзя (склеенная страница, где под
+    одним id живут двое), иначе один тап выгнал бы владельца из его же
+    подписки.
+
+    ("show"|"hide"|"", причина). Молчит, если файла отзыва нет: нет
+    доказательства — нет и цензуры.
+    """
+    from . import owner_anchor
+    try:
+        from . import owner_feedback
+        ident = identity_of(entry)
+        # Собственные id подписки. Под защитой НЕ ТОЛЬКО подтверждённые записи
+        # `identity.services`: канонический id самой подписки живёт на верхнем
+        # уровне (`artist_id`, витрина — `service`, чаще всего Apple) и в
+        # `services` может не быть вовсе. 24.09 на фикстуре Solomon Grey это
+        # стоило того, что одно «не мой» по испанскому госпелу выгнало из ленты
+        # и legitimately-свой альбом: карточка приехала под тем же apple-id,
+        # который подписка носит вверху.
+        own = {f"{svc}|{str((rec or {}).get('id') or '')}"
+               for svc, rec in (ident.get("services") or {}).items()
+               if (rec or {}).get("status") == CONFIRMED and (rec or {}).get("id")}
+        own |= {f"{svc}|{str(a)}" for svc, rec in (ident.get("services") or {}).items()
+                if (rec or {}).get("status") == CONFIRMED
+                for a in (rec.get("aliases") or []) if a}
+        top = str((entry or {}).get("artist_id") or "")
+        if top:
+            own.add(f"{str((entry or {}).get('service') or 'apple')}|{top}")
+            own.add(top)
+        dec, why = owner_feedback.gate(rel, str((entry or {}).get("name") or ""),
+                                       own_ids=own)
+    except Exception:                                          # noqa: BLE001
+        return "", ""
+    if dec:
+        owner_anchor.note("feedback_" + dec)
+    return dec, why
+
+
+def _feedback_for_card(rel: dict) -> tuple:
+    """Слово владельца против карточки, у которой НЕТ подписки-хозяйки.
+
+    Имя на самой карточке — вот единственный ключ: «не мой», сказанное по
+    такому имени, действует и когда подписки с этим именем в вишлисте нет
+    (карточка лейбловой ленты, чужая склейка).
+    """
+    try:
+        from . import owner_feedback
+        name = str((rel or {}).get("artist") or (rel or {}).get("alb_artist") or "")
+        return owner_feedback.gate(rel, name) if name else ("", "")
+    except Exception:                                          # noqa: BLE001
+        return "", ""
+
+
 def anchor_show(entry: dict, rel: dict, anchor: Optional[dict] = None) -> tuple:
     """Правило v5 «якорь владельца»: пускать ли релиз по ДЕЙСТВИЯМ владельца.
 
@@ -472,10 +543,12 @@ def home_show(entry: dict, rel: dict, anchor=_NO_ANCHOR) -> tuple[bool, str]:
 
       1. решение владельца (`choice.hide_titles`, возврат `show_titles`) — оно
          не обсуждается и не перекрывается ни авто-правилом, ни профилем;
-      2. якорь владельца (правило v5, `anchor_show`) — единственный признак,
+      2. слово владельца об этой карточке или о том же id/лейбле
+         (`owner_feedback.gate`) — прямое утверждение, сильнее любого вывода;
+      3. якорь владельца (правило v5, `anchor_show`) — единственный признак,
          который НЕ лепится из однофамильцев;
-      3. профиль подписки: работу, известную чистой витрине, её лейбл, её жанр;
-      4. судить нечем — не трогаем.
+      4. профиль подписки: работу, известную чистой витрине, её лейбл, её жанр;
+      5. судить нечем — не трогаем.
 
     Скрываем ровно то, против чего говорит доказанное, и карточка помечается
     владельцу (`hidden_add`), а не удаляется: склад остаётся складом.
@@ -492,6 +565,12 @@ def home_show(entry: dict, rel: dict, anchor=_NO_ANCHOR) -> tuple[bool, str]:
         return True, "владелец вернул вручную"
     if t and t in hidden:
         return False, "cluster not attested by any clean catalog"
+    # Слово владельца об ЭТОЙ карточке (или о том же id/лейбле) — выше якоря.
+    dec, why = _feedback_gate(entry, rel)
+    if dec == "show":
+        return True, why
+    if dec == "hide":
+        return False, why
     if anchor is _NO_ANCHOR:
         anchor = _anchor_of(entry)
     if anchor:
@@ -527,6 +606,62 @@ def home_show(entry: dict, rel: dict, anchor=_NO_ANCHOR) -> tuple[bool, str]:
     # судим только по лейблу карточки — чужой кластер опознан именно им.
     if lbl and lbl not in stored and raw_lbl not in stored:
         return False, "label absent from the confirmed catalogs"
+    return True, ""
+
+
+def _name_entries(rel: dict, entries: list) -> list:
+    """Подписки, чьё ИМЯ несёт карточка (не по id, а именно по имени).
+
+    Нужны затем, чтобы судить якорём карточки, НЕ привязанные к подписке по id
+    витрины: кросс-сервисный обход по pending-подписке (Aruna подтверждена в
+    Apple/Qobuz/Deezer, но pending в Tidal/Spotify) и карточки лейбловой ленты
+    (у них `artist_id` пуст) не дают `_entry_for` ничего — а якорь собран по
+    ИМЕНИ из фонотеки владельца и обязан работать на них точно так же.
+    """
+    nm = norm(str(rel.get("artist") or rel.get("alb_artist") or ""))
+    if not nm:
+        return []
+    return [e for e in (entries or [])
+            if e.get("kind") != "label" and e.get("artist_id")
+            and norm(str(e.get("name") or "")) == nm]
+
+
+def anchor_gate(entry: dict, rel: dict) -> tuple[bool, str]:
+    """Пускать ли НЕпривязанную по id карточку — только по якорю владельца (v5).
+
+    Здесь НЕТ кластерного профиля витрины (`home_show` шаг 3–4): профиль собран
+    по подтверждённому id ДРУГОЙ витрины и судить им карточку с чужим/пустым id
+    значило бы прятать законные релизы по «label absent from the confirmed
+    catalogs». Остаётся ровно то доказательство, которое не склеивается и не
+    зависит от того, каким сервисом приехала карточка, — действия владельца.
+    Решение владельца (`choice`) по-прежнему выше автоматики.
+
+    Возвращает (keep, why). `anchor_show` молчит («нечем судить») → показываем:
+    без доказательства не цензуруем, и своих релизов не теряем.
+    """
+    from . import owner_anchor
+
+    ident = identity_of(entry)
+    prof = ident.get("profile") or {}
+    choice = ident.get("choice") or {}
+    t = tkey(rel.get("title", "") or rel.get("name", ""))
+    if t and t in {tkey(x) for x in (choice.get("show_titles") or ())}:
+        return True, "владелец вернул вручную"
+    if t and t in {tkey(x) for x in (prof.get("hidden_titles") or ())}:
+        return False, "cluster not attested by any clean catalog"
+    dec, why = _feedback_gate(entry, rel)
+    if dec == "show":
+        return True, why
+    if dec == "hide":
+        return False, why
+    dec, why = anchor_show(entry, rel)
+    if dec == "show":
+        owner_anchor.note("anchor_show")
+        return True, why
+    if dec == "hide":
+        owner_anchor.note("anchor_hide")
+        return False, why
+    owner_anchor.note("anchor_unknown")
     return True, ""
 
 
@@ -1092,12 +1227,50 @@ def hidden_add(entry: dict, rel: dict, reason: str) -> None:
                     "date": str(rel.get("date") or ""), "reason": reason,
                     "service": str(rel.get("service") or ""),
                     "id": str(rel.get("id") or ""),
+                    "url": str(rel.get("url") or ""),
                     "label": str(rel.get("label") or ""),
                     "genres": owner_anchor.genres_of(rel),
                     "ts": time.time()})
         if len(hid) > 80:
             del hid[:len(hid) - 80]
     entry["identity"] = ident
+
+
+def hidden_clear(entry: dict, rel: dict) -> None:
+    """Вычеркнуть карточку из скрытых: владелец сказал «это мой».
+
+    Скрытый список живёт на подписке и без этой чистки карточка осталась бы
+    «скрытой» в отчёте, даже когда она уже в ленте, — а счётчик скрытого
+    показывает владельцу, где автомат сомневается.
+    """
+    t = tkey(rel.get("title", "") or rel.get("name", ""))
+    ident = identity_of(entry)
+    hid = ident.get("hidden") or []
+    keep = [h for h in hid if tkey(str(h.get("title") or "")) != t]
+    if len(keep) != len(hid):
+        ident["hidden"] = keep
+        entry["identity"] = ident
+
+
+def hidden_cards(entries: list) -> list:
+    """Всё спрятанное дверью — одним списком для экрана «Скрытые».
+
+    Скрытое обязано быть видимым: иначе автомат цензурует молча, а вернуть
+    карточку нечем. В записи уже лежат сервис, id, заголовок, лейбл, жанры и
+    причина (`hidden_add`) — этого хватает, и показать карточку, и объяснить
+    почему, и принять по ней решение.
+    """
+    out = []
+    for e in entries or []:
+        if not e.get("artist_id") or e.get("kind") == "label":
+            continue
+        for h in (identity_of(e).get("hidden") or []):
+            row = dict(h)
+            row["artist"] = str(e.get("name") or "")
+            row["subscription_id"] = str(e.get("artist_id") or "")
+            out.append(row)
+    out.sort(key=lambda r: -float(r.get("ts") or 0))
+    return out
 
 
 def _sub_index(entries: list) -> tuple[dict, dict]:
@@ -1161,7 +1334,33 @@ def feed_filter(rels: list, entries: list, base_dir=None, save=None) -> list:
                 hidden_add(entry, r, why)
                 touched = True
                 continue
-        out.append(r)
+            out.append(r)
+            continue
+        # Карточка НЕ привязана к подписке по id витрины: pending-привязка
+        # (Aruna подтверждена в Qobuz, но pending в Tidal/Spotify), чужой id
+        # склеенной страницы или вовсе пустой `artist_id` (`via_label`). Дверь
+        # по id тут молчала — и однофамилец проходил (Aruna «639 Hz Inner
+        # Worth», Qobuz/Tidal/Spotify, 24.09.2026). Судит якорь по ИМЕНИ: он
+        # собран из дел владельца и не зависит от того, каким сервисом приехала
+        # карточка. Молчит («нечем судить») — не трогаем.
+        for cand in _name_entries(r, entries):
+            keep, why = anchor_gate(cand, r)
+            if not keep:
+                hidden_add(cand, r, why)
+                touched = True
+                break
+        else:
+            # Подписки с таким именем нет вообще (чужая карточка лейбловой
+            # ленты): ни якоря, ни профиля — правило молчит. Слово владельца
+            # молчать не обязано: «не мой», сказанное по имени, действует и
+            # здесь, иначе жалоба на карточку вне подписки осталась бы
+            # невыполнимой.
+            dec, why = _feedback_for_card(r)
+            if dec == "hide":
+                owner_anchor.note("feedback_hide")
+                _remember_dropped(r, why)
+                continue
+            out.append(r)
     if touched and save:
         try:
             save(entries)

@@ -230,7 +230,13 @@ def get_pool(config: dict) -> DeezerPool | None:
         base = _P(__file__).resolve().parent.parent / "dist" / "deezer_pool"
         _pool_instance = DeezerPool(accounts, base)
         _pool_accounts_fingerprint = fp
-        _warm_health(fp)
+        # НЕ `fp`: отпечаток — это кортежи (arl, enabled, priority), а
+        # `deezer_accounts.known()` ждёт СТРОКУ ARL и падает
+        # AttributeError: 'tuple' object has no attribute 'encode'. Нитка
+        # умирала молча (ошибки глушатся намеренно), и подогрев здоровья не
+        # работал НИКОГДА: порядок перебора учёток до 24.09.2026 всегда
+        # решался «как в конфиге» — ровно то, против чего этот проход писали.
+        _warm_health(tuple(a["arl"] for a in accounts if a.get("enabled", True)))
     return _pool_instance
 
 

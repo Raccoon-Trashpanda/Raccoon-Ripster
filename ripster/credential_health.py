@@ -19,15 +19,20 @@ Deezer ARL, Tidal/Qobuz токены, media-user-token) — какие-то до
    владелец должен уметь открыть его блокнотом и скопировать значение руками, если
    аккаунт потом продлят и захотят вернуть.
 3. Отключает credential от активной маршрутизации (конкретный disable_fn зависит от
-   типа — для Apple wrapper-слота это docker stop, что заодно и освобождает порт).
+   типа). С 24.09.2026 Apple ходит по тому же пути, что Deezer/Qobuz/SoundCloud, с
+   ОДНИМ отличием — порог в 5 проходов вместо 3 (`APPLE_THRESHOLD`), и снятие там
+   полное: контейнер удаляется (`docker rm -f`), порт освобождается, запись уходит
+   из конфига через писатель приложения, учётка попадает в реестр снятых. Раньше
+   для Apple здесь был `docker stop`, и он не освобождал ровно ничего:
+   остановленный `rip-wrapper-3` три недели держал имя, слот и порт.
 
 Чего модуль НЕ делает: не поднимает новый слот на освободившееся место и не логинит
 новый аккаунт автоматически. Каждый логин жжёт лимит устройств у Apple (см. скилл
 ripster-apple-wrapper) — автоматически заводить сессии без присмотра это ровно тот
 инцидент 2026-07-09, который уже один раз уронил пул. Освободившийся порт просто
 перестаёт быть занят мёртвым контейнером — следующий реальный аккаунт владелец
-подключает сам, и никакого конфликта портов не будет, потому что старый контейнер
-уже остановлен и его порт-биндинг Docker снял сам.
+подключает сам, и никакого конфликта портов не будет, потому что контейнер снятой
+учётки удаляется, а Docker снимает его порт-биндинг вместе с ним.
 """
 from __future__ import annotations
 
@@ -76,10 +81,15 @@ def _load_state() -> dict:
     # Записи старого формата (только хвост секрета, без `#хеш`) больше не
     # опознаются и, что важнее, могли СКЛЕИВАТЬ разные учётки с общим хвостом —
     # см. `_ident`. Выбрасываем их: осиротевший счётчик хуже отсутствующего,
-    # потому что выглядит как знание. Ключи Apple-слотов — имена контейнеров,
-    # их правило не касается.
+    # потому что выглядит как знание.
+    # `apple_slot:*` — счётчики по ИМЕНИ КОНТЕЙНЕРА (до 24.09.2026). Apple-слоты
+    # теперь считаются по учётке (`apple_account:*`), потому что контейнера у
+    # мёртвой учётки может уже не быть, а имя к тому же занимает новый аккаунт.
+    # Старые ключи выбрасываем разом: держать счётчик того, чего больше нет, —
+    # это ровно тот класс мусора, из-за которого учётка могла «почти умереть».
     return {k: v for k, v in st.items()
-            if "#" in k or not k.startswith(_IDENT_KINDS)}
+            if (("#" in k or not k.startswith(_IDENT_KINDS))
+                and not k.startswith("apple_slot:"))}
 
 
 def _save_state(st: dict) -> None:
@@ -111,7 +121,7 @@ def _append_archive(service: str, key: str, country: str, reason: str) -> None:
 
 def record_check(kind: str, key: str, alive: bool, *, country: str = "",
                   reason: str = "", threshold: int = DEFAULT_THRESHOLD,
-                  disable_fn=None) -> tuple[int, bool]:
+                  disable_fn=None, can_retire=None, prune: bool = False) -> tuple[int, bool]:
     """Отметить результат одной проверки credential'а.
 
     kind — тип ("apple_slot", "deezer_arl", "tidal_token", …), key — стабильный
@@ -119,6 +129,12 @@ def record_check(kind: str, key: str, alive: bool, *, country: str = "",
     Возвращает (текущий streak неудач, был ли только что заархивирован и отключён).
     disable_fn(kind, key) — вызывается РОВНО ОДИН РАЗ при достижении порога; исключения
     из него не должны ронять сам чекер.
+    can_retire() — страж, которого спросить ПЕРЕД снятием (см. `_apple_retire_guard`):
+    вернёт ложь — streak остаётся на пороге и попытка повторится в следующем проходе.
+    Порог без права снятия — это не «почти сняли», а «ждём явного сигнала», и
+    врать об этом в отчёте нельзя.
+    prune=True — запись снимается (учётки больше нет), счётчик удаляется вовсе:
+    оставить его значило бы «ключ мёртвой учётки вечно помнит её streak».
     """
     state_key = f"{kind}:{key}"
     st = _load_state()
@@ -144,6 +160,18 @@ def record_check(kind: str, key: str, alive: bool, *, country: str = "",
     if entry["streak"] < threshold:
         return entry["streak"], False
 
+    if can_retire is not None:
+        try:
+            allowed = bool(can_retire())
+        except Exception:
+            allowed = False
+        if not allowed:
+            # Держим streak на пороге: сигнал не «потерян», а «ещё не достаточен».
+            entry["streak"] = threshold
+            st[state_key] = entry
+            _save_state(st)
+            return threshold, False
+
     # Порог достигнут — архивируем и отключаем, затем сбрасываем streak, чтобы не
     # архивировать одну и ту же учётку заново на каждом следующем проходе чекера.
     _append_archive(kind, key, entry.get("last_country", ""), reason or "не отвечает")
@@ -152,44 +180,159 @@ def record_check(kind: str, key: str, alive: bool, *, country: str = "",
             disable_fn(kind, key)
         except Exception:
             pass
-    entry["streak"] = 0
-    st[state_key] = entry
+    if prune:
+        st.pop(state_key, None)
+    else:
+        entry["streak"] = 0
+        st[state_key] = entry
     _save_state(st)
     return threshold, True
 
 
-def apple_slot_alive(container: str) -> tuple[bool, str]:
-    """Жив ли Apple wrapper-слот. Возвращает (жив?, причина если нет)."""
+#: Apple — порог НЕ `DEFAULT_THRESHOLD`, и это не вежливость. Учётка Apple
+#: дороже любого ARL: каждый логин жжёт слот устройства (скилл
+#: ripster-apple-wrapper), а ложное снятие ещё и перенумеровывает слоты,
+#: заставляя остальных перелогиниться. Пять проходов = 2.5 суток при графике
+#: 08:00/20:00 — переживает ночную аварию Docker Desktop и выходной Apple.
+APPLE_THRESHOLD = 5
+
+#: Классы «учётка мертва ЯВНО». Только они дают право снять основной слот
+#: (страж `apple_retire_guard`); прочие — симптом, а не приговор.
+APPLE_HARD_CLASSES = ("account_disabled", "subscription_inactive", "token_rejected")
+
+_REASON_TEXT = {
+    "account_disabled":     "Apple заблокировал аккаунт («account is disabled»)",
+    "device_limit":         "Apple: лимит устройств (device limit / lease 3062)",
+    "login_failed":         "Apple отвергает логин (login failed / response type 4)",
+    "subscription_inactive": "подписка Apple Music неактивна",
+    "token_rejected":       "Apple отвергает media-user-token (403)",
+    "port_dead":            "порт слота не отвечает",
+    "":                     "не отвечает",
+}
+
+
+def _verdict(state: str, klass: str = "", reason: str = "", country: str = "") -> dict:
+    return {"state": state, "klass": klass, "reason": reason or _REASON_TEXT.get(klass, ""),
+            "country": country}
+
+
+def apple_container_verdict(container: str, port: int = 0) -> dict:
+    """Что делает контейнер сейчас: alive | failed | idle | unverified | missing.
+
+    `idle` — остановлен сборщиком простоя, проверкой НЕ считается: штатно
+    погашенный через 5 минут слот — норма для большинства пула в любой момент
+    суток, а не смерть учётки (доксказано 24.09.2026, иначе сторож выжигал бы
+    всё, чем не качали ночь).
+    """
     from . import apple_accounts as aa
-    if not aa.container_running(container):
-        return False, "контейнер остановлен"
+    info = aa.container_stop_info(container)
+    if not info["exists"]:
+        return _verdict("missing")
+    if not info["running"]:
+        br = info["block_reason"]
+        if br in aa.HARD_BLOCK_REASONS:
+            return _verdict("failed", br)
+        if info["idle"]:
+            return _verdict("idle")
+        return _verdict("unverified",
+                        reason=f"остановлен (код выхода {info['exit_code']}), причины нет")
     raw = aa._account_json(container)
-    if not raw:
-        # Контейнер жив, но 30020 не отвечает — либо ещё не поднялся, либо застрял
-        # в цикле логина. Проверяем логи на явный сигнал блокировки аккаунта.
-        try:
-            logs = subprocess.run(
-                ["docker", "logs", "--tail", "20", container],
-                capture_output=True, text=True, timeout=8, creationflags=_CNW,
-            ).stdout
-        except Exception:
-            logs = ""
-        if "account has been disabled" in logs.lower() or "account is disabled" in logs.lower():
-            return False, "Apple заблокировал аккаунт (account disabled)"
-        if "login failed" in logs.lower():
-            return False, "не может залогиниться (login failed)"
-        return False, "порт 30020 не отвечает"
-    # Контейнер жив и отдаёт токены — но это ещё не значит, что по ним что-то
-    # скачается. Аккаунт с истёкшей подпиской Apple Music точно так же публикует
-    # media-user-token, а на загрузке отдаёт 401 «Failed to rip song» / Invalid
-    # CKC. Раньше такой слот проходил как «жив» и месяцами занимал место в пуле
-    # (жалоба владельца 03.09.2026: «в эпле вставлено хуева гора токенов, а
-    # ошибки сыплются всё равно»). Спрашиваем amp-api про подписку — тем же
-    # запросом, что apple_router.local_wrapper_storefront.
-    active, why = _apple_subscription_active(raw)
-    if active is False:                 # именно явное False, не «не смог проверить»
-        return False, why
-    return True, ""
+    if raw:
+        active, why = _apple_subscription_active(raw)
+        if active is False:                 # именно явное False, не «не смогли»
+            return _verdict("failed", "subscription_inactive", why)
+        if active is None:
+            if port and not aa._port_open(port):
+                return _verdict("failed", "port_dead")
+            return _verdict("unverified", reason="ответа о подписке нет — amp-api молчит")
+        return _verdict("alive", country=aa.container_storefront(container))
+    # Контейнер жив, но 30020 не отдаёт учётку — слушаем его же журнал.
+    br = aa.container_block_reason(container)
+    if br in aa.HARD_BLOCK_REASONS:
+        return _verdict("failed", br)
+    if port and not aa._port_open(port):
+        return _verdict("failed", "port_dead")
+    return _verdict("unverified", reason="порт учётки 30020 молчит — слот прогревается")
+
+
+def apple_login_block(acct: dict) -> str:
+    """УСТОЙЧИВЫЙ сигнал смерти учётки, когда её контейнера уже нет.
+
+    Без этого мёртвая учётка `device_limit_2026-08-01` (владелец, 24.09) жила в
+    настройках с августа: контейнера давно нет → проверять нечего → «не
+    проверена» → никогда не накапливает неудачи. Пауза входа и метка в конфиге —
+    это и есть тот след, который оставил враппер; его и читаем."""
+    from . import apple_accounts as aa
+    from . import wrapper_pool as wp
+    entry = {}
+    try:
+        entry = wp._blocks_load().get(wp._acct_key(acct or {})) or {}
+    except Exception:  # noqa: BLE001
+        entry = {}
+    reason = str(entry.get("reason") or "")
+    if reason in aa.HARD_BLOCK_REASONS:
+        return reason
+    trace = f"{(acct or {}).get('label') or ''} {(acct or {}).get('id') or ''}".lower()
+    for name in aa.HARD_BLOCK_REASONS:
+        if name in trace:
+            return name
+    return ""
+
+
+def _apple_token_verdict(acct: dict) -> dict:
+    """media-user-token спрашиваем у amp-api напрямую: контейнера у такой
+    записи нет и быть не может (врапперу токеном расшифровывать нечем)."""
+    from . import apple_cookies
+    try:
+        probe = apple_cookies.probe_media_user_token(str((acct or {}).get("token") or ""))
+    except Exception:  # noqa: BLE001
+        return _verdict("unverified", reason="проба токена не выполнена")
+    state = str((probe or {}).get("state") or "")
+    if state == "ok":
+        return _verdict("alive", country=str((probe or {}).get("storefront") or ""))
+    if state == "token_rejected":
+        return _verdict("failed", "token_rejected", str((probe or {}).get("reason") or ""))
+    # bad_request — претензия к НАШЕМУ запросу; unknown — нет dev_token или сеть.
+    return _verdict("unverified", reason=str((probe or {}).get("reason") or "токен не проверен"))
+
+
+def apple_account_verdict(acct: dict, slot: int) -> dict:
+    """Один проход проверки по ОДНОЙ НАСТРОЕННОЙ учётке (не по контейнеру).
+
+    До 24.09.2026 сторож обходил `docker ps` и видел только поднятые контейнеры,
+    поэтому из шести учётки владельца проверялось три — и мёртвая учётка, у
+    которой контейнера уже не было, не получала ни одной неудачи никогда."""
+    from . import apple_accounts as aa
+    if str((acct or {}).get("kind") or "login") == "token":
+        return _apple_token_verdict(acct)
+    v = apple_container_verdict(aa.container_for_slot(slot), aa.slot_port(slot))
+    if v["state"] != "missing":
+        return v
+    block = apple_login_block(acct)
+    if block:
+        return _verdict("failed", block)
+    return _verdict("unverified",
+                    reason="контейнера нет — враппер под учётку не поднимали")
+
+
+def disable_apple_slot(kind: str, container: str) -> None:
+    """УДАЛЯЕТ мёртвый wrapper-контейнер и освобождает его порт.
+
+    Раньше здесь был `docker stop`, и он ничего не освобождал: остановленный
+    `rip-wrapper-3` продолжал существовать, занимать имя, слот и порт 10023 три
+    недели, пока соседние учётки не могли их получить. `rm -f` — единственный
+    способ, которым Docker сам снимает port binding; новый аккаунт вместо
+    мёртвого пул не поднимает и не логинит (см. docstring модуля)."""
+    try:
+        subprocess.run(["docker", "rm", "-f", container], capture_output=True,
+                       timeout=30, creationflags=_CNW)
+    except Exception:
+        pass
+    try:
+        from . import apple_accounts as aa
+        aa.release_container(container)
+    except Exception:
+        pass
 
 
 def _apple_subscription_active(raw: dict) -> "tuple[bool | None, str]":
@@ -221,25 +364,6 @@ def _apple_subscription_active(raw: dict) -> "tuple[bool | None, str]":
         return None, ""
     return (bool(sub.get("active")),
             "" if sub.get("active") else "подписка Apple Music неактивна")
-
-
-def disable_apple_slot(kind: str, container: str) -> None:
-    """Останавливает мёртвый wrapper-контейнер — освобождает порт, ничего не создаёт заново."""
-    try:
-        subprocess.run(["docker", "stop", container], capture_output=True,
-                        timeout=20, creationflags=_CNW)
-    except Exception:
-        pass
-    # Снять из мемо страны, иначе pick_slot_for продолжит считать слот существующим.
-    try:
-        from . import apple_accounts as aa
-        memo = aa._memo_load()
-        if container in memo:
-            del memo[container]
-            aa._memo_path().write_text(json.dumps(memo, ensure_ascii=False, indent=1),
-                                        encoding="utf-8")
-    except Exception:
-        pass
 
 
 def _mask(secret: str) -> str:
@@ -1244,38 +1368,378 @@ def check_all_soundcloud_tokens(threshold: int = DEFAULT_THRESHOLD) -> list[str]
     return lines
 
 
-def check_all_apple_slots(threshold: int = DEFAULT_THRESHOLD) -> list[str]:
-    """Прогнать проверку по RUNNING Apple wrapper-контейнерам.
+def _wrapper_container_names() -> list[str]:
+    """Имена ВСЕХ wrapper-контейнеров, включая остановленные (`docker ps -a`).
 
-    Намеренно НЕ `docker ps -a`: простаивающие слоты штатно гасит отдельный сборщик
-    (см. apple_accounts.py) через 5 минут бездействия — остановленный контейнер это
-    норма, не признак смерти, и не должен копить streak. Признак реальной смерти —
-    контейнер ЖИВ (кто-то его поднял под задачу), но сессия не работает: залип в
-    login-цикле или порт 30020 так и не отвечает. Именно так был найден rip-wrapper-3.
-
-    Возвращает список человекочитаемых строк для отчёта чекера (пусто = всё живо
-    или ничего не пересекло порог в этом проходе)."""
-    from . import apple_accounts as aa
-    lines: list[str] = []
+    Фильтр — по слоту, а не по подстроке «wrapper»: `wrapper-manager` и чужие
+    контейнеры с похожим именем автоматике удалять нельзя."""
     try:
         out = subprocess.run(
-            ["docker", "ps", "--format", "{{.Names}}"],
-            capture_output=True, text=True, timeout=10, creationflags=_CNW,
-        ).stdout
-    except Exception:
-        return lines
-    containers = [n for n in out.splitlines() if n.strip() and
-                  ("wrapper" in n or n.startswith("rip-"))]
-    for c in containers:
-        alive, reason = apple_slot_alive(c)
-        country = aa.container_storefront(c) if alive else ""
-        streak, archived = record_check(
-            "apple_slot", c, alive, country=country, reason=reason,
-            threshold=threshold, disable_fn=disable_apple_slot,
-        )
-        if archived:
-            lines.append(f"💀 Слот {c} архивирован и остановлен ({reason}) — "
-                         f"запись в DEAD_ACCOUNTS.txt")
-        elif not alive and streak > 0:
-            lines.append(f"⚠️ Слот {c}: {streak}/{threshold} неудачных проверок подряд ({reason})")
+            ["docker", "ps", "-a", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=15, creationflags=_CNW).stdout
+    except Exception:  # noqa: BLE001
+        return []
+    from . import apple_accounts as aa
+    return [n.strip() for n in out.splitlines()
+            if n.strip() and aa.slot_of_container(n.strip()) >= 0]
+
+
+def apple_container_owner(container: str, accounts: list[dict]) -> str:
+    """Кому принадлежит контейнер: 'owned' | 'orphan' | 'unknown'.
+
+    Вопрос «не пора ли удалить контейнер» до 24.09.2026 решался по ИМЕНИ, и это
+    был единственный доступный способ — карты аккаунт↔контейнер не было. Теперь
+    читаем РЕЕСТР: `-L` из env контейнера и карту `apple_account_map.json`.
+    `unknown` (env не прочитался, Docker молчит) — удалять запрещено: молчание
+    докера неотличимо от «контейнер чужой», а цена ошибки — живой слот."""
+    from . import apple_accounts as aa, retired_credentials as _retired, wrapper_pool as wp
+    ids = set()
+    digests = set()
+    for a in accounts or []:
+        for val in (str(a.get("id") or ""), str(a.get("token") or ""),
+                    str(a.get("label") or "")):
+            if val:
+                ids.add(val)
+        digests.add(_retired._digest(wp.account_identity(a)))
+    env_id = aa.container_env_id(container)
+    if env_id:
+        return "owned" if env_id in ids else "orphan"
+    mapped = aa.account_map()["containers"].get(container)
+    if mapped:
+        return "owned" if mapped in digests else "orphan"
+    slot = aa.slot_of_container(container)
+    if slot >= len(accounts or []):
+        return "orphan"          # под этот номер учётки в конфиге уже нет
+    return "unknown"
+
+
+def _sweep_apple_orphans(accounts: list[dict], *, dry: bool,
+                         live_logins: int) -> list[str]:
+    """Контейнер, к которому нет учётки, держит имя, слот и порт даром. В отличие
+    от мёртвой УЧЁТКИ, решать тут некому — аккаунта в конфиге больше нет, и пять
+    проходов ждать не за чем. Убирается сразу, строкой в отчёт.
+
+    Единственная уздечка — страж (a): живой осиротевший контейнер при нуле
+    живых учётки в конфиге не удаляется. Это ровно тот случай, когда список
+    поручился в конфиге, а качать всё ещё нечем, кроме как этим контейнером."""
+    from . import apple_accounts as aa
+    lines: list[str] = []
+    for name in _wrapper_container_names():
+        if apple_container_owner(name, accounts) != "orphan":
+            continue
+        running = aa.container_running(name)
+        if running and live_logins <= 0:
+            lines.append(f"⚠️ Осиротевший {name} жив, но живых учёток в конфиге нет — "
+                         f"не трогаем: удалив его, пул лишится последней расшифровки")
+            continue
+        if dry:
+            lines.append(f"🧪 dry-run: осиротевший контейнер {name} НЕ удалён "
+                         f"(учётки под него в конфиге нет)")
+            continue
+        rc = subprocess.run(["docker", "rm", "-f", name],
+                            capture_output=True, timeout=30,
+                            creationflags=_CNW).returncode
+        aa.release_container(name)
+        port = aa.slot_port(aa.slot_of_container(name))
+        lines.append(f"🧹 Осиротевший контейнер {name} удалён (docker: код {rc}), "
+                     f"порт {port} освобождён — учётки под него в конфиге нет")
     return lines
+
+
+def _drop_apple_account_from_files(digest: str, primary: bool) -> list[str]:
+    """Вычеркнуть учётку из того файла (config.yaml или tokens/*.yaml), где она
+    реально лежит, — через писатель конфига приложения.
+
+    `config.yaml` руками не правим НИКОГДА: приложение держит его копию в памяти
+    и пишет при любом сохранении ЦЕЛИКОМ (см. docstring модуля и
+    `retired_credentials`), поэтому точечная правка файла без реестра снятых
+    обратима чужой рукой."""
+    import yaml
+    from . import config_service as _cs
+    from . import retired_credentials as _retired
+    from . import wrapper_pool as wp
+    notes: list[str] = []
+    for path in _yaml_files_to_check():
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except Exception:  # noqa: BLE001
+            continue
+        if not isinstance(data, dict):
+            continue
+        changed = False
+        if primary:
+            prim = {"id": data.get("wrapper-apple-id"),
+                    "password": data.get("wrapper-password")}
+            if (prim["id"] or prim["password"]) and \
+                    _retired._digest(wp.account_identity(prim)) == digest:
+                data["wrapper-apple-id"] = ""
+                data["wrapper-password"] = ""
+                changed = True
+                notes.append("основная учётка (slot 0) вычищена из wrapper-apple-id")
+        pool = data.get("wrapper-accounts")
+        if isinstance(pool, list):
+            kept = [a for a in pool
+                    if not (isinstance(a, dict)
+                            and _retired._digest(wp.account_identity(a)) == digest)]
+            if len(kept) != len(pool):
+                data["wrapper-accounts"] = kept
+                changed = True
+                notes.append(f"запись удалена из wrapper-accounts ({path.name})")
+        if changed:
+            _cs._atomic_write_yaml(path, data)
+    return notes
+
+
+def retire_apple_account(acct: dict, slot: int, reason: str) -> list[str]:
+    """Полное снятие мёртвой Apple-учётки — то, ради чего всё и затевалось.
+
+    Отличие от «остановить слот» (что делал сторож до 24.09): учётка уходит изо
+    ВСЕХ мест, где она занимает ресурс — реестр снятых (чтобы не воскресла при
+    следующем сохранении конфига), config/tokens, Docker-контейнер вместе с
+    портом, мемо страны и карта аккаунт↔слот. Больше всего это похоже на
+    `disable_deezer_arl` + `disable_soundcloud_token`, сложенные в один шаг:
+    те же два письма (реестр ДО файла), тот же писатель конфига, тот же
+    `_notify_app_config_changed()` в конце.
+
+    Ничего не логинит и нового аккаунта на освободившееся место не ставит."""
+    from . import apple_accounts as aa
+    from . import retired_credentials as _retired
+    from . import wrapper_pool as wp
+    identity = wp.account_identity(acct)
+    if not identity:
+        return []
+    digest = _retired._digest(identity)
+    container = aa.container_for_slot(slot)
+    notes: list[str] = []
+    # Порядок как у Deezer: сначала реестр, потом файл.
+    _retired.retire("apple_account", identity, reason or "учётка Apple мертва")
+    notes += _drop_apple_account_from_files(digest, slot == 0)
+    if aa.container_exists(container):
+        disable_apple_slot("apple_account", container)
+        notes.append(f"контейнер {container} удалён, порт {aa.slot_port(slot)} свободен")
+    else:
+        aa.release_container(container)
+    aa.account_map_forget(digest=digest)
+    if not _notify_app_config_changed():
+        notes.append("⚠️ приложение не перечитало конфиг: пока оно живёт в памяти "
+                     "со старой копией, первое же сохранение вернёт учётку — "
+                     "реестр снятых не даст ей вернуться в маршрутизацию, но "
+                     "перезапустите приложение")
+    return notes
+
+
+def apple_retire_guard(slot: int, klass: str, remaining: int, *,
+                       hard_classes=APPLE_HARD_CLASSES) -> tuple[bool, str]:
+    """Страж снятия. Возвращает (можно ли снимать, почему нет).
+
+    a) `remaining` — сколько учётки ОСТАНЕТСЯ в конфиге после снятия. Нуль
+       запрещён: автоматика не имеет права оставить пул пустым, даже если каждая
+       учётка в нём мертва. Пустой список неотличим от «Apple не настроен», а
+       узнаёт владелец об этом только на первой же задаче. Последняя ЖИВАЯ учётка
+       под запретом и сама по себе: живая неудач не копит, а если живых не
+       осталось вовсе, «пересадить пул с нуля» решает человек.
+    d) Основной слот (0) снимается ТОЛЬКО по явному сигналу смерти —
+       `subscription.active == false` или «account is disabled». Все прочие
+       классы (device_limit, login_failed, мёртвый порт) на пороге в пять
+       проходов дают отчёт, но не удаление: 24.09.2026 слот 0 ловил Invalid CKC
+       на всём подряд при ЖИВОЙ подписке, и по старому поведению это означало бы
+       потерю последней рабочей учётки пула."""
+    if remaining <= 0:
+        return False, ("последняя учётка Apple в конфиге: после снятия пул "
+                       "опустеет — решение за владельцем")
+    if slot == 0 and klass not in hard_classes:
+        return False, (f"основной слот: сигнала смерти нет ({klass or 'не выяснили'}), "
+                       f"нужны subscription.active=false или account_disabled")
+    return True, ""
+
+
+def _apple_note_state(key: str, state: str, reason: str, container: str) -> None:
+    """Запомнить последний вердикт учётки — чтобы список в настройках показывал
+    состояние, НЕ требуя docker/сети на каждый GET."""
+    st = _load_state()
+    entry = st.get(key) or {"streak": 0, "last_country": ""}
+    entry["last_state"] = state
+    entry["last_reason"] = reason or ""
+    entry["container"] = container or ""
+    entry["at"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+    st[key] = entry
+    _save_state(st)
+
+
+def apple_account_states(cfg: dict | None = None) -> list[dict]:
+    """Состояние каждой НАСТРОЕННОЙ Apple-учётки для `/api/wrapper/accounts`.
+
+    До 24.09.2026 список строился по `_configured_accounts` (шесть записей), а
+    диагностике видели только контейнеры (три) — мёртвая учётка выглядела
+    «обычной строкой» независимо от того, мертва она или никто её не проверял.
+    Здесь честные четыре состояния, и «не проверена» отделена от «мертва».
+
+    Секретов не возвращает: метка маскируется (`wrapper_pool.display_label`),
+    ни Apple ID целиком, ни токен, ни хеш опознания наружу не идут."""
+    from . import apple_accounts as aa
+    from . import retired_credentials as _retired
+    from . import wrapper_pool as wp
+    if cfg is None:
+        cfg = _load_raw_config()
+    st = _load_state()
+    out: list[dict] = []
+    for i, acct in enumerate(wp._configured_accounts(cfg) or []):
+        identity = wp.account_identity(acct)
+        key = f"apple_account:{_ident(identity)}"
+        entry = st.get(key) or {}
+        retired = bool(identity) and _retired.is_retired("apple_account", identity)
+        streak = int(entry.get("streak") or 0)
+        if retired:
+            state = "removed"
+        elif streak >= APPLE_THRESHOLD:
+            state = "dead"
+        elif streak > 0:
+            state = "failing"
+        else:
+            state = entry.get("last_state") or "unverified"
+            if state == "idle":
+                state = "unverified"
+        out.append({
+            "slot": i,
+            "state": state,
+            "streak": streak,
+            "threshold": APPLE_THRESHOLD,
+            "reason": entry.get("last_reason") or "",
+            "container": entry.get("container") or aa.container_for_slot(i),
+            "label": wp.display_label(acct),
+            "kind": acct.get("kind") or "login",
+            "checked_at": entry.get("at") or "",
+        })
+    return out
+
+
+def check_all_apple_slots(threshold: int = APPLE_THRESHOLD) -> list[str]:
+    """Жизненный цикл ВСЕХ настроенных Apple-учёток: неудачи, снятие, порты.
+
+    Обходим НАСТРОЙКИ, а не `docker ps` (см. docstring выше): у владельца шесть
+    учётки в списке, контейнеров три, и ровно поэтому учётка
+    «device_limit_2026-08-01» числилась живой с августа — проверялись только
+    поднятые контейнеры.
+
+    Четыре исхода проверки, и два из них НЕ наказуемы:
+      * `idle` — контейнер штатно погашен сборщиком
+        простоя (5 минут без дела). Неудача здесь означала бы, что пул
+        вымирает за ту ночь, когда никто ничего не качал.
+      * `unverified` — спросить не удалось (нет контейнера, молчит amp-api,
+        слот ещё прогревается). Честное «не проверена» в списке настроек.
+    Накажутся только явные классы смерти: device_limit, login_failed,
+    «account is disabled», subscription.active == false, мёртвый порт, 403 по
+    media-user-token.
+
+    Стража (см. `apple_retire_guard` и детектор общей аварии `global_klass`
+    ниже в этом же теле) переживает только
+    то, что дошло до порога; dry-run (`--no-fix`) не пишет, не снимает и не
+    удаляет ничего."""
+    from . import apple_accounts as aa
+    from . import retired_credentials as _retired
+    from . import wrapper_pool as wp
+    lines: list[str] = []
+    cfg = _load_raw_config()
+    accounts = wp._configured_accounts(cfg) if cfg else []
+    dry = dry_run()
+    pending_notes: list[str] = []
+
+    verdicts: list[dict] = []
+    for i, acct in enumerate(accounts):
+        try:
+            v = apple_account_verdict(acct, i)
+        except Exception as e:  # noqa: BLE001
+            # Ошибка проверки — это «не спросили», а не «мертва»: чекер обязан
+            # досмотреть до конца и не имеет права жечь streak за свой сбой.
+            v = _verdict("unverified", reason=f"ошибка проверки: {type(e).__name__}")
+        v["slot"] = i
+        v["kind"] = str(acct.get("kind") or "login")
+        verdicts.append(v)
+
+    live_logins = sum(1 for v in verdicts
+                      if v["state"] == "alive" and v["kind"] == "login")
+
+    # b) Общая авария ≠ смерть каждой учётки. Если ВСЕ проверяемые учётки
+    #    умерли ОДНИМ И ТЕМ ЖЕ симптомом — это сеть, Apple или Docker, а не
+    #    шесть трупов за один вечер. Считаем только «failed»: их должно быть не
+    #    меньше двух, иначе правило совпало бы с «осталась одна учётка».
+    judged = [v for v in verdicts if v["state"] in ("alive", "failed")]
+    failed = [v for v in verdicts if v["state"] == "failed"]
+    global_klass = ""
+    if len(failed) >= 2 and len(failed) == len(judged) and \
+            len({v["klass"] for v in failed}) == 1:
+        global_klass = failed[0]["klass"]
+        lines.append(
+            f"🌐 Apple: {len(failed)} учёток одновременно с одним симптомом "
+            f"(«{_REASON_TEXT.get(global_klass, global_klass)}») — похоже на общую "
+            f"аварию (сеть/Apple/Docker), неудачи НИКОМУ не засчитываем")
+
+    lines += _sweep_apple_orphans(accounts, dry=dry, live_logins=live_logins)
+
+    if not accounts:
+        return lines
+
+    known_digests = set()
+    for acct, v in zip(accounts, verdicts):
+        identity = wp.account_identity(acct)
+        key = _ident(identity)
+        state_key = f"apple_account:{key}"
+        shown = wp.display_label(acct)
+        container = aa.container_for_slot(v["slot"]) if v["kind"] == "login" else ""
+        digest = _retired._digest(identity)
+        known_digests.add(digest)
+        if not dry:
+            aa.account_map_put(digest, slot=v["slot"], container=container,
+                               kind=v["kind"], label=shown)
+            _apple_note_state(state_key, v["state"], v["reason"], container)
+
+        if v["state"] == "alive":
+            record_check("apple_account", key, True, country=v.get("country", ""),
+                         threshold=threshold)
+            continue
+        if v["state"] in ("idle", "unverified"):
+            if v["state"] == "unverified":
+                lines.append(f"· Apple {shown} (слот {v['slot']}): не проверена — "
+                             f"{v['reason']}")
+            continue
+        if global_klass:
+            continue                      # страж (b): всё умерло одинаково
+
+        veto = ""
+        notes: list[str] = []
+
+        def _allowed(_v=v, _rest=len(accounts) - 1) -> bool:
+            nonlocal veto
+            ok, veto = apple_retire_guard(_v["slot"], _v["klass"], _rest)
+            return ok
+
+        streak, retired = record_check(
+            "apple_account", key, False, country=v.get("country", ""),
+            reason=v["reason"] or _REASON_TEXT.get(v["klass"], "не отвечает"),
+            threshold=threshold, can_retire=_allowed, prune=True,
+            disable_fn=lambda _k, _key, _a=accounts[v["slot"]], _s=v["slot"], _v=v, _n=notes:
+            _n.extend(retire_apple_account(_a, _s,
+                                           _v["reason"] or _REASON_TEXT.get(_v["klass"], ""))))
+        if retired:
+            lines.append(f"💀 Apple {shown} (слот {v['slot']}): {threshold} неудач "
+                         f"подряд ({v['reason']}) — учётка СНЯТА")
+            lines += [f"   ↳ {n}" for n in notes]
+        elif veto:
+            lines.append(f"⛔ Apple {shown} (слот {v['slot']}): порог {threshold} "
+                         f"достигнут ({v['reason']}), снятия нет — {veto}")
+        elif streak > 0:
+            lines.append(f"⚠️ Apple {shown} (слот {v['slot']}): {streak}/{threshold} "
+                         f"неудачных проверок подряд ({v['reason']})")
+
+    if not dry:
+        _prune_apple_map(known_digests)
+    return lines
+
+
+def _prune_apple_map(keep: set) -> None:
+    """Вычистить из карты учётки, которых больше нет в конфиге (владелец убрал
+    их руками либо снятие уже отработало)."""
+    from . import apple_accounts as aa
+    d = aa.account_map()
+    for digest in [k for k in d["accounts"] if k not in keep]:
+        aa.account_map_forget(digest=digest)

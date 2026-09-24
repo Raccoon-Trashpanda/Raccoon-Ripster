@@ -87,6 +87,29 @@ def forget_container(container: str) -> None:
     _CACHE.pop(container, None)
 
 
+def release_container(container: str) -> None:
+    """Контейнер УДАЛЁН (слот снят вместе с учёткой): освободить порт и все
+    следы о нём.
+
+    Отличается от `forget_container` тем, что вычищается запись страны на диске
+    и карта аккаунт↔контейнер. Пока контейнер лишь пересоздаётся, memo нужна:
+    без неё остановленный слот выпадает из маршрутизации. Когда контейнера
+    больше нет — memo врёт: порт 10020+N свободен, а `slot_countries.json`
+    по-прежнему «помнит» слот, и следующий `all_slots()` считает его
+    существующим. Именно так `rip-wrapper-3`, три недели как мёртвый, продолжал
+    занимать слот и порт."""
+    forget_container(container)
+    try:
+        memo = _memo_load()
+        if container in memo:
+            del memo[container]
+            _memo_path().write_text(json.dumps(memo, ensure_ascii=False, indent=1),
+                                    encoding="utf-8")
+    except Exception:
+        pass
+    account_map_forget(container=container)
+
+
 def _memo_path():
     from pathlib import Path
     import os
@@ -136,11 +159,21 @@ def container_running(container: str) -> bool:
 # ожидания и своим identity, второе только временем, — и оба неотличимы снаружи
 # от «нет прав в регионе», пока не заглянешь в контейнер.
 _BLOCK_PATTERNS = (
+    # «Your account is disabled. This Apple Account has been disabled for
+    # security reasons» — 24.09.2026 три учётки владельца получили этот диалог и
+    # числились «просто остановленными»: паттерна «account IS disabled» в списке
+    # не было, был только «account HAS BEEN disabled» из rip-wrapper-3.
+    ("account_disabled", ("account is disabled", "account has been disabled",
+                          "disabled for security reasons", "apple account has been disabled")),
     ("device_limit", ("device limit", "concurrent playing devices",
                       "lease code 3062", "response type 6")),
     ("login_failed", ("login failed", "response type 4")),
     ("no_session", ("playback error",)),
 )
+
+#: Причины из `_BLOCK_PATTERNS`, которые значат «учётка мертва НАСОВСЕМ в рамках
+#: этого симптома». `no_session` — нет: это состояние контейнера, а не аккаунта.
+HARD_BLOCK_REASONS = ("account_disabled", "device_limit", "login_failed")
 
 
 def container_block_reason(container: str, tail: int = 60) -> str:
@@ -241,6 +274,148 @@ def slot_of_container(container: str) -> int:
         return 0
     m = re.match(r"rip-wrapper-(\d+)$", container or "")
     return int(m.group(1)) if m else -1
+
+
+def container_for_slot(slot: int) -> str:
+    """Контейнер слота: 0 → `amd-wrapper`, дальше `rip-wrapper-N`. Одно место,
+    потому что `_name` в пуле и обход сторожа обязаны называть слот одинаково —
+    иначе сторож снимает чужой контейнер."""
+    return "amd-wrapper" if int(slot) == 0 else f"rip-wrapper-{int(slot)}"
+
+
+def _inspect(container: str, fmt: str) -> str:
+    try:
+        r = subprocess.run(["docker", "inspect", "-f", fmt, container],
+                           capture_output=True, text=True, timeout=10,
+                           creationflags=_CNW)
+        return (r.stdout or "").strip() if r.returncode == 0 else ""
+    except Exception:
+        return ""
+
+
+def container_stop_info(container: str) -> dict:
+    """Почему контейнер НЕ работает: штатный простой или симптом смерти.
+
+    Различать обязано. Сборщик гасит простаивающие слоты через пять минут
+    (см. `wrapper_pool.IDLE_COOLDOWN`), и «остановлен» — норма для 90% слотов в
+    любой момент суток. Считать такие остановки неудачами — значит снять весь
+    пул за одну ночь простоя. Мёртвый же слот выдаёт себя журналом: device
+    limit, login failed, «account is disabled», или нечистым кодом выхода.
+
+    Возвращает {"exists", "running", "exit_code", "block_reason", "idle"};
+    `idle` — то есть «остановлен без симптомов», проверкой НЕ является.
+    """
+    state = _inspect(container, "{{.State.Status}}|{{.State.ExitCode}}")
+    if not state:
+        return {"exists": False, "running": False, "exit_code": None,
+                "block_reason": "", "idle": False}
+    status, _, code = state.partition("|")
+    try:
+        exit_code = int(code)
+    except ValueError:
+        exit_code = None
+    running = status == "running"
+    reason = container_block_reason(container) if not running else ""
+    return {"exists": True, "running": running, "exit_code": exit_code,
+            "block_reason": reason,
+            "idle": (not running and not reason and exit_code in (0, None))}
+
+
+def container_env_id(container: str) -> str:
+    """Apple ID, под которым контейнер СОЗДАВАЛСЯ (`-L id:пароль` в env).
+
+    Это единственный честный ответ на вопрос «чей вообще этот контейнер»: номер
+    слота — порядок в списке, а список правят, и после удаления середины
+    `rip-wrapper-2` остаётся сессией аккаунта, которого в списке уже нет. Имя
+    здесь ни при чём — по имени судят о владении только те, кто ни разу не
+    доставал env."""
+    raw = _inspect(container, "{{json .Config.Env}}")
+    try:
+        env = json.loads(raw) if raw else []
+    except Exception:
+        return ""
+    for item in (env or []):
+        s = str(item)
+        if not s.startswith("args="):
+            continue
+        m = re.search(r"-L\s+(\S+?):", s)
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+# ── Карта «аккаунт ↔ слот/контейнер» ────────────────────────────────────────
+# До 24.09.2026 её не было вовсе: настройки показывали шесть учётки из конфига,
+# `all_slots()` — три контейнера, и никто не умел сказать, что к чему относится.
+# Из этого вырос основной упрёк владельца: мёртвая учётка `device_limit_2026-08-01`
+# жила в списке с августа и ни разу не была снята, потому что сторож смотрел на
+# контейнеры, а контейнера у неё давно не было.
+#
+# Ключ — sha256-хеш опознания учётки (`retired_credentials._digest`), НЕ сам
+# Apple ID: файл лежит в dist/, а dist уезжает в бэкапы и кэши.
+
+def _map_path():
+    from pathlib import Path
+    import os
+    base = Path(os.environ.get("RIPSTER_BASE_DIR") or Path(__file__).resolve().parent.parent)
+    p = base / "dist" / "docker" / "apple_account_map.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def account_map() -> dict:
+    """{"accounts": {digest: {slot, container, kind, label, at}}, "containers": {имя: digest}}."""
+    try:
+        d = json.loads(_map_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {"accounts": {}, "containers": {}}
+    if not isinstance(d, dict):
+        return {"accounts": {}, "containers": {}}
+    d.setdefault("accounts", {})
+    d.setdefault("containers", {})
+    return d
+
+
+def account_map_put(digest: str, *, slot: int, container: str, kind: str,
+                    label: str) -> None:
+    """Записать, где живёт учётка. Вызывается КАЖДЫМ проходом сторожа — карта
+    обязана переживать удаление контейнеров и правку списка, но не переживать
+    перестановку учёток местами."""
+    if not digest:
+        return
+    d = account_map()
+    d["accounts"][digest] = {"slot": int(slot), "container": container,
+                             "kind": kind, "label": label,
+                             "at": int(time.time())}
+    if container:
+        d["containers"][container] = digest
+    try:
+        p = _map_path()
+        tmp = p.with_suffix(".tmp")
+        tmp.write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(p)
+    except Exception:
+        pass
+
+
+def account_map_forget(*, digest: str = "", container: str = "") -> None:
+    """Вычеркнуть учётку (снята) или контейнер (удалён осиротевшим)."""
+    d = account_map()
+    changed = False
+    if digest:
+        if d["accounts"].pop(digest, None) is not None:
+            changed = True
+        for name in [c for c, dg in d["containers"].items() if dg == digest]:
+            del d["containers"][name]
+            changed = True
+    if container and d["containers"].pop(container, None) is not None:
+        changed = True
+    if not changed:
+        return
+    try:
+        _map_path().write_text(json.dumps(d, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        pass
 
 
 def ensure_slot_up(container: str, port: int = 0, timeout: float = 60.0,

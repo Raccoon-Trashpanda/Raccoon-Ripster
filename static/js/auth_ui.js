@@ -1178,34 +1178,64 @@ async function removeQobuzAccount(slot) {
 }
 
 // ── Apple multi-account pool (load-balanced, own Docker wrapper per slot) ──
+// Состояние УЧЁТКИ (поле `state` от /api/wrapper/accounts), а не контейнера.
+// До 24.09.2026 строка «не запущен» скрывала всё сразу: мёртвую учётку, учётку
+// «N из 5 неудач» и ту, которую вообще нечем было проверить. Порог в пять
+// проходов без этой строки не увидеть.
+function _appleLifecycle(a) {
+  const s = a.state;
+  if (!s || s === 'alive') return null;
+  const th = a.threshold || 5;
+  if (s === 'failing') return {txt: ti('acc.st_failing', {streak: a.streak || 0, threshold: th}),
+                               color: 'var(--orange)', why: a.reason};
+  if (s === 'dead')     return {txt: ti('acc.st_dead', {threshold: th}), color: 'var(--red)', why: a.reason};
+  if (s === 'removed')  return {txt: t('acc.st_removed'), color: 'var(--muted2)', why: a.reason};
+  return {txt: t('acc.st_unverified'), color: 'var(--muted2)', why: a.reason};
+}
+
 async function loadAppleAccounts() {
   const list = document.getElementById('apple-accounts-list');
   if(!list) return;
   try {
     const r = await api('GET', '/api/wrapper/accounts');
     const accs = r.accounts || [];
-    if(!accs.length) { list.innerHTML = ''; return; }
-    list.innerHTML = _acctSorted(accs).map(a => {
+    if(!accs.length) { list.innerHTML = _appleRetiredLine(r.retired); return; }
+    list.innerHTML = _appleRetiredLine(r.retired) + _acctSorted(accs).map(a => {
       // media-user-token НЕ равно логину: враппер такой слот не поднимает, и
       // зелёная точка «не запущен» здесь означала бы поломку. Показываем
       // ограничение строкой, а не молчаливым серым кружком.
       const token = a.kind === 'token';
-      const dot = token ? 'var(--muted2)'
-                        : (a.busy ? 'var(--orange)' : (a.running ? 'var(--green)' : 'var(--muted)'));
-      const state = token ? t('acc.token_only')
-                          : (a.busy ? t('acc.busy') : (a.running ? t('acc.ready') : t('acc.not_started')));
+      const lc = _appleLifecycle(a);
+      const dot = lc ? lc.color
+                     : (token ? 'var(--muted2)'
+                              : (a.busy ? 'var(--orange)' : (a.running ? 'var(--green)' : 'var(--muted)')));
+      const state = lc ? lc.txt
+                       : (token ? t('acc.token_only')
+                                : (a.busy ? t('acc.busy') : (a.running ? t('acc.ready') : t('acc.not_started'))));
+      const tip = lc && lc.why ? ` title="${escapeHtml(lc.why)}${a.checked_at ? ' · ' + escapeHtml(a.checked_at) : ''}"` : '';
       return `
       <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
         ${acctDragHandle()}
         <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}" title="${state}"></span>
         <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}${token&&a.country?' <span style="color:var(--muted)">('+escapeHtml(a.country.toUpperCase())+')</span>':''}</span>
-        <span style="color:${token?'var(--muted2)':'var(--muted)'};font-size:10px">${state}</span>
+        <span${tip} style="color:${lc?lc.color:'var(--muted)'};font-size:10px">${state}</span>
         ${acctPrefCtl('apple', a)}
         ${a.primary ? '' : `<button onclick="removeAppleAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
       </div>`;
     }).join('');
     acctDndWire('apple', list);
   } catch(e) { list.innerHTML = ''; }
+}
+
+// Снятые автоматикой учётки. Строка в списке исчезает молча, и владелец читает
+// это как «я такую не заводил», а не «ее убил порог в 5 неудач».
+function _appleRetiredLine(rows) {
+  const gone = (rows || []).filter(r => r && (r.reason || r.at));
+  if(!gone.length) return '';
+  const last = gone[gone.length - 1];
+  return `<div style="padding:4px 10px;margin-bottom:5px;font-size:10px;color:var(--muted2)">`
+    + escapeHtml(ti('acc.st_retired_note', {n: gone.length, reason: last.reason || '', at: last.at || ''}))
+    + `</div>`;
 }
 
 async function addAppleAccount() {

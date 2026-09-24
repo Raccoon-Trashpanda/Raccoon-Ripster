@@ -32,6 +32,11 @@ from pathlib import Path
 _KIND_DEEZER = "deezer_arl"
 _KIND_QOBUZ = "qobuz_account"
 _KIND_SC = "soundcloud_token"
+#: Apple: учётка, а не контейнер. С 24.09.2026 мёртвая Apple-учётка снимается
+#: целиком (контейнер удаляется, порт освобождается, запись уходит из конфига) —
+#: и ровно поэтому она обязана быть в этом реестре, иначе первое же сохранение
+#: настроек вернёт её из копии приложения в памяти.
+_KIND_APPLE = "apple_account"
 
 
 def _base_dir() -> Path:
@@ -100,6 +105,16 @@ def listing() -> list[dict]:
     return sorted(_load().values(), key=lambda r: r.get("at", ""))
 
 
+def lookup(kind: str, secret: str) -> dict:
+    """Запись о снятии ({"kind","tail","reason","at"}) — чтобы UI сказал
+    КОГДА и ПОЧЕМУ учётка ушла, а не только «её больше нет». Пустой словарь,
+    если учётка в строю. Хвост здесь тот же, что и в архиве: шесть символов,
+    не секрет."""
+    if not (secret or "").strip():
+        return {}
+    return _load().get(f"{kind}:{_digest(secret)}") or {}
+
+
 def strip_from_config(cfg: dict) -> list[str]:
     """Убрать снятые Deezer ARL из словаря конфига НА МЕСТЕ.
 
@@ -132,6 +147,51 @@ def strip_from_config(cfg: dict) -> list[str]:
 
     notes += _strip_qobuz(cfg)
     notes += _strip_soundcloud(cfg)
+    notes += _strip_apple(cfg)
+    return notes
+
+
+def _apple_secret(a: dict) -> str:
+    """Чем опознаётся учётка Apple: media-user-token либо связка «Apple ID +
+    хеш пароля». Совпадает с `wrapper_pool.account_identity` дословно и
+    продублировано намеренно: реестр не имеет права тянуть за собой docker-SDK
+    (см. ту же причину у `_qobuz_secret`)."""
+    if not isinstance(a, dict):
+        return ""
+    tok = str(a.get("token") or "").strip()
+    if a.get("kind") == "token" or (tok and not a.get("id")):
+        return tok or str(a.get("label") or "")
+    pw = hashlib.sha256(str(a.get("password") or "").encode()).hexdigest()[:12]
+    return f"{str(a.get('id') or '').lower()}|{pw}"
+
+
+def _strip_apple(cfg: dict) -> list[str]:
+    """То же для Apple: снятая автоматикой учётка не должна возвращаться ни
+    через загрузку конфига, ни через его сохранение.
+
+    Идентификатор в отчёте — только хеш: Apple ID это почта владельца, а
+    media-user-token это пароль по сути; оба наружу в логи и в NOTES нельзя."""
+    notes: list[str] = []
+    prim = {"id": cfg.get("wrapper-apple-id"), "password": cfg.get("wrapper-password")}
+    secret = _apple_secret(prim)
+    if secret and (prim["id"] or prim["password"]) and is_retired(_KIND_APPLE, secret):
+        cfg["wrapper-apple-id"] = ""
+        cfg["wrapper-password"] = ""
+        notes.append(f"Apple основная учётка ({_digest(secret)[:8]}) снята "
+                     f"автоматикой — поля освобождены")
+
+    pool = cfg.get("wrapper-accounts")
+    if isinstance(pool, list):
+        kept = []
+        for a in pool:
+            s = _apple_secret(a)
+            if s and is_retired(_KIND_APPLE, s):
+                notes.append(f"Apple учётка ({_digest(s)[:8]}) снята автоматикой — "
+                             f"запись удалена")
+                continue
+            kept.append(a)
+        if len(kept) != len(pool):
+            cfg["wrapper-accounts"] = kept
     return notes
 
 

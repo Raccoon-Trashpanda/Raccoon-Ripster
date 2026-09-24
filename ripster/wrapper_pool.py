@@ -68,7 +68,10 @@ def _bound_to_loopback(ct) -> bool:
 # новая попытка входа сжигает ещё один слот устройства. Метка живёт на диске
 # (перезапуск приложения её не стирает) и привязана к учётке + отпечатку
 # пароля: владелец сменил пароль в настройках — пауза снялась сама.
-_HARD_LOGIN_REASONS = ("device_limit", "login_failed")
+# «account is disabled» — тоже: учётку Apple заблокировал, и каждый новый `-L`
+# вход к этой же учётке жжёт слот устройства впустую (24.09.2026 три учётки
+# владельца получали именно этот диалог).
+_HARD_LOGIN_REASONS = ("device_limit", "login_failed", "account_disabled")
 LOGIN_PAUSE_S = 12 * 3600
 
 
@@ -656,6 +659,58 @@ def all_accounts(config: dict) -> list[dict]:
                     "enabled": extra.get("enabled", True),
                     "kind": kind})
     return out
+
+
+def account_identity(acct: dict) -> str:
+    """Чем опознаётся учётка в реестре снятых и в счётчике неудач. Для логина —
+    связка id+хеш пароля (то же, что ключ паузы входа), для токена — сам токен.
+
+    Значение СЕКРЕТНО: наружу уходит только через `_ident`/`_mask`."""
+    a = acct or {}
+    tok = str(a.get("token") or "").strip()
+    if a.get("kind") == "token" or (tok and not a.get("id")):
+        return tok or str(a.get("label") or "")
+    return _acct_key(a)
+
+
+def display_label(acct: dict) -> str:
+    """Метка учётки ДЛЯ ПОКАЗА: в JSON настроек, в журнал, в сообщение владельцу.
+
+    🔴 У token-записей поле `label` в старых конфигах — сам media-user-token (его
+    вклеивали в «Apple ID», а метку брали оттуда). Ручка removal до 24.09.2026
+    отвечала этим значением браузеру дословно: «Аккаунт 0.AsA5… убран», то есть
+    пароль по сути уехал в HTTP-ответ и в интерфейс. Поэтому показываем хвост по
+    тому же правилу, что и остальные сервисы (`credential_health._mask`), а не
+    метку как её завёл человек."""
+    from .credential_health import _mask
+    a = acct or {}
+    cc = str(a.get("country") or "").lower()
+    tok = str(a.get("token") or "").strip()
+    if not tok and _looks_like_media_user_token(a.get("id") or ""):
+        tok = str(a.get("id") or "").strip()
+    lab = str(a.get("label") or "").strip()
+    kind = a.get("kind") or ("token" if tok else "login")
+    if kind == "token":
+        # человеческая метка у token-записи — это либо заглушка («token»,
+        # «token · es»), либо утёкший токен; показываем только настоящую
+        safe = lab if lab and "token" not in lab.lower() \
+            and not _looks_like_media_user_token(lab) else ""
+        shown = safe or "token"
+        if cc and cc not in shown:
+            shown = f"{shown} · {cc}"
+        return f"{shown} {_mask(tok)}" if tok else shown
+    if _looks_like_media_user_token(lab):
+        # логин-запись, в метке которой на самом деле токен
+        return f"токен {_mask(lab)}"
+    shown = lab or str(a.get("id") or "")
+    # Apple ID — это почта владельца. Как метка она годится только та, что
+    # человек вписал сам («roger987»); всё, что похоже на адрес, маскируется
+    # так же, как секреты остальных сервисов: отчёт сторожа и список настроек
+    # читаются вслух, а `label` по умолчанию и есть id.
+    if "@" in shown:
+        from .credential_health import _ident
+        return _ident(account_identity(a))
+    return shown
 
 
 def login_accounts(config: dict) -> list[dict]:

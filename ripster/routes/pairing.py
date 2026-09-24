@@ -1220,6 +1220,11 @@ async def pair_fetch_status(task_id: str, request: Request):
         "title": meta.get("title", ""),
         "artist": meta.get("artist", ""),
         "error": t.get("error") or meta.get("error") or "",
+        # Короткий локализуемый вердикт для телефона: длинная аббревиатура
+        # своих витрин — для ПК-истории, экрану нужна одна строка.
+        # `available_on` дописывает запасной путь, пока задача ещё в статусе.
+        "error_key": meta.get("error_key") or "",
+        "available_on": meta.get("available_on") or [],
         "note": meta.get("route_note", ""),
     }
 

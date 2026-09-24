@@ -176,10 +176,12 @@ async def widevine_mint_auto():
     (setup_widevine_toolchain lived behind an unreferenced endpoint), so
     Ensure-Sdk failed immediately and every step after it stayed uninstalled."""
     if sys.platform != "win32":
-        return {"ok": False, "error": "Авто-минт WVD доступен только на Windows."}
+        return {"ok": False, "error_key": "err.wvd_mint_windows_only",
+                "error": "Авто-минт WVD доступен только на Windows."}
     ps1 = _base_dir / "_widevine_setup" / "wvd_console.ps1"
     if not ps1.exists():
-        return {"ok": False, "error": "_widevine_setup/wvd_console.ps1 не найден в установке."}
+        return {"ok": False, "error_key": "err.wvd_ps1_missing",
+                "error": "_widevine_setup/wvd_console.ps1 не найден в установке."}
 
     async def _do():
         await _setup.ilog("── Widevine L3: авто-минт device.wvd "
@@ -202,7 +204,8 @@ async def widevine_mint_auto():
                               "если KeyDive застрял на Chrome — открой «Мастер WVD» и доведи вручную.",
                               "error")
     asyncio.create_task(_do())
-    return {"ok": True, "msg": "Авто-минт запущен — следи за консолью Setup."}
+    return {"ok": True, "msg_key": "setup.wvd_mint_started",
+            "msg": "Авто-минт запущен — следи за консолью Setup."}
 
 
 # ── Setup checklist: install ONE component synchronously ──────────────────────
@@ -287,6 +290,7 @@ async def _run_setup_component(key: str) -> dict:
             done = True
         else:
             return {"ok": False, "state": "failed",
+                    "error_key": "err.unknown_component", "error_args": {"key": key},
                     "error": f"неизвестный компонент: {key}"}
     except Exception as e:                                # noqa: BLE001
         await _setup.ilog(f"✗ {key}: {e}", "error")
@@ -340,6 +344,7 @@ async def setup_component(key: str):
              "orpheus", "beatport", "jiosaavn", "zhaarey", "widevine"}
     if key not in known:
         return {"ok": False, "state": "failed",
+                "error_key": "err.unknown_component", "error_args": {"key": key},
                 "error": f"неизвестный компонент: {key}"}
 
     async def _bg():
@@ -453,6 +458,7 @@ async def wrapper_relogin():
     return {
         "ok": True,
         "had_session": has_session,
+        "msg_key": "setup.wrapper_relogin_started",
         "msg": "Re-login started — ожидай 2FA на телефоне",
     }
 
@@ -487,7 +493,8 @@ async def wrapper_build():
 async def wrapper_2fa(body: dict):
     code = (body.get("code") or "").strip()
     if not code:
-        return {"ok": False, "msg": "Нет кода"}
+        return {"ok": False, "msg_key": "setup.no_2fa_code", "params": {},
+                "msg": "Нет кода"}
     # Deliver to the interactive login process's STDIN (primary) + files (fallback).
     fed = await _amd.submit_2fa(code)
     return {"ok": True, "fed_stdin": fed}
@@ -525,10 +532,32 @@ async def wrapper_accounts_list():
             e = extras[i - 1] if i - 1 < len(extras) and isinstance(extras[i - 1], dict) else {}
             v = e.get(key)
         return default if v is None else v
+    # Состояние по учётке, а не по контейнеру (см. credential_health.
+    # apple_account_states): до 24.09.2026 список показывал шесть одинаковых
+    # строк, хотя проверялись три поднятых контейнера, и мёртвая учётка
+    # выглядела живого хуже — её вообще не было видно. Здесь их честно четыре:
+    # живая / не проверена / N из 5 неудач / удалена.
+    try:
+        from ripster import credential_health as _ch
+        states = {s["slot"]: s for s in _ch.apple_account_states(_cfg)}
+    except Exception:                                     # noqa: BLE001
+        states = {}
+    # Снятые автоматикой учётки: из списка их вычеркнул реестр (`strip_from_config`
+    # на загрузке), и молчаливое исчезновение строки владелец читает как «я её
+    # не заводил». Отдаём хвост, причину и дату — их и показывает панель.
+    retired_rows: list[dict] = []
+    try:
+        from ripster import retired_credentials as _retired
+        retired_rows = [{"tail": r.get("tail", ""), "reason": r.get("reason", ""),
+                         "at": r.get("at", "")}
+                        for r in _retired.listing() if r.get("kind") == "apple_account"]
+    except Exception:                                     # noqa: BLE001
+        pass
     return {
         "pool_enabled": _pool.pool_enabled(_cfg),
+        "retired": retired_rows,
         "accounts": [
-            {"slot": i, "label": a["label"], "primary": i == 0,
+            {"slot": i, "label": _pool.display_label(a), "primary": i == 0,
              "priority": _pref(i, "priority", i),
              "enabled": bool(_pref(i, "enabled", True)),
              # kind/country — чтобы настройки могли ЧЕСТНО сказать, что
@@ -537,6 +566,7 @@ async def wrapper_accounts_list():
              "kind": a.get("kind") or "login",
              "country": a.get("country") or "",
              "has_token": bool(a.get("token")),
+             **(states.get(i) or {}),
              **status_by_slot.get(i, {"running": False, "busy": False})}
             for i, a in enumerate(accounts)
         ],
@@ -563,8 +593,10 @@ async def wrapper_accounts_order(body: dict):
     accounts = _pool._configured_accounts(_cfg)
     order = body.get("order") or []
     if sorted(order) != list(range(len(accounts))):
-        raise HTTPException(400, f"order должен быть перестановкой 0..{len(accounts)-1}, "
-                                 f"получено {order}")
+        raise HTTPException(400, imsg(
+            "err.order_not_permutation",
+            f"order должен быть перестановкой 0..{len(accounts)-1}, получено {order}",
+            n=len(accounts) - 1, order=order))
     new = [accounts[i] for i in order]
     head, tail = new[0], new[1:]
     _cfg["wrapper-apple-id"]  = head["id"]
@@ -583,8 +615,8 @@ async def wrapper_accounts_order(body: dict):
         raise HTTPException(500, imsg("err.cfg_save_failed",
                                       "не сохранил конфиг: {e}", e=str(e)))
     return {"ok": True,
-            "primary": head.get("label") or head["id"],
-            "order": [a.get("label") or a["id"] for a in new],
+            "primary": _pool.display_label(head),
+            "order": [_pool.display_label(a) for a in new],
             "note": "контейнеры перезапустятся при следующем запуске пула — "
                     "каждый аккаунт останется на своей identity"}
 
@@ -697,8 +729,12 @@ async def _wrapper_account_add_token(token: str, country: str, label: str) -> di
         return {"ok": False, "state": "duplicate",
                 "msg": "Такой токен уже добавлен",
                 "msg_key": "acc.token_duplicate", "params": {}}
-    entry = {"token": token, "country": cc,
-             "label": label or (f"token · {cc}" if cc else "token")}
+    from ripster.wrapper_pool import _looks_like_media_user_token, display_label as _disp
+    # Метку, совпадающую с токеном, не пишем НИКОГДА: ровно так 22.09 в конфиге
+    # оказался 246-символьный blob, который потом уезжал в HTTP-ответ настроек.
+    if not label or _looks_like_media_user_token(label):
+        label = f"token · {cc}" if cc else "token"
+    entry = {"token": token, "country": cc, "label": label}
     existing.append(entry)
     _cfg["wrapper-accounts"] = existing
     if _save_config:
@@ -708,7 +744,7 @@ async def _wrapper_account_add_token(token: str, country: str, label: str) -> di
             return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "started": False, "state": "ok", "country": cc,
-            "label": entry["label"],
+            "label": _disp({**entry, "kind": "token"}),
             "msg_key": "acc.token_saved_wrapper_note", "params": {},
             "msg": ("Аккаунт по токену сохранён. Враппер под него НЕ поднимается: "
                     "media-user-token даёт каталог, тексты и AAC, но не ALAC/Atmos — "
@@ -746,7 +782,9 @@ async def wrapper_accounts_add(body: dict):
                        "вставьте его в поле «токен»"}
 
     existing = list(_cfg.get("wrapper-accounts") or [])
-    label = label or apple_id
+    # меткой может приехать и токен (форма раньше принимала его в любое поле)
+    if not label or _looks_like_media_user_token(label):
+        label = apple_id
     if any(a.get("id") == apple_id for a in existing):
         return {"ok": False, "msg": "Этот аккаунт уже добавлен",
                 "msg_key": "acc.account_duplicate", "params": {}}
@@ -805,9 +843,26 @@ async def wrapper_accounts_remove(slot: int):
             c.containers.get(f"{NAME_PREFIX}{slot}").remove(force=True)
         except Exception:
             pass
+        # Порт освобождён — значит и мемо страны, и карта аккаунт↔слот больше
+        # не должны говорить, что здесь живая сессия: иначе `all_slots()`
+        # вернёт этот слот в перебор с чужой витриной.
+        try:
+            from ripster import apple_accounts as _aa
+            _aa.release_container(f"{NAME_PREFIX}{slot}")
+        except Exception:
+            pass
     await asyncio.to_thread(_stop)
-    return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
-            "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
+    # Метка наружу — только masked (см. wrapper_pool.display_label): у token-
+    # записей поле `label` в конфиге и есть сам media-user-token.
+    from ripster.wrapper_pool import display_label as _disp
+    shown = _disp({"label": removed.get("label") or "",
+                   "token": removed.get("token") or "",
+                   "id": removed.get("id") or "",
+                   "country": removed.get("country") or "",
+                   "kind": "token" if (removed.get("token")
+                                        or removed.get("kind") == "token") else "login"})
+    return {"ok": True, "msg": f"Аккаунт {shown} убран",
+            "msg_key": "acc.account_removed", "params": {"label": shown}}
 
 
 # ── Deezer multi-account pool (load-balanced, no Docker) ───────────────────────
@@ -1152,7 +1207,8 @@ async def tidal_accounts_add(body: dict):
 async def tidal_accounts_remove(slot: int):
     """Убрать доп. учётку Tidal (slot >= 1; слот 0 — основной, через обычное поле)."""
     if slot < 1:
-        return {"ok": False, "msg": "Слот 0 — основная учётка, убирается через поле Tidal"}
+        return {"ok": False, "msg_key": "err.tidal_slot0_main", "params": {},
+                "msg": "Слот 0 — основная учётка, убирается через поле Tidal"}
     existing = list(_cfg.get("tidal-accounts") or [])
     idx = slot - 1
     if idx < 0 or idx >= len(existing):
@@ -1651,10 +1707,12 @@ async def orpheus_login_open(request: Request):
     запрос пришёл с этой машины: через туннель браузер хозяина открывать нельзя.
     """
     if not _owner_at_the_machine(request):
-        return {"ok": False, "error": "Открыть браузер можно только на этой машине — "
-                                      "скопируй ссылку входа вручную"}
+        return {"ok": False, "error_key": "err.browser_local_only",
+                "error": "Открыть браузер можно только на этой машине — "
+                         "скопируй ссылку входа вручную"}
     if not _oauth_url:
-        return {"ok": False, "error": "Нет активной ссылки входа — нажми «Войти в Spotify» заново"}
+        return {"ok": False, "error_key": "err.no_login_url",
+                "error": "Нет активной ссылки входа — нажми «Войти в Spotify» заново"}
 
     def _open() -> bool:
         import webbrowser
@@ -1670,7 +1728,8 @@ async def orpheus_login_open(request: Request):
             return False
 
     if not await asyncio.to_thread(_open):
-        return {"ok": False, "error": "Не удалось открыть браузер — скопируй ссылку входа вручную"}
+        return {"ok": False, "error_key": "err.browser_open_failed_copy",
+                "error": "Не удалось открыть браузер — скопируй ссылку входа вручную"}
     return {"ok": True}
 
 
@@ -1844,7 +1903,8 @@ async def beatport_install():
     async def _do():
         await _install_beatport_component()
     asyncio.create_task(_do())
-    return {"ok": True, "msg": "Установка запущена — смотри Setup-лог"}
+    return {"ok": True, "msg_key": "setup.install_started",
+            "msg": "Установка запущена — смотри Setup-лог"}
 
 
 async def _install_soundcloud_component() -> bool:

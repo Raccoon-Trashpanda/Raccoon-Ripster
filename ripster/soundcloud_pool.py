@@ -216,7 +216,11 @@ def get_pool(config: dict) -> SoundcloudPool | None:
     if _pool_instance is None or fp != _pool_fingerprint:
         _pool_instance = SoundcloudPool(accounts)
         _pool_fingerprint = fp
-        _warm_health(fp)
+        # Та же ловушка, что у Deezer: в подогрев идёт список ТОКЕНОВ, а не
+        # кортежей-отпечатков `(token, enabled, priority)` — иначе нитка
+        # health-warm умирает на `AttributeError` и порядок учёток решает
+        # молчаливая сортировка «как в конфиге».
+        _warm_health(tuple(a["token"] for a in accounts if a.get("enabled", True)))
     return _pool_instance
 
 
