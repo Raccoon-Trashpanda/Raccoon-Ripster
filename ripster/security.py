@@ -40,9 +40,14 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "authorization-token",   # Apple bearer — found unsaveable via REST in the 2026-07-22 audit
                               # (only ever landed via the WS token_update path in practice)
     "amd-dir", "amd-instance-url", "amd-instance-secure",
+    "amd-wm-api-key",   # ключ wm.wol.moe (с 10.09.2026 обязателен) — секрет, маску см. routes/core
     "amd-parallel", "amd-save-lyrics", "amd-lyrics-format",
     "amd-codec-alt",
     "apple-parallel",   # apple-parallel-tracks / apple-parallel-count (zhaarey)
+    # Мягкие потолки пейсинга (ripster/pacing.py): наши запросы к amp-api и к
+    # официальному эндпоинту плейлистов Qobuz. Без этой строки поле в Настройках
+    # сохранялось бы «успешно» и молча не действовало.
+    "apple-requests-per", "qobuz-playlist-per",
     "atmos-max", "max-memory",
     "media-user",
     "storefront",
@@ -140,6 +145,12 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     # — разные решения, и включать второе за человека нельзя (эксклюзивный
     # захват отбирает звук у всей системы).
     "audio-native-local",
+    # Скин интерфейса (data-skin на <html>): classic/neon/console/oled.
+    # Ключ `ui-skin` в config.yaml был, но сюда он не попадал ни разу:
+    # то есть переключатель в настройках физически не мог сохранить выбор —
+    # ровно подвид 1 из ripster-setting-with-no-wire. Оформляющих правил для
+    # classic нет, поэтому запись меняет только явно выбранный новый скин.
+    "ui-skin",
 )
 
 

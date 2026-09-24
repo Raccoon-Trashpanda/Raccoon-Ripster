@@ -169,8 +169,17 @@ async def _apple_playlist(url: str, sf: str, playlist_id: str) -> list[dict]:
 
     api_url = (f"https://api.music.apple.com/v1/catalog/{sf}"
                f"/playlists/{playlist_id}?include=tracks&limit[tracks]=300")
+    # Плейлист раскрывается ОФИЦИАЛЬНЫМ API Apple с токеном конкретной учётки:
+    # именно за частоту таких обращений учётки улетают в 429 и бан (чат
+    # @apple_music_alac, 24.09). Потолок мягкий: не «ошибка», а пустой список —
+    # то, чем этот путь и так умеет быть.
+    from ripster import pacing
+    who = pacing.ident_for(mut or bearer)
+    if not await pacing.allow("apple", who, _cfg):
+        return []
     async with _HTTP.ashared() as c:
         r = await c.get(api_url, headers=headers)
+    pacing.outcome("apple", who, r.status_code)
     if r.status_code != 200:
         return []
 
@@ -376,6 +385,12 @@ async def _qobuz_album(album_id: str, app_id: str, headers: dict) -> list[dict]:
 
 
 async def _qobuz_playlist(playlist_id: str, app_id: str, headers: dict) -> list[dict]:
+    # `playlist/get` — единственный эндпоинт Qobuz, за частые обращения к
+    # которому режут 403 (чат @apple_music_alac, 24.09). Отдельный сервис в
+    # пейсинге именно поэтому: свой потолок, свой штраф, свой счётчик.
+    from ripster import pacing
+    if not await pacing.allow("qobuz_playlist", "", _cfg):
+        return []
     async with _HTTP.ashared() as c:
         r = await c.get(
             "https://www.qobuz.com/api.json/0.2/playlist/get",
@@ -383,6 +398,7 @@ async def _qobuz_playlist(playlist_id: str, app_id: str, headers: dict) -> list[
                     "limit": 500, "extra": "tracks"},
             headers=headers,
         )
+    pacing.outcome("qobuz_playlist", "", r.status_code)
     if r.status_code != 200:
         return []
     d = r.json()

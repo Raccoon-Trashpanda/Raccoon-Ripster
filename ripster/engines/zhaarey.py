@@ -395,6 +395,14 @@ class ZhaereyEngine(EngineBase):
                    "Origin": "https://music.apple.com"}
         if mut:
             headers["media-user-token"] = mut
+        # amp-api со счетов учётки: треклист альбома — это до шести страниц одним
+        # заходом, а страницы эти идут одна за другой на каждой задаче очереди.
+        # Ровно так и набираются «тысячи запросов в сутки», за которые Apple
+        # отвечает 429, а потом банит (чат @apple_music_alac, 24.09).
+        from ripster import pacing
+        who = pacing.ident_for(mut or bearer)
+        if not await pacing.allow("apple", who, config):
+            return []
         out: list = []
         try:
             async with _httpx.AsyncClient(timeout=12) as c:
@@ -404,6 +412,7 @@ class ZhaereyEngine(EngineBase):
                 params = {"limit": 100}
                 for _ in range(6):
                     r = await c.get(url, params=params, headers=headers)
+                    pacing.outcome("apple", who, r.status_code)
                     if r.status_code != 200:
                         break
                     data = r.json()

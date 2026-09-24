@@ -276,6 +276,10 @@ DEFAULT_CONFIG: dict = {
     # ── AMD v2 (AppleMusicDecrypt) ───────────────────────────────────────────
     "amd-dir":           "",
     "amd-instance-url":  "wm.wol.moe",
+    # wm.wol.moe с 10.09.2026 требует API-ключ (@wm_auth_bot → /newkey). Секрет:
+    # пишется штатным конфиг-райтером и полем Настроек, гостям маскируется
+    # (ripster/routes/core.py::_SECRET_KEYS), в логи/тесты/отчёты не попадает.
+    "amd-wm-api-key":    "",
     # Публичный пул обслуживает столько витрин, сколько стран у волонтёров
     # (06.09.2026 — тринадцать, нашей `us` среди них нет, `nz` есть). Ссылку
     # переводим в обслуживаемую витрину; выключается этим ключом, порядок
@@ -290,6 +294,17 @@ DEFAULT_CONFIG: dict = {
     # zhaarey (local wrapper) — parallel track downloads within one album
     "apple-parallel-tracks": False,
     "apple-parallel-count":  4,
+    # Солёмка для уникального `-I` device-info каждой учётки wrapper'а
+    # (ripster/wrapper_device_info). Пишется штатным конфиг-райтером, наружу не
+    # печатается. Пустая — отпечатки всё равно уникальны по id аккаунта.
+    "apple-device-salt":     "",
+    # ── Пейсинг против бана (ripster/pacing.py) ───────────────────────────────
+    # Мягкие потолки НАШИХ запросов к сервису: частота — то, за что отвечают
+    # 429/403, суточный объём — то, за что банят учётку. Ноль = потолок снят.
+    "apple-requests-per-hour":  1500,
+    "apple-requests-per-day":   15000,
+    "qobuz-playlist-per-hour":  120,
+    "qobuz-playlist-per-day":   1200,
     # ── Qobuz ───────────────────────────────────────────────────────────────
     "qobuz-user-id":    "",
     "qobuz-auth-token": "",

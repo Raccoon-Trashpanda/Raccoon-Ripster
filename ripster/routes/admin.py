@@ -329,6 +329,25 @@ def _wrapper_pool_info() -> dict:
     return info
 
 
+def _pacing_info() -> dict:
+    """Счётчики пейсинга по сервисам (ripster/pacing.py) — то, что владелец
+    просит посмотреть, когда «что-то стало медленнее»: сколько запросов ушло за
+    час и за сутки, какой потолок действует, есть ли штраф после 429/403 и
+    сколько запросов уже отказали суточные потолки. Дешёвый read-only, за токены
+    не отвечает: учётки подписаны несекретным хешем."""
+    info: dict = {}
+    try:
+        from ripster import pacing
+        rows = pacing.snapshot(_cfg)
+        info["rows"] = rows
+        info["services"] = sorted({r["service"] for r in rows})
+        info["penalised"] = sum(1 for r in rows if r["strikes"])
+        info["refused"]   = sum(int(r["refused"] or 0) for r in rows)
+    except Exception as e:
+        info["error"] = str(e)
+    return info
+
+
 def _tunnel_info() -> dict:
     """Serveo + ngrok tunnel state."""
     info = {}
@@ -425,6 +444,7 @@ async def admin_diagnostics(request: Request):
         "pool":        _wrapper_pool_info(),
         "guest":       _guest_info(),
         "engines":     _engine_info(),
+        "pacing":      _pacing_info(),
         "tunnel":      _tunnel_info(),
         "tokens":      _tokens_summary(),
         "auth": {

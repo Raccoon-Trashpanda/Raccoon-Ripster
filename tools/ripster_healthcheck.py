@@ -35,6 +35,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 CONFIG = ROOT / "config.yaml"
 BOT_CFG = ROOT / "tgbot" / "config.json"
+CANARY_STATE = Path(r"C:\dev\LOG\download_canary.json")
 HANDOFF = ROOT / "HANDOFF_DAILY_OPS.md"
 BASE = "http://127.0.0.1:7799"
 WRAPPER_IMAGE = "ripster-wrapper:premium"
@@ -356,21 +357,32 @@ def _heal_app_down() -> bool:
         except Exception:
             pass
         time.sleep(2)
-        exe = ROOT / "RipsterLauncher.exe"
+        old = ROOT / "RipsterLauncher.exe"
         py = ROOT / ".venv" / "Scripts" / "python.exe"
         try:
+            # Порядок 24.09.2026: раньше первым шёл RipsterLauncher.exe, но это
+            # stale-сборка 30.05 (PyQt-эра), которая висит ДО спавна бэкенда —
+            # ровно тот hangs, из-за которого хозяин поднимал стек руками
+            # (24.09: два её трупа живы с 02:34:16, бэкенда нет). Боевой лончер —
+            # Ripster.exe (frozen launcher_exe.py), его и зовём первым.
+            exe = ROOT / "Ripster.exe"
             if exe.exists():
-                # Проверенный путь (2026-07-19): чистый перезапуск лаунчера; спавн
-                # бэкенда у него медленный (~2-4 мин), но стек остаётся штатным.
                 subprocess.Popen([str(exe)], cwd=str(ROOT),
                                  creationflags=CNW | _DETACHED)
-                how = "перезапуском RipsterLauncher.exe"
+                how = "перезапуском Ripster.exe"
             elif py.exists():
                 logf = open(ROOT / "logs" / "app_heal.log", "ab")
                 subprocess.Popen([str(py), "app.py"], cwd=str(ROOT),
                                  stdout=logf, stderr=subprocess.STDOUT,
                                  creationflags=CNW | _DETACHED)
                 how = "прямым запуском .venv app.py"
+            elif old.exists():
+                # Проверенный путь (2026-07-19): чистый перезапуск лаунчера; спавн
+                # бэкенда у него медленный (~2-4 мин), но стек остаётся штатным.
+                # С 24.09 — последний шанс: именно этот exe висает без бэкенда.
+                subprocess.Popen([str(old)], cwd=str(ROOT),
+                                 creationflags=CNW | _DETACHED)
+                how = "перезапуском RipsterLauncher.exe"
             else:
                 warn("Нет ни RipsterLauncher.exe, ни .venv python — не могу поднять app сам")
                 return False
@@ -388,8 +400,9 @@ def _heal_app_down() -> bool:
     py = ROOT / ".venv" / "Scripts" / "python.exe"
     if how.startswith("перезапуском") and py.exists() and not _app_backend_running():
         try:
-            subprocess.run(["taskkill", "/F", "/IM", "RipsterLauncher.exe"],
-                           capture_output=True, timeout=15, creationflags=CNW)
+            for img in ("Ripster.exe", "RipsterLauncher.exe"):
+                subprocess.run(["taskkill", "/F", "/IM", img],
+                               capture_output=True, timeout=15, creationflags=CNW)
             logf = open(ROOT / "logs" / "app_heal.log", "ab")
             subprocess.Popen([str(py), "app.py"], cwd=str(ROOT),
                              stdout=logf, stderr=subprocess.STDOUT,
@@ -1478,6 +1491,45 @@ def check_engine_probe():
         ok(f"Сервисы отвечают по-настоящему ({len(services)} проверено)")
 
 
+def check_download_canary():
+    """Отвечать и ОТДАВАТЬ ФАЙЛ — разные вопросы; probe-all отвечает на первый.
+
+    24.09.2026 Apple 12 часов отвечала Invalid CKC на каждый релиз: все пробы
+    «зелёные», скачать нельзя ничего. Канарейка (tools/download_canary.py)
+    качает по треку каждого настроенного сервиса каждые 3 часа; здесь она
+    ТОЛЬКО читается — ничего не перекачивается ради отчёта.
+    """
+    try:
+        st = json.loads(CANARY_STATE.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        warn("Canary: состояния нет — фоновый цикл в приложении не запущен?")
+        return
+    except Exception as e:
+        warn(f"Canary: состояние не читается ({str(e)[:80]})")
+        return
+    svc = st.get("services") or {}
+    if not svc:
+        warn("Canary: пусто — ни одного прохода не было"); return
+    last = str(st.get("last_run") or "")
+    stale = ""
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.fromisoformat(last.replace("Z", "+00:00"))
+        age_h = (datetime.now(timezone.utc) - dt).total_seconds() / 3600.0
+        if age_h > 8:
+            stale = f" · ПОСЛЕДНИЙ ПРОХОД {age_h:.0f} ч назад (цикл мог умереть)"
+    except Exception:
+        stale = " · метка времени не читается"
+    dead = {s: v for s, v in sorted(svc.items()) if not v.get("ok")}
+    if dead:
+        parts = [f"{s}: {v.get('streak_fail', '?')} пад. подряд с {str(v.get('since'))[:16]}"
+                 f" — {str(v.get('last_error') or '')[:90]}" for s, v in dead.items()]
+        bad("Canary — скачивание мертво: " + " · ".join(parts) + stale)
+    else:
+        ok(f"Canary: {len(svc)} сервис(ов) реально скачали свой трек"
+           f" (последний проход {last[:16]}{stale})")
+
+
 def _trust_ctx():
     """Контекст проверки TLS на СВЕЖЕМ наборе корней (Mozilla/certifi).
 
@@ -1945,6 +1997,67 @@ def check_bbc_radar_urls():
              f"Синхронизировать формат в routes/radar.py и разбор в runner.py")
     else:
         ok(f"BBC-радар: все {len(urls)} ссылок разбираются регуляркой загрузчика")
+
+
+def check_namesake_guard():
+    """Однофамильцы: «скрыто N, возвращено M» и сколько раз правило промахнулось.
+
+    ЗАЧЕМ. Дверь ленты (`artist_identity.feed_filter`) судит при ЧТЕНИИ, поэтому
+    «мы вылечили алгоритм» и «витрина чиста» — разные утверждения: карточка,
+    пропущенная ВЧЕРашним правилом, лежит в ленте до первого перечитывания, а
+    карточка, спрятанная ПРЕЖНИМ правилом по ошибке, после правки сама не
+    вернётся — отметка «скрыто» переживает правку. Ровно на это владелец и
+    жаловался 24.09.2026 (Qobuz «639 Hz Inner Worth»): артиста лечили шесть раз,
+    а класс однофамильцев ходил по-прежнему.
+
+    Проверяем три вещи, и третью — особенно честно:
+      • суточный прогон склада вообще состоялся и не отстал от правил;
+      • слово владельца («это не мой артист») переживает перезапуск — реестр на
+        месте и не пустой, если человек уже жаловался;
+      • МЕТРИКА УТЕЧКИ: сколько карточек радар ПОКАЗАЛ, а владелец отверг. Пока
+        она растёт, рапортовать о «скрыто N» нечестно — это и есть сигнал, что
+        лечат артиста, а не алгоритм.
+
+    Авто-починки нет: промах правила чинится только правкой правила.
+    """
+    st, data = _api("/api/identity", timeout=90)
+    if st != 200 or not isinstance(data, dict):
+        warn(f"Однофамильцы: /api/identity не ответил (HTTP {st}, {str(data)[:60]}) — "
+             f"состояние двери неизвестно")
+        return
+    a = data.get("audit") or {}
+    fb = data.get("feedback") or {}
+    hidden = int(a.get("hidden") or 0)
+    returned = int(a.get("returned") or 0)
+    kept = int(a.get("kept") or 0)
+    cards = int(a.get("cards") or 0)
+    # Число берём из `leaks` (оно полное), а не из `leak_items` — там только
+    # первые десять карточек для показа, и по ним «утечек 10» было бы наглым
+    # занижением при сотке.
+    leaks = int(a.get("leaks") or 0)
+    if not a.get("ts"):
+        warn("Однофамильцы: самоаудит склада НИ РАЗУ не проходил — карточки, "
+             "которые прежнее правило спрятало по ошибке, до сих пор спрятаны, "
+             "а новые однофамильцы до сих пор в ленте. "
+             "POST /api/identity/audit (или дождаться ночного прогона)")
+    elif a.get("stale_model"):
+        warn("Однофамильцы: правила менялись ПОСЛЕ последнего прогона — отчёт "
+             f"«скрыто {hidden}, возвращено {returned}» описывает прошлые правила, "
+             "а не нынешние. Нужен прогон заново (POST /api/identity/audit)")
+    else:
+        ok(f"Однофамильцы: скрыто {hidden}, возвращено {returned}, "
+           f"показано {kept} из {cards}; слово хозяина: «не мой» "
+           f"{int(fb.get('negative') or 0)}, «это мой» {int(fb.get('positive') or 0)}")
+    if leaks:
+        names = sorted({str(x.get("artist") or "").strip()
+                        for x in (a.get("leak_items") or [])} - {""})[:5]
+        warn(f"Однофамильцы: метрика утечки = {leaks} — радар ПОКАЗАЛ этих артистов "
+             f"и владелец отверг их словом «не мой» "
+             f"({', '.join(names)[:90]}). Значит правило по-прежнему пропускает "
+             f"целый класс — лечить его, а не артиста")
+    if int(a.get("leaks_delta") or 0) > 0:
+        warn(f"Однофамильцы: за последние сутки утечка ВЫРОСЛА на "
+             f"{a['leaks_delta']} — новый промах алгоритма, а не новый каприз владельца")
 
 
 def check_external_apis():
@@ -2421,6 +2534,69 @@ def check_retry_storms():
         _report.append(f"↻ Повторы вхолостую: не смог посчитать ({str(e)[:50]})")
 
 
+def check_pacing():
+    """Счётчики запросов к сервисам — владелец просит их видеть, когда «само
+    замедлилось» (24.09.2026, выжимка чата @apple_music_alac: учётки летят в бан
+    пачками за тысячи запросов в сутки, Apple отвечает 429, Qobuz режет 403 на
+    официальном эндпоинте плейлистов).
+
+    Здесь ровно то, ради чего пейсинг заведён: сколько ушло за час/сутки, есть ли
+    штраф после 429/403 и сколько запросов суточный потолок уже ОТКАЗАЛ. Отказ —
+    это не ошибка, а штатная защита: вызывающий получает пустой список там, где
+    умеет без него жить. Предупреждение — только если потолок начал резать
+    по-настоящему или штраф уехал на высокую ступень."""
+    try:
+        sys.path.insert(0, str(ROOT))
+        from ripster import pacing
+    except Exception as e:
+        _report.append(f"↻ Пейсинг: модуль не импортирован ({str(e)[:50]})")
+        return
+    try:
+        # pyyaml в этот скрипт намеренно не тащат (см. `_cfg_get`), поэтому
+        # потолки читаются теми же точечными скалярами, что и остальной конфиг.
+        cfg = {k: _cfg_get(k) for k in
+               ("apple-requests-per-hour", "apple-requests-per-day",
+                "qobuz-playlist-per-hour", "qobuz-playlist-per-day")}
+        cfg = {k: v for k, v in cfg.items() if v}
+        rows = pacing.snapshot(cfg)
+    except Exception as e:
+        _report.append(f"↻ Пейсинг: счётчики не прочитаны ({str(e)[:50]})")
+        return
+    if not rows:
+        ok("Пейсинг: запросов к Apple/Qobuz-API с этого прогона ещё не считали")
+        return
+    worst_day = max(rows, key=lambda r: (r["day"] / (r["day_cap"] or 1e9)))
+    refused = sum(int(r["refused"] or 0) for r in rows)
+    hot     = [r for r in rows if r["day_cap"] and r["day"] >= r["day_cap"]]
+    struck  = [r for r in rows if r["strikes"]]
+    for r in rows[:6]:
+        _report.append(
+            f"↻ Пейсинг {r['service']} · {r['account']}: {r['hour']}/{r['hour_cap'] or '∞'} за час, "
+            f"{r['day']}/{r['day_cap'] or '∞'} за сутки"
+            + (f", штраф {int(r['penalty_left'])} с (ступень {r['strikes']})" if r["penalty_left"] > 0 else "")
+            + (f", отказов {r['refused']}" if r["refused"] else ""))
+    if len(rows) > 6:
+        # Отчёт живёт в Telegram-сообщении с лимитом в 4096 знаков: показываем
+        # шесть самых загруженных, остальное — числом, а не молчанием.
+        _report.append(f"↻ Пейсинг: ещё {len(rows) - 6} счётчиков (полный список — "
+                       f"dist/pacing.json или /api/admin/diagnostics)")
+    if hot:
+        warn(f"Пейсинг: суточный потолок выбран у {len(hot)} сервис(а/ов) — запросы "
+             f"НЕ отправляются до переката суток (всего отказов {refused}). Это "
+             f"защита от бана, а не поломка; снять можно в настройках "
+             f"(`apple-requests-per-day`, `qobuz-playlist-per-day`)")
+    elif any(r["strikes"] >= 3 for r in rows):
+        warn(f"Пейсинг: 429/403 повторяются (ступень {max(r['strikes'] for r in struck)} у "
+             f"{struck[0]['service']}) — сервер нас притормаживает всерьёз. Пул учёток "
+             f"и суточный объём стоит уменьшить, а не потолок поднимать")
+    elif struck:
+        ok(f"Пейсинг: штрафы были у {len(struck)}, но уже отработаны; "
+           f"максимум {worst_day['day']}/{worst_day['day_cap'] or '∞'} суток по {worst_day['service']}")
+    else:
+        ok(f"Пейсинг: в штатном режиме — максимум {worst_day['day']}/"
+           f"{worst_day['day_cap'] or '∞'} суток по {worst_day['service']} · {worst_day['account']}")
+
+
 def check_code_newer_than_app():
     """Фикс лежит на диске, а живой app.py его ещё не видел.
 
@@ -2692,10 +2868,12 @@ def main():
         check_token_files()
         check_spotify_bearer()
         check_engine_probe()
+        check_download_canary()
         check_tunnel()
         check_queue()
         check_watchlist()
         check_bbc_radar_urls()
+        check_namesake_guard()
         check_bot()
         check_bot_delivery()
         check_botapi_responsive()
@@ -2703,6 +2881,7 @@ def main():
         check_disk()
         check_code_newer_than_app()
         check_retry_storms()
+        check_pacing()
         check_errors_24h()
     status = "🟢 ВСЁ ЗДОРОВО" if _issues == 0 else f"🟠 НАЙДЕНО ПРОБЛЕМ: {_issues}"
     if _fixes:
