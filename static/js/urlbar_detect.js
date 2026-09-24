@@ -426,15 +426,19 @@ function _pairDeviceMeta(d){
   return parts.join(' · ');
 }
 
-// Список строится из снимка, который принёс /api/pair/status, — перерисовка
-// после смены языка не ходит в сеть.
+// Порядок важнее числа: на живой машине в списке 40 записей — эмуляторы и
+// перепаривания, а реальный телефон надо найти глазами. Поэтому первые 10 по
+// последней активности, остальные под кнопкой «показать все».
+const _PAIR_LIST_CAP = 10;
+
 function pairRenderDevices(){
   const wrap=document.getElementById('pair-devices-wrap');
   const box=document.getElementById('pair-devices');
   if(!wrap||!box) return;
-  const devs=window._pairDevices||[];
-  wrap.style.display = devs.length ? '' : 'none';
-  box.innerHTML = devs.map(d=>{
+  const all=(window._pairDevices||[]).slice().sort((a,b)=>(b.seen||0)-(a.seen||0));
+  wrap.style.display = all.length ? '' : 'none';
+  const shown = window._pairDevicesAll ? all : all.slice(0,_PAIR_LIST_CAP);
+  box.innerHTML = shown.map(d=>{
     const id=escapeHtml(d.device_id||''), on=!!d.share_credentials;
     return '<div class="toggle-row" style="margin-top:8px">'
       + '<div class="toggle-info"><div class="toggle-label">'
@@ -446,6 +450,18 @@ function pairRenderDevices(){
       +   ' aria-label="'+escapeHtml(t('s.pair_share'))+'"><div class="toggle-slider"></div></label>'
       + '</div>';
   }).join('');
+  if(all.length>shown.length || window._pairDevicesAll){
+    const more = window._pairDevicesAll
+      ? t('s.pair_show_fewer')
+      : ti('s.pair_show_all',{n:all.length-shown.length});
+    box.innerHTML += '<div><button class="btn-ghost btn-sm" style="margin-top:8px" '
+      + 'onclick="pairToggleAllDevices()">'+escapeHtml(more)+'</button></div>';
+  }
+}
+
+function pairToggleAllDevices(){
+  window._pairDevicesAll = !window._pairDevicesAll;
+  pairRenderDevices();
 }
 
 async function pairRevokeAll(){
