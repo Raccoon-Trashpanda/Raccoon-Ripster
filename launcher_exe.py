@@ -689,6 +689,8 @@ TRAY_ICON = None   # pystray Icon — по нему обновляются пу�
 
 LOCK_FILE = None  # set in main(); single-instance lock holding our PID
 SHOW_FLAG = None  # a second launch drops this so the running instance pops up
+RPWIN_REQ = None  # POST /api/player-window/open drops this → show the panel OS-window
+RPWIN_ACK = None  # we write the result back so the server stops waiting (see _watch_show_flag)
 WIN_STATE = None  # set in main(); remembers the window's last position + size
 
 
@@ -1229,6 +1231,28 @@ def start_tray(window, do_quit) -> "object | None":
         return None
 
 
+def _rpwin_poll_once() -> bool:
+    """Один шаг протокола «сервер просит окно панели» (кнопка «Открыть
+    внешний плеер», POST /api/player-window/open). Сервер ждёт ACK недолго:
+    старый frozen-exe протокола не знает, и тогда он честно заводит
+    standalone-окно (ripster.player_window), а не вешает кнопку."""
+    try:
+        if RPWIN_REQ and RPWIN_REQ.exists():
+            RPWIN_REQ.unlink()
+            res = _panel_toggle(show=True)
+            try:
+                if RPWIN_ACK:
+                    RPWIN_ACK.parent.mkdir(parents=True, exist_ok=True)
+                    RPWIN_ACK.write_text(res, encoding="utf-8")
+            except Exception:
+                pass
+            _log(f"[launcher] server rpwin request → panel ({res})")
+            return True
+    except Exception as e:
+        _log(f"[launcher] rpwin poll: {type(e).__name__}: {e}")
+    return False
+
+
 def _watch_show_flag(window, win_open) -> None:
     """Poll for the SHOW_FLAG a second launch drops, and surface the window."""
     while win_open.is_set():
@@ -1240,6 +1264,7 @@ def _watch_show_flag(window, win_open) -> None:
                 _log("[launcher] second launch → surfaced window")
         except Exception:
             pass
+        _rpwin_poll_once()
         time.sleep(0.7)
 
 
@@ -1659,6 +1684,14 @@ def open_window(url: str, port: int, win_open, title: str = "Ripster", ready: bo
             state["tray"] = start_tray(window, do_quit)
             threading.Thread(target=_watch_show_flag, args=(window, win_open),
                              daemon=True).start()
+        else:
+            # Протокол rpwin («открой окно панели» с веб-кнопки) нужен и без
+            # треев: иначе кнопка зря ждёт 2.5 с и уезжает в standalone-окно.
+            def _watch_rpwin_only():
+                while win_open.is_set():
+                    _rpwin_poll_once()
+                    time.sleep(0.7)
+            threading.Thread(target=_watch_rpwin_only, daemon=True).start()
 
         # Тестовый хук для проверок frozen-exe без человека: закрыть окно
         # «самому через N секунд» — штатный do_quit со всего сценария «Выход».
@@ -2186,13 +2219,15 @@ def _pid_alive(pid: "int | None") -> bool:
 def _single_instance_guard() -> bool:
     """True = we are the sole instance and may proceed. False = another launcher
     already owns the window; we signalled it to surface and should exit."""
-    global LOCK_FILE, SHOW_FLAG, WIN_STATE
+    global LOCK_FILE, SHOW_FLAG, WIN_STATE, RPWIN_REQ, RPWIN_ACK
     logs = BASE / "logs"
     # Изолированный прогон нового exe не должен отбирать lock у живого лончера
     # (иначе «уже запущено → показать окно и выйти» убило бы тест до старта).
     suffix = "_isolated" if isolated() else ""
     LOCK_FILE = logs / f"launcher{suffix}.lock"
     SHOW_FLAG = logs / f"launcher{suffix}.show"
+    RPWIN_REQ = logs / f"launcher{suffix}.rpwin"
+    RPWIN_ACK = logs / f"launcher{suffix}.rpwin.ok"
     WIN_STATE = logs / f"window_state{suffix}.json"
     try:
         logs.mkdir(parents=True, exist_ok=True)

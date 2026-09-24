@@ -386,6 +386,13 @@ def _guest_owns_task(task_id: str, sid: str) -> bool:
 from ripster.ws_broker import WebSocketBroker
 _ws_broker = WebSocketBroker()
 
+# Relay-транспорт мобильной панели (трекер #37): окно панели (?transport=relay)
+# и главная страница говорят через этот сервер, сообщения — те же {rp:1,…}.
+# Логика маршрутизации — чистый класс в ripster/rp_relay.py, здесь только
+# подключение к приёмному циклу /ws.
+from ripster.rp_relay import RpRelay
+_rp_relay = RpRelay()
+
 
 def _ws_dead(ws) -> None:
     """Called by the broker when a client's socket dies — drop our bookkeeping."""
@@ -1204,6 +1211,10 @@ _pairing_routes.install(app, _ctx)
 _upcoming_routes.install(app, _ctx)
 _featurefm_routes.install(app, _ctx)
 _accounts_routes.install(app, _ctx)
+# Кнопка «Открыть внешний плеер» (трекер #37): OS-окно с панелью из ЛЮБОЙ
+# вкладки — фокус живого окна, просьба лаунчеру или standalone-процесс.
+from ripster.routes import player_window as _player_window_routes
+_player_window_routes.install(app, _ctx)
 # Свой аудиотракт ПК: вывод локального lossless мимо микшера Windows.
 # Замер 05.09.2026: WASAPI exclusive берёт 44.1/48/96 кГц, shared — только 48,
 # то есть web-плеер физически не может отдать частоту файла без пересчёта.
@@ -1468,8 +1479,20 @@ async def websocket_endpoint(ws: WebSocket):
             init_payload["config"] = _redact_config(config)
         await ws.send_json(init_payload)
         _ws_broker.register(ws)   # ongoing fan-out goes through the broker
+        # Окно панели в relay-режиме (трекер #37): представляется ролью,
+        # дальше сервер просто перекладывает rp-сообщения панель↔главная.
         while True:
             data = await ws.receive_json()
+            t = data.get("type")
+            if t == "rp-role":
+                if not _ws_is_guest and not _is_paired_phone:
+                    _rp_relay.register(ws, data.get("role"))
+                continue
+            if t == "rp":
+                if _rp_relay.role(ws) is not None:
+                    for target, payload in _rp_relay.route(ws, data.get("msg")):
+                        _ws_broker.enqueue(target, payload)
+                continue
             if data.get("type") == "token_update" and not _ws_is_guest:
                 b = data.get("bearer")
                 m = data.get("mut")
@@ -1483,6 +1506,10 @@ async def websocket_endpoint(ws: WebSocket):
     except Exception as e:
         print(f"[ws] client dropped: {type(e).__name__}: {e}", flush=True)
     finally:
+        # Relay-панель/хост отвалились — предупредить того, кто на них смотрел
+        # (иначе хост вечно крутит цикл «ready», а панель притворяется мостом).
+        for target, payload in _rp_relay.drop(ws):
+            _ws_broker.enqueue(target, payload)
         _ws_broker.unregister(ws)
         ws_clients.discard(ws)
         _ws_guest_sids.pop(ws, None)
