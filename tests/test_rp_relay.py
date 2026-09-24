@@ -268,13 +268,16 @@ def test_panel_ack_is_consumed_and_remembered(relay):
     relay.register(h, "host")
     relay.register(p, "panel")
     assert relay.route(p, rp(k="ack", title="Nightcall", artist="Kavinsky",
-                             have=True, live=True, nolink=False)) == []
+                             have=True, live=True, nolink=False,
+                             keys=3, cmds=1)) == []
     st = relay.status()
     assert st["last_panel_ack"]["title"] == "Nightcall"
     assert st["last_panel_ack"]["panel"] == st["panel_ids"][0]
     assert st["last_panel_ack"]["age_s"] < 2
-    # live/nolink — как панель видит свой мост: снаружи этого не измерить
-    assert (st["last_panel_ack"]["live"], st["last_panel_ack"]["nolink"]) == (True, False)
+    # live/nolink — как панель видит свой мост: снаружи этого не измерить;
+    # keys/cmds — счётчики панели: клавиша долетела / команда послана
+    ack = st["last_panel_ack"]
+    assert (ack["live"], ack["nolink"], ack["keys"], ack["cmds"]) == (True, False, 3, 1)
 
 
 def test_status_counts_hosts_panels_and_elected(relay):

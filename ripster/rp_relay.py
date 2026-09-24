@@ -163,7 +163,15 @@ class RpRelay:
         """Панель подтвердила, что видит состояние: запоминаем заголовок и срок.
         title/artist — строки, наружу отдаём только их и обрезанными;
         live/nolink — как панель сама видит свой мост (баннер «нет связи»
-        снаружи не увидеть ни откуда, кроме самой панели)."""
+        снаружи не увидеть ни откуда, кроме самой панели); keys/cmds — счётчики
+        панели: сколько Space она реально получила и сколько команд послала
+        (между «клавиша не долетела до окна» и «команда не дошла до хоста»
+        без этих чисел различить нечем)."""
+        def cnt(key: str) -> int:
+            try:
+                return max(0, min(int(msg.get(key) or 0), 1_000_000))
+            except (TypeError, ValueError):
+                return 0
         self.last_ack = {
             "panel": self.ids.get(ws, "?"),
             "title": str(msg.get("title") or "")[:200],
@@ -171,6 +179,8 @@ class RpRelay:
             "have": bool(msg.get("have")),
             "live": bool(msg.get("live")),
             "nolink": bool(msg.get("nolink")),
+            "keys": cnt("keys"),
+            "cmds": cnt("cmds"),
             "at": time.monotonic(),
         }
         return []

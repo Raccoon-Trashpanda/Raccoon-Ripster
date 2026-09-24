@@ -238,7 +238,12 @@ function rpSend(msg) {
   if (!IFRAME) return false;
   try { window.parent.postMessage(msg, location.origin); return true; } catch (e) { return false; }
 }
-function cmd(name, arg) { return rpSend({ k: 'cmd', cmd: name, arg: arg || {} }); }
+function cmd(name, arg) { _cmdns++; return rpSend({ k: 'cmd', cmd: name, arg: arg || {} }); }
+
+/* Счётчики для ack: сколько клавиш Space панель РЕАЛЬНО увидела и сколько
+   команд послала хосту. Наружу («почему окно не слушает клавишу») это
+   единственный способ измерить: с хозяйского экрана видно только результат. */
+var _keyns = 0, _cmdns = 0;
 function can(what) { return B.live && B.caps[what]; }
 
 /* Подтверждение «мне дошло». Релей сервера отдаёт его в
@@ -258,7 +263,8 @@ function rpAck() {
   rpSend({ k: 'ack', have: !!(B.state && B.state.have),
            title: String((ci && ci.title) || '').slice(0, 200),
            artist: String((ci && ci.artist) || '').slice(0, 200),
-           live: !!B.live, nolink: !!B.nolink });
+           live: !!B.live, nolink: !!B.nolink,
+           keys: _keyns, cmds: _cmdns });
 }
 
 function hostToItem(x) {
@@ -1641,6 +1647,8 @@ window.addEventListener('storage', function (ev) {
 
 /* ── Клавиши: панель живёт под мышью, и с клавиатуры тоже ────────────────── */
 function onKey(ev) {
+  if (ev.code === 'Space') _keyns++;   // до проверки таргета: клавиша долетела
+                                       // до страницы даже в поле — это разное
   if (ev.target && /INPUT|TEXTAREA/.test(ev.target.tagName)) {
     if (ev.key === 'Escape') {
       var sq = document.getElementById('sq'), lq = document.getElementById('lq');

@@ -152,6 +152,7 @@ def wait_panel(s: requests.Session, base: str, pred, timeout: float = 45.0):
 
 # ── настоящее нажатие в настоящем окне ───────────────────────────────────────
 _EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+_EnumChildProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
 
 def window_hwnd(pid: int) -> int | None:
@@ -171,29 +172,206 @@ def window_hwnd(pid: int) -> int | None:
     return hits[0] if hits else None
 
 
+def webview_child(hwnd: int) -> int | None:
+    """Окно контента WebView2 внутри рамы. getForegroundWindow — это рама,
+    а клавиши в DOM приходят только тому дочернему окну, у которого фокус
+    ввода ВНУТРИ окна: у только что открытого pywebview-окна это
+    Chrome_RenderWidgetHostHWND, а не сама рама (прогон 24.09: фокус рамы
+    взят, Space ушёл, DOM его не увидел)."""
+    user32 = ctypes.windll.user32
+    found: list[int] = []
+    buf = ctypes.create_unicode_buffer(256)
+
+    def cb(child, _lparam):
+        user32.GetClassNameW(child, buf, 256)
+        if buf.value == "Chrome_RenderWidgetHostHWND":
+            found.append(child)
+            return False
+        return True
+
+    user32.EnumChildWindows(hwnd, _EnumChildProc(cb), 0)
+    return found[0] if found else None
+
+
 def press_space(pid: int) -> str:
     """Отдать окну фокус, ударить Space, вернуть фокус прежней программе.
     Без доказанного фокуса клавиша не шлётся вовсе: печатать в чужое окно
-    стенд не имеет права."""
+    стенд не имеет права.
+
+    SetForegroundWindow из не работающего с фокусом процесса Windows молча
+    игнорирует (правило блокировки фокуса), поэтому сначала прицепляемся
+    AttachThreadInput к потоку текущего владельца фокуса, а на второй попытке —
+    «отлепляемся» тапом ALT. Ни один приём не дал результат — честный FAIL,
+    подмены нет.
+    """
     user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
     hwnd = window_hwnd(pid)
     if not hwnd:
         return f"нет HWND процесса {pid}"
     prev = user32.GetForegroundWindow()
+    prev_tid = user32.GetWindowThreadProcessId(prev, None)
+    cur_tid = kernel32.GetCurrentThreadId()
     user32.ShowWindow(hwnd, 9)                      # SW_RESTORE
-    user32.SetForegroundWindow(hwnd)
-    t0 = time.time()
-    while time.time() - t0 < 5 and user32.GetForegroundWindow() != hwnd:
-        time.sleep(0.2)
-    if user32.GetForegroundWindow() != hwnd:
+
+    def foreground() -> bool:
+        for attempt in range(3):
+            attached = bool(user32.AttachThreadInput(prev_tid, cur_tid, True)) if prev_tid else False
+            try:
+                user32.BringWindowToTop(hwnd)
+                user32.SetForegroundWindow(hwnd)
+                if attempt:                         # тап ALT разблокирует смену фокуса
+                    for flag in (0, 2):
+                        user32.keybd_event(0x12, 0x38, flag, 0)
+                t0 = time.time()
+                while time.time() - t0 < 1.5 and user32.GetForegroundWindow() != hwnd:
+                    time.sleep(0.1)
+                if user32.GetForegroundWindow() == hwnd:
+                    return True
+            finally:
+                if attached:
+                    user32.AttachThreadInput(prev_tid, cur_tid, False)
+        return False
+
+    if not foreground():
         return f"фокус не взят (впереди {user32.GetForegroundWindow()})"
-    time.sleep(0.4)                                 # чтобы WebView2 успел проснуться
-    for flag in (0, 2):                             # keybd_event: нажатие, отпускание
-        user32.keybd_event(0x20, 0x39, flag, 0)
-        time.sleep(0.08)
+    # Рама — впереди, но ключевое слово здесь «фокус ввода внутри окна»:
+    # переставляем его на контент WebView2. SetFocus чужого процесса работает,
+    # только если потоки сцеплены input-очередью — цепляемся к потоку окна.
+    child = webview_child(hwnd)
+    win_tid = user32.GetWindowThreadProcessId(hwnd, None)
+    linked = bool(user32.AttachThreadInput(cur_tid, win_tid, True)) if win_tid else False
+    focused = bool(child and user32.SetFocus(child))
+    try:
+        time.sleep(0.4)                             # чтобы WebView2 успел проснуться
+        if user32.GetForegroundWindow() != hwnd and not foreground():
+            return "фокус украден между проверкой и нажатием"
+        # Escape — НЕ наша выдумка: panel.js по Esc снимает фокус с поля поиска.
+        # Прогон 3 поймал Space при focus=да, но клавиша ушла в поле: там пробел
+        # — это пробел, а не плей/пауза. Сначала фокус из поля вон, потом клавиша.
+        for vk, scan in ((0x1B, 0x01), (0x20, 0x39)):
+            for flag in (0, 2):                     # нажатие, отпускание
+                user32.keybd_event(vk, scan, flag, 0)
+                time.sleep(0.06)
+            time.sleep(0.1)
+    finally:
+        if linked:
+            user32.AttachThreadInput(cur_tid, win_tid, False)
     if prev and prev != hwnd:
         user32.SetForegroundWindow(prev)
-    return "ok"
+    return f"ok child={'есть' if child else 'нет'} focus={'да' if focused else 'нет'}"
+
+
+def _link_input_threads(user32, kernel32, hwnd: int):
+    """Сцепить input-очереди наших потоков с потоком окна и вернуть пары
+    (аргументы для AttachThreadInput … False). Отцеплять обязан вызывающий."""
+    win_tid = user32.GetWindowThreadProcessId(hwnd, None)
+    cur_tid = kernel32.GetCurrentThreadId()
+    ok = bool(user32.AttachThreadInput(cur_tid, win_tid, True)) if win_tid else False
+    return win_tid, cur_tid, ok
+
+
+def press_space_post(pid: int) -> str:
+    """Запас, когда keybd_event до окна дошёл, а DOM клавиши не увидел
+    (прогон 5: keybd мимо оба раза, PostMessage поставил паузу; прогоны 3–4 —
+    и post иногда мимо). Те же самые WM_KEYDOWN/WM_KEYUP, но положенные прямо
+    в очередь окна контента — настоящее оконное, без CDP и без инъекции в
+    DOM. Перед постом — передний план ПОДТВЕРЖДАЕМ (проверкой, а не надеждой)
+    и фокус ввода ставим на контент: WebView2 дисциплина ввода такая же, как
+    у человека: окно переднее, курсор в странице. Если и это не помогло —
+    честный FAIL, подмены вкладкой нет."""
+    user32 = ctypes.windll.user32
+    kernel32 = ctypes.windll.kernel32
+    hwnd = window_hwnd(pid)
+    if not hwnd:
+        return "нет HWND процесса"
+    child = webview_child(hwnd)
+    if not child:
+        return "нет окна контента"
+    prev = user32.GetForegroundWindow()
+    prev_tid = user32.GetWindowThreadProcessId(prev, None)
+    cur_tid = kernel32.GetCurrentThreadId()
+    user32.ShowWindow(hwnd, 9)
+    fg = user32.GetForegroundWindow() == hwnd
+    for attempt in range(3):
+        if fg:
+            break
+        attached = bool(user32.AttachThreadInput(prev_tid, cur_tid, True)) if prev_tid else False
+        try:
+            user32.BringWindowToTop(hwnd)
+            user32.SetForegroundWindow(hwnd)
+            if attempt:                             # тап ALT разблокирует смену фокуса
+                for flag in (0, 2):
+                    user32.keybd_event(0x12, 0x38, flag, 0)
+            t0 = time.time()
+            while time.time() - t0 < 1.0 and user32.GetForegroundWindow() != hwnd:
+                time.sleep(0.1)
+            fg = user32.GetForegroundWindow() == hwnd
+        finally:
+            if attached:
+                user32.AttachThreadInput(prev_tid, cur_tid, False)
+    if not fg:
+        return f"передний план не взят (впереди {user32.GetForegroundWindow()})"
+    win_tid, _, linked = _link_input_threads(user32, kernel32, hwnd)
+    focused = bool(user32.SetFocus(child))
+    time.sleep(0.2)                                 # окну — прийти в себя после фокуса
+    WM_KEYDOWN, WM_KEYUP = 0x0100, 0x0101
+    WM_LBUTTONDOWN, WM_LBUTTONUP, MK_LBUTTON = 0x0201, 0x0202, 0x0008
+
+    def lparam(scan: int, up: bool) -> int:
+        v = 1 | (scan << 16) | (0xC0000000 if up else 0)   # repeat=1, скан-код
+        return v - 0x100000000 if v >= 0x80000000 else v
+
+    # Клик по пустому месту шапки (между енотом и кнопками) — как у человека:
+    # клик по странице забирает DOM-фокус из автофокусного поля в body, и
+    # дальше Space — это плей/пауза, а не пробел в строку поиска.
+    spot = 210 | (28 << 16)
+    user32.PostMessageW(child, WM_LBUTTONDOWN, MK_LBUTTON, spot)
+    time.sleep(0.06)
+    user32.PostMessageW(child, WM_LBUTTONUP, 0, spot)
+    time.sleep(0.25)
+
+    try:
+        for vk, scan in ((0x1B, 0x01), (0x20, 0x39)):      # Esc (фокус из поля вон), Space
+            user32.PostMessageW(child, WM_KEYDOWN, vk, lparam(scan, False))
+            time.sleep(0.08)
+            user32.PostMessageW(child, WM_KEYUP, vk, lparam(scan, True))
+            time.sleep(0.1)
+    finally:
+        if linked:
+            user32.AttachThreadInput(cur_tid, win_tid, False)
+    if prev and prev != hwnd:
+        user32.SetForegroundWindow(prev)
+    return f"ok post=в очередь контента focus={'да' if focused else 'нет'}"
+
+
+def wait_host_pause(owner, base, host, want: bool, timeout: float = 15.0):
+    """Дождаться от играющей вкладки wanted paused — и честно сказать, чем.
+    Первые слова — DOM вкладки (CDP); но отладочный сокет живучестью не славится
+    (прогон 24.09: вкладка сбросила ws между двумя нажатиями, и стенд упал
+    середь проверки), а пауза всё равно хозяйска: heartbeat хоста в relay-status
+    — то же самое слово хоста, просто через релей. Если вкладка нема — мерим
+    им и так и подписываем в детале, чем мерили."""
+    t0 = time.time()
+    last = "нет данных"
+    while time.time() - t0 < timeout:
+        try:
+            hv = host.ev(el.HOST_VIEW) or {}
+            if bool(hv.get("paused")) == want:
+                return True, f"вкладка: paused={hv.get('paused')}"
+            last = f"вкладка: paused={hv.get('paused')}"
+            time.sleep(0.3)
+            continue
+        except Exception as e:
+            last = f"вкладка недоступна ({type(e).__name__})"
+        try:
+            st = relay_status(owner, base)
+            if bool(st.get("playing")) != want:
+                return True, f"heartbeat хоста: playing={st.get('playing')} ({last})"
+        except Exception:
+            pass
+        time.sleep(0.5)
+    return False, last
 
 
 def cookie_dbs(profile: Path) -> list[Path]:
@@ -297,8 +475,10 @@ def main() -> int:
 
             # ── s3/s4: сервер видит панель и её показ ────────────────────────
             STEP[0] = "s3: панель в релее"
+            # Ровно ОДНА: окно одно, и вторая регистрация означала бы висящий
+            # сокет-призрак (так и было, пока connectWS не стал идемпотентным).
             st, waited = wait_panel(owner, base, lambda d: d.get("panels", 0) >= 1)
-            say("s3 панель зарегистрирована в rp_relay", st.get("panels", 0) >= 1,
+            say("s3 панель зарегистрирована в rp_relay ОДНА", st.get("panels") == 1,
                 f"hosts={st.get('hosts')} panels={st.get('panels')} "
                 f"panel_ids={st.get('panel_ids')} active={st.get('active_host')} "
                 f"за {waited:.1f} с" + (f" err={st.get('err')}" if st.get("err") else ""))
@@ -325,19 +505,54 @@ def main() -> int:
 
             # ── s6: настоящее нажатие в настоящем окне ───────────────────────
             STEP[0] = "s6: Space в окне"
-            hv_before = host.ev(el.HOST_VIEW)
-            sent = press_space(pid) if pid else "нет pid окна"
-            paused = bool(host.wait("document.getElementById('pp-audio').paused === true",
-                                    timeout=12)) if sent == "ok" else False
+            try:
+                was_paused = (host.ev(el.HOST_VIEW) or {}).get("paused")
+            except Exception:
+                was_paused = "?"
+
+            def counters() -> str:
+                """Что панель сама насчитала (Space получено / cmd послано) —
+                отличает «клавиша не долетела до страницы» от «команда не
+                дошла до хоста». Ack — не чаще раза в 5 с, поэтому после
+                попытки даём панелью же и обновиться."""
+                time.sleep(1.2)
+                try:
+                    a = (relay_status(owner, base).get("last_panel_ack") or {})
+                    return f"панель: keys={a.get('keys')} cmds={a.get('cmds')}"
+                except Exception as e:
+                    return f"панель: счётчики не прочитаны ({type(e).__name__})"
+
+            def press(want: bool) -> tuple[bool, str]:
+                """Space сверху вниз: сначала настоящий keybd_event, затем
+                PostMessage в очередь контента (до трёх раз: прогоны 3–6
+                показали, что доставка клавиш в WebView2 дрожит, а мост —
+                нет). Чем сработало — пишем в детале: это разные пути."""
+                sent = press_space(pid) if pid else "нет pid окна"
+                if not sent.startswith("ok"):
+                    return False, sent
+                ok, d = wait_host_pause(owner, base, host, want, timeout=5)
+                if ok:
+                    return True, f"keybd_event; {d}; {counters()}"
+                notes = [f"keybd_event не дошёл ({d})"]
+                for i in range(3):
+                    s2 = press_space_post(pid)
+                    if not s2.startswith("ok"):
+                        notes.append(f"post#{i + 1}: {s2}")
+                        continue
+                    ok2, d2 = wait_host_pause(owner, base, host, want, timeout=5)
+                    if ok2:
+                        return True, ("; ".join(notes) +
+                                      f"; post#{i + 1} сработал ({s2}): {d2}; {counters()}")
+                    notes.append(f"post#{i + 1} не дошёл ({s2}): {d2}")
+                return False, "; ".join(notes) + f"; {counters()}"
+
+            paused, d1 = press(True)
             say("s6 Space В НАСТОЯЩЕМ ОКНЕ поставил играющую вкладку на паузу",
-                paused, f"нажатие: {sent}; host.paused={host.ev(el.HOST_VIEW)['paused']} "
-                        f"(было {hv_before['paused']})")
-            sent2 = press_space(pid) if paused else "пропущено: пауза не получена"
-            resumed = bool(host.wait("document.getElementById('pp-audio').paused === false",
-                                     timeout=12)) if sent2 == "ok" else False
+                paused, f"было paused={was_paused}; {d1}")
+            resumed, d2 = press(False) if paused else (False, "пропущено: пауза не получена")
             st_after = relay_status(owner, base)
             say("s6 второй Space из окна возвращает игру (мост в обе стороны)",
-                resumed, f"нажатие: {sent2}; host.paused={host.ev(el.HOST_VIEW)['paused']}; "
+                resumed, f"{d2}; "
                          f"ack={(st_after.get('last_panel_ack') or {}).get('title')!r} "
                          f"panels={st_after.get('panels')}")
 
