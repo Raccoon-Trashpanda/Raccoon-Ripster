@@ -5,6 +5,7 @@
 """
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from ripster import launch_token as _lt  # noqa: E402
 from ripster import player_window as pw  # noqa: E402
 
 
@@ -27,6 +29,35 @@ def test_win_paths_layout(tmp_path):
 def test_panel_url_single_transport_relay():
     assert pw.panel_url("http://127.0.0.1:7805/") == \
         "http://127.0.0.1:7805/static/panel/index.html?transport=relay"
+
+
+def test_panel_url_carries_launch_token_in_fragment():
+    """Фрагмент, не query: адрес с токеном не должен попадать ни в один
+    запрос на сервер — иначе пропуск оседает в access-логе."""
+    url = pw.panel_url("http://127.0.0.1:7805", "ab" * 32)
+    assert url == ("http://127.0.0.1:7805/static/panel/index.html"
+                   "?transport=relay#launch=" + "ab" * 32)
+    assert "?" not in url.split("#", 1)[1]
+
+
+def test_strip_launch_hides_token_from_logs():
+    url = pw.panel_url("http://h", "cd" * 32)
+    assert pw.strip_launch(url) == "http://h" + pw.PANEL_QUERY
+    assert "cd" not in pw.strip_launch(url)
+
+
+def test_write_launch_rejects_foreign_shapes(tmp_path):
+    """Файл-флаг может подменить локальный процесс; в JS окна попадает только
+    то, что похоже на наш токен."""
+    p = pw.win_paths(tmp_path)
+    assert pw.write_launch(p, "не-токен") is False
+    assert not p["launch"].exists()
+    assert pw.write_launch(p, "a" * 64) is True
+    assert pw._read_launch_flag(p["launch"]) == "a" * 64
+    p["launch"].write_text("a" * 63, encoding="utf-8")
+    assert pw._read_launch_flag(p["launch"]) == ""       # мусор — выбросить
+    p["launch"].write_text("a" * 64 + "\n1", encoding="utf-8")
+    assert pw._read_launch_flag(p["launch"]) == ""       # просрочено
 
 
 # ── PID-механика (single-instance основа) ────────────────────────────────────
@@ -85,6 +116,16 @@ def test_open_external_focuses_live_window(tmp_path, monkeypatch):
     assert Path(calls["touched"]).name == "player_window.show"
 
 
+def test_open_external_focus_hands_live_window_a_fresh_token(tmp_path, monkeypatch):
+    """Живое окно не перезагружается, поэтому пропуск ему передаёт файл-флаг:
+    без этого повторный клик по кнопке только поднимал окно с мёртвой кукой."""
+    monkeypatch.setattr(pw, "running_pid", lambda p: 4242)
+    p = pw.win_paths(tmp_path)
+    assert pw.open_external(tmp_path, pw.panel_url("http://h", "a" * 64),
+                            token="a" * 64) == {"ok": True, "how": "focus"}
+    assert pw._read_launch_flag(p["launch"]) == "a" * 64
+
+
 def test_open_external_asks_launcher_first(tmp_path, monkeypatch):
     monkeypatch.setattr(pw, "running_pid", lambda p: None)
     monkeypatch.setattr(pw, "request_launcher",
@@ -96,7 +137,7 @@ def test_open_external_asks_launcher_first(tmp_path, monkeypatch):
 def test_open_external_falls_back_to_standalone(tmp_path, monkeypatch):
     # Старый frozen-exe протокола не знает → request_launcher честен=False,
     # и окно поднимается своим процессом.
-    monkeypatch.setattr(pw, "focus_existing", lambda p: False)
+    monkeypatch.setattr(pw, "focus_existing", lambda p, tok="": False)
     monkeypatch.setattr(pw, "request_launcher", lambda p, url, **k: False)
     monkeypatch.setattr(pw, "spawn_standalone",
                         lambda p, base, url, **k: {"ok": True, "how": "standalone"})
@@ -106,7 +147,7 @@ def test_open_external_falls_back_to_standalone(tmp_path, monkeypatch):
 def test_open_external_from_browser_tab_never_asks_launcher(tmp_path, monkeypatch):
     # Вкладка браузера (ask_launcher=False): лаунчерово окно управлялось бы
     # главным окном ЛАУНЧЕРА, а не этой вкладкой — просим сразу standalone.
-    monkeypatch.setattr(pw, "focus_existing", lambda p: False)
+    monkeypatch.setattr(pw, "focus_existing", lambda p, tok="": False)
     asked = {"launcher": False}
     monkeypatch.setattr(pw, "request_launcher",
                         lambda p, url, **k: asked.__setitem__("launcher", True) or True)
@@ -117,7 +158,7 @@ def test_open_external_from_browser_tab_never_asks_launcher(tmp_path, monkeypatc
     assert asked["launcher"] is False
 
 
-# ── HTTP-слой: флаг вкладами в теле запроса ─────────────────────────────────
+# ── HTTP-слой: флаг вкладами в теле запроса + пропуск запуска ────────────────
 def _open_route(monkeypatch, tmp_path):
     """Ставит роут с заглушками auth и open_external; возвращает (клиент, вызовы)."""
     from types import SimpleNamespace
@@ -129,8 +170,9 @@ def _open_route(monkeypatch, tmp_path):
     monkeypatch.setattr(R._auth, "is_owner_request", lambda req: True)
     monkeypatch.setattr(R._auth, "is_enabled", lambda: True)
     monkeypatch.setattr(pw, "open_external",
-                        lambda base, url, ask=True: (
-                            calls.append({"base": base, "url": url, "ask": ask}),
+                        lambda base, url, ask=True, token="": (
+                            calls.append({"base": base, "url": url, "ask": ask,
+                                          "token": token}),
                             {"ok": True, "how": "standalone"})[1])
     app = FastAPI()
     R.install(app, SimpleNamespace(base_dir=tmp_path))
@@ -147,7 +189,23 @@ def test_open_route_passes_launcher_flag(monkeypatch, tmp_path, body, ask):
     r = cli.post("/api/player-window/open", json=body)
     assert r.status_code == 200 and r.json()["ok"] is True
     origin = str(r.request.url).rsplit("/api/", 1)[0]   # окно грузит ТОТ ЖЕ сервер
-    assert calls == [{"base": tmp_path, "url": origin + pw.PANEL_QUERY, "ask": ask}]
+    call = calls[0]
+    assert call["base"] == tmp_path and call["ask"] is ask
+    # адрес окна: панель + relay-транспорт + разовый пропуск во ФРАГМЕНТЕ
+    assert call["url"].startswith(origin + pw.PANEL_QUERY + pw.LAUNCH_PREFIX)
+    token = call["url"].split(pw.LAUNCH_PREFIX, 1)[1]
+    assert token == call["token"] and re.fullmatch(r"[0-9a-f]{64}", token)
+    # пропуск живёт ровно одно предъявление — иначе «кнопка» стала постоянной кукой
+    assert _lt.consume(token, "127.0.0.1") is True
+    assert _lt.consume(token, "127.0.0.1") is False
+
+
+def test_open_route_never_echoes_token(monkeypatch, tmp_path):
+    """Ответ кнопки не должен содержать пропуск: его некому печатать, а
+    утечка в JS-консоль/лог вкладки = готовый хозяйский вход."""
+    cli, _calls = _open_route(monkeypatch, tmp_path)
+    r = cli.post("/api/player-window/open", json={})
+    assert r.status_code == 200 and "launch" not in r.text
 
 
 def test_open_route_garbage_body_still_asks_launcher(monkeypatch, tmp_path):
@@ -291,11 +349,13 @@ def test_watch_flags_show_and_close(tmp_path):
     p = pw.win_paths(tmp_path)
     p["show"].parent.mkdir(parents=True)
     class Win:
+        """Реплика настоящего API pywebview.Window: `close` у окна его нет,
+        есть `destroy` — прогон настоящим окном 24.09 поймал это на живом
+        AttributeError, поэтому и заглушка обязана повторять настоящий класс."""
         def __init__(self): self.calls = []
         def show(self): self.calls.append("show")
         def restore(self): self.calls.append("restore")
-        def focus(self): self.calls.append("focus")
-        def close(self): self.calls.append("close")
+        def destroy(self): self.calls.append("destroy")
     win = Win()
     import threading
     stop = threading.Event()
@@ -303,13 +363,14 @@ def test_watch_flags_show_and_close(tmp_path):
     th.start()
     pw.touch(p["show"])
     deadline = time.monotonic() + 3
-    while "focus" not in win.calls and time.monotonic() < deadline:
+    while "show" not in win.calls and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert win.calls[:3] == ["show", "restore", "focus"]
+    assert win.calls[:2] == ["show", "restore"]
     assert not p["show"].exists()
     pw.touch(p["close"])
     deadline = time.monotonic() + 3
-    while "close" not in win.calls and time.monotonic() < deadline:
+    while "destroy" not in win.calls and time.monotonic() < deadline:
         time.sleep(0.05)
-    assert stop.is_set()
+    assert win.calls == ["show", "restore", "destroy"]
+    assert stop.is_set() and not p["close"].exists()
     th.join(3)

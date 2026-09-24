@@ -22,12 +22,26 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 PANEL_QUERY = "/static/panel/index.html?transport=relay"
+
+# Форму токена задаёт ripster.launch_token (secrets.token_hex(32)). Проверять
+# её обязательно: файл-флаг лежит в общем каталоге и теоретически может быть
+# подменён локальным процессом, а содержимое мы подставляем в JS окна.
+_TOKEN_RE = re.compile(r"[0-9a-f]{64}")
+_LAUNCH_GRACE_S = 90         # флаг живёт дольше серверного TTL — окно не гоно
+
+# Токен запуска едем в ФРАГМЕНТЕ (#launch=…), а не в query: фрагмент не
+# уходит на сервер ни в каком запросе, поэтому одноразовый пропуск не
+# пропечатается в access-лог uvicorn и не останется в истории WebView2 как
+# часть адреса. Панель забирает его, вызывает /api/player-window/claim и
+# стирает из адреса history.replaceState.
+LAUNCH_PREFIX = "#launch="
 
 # Окно обязано влезть в любой разумный экран и не превратиться в полосу.
 _GEO_BOUNDS = {"width": (280, 4000), "height": (400, 4000),
@@ -42,17 +56,31 @@ def win_paths(base_dir: Path | str) -> dict:
         "lock":          logs / "player_window.lock",
         "show":          logs / "player_window.show",
         "close":         logs / "player_window.close",
+        "launch":        logs / "player_window.launch",
+        "reauth":        logs / "player_window.reauth",
         "state":         logs / "player_window.json",
         "log":           logs / "player_window.log",
+        "profile":       base / "player_window_profile",
         "launcher_lock": logs / "launcher.lock",
         "launcher_req":  logs / "launcher.rpwin",
         "launcher_ack":  logs / "launcher.rpwin.ok",
     }
 
 
-def panel_url(http_url: str) -> str:
-    """Адрес панели для окна из базового URL сервера (127.0.0.1 или туннель)."""
-    return str(http_url).rstrip("/") + PANEL_QUERY
+def panel_url(http_url: str, token: str = "") -> str:
+    """Адрес панели для окна из базового URL сервера (127.0.0.1 или туннель).
+    С токеном — он во фрагменте, см. LAUNCH_PREFIX."""
+    url = str(http_url).rstrip("/") + PANEL_QUERY
+    return url + (LAUNCH_PREFIX + token if token else "")
+
+
+def strip_launch(url: str) -> str:
+    """URL без токена — для логов и сообщений. Токен всегда последний
+    сегмент фрагмента, поэтому всё после него просто отбрасываем."""
+    u = str(url)
+    i = u.find(LAUNCH_PREFIX)
+    return u[:i] if i >= 0 else u
+
 
 
 # ── чистая механика: PID, флаги, геометрия ───────────────────────────────────
@@ -148,15 +176,41 @@ def touch(path: Path) -> None:
     Path(path).write_text(str(os.getpid()), encoding="utf-8")
 
 
-def focus_existing(paths: dict) -> bool:
-    """Окно живо — попросить его подняться (сторож внутри окна читает флаг)."""
-    if running_pid(paths) is None:
+def write_launch(paths: dict, token: str) -> bool:
+    """Передать ЖИВОМУ окну свежий токен запуска (окно заберёт его из файла и
+    попросит страницу его предъявить). Без этого повторный клик по кнопке
+    только поднимал окно с протухшей кукой. Файл — не секрет: доступ к нему =
+    доступ к диску владельца, где и config.yaml с session-secret. Вторая
+    строка файла — дедлайн: просроченный флаг окно выбрасывает само.
+    """
+    if not _TOKEN_RE.fullmatch(token or ""):
         return False
     try:
-        touch(paths["show"])
+        p = Path(paths["launch"])
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(f"{token}\n{int(time.time()) + _LAUNCH_GRACE_S}",
+                     encoding="utf-8")
         return True
     except Exception:
         return False
+
+
+
+def focus_existing(paths: dict, token: str = "") -> bool:
+    """Окно живо — поднять (сторож внутри окна читает флаг) и, если есть чем,
+    дать свежий пропуск."""
+    if running_pid(paths) is None:
+        return False
+    ok = False
+    try:
+        touch(paths["show"])
+        ok = True
+    except Exception:
+        pass
+    if token:
+        write_launch(paths, token)
+    return ok
+
 
 
 def request_launcher(paths: dict, url: str, timeout: float = 2.5,
@@ -239,20 +293,27 @@ def spawn_standalone(paths: dict, base_dir: Path, url: str,
             "detail": f"window did not register within {wait_s:.0f}s"}
 
 
-def open_external(base_dir: Path | str, url: str, ask_launcher: bool = True) -> dict:
+def open_external(base_dir: Path | str, url: str, ask_launcher: bool = True,
+                  token: str = "") -> dict:
     """Оркестрация кнопки: фокус → лаунчер → standalone. Возвращает
     {ok, how} или {ok: False, reason} — reason переводит в i18n интерфейс.
 
     ask_launcher=False — звала ВКЛАДКА БРАУЗЕРА (хоста нет внутри pywebview,
     и лаунчерово окно панели связалось бы с главным окном ЛАУНЧЕРА, а не с
     этой вкладкой: мост oswin живёт только внутри pywebview). Такой просят
-    сразу standalone relay-окно — оно честно говорит с вкладкой через /ws."""
+    сразу standalone relay-окно — оно честно говорит с вкладкой через /ws.
+
+    token — одноразовый пропуск запуска (ripster.launch_token). В url он уже
+    сидит во фрагменте (пути лаунчера и standalone); живому окну это единственный
+    способ получить свежую куку — страницу никто не перезагружает.
+    """
     paths = win_paths(base_dir)
-    if focus_existing(paths):
+    if focus_existing(paths, token):
         return {"ok": True, "how": "focus"}
     if ask_launcher and request_launcher(paths, url):
         return {"ok": True, "how": "launcher"}
     return spawn_standalone(paths, Path(base_dir), url)
+
 
 
 def close_external(base_dir: Path | str) -> dict:
@@ -308,11 +369,57 @@ class WindowApi:
         except Exception:
             return "fail"
 
+    def reauth(self):
+        """Панель упёрлась в 403 на /ws (кука села или профиль потерялся) и
+        просит свежий запуск. Окно не может выписать себе допуск — оно лишь
+        поднимает флаг, сервер (routes/player_window) видит его и передаёт
+        через «launch» новый разовый пропуск."""
+        try:
+            Path(self._paths["reauth"]).parent.mkdir(parents=True, exist_ok=True)
+            Path(self._paths["reauth"]).write_text(str(os.getpid()), encoding="utf-8")
+            return "ok"
+        except Exception as e:
+            _logf(self._paths, f"reauth flag failed: {type(e).__name__}: {e}")
+            return "fail"
+
+
+def _read_launch_flag(path: Path) -> "str | None":
+    """Токен из файла-флага, если он живой и правильной формы. Просроченный
+    или мусорный возвращаем как '' — вызывающий обязан убрать флаг, чтобы он
+    не всплыл в следующем окне."""
+    try:
+        lines = Path(path).read_text(encoding="utf-8").split()
+    except Exception:
+        return None                       # файла нет / не читается — ничего
+    if not lines:
+        return ""
+    try:
+        deadline = int(lines[1]) if len(lines) > 1 else 0
+    except ValueError:
+        deadline = 0
+    if deadline and time.time() > deadline:
+        return ""
+    tok = lines[0]
+    return tok if _TOKEN_RE.fullmatch(tok) else ""
+
+
+def _claim_in_window(win, token: str) -> bool:
+    """Попросить страницу предъявить токен серверу (window.rpClaim в panel.js).
+    До загрузки страницы evaluate_js бросается/молчит — флаг тогда держим."""
+    try:
+        res = win.evaluate_js(
+            "window.rpClaim ? String(window.rpClaim('%s')) : 'nopage'" % token)
+        return str(res) != "nopage"
+    except Exception:
+        return False
+
 
 def _watch_flags(paths: dict, win, stop) -> None:
     """Флаги серверной оркестрации: show — поднять (повторный клик по кнопке),
-    close — панель попросила закрыться. Опрос 0.5 с: это не плеер, задержка
-    нажатия невидна."""
+    close — панель попросила закрыться; launch — свежий разовый пропуск
+    запуска (окно живо, страницу не перезагружаем, поэтому токен передаём
+    вызовом window.rpClaim). Опрос 0.5 с: это не плеер, задержка нажатия
+    невидна."""
     import threading
     while not stop.is_set():
         try:
@@ -327,13 +434,47 @@ def _watch_flags(paths: dict, win, stop) -> None:
                     win.focus()
                 except Exception:
                     pass
+            launch = Path(paths["launch"])
+            if launch.exists():
+                token = _read_launch_flag(launch)
+                if token == "" or _claim_in_window(win, token or ""):
+                    launch.unlink(missing_ok=True)   # '' = мусор/просрочено
             if Path(paths["close"]).exists():
                 Path(paths["close"]).unlink()
                 stop.set()
-                win.close()
+                win.destroy()              # у pywebview-окна нет close(): флаг
+                # «закрыться» молча падал в AttributeError и окно выживало
         except Exception as e:
             _logf(paths, f"flag watch: {type(e).__name__}: {e}")
         time.sleep(0.5)
+
+
+def _start_kwargs(paths: dict, webview_module=None) -> dict:
+    """Аргументы webview.start: ПОСТОЯННЫЙ профиль браузера, а не инкогнито.
+
+    Без него WebView2 живёт в inPrivate-профиле: кука, полученная по разовому
+    токену запуска, умирает вместе с окном, и каждый следующий старт окна
+    требовал бы нового допуска. С ним — окно входит один раз, а дальние
+    перезапуски получают ту же сессию (её отзыв — /api/logout или смена
+    пароля, как у любой другой хозяйской куки).
+
+    Старый pywebview может не знать `storage_path` — тогда молча уходим в
+    дефолтный запуск, окно обязанности не теряет.
+    """
+    if webview_module is None:
+        import webview as webview_module     # noqa: PLC0415
+    try:
+        import inspect
+        params = inspect.signature(webview_module.start).parameters
+    except (TypeError, ValueError):
+        return {}
+    if "storage_path" not in params or "private_mode" not in params:
+        return {}
+    try:
+        Path(paths["profile"]).mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return {}
+    return {"private_mode": False, "storage_path": str(paths["profile"])}
 
 
 def main(argv: "list[str] | None" = None) -> int:
@@ -398,9 +539,11 @@ def main(argv: "list[str] | None" = None) -> int:
     win.events.moved += _remember("moved")
     threading.Thread(target=_watch_flags, args=(paths, win, stop), daemon=True).start()
 
-    _logf(paths, f"opened {args.url} geo={geo}")
+    _logf(paths, f"opened {strip_launch(args.url)} geo={geo}")
     try:
-        webview.start()                      # блокирует до закрытия окна
+        webview.start(**_start_kwargs(paths))   # блокирует до закрытия окна
+    except Exception as e:
+        _logf(paths, f"webview.start failed: {type(e).__name__}: {e}")
     finally:
         try:
             paths["lock"].unlink()

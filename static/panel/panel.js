@@ -139,7 +139,7 @@ function ago(ts) {
 }
 
 /* ── Мост с окном ПК ──────────────────────────────────────────────────────── */
-var B = { live: false, caps: {}, state: null, queue: null, stamp: '', up: false };
+var B = { live: false, caps: {}, state: null, queue: null, stamp: '', up: false, nolink: false };
 
 /* RPWIN — панель в OS-окне лаунчера (Python-хост по ту сторону pywebview).
    IFRAME — доком в окне ПК. RELAY — внешнее окно (?transport=relay), у которого
@@ -151,6 +151,59 @@ var RELAY = /[?&]transport=relay/.test(location.search);
 var IFRAME = (function () {
   try { return !!(window.parent && window.parent !== window); } catch (e) { return false; }
 })();
+
+/* ── Разовый пропуск запуска (внешнее окно, лечение 24.09) ─────────────────
+   Окно плеера — отдельный процесс WebView2. В его профиле хозяйской куки при
+   первом запуске нет, /ws такой сокет отвергает (403), панель никогда не
+   регистрируется в релее — окно «живёт своей жизнью». Сервер кладёт одноразовый
+   токен во ФРАГМЕНТ адреса: фрагмент не уходит на сервер, поэтому токен не
+   попадает ни в access-лог, ни в историю запросов. Мы меняем его на обычную
+   сессию (POST /api/player-window/claim) и тут же стираем из адреса. */
+var LAUNCH_RE = /(?:^|[#&])launch=([0-9a-f]{16,128})/;
+var _claimTried = false;
+
+function rpLaunchToken() {
+  var m = LAUNCH_RE.exec(location.hash || '');
+  return m ? m[1] : '';
+}
+
+function rpStripLaunch() {
+  try {
+    var h = (location.hash || '').replace(LAUNCH_RE, '').replace(/^[&#]/, '#');
+    if (h === '#') h = '';
+    history.replaceState(null, '', location.pathname + location.search + h);
+  } catch (e) { /* WebView2 без replaceState — токен всё равно одноразовый */ }
+}
+
+/* Меняет разовый пропуск на куку. Возвращает true, если кука получена
+   (или уже есть — окно перетребовало допуск зря). */
+async function rpClaimLaunch(tok) {
+  if (!tok || _claimTried) return false;
+  _claimTried = true;
+  var ok = false;
+  try {
+    var r = await fetch('/api/player-window/claim', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: tok })
+    });
+    ok = r.ok;
+    S.lastErr = ok ? '' : ('claim → HTTP ' + r.status);
+  } catch (e) { S.lastErr = 'claim: ' + (e.message || e); }
+  if (ok) rpReconnectWS();                 // сокет до допуска был обречён
+  diag();
+  return ok;
+}
+
+/* Точка входа для Python-хоста: живое окно не перезагружают, поэтому новый
+   пропуск приходит файлом-флагом, а окно зовёт эту функцию через evaluate_js.
+   Синхронный возврат — хосту важно, что страница готова, а не исход обмена. */
+window.rpClaim = function (tok) {
+  if (typeof tok !== 'string' || !/^[0-9a-f]{16,128}$/.test(tok)) return 'bad';
+  _claimTried = false;
+  rpClaimLaunch(tok);
+  return 'sent';
+};
 
 function rpApi() {
   if (!RPWIN) return null;
@@ -187,6 +240,26 @@ function rpSend(msg) {
 }
 function cmd(name, arg) { return rpSend({ k: 'cmd', cmd: name, arg: arg || {} }); }
 function can(what) { return B.live && B.caps[what]; }
+
+/* Подтверждение «мне дошло». Релей сервера отдаёт его в
+   /api/player-window/relay-status — это единственное доказательство, что
+   состояние не уехало в окно, а именно отрисовалось. Хост вещает каждые
+   400 мс, поэтому шлём на смену карточки и не чаще раза в 5 с.
+   nolink/live едут рядом: «нет связи» — то, что видно только самой панели,
+   и с хозяйского экрана это единственный способ увидеть беду окна. */
+var RP_ACK_EVERY_MS = 5000;
+var _ackKey = '', _ackAt = 0;
+function rpAck() {
+  var ci = curItem();
+  var key = (ci ? ci.service + ':' + ci.id : '') + '|' + (B.state && B.state.have ? 1 : 0);
+  var now = Date.now();
+  if (key === _ackKey && now - _ackAt < RP_ACK_EVERY_MS) return;
+  _ackKey = key; _ackAt = now;
+  rpSend({ k: 'ack', have: !!(B.state && B.state.have),
+           title: String((ci && ci.title) || '').slice(0, 200),
+           artist: String((ci && ci.artist) || '').slice(0, 200),
+           live: !!B.live, nolink: !!B.nolink });
+}
 
 function hostToItem(x) {
   return {
@@ -228,6 +301,7 @@ function onHost(d) {
     B.live = true; B.caps = d.caps || {}; B.up = true; S.env = d.env || 'WebView2?';
     if (B.caps.oswin) S.env = 'WebView2/OS-window';
     if (B.caps.relay) S.env = 'relay/' + (d.env || '?');
+    touchHost();
     readMirror();
     renderAll();
     if (currentScreen() === 'scr-home') renderHome();
@@ -245,12 +319,14 @@ function onHost(d) {
   }
   if (d.k === 'state') {
     B.live = true; B.state = d;
+    touchHost();
     if (d.queue !== B.stamp && !B.queue) rpSend({ k: 'need-queue' });
     /* Смена эфира (BBC играет вне очереди) — карточку и бейдж LIVE надо
        перерисовать сразу, а не ждать, пока экран заново откроют. */
     var ci = curItem();
     if ((ci ? ci.service + ':' + ci.id : '') !== _playerKey) renderPlayer();
     renderTransport(); renderMini(); diag();
+    if (RELAY) rpAck();
     return;
   }
   if (d.k === 'queue') {
@@ -980,13 +1056,21 @@ function dlStatus(s) {
 
 /* ── Живые события сервера (WebSocket — в WebView2 работает, в отличие от
    window.open) ──────────────────────────────────────────────────────────── */
-var _ws = null, _wsRetry = 0;
+var _ws = null, _wsRetry = 0, _wsDenied = false;
+function rpReconnectWS() {
+  try { if (_ws) { _ws.onclose = function () {}; _ws.close(); } } catch (e) {}
+  _ws = null; _wsRetry = 0; _wsDenied = false;
+  connectWS();
+}
 function connectWS() {
+  /* Мост один: живой сокет (Connecting/Open) — не второй. Прогон настоящим
+     окном 24.09 дал панели=2 из одного окна: claim переподключается до boot. */
+  if (_ws && (_ws.readyState === 0 || _ws.readyState === 1)) return;
   var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
   try { _ws = new WebSocket(proto + location.host + '/ws'); }
   catch (e) { return; }
   _ws.onopen = function () {
-    S.wsOpen = true; _wsRetry = 0;
+    S.wsOpen = true; _wsRetry = 0; _wsDenied = false;
     if (RELAY) {
       /* Relay-режим: этот сокет и есть мост. Сообщаем серверу роль и
        здороваемся с хостом — на каждом (пере)подключении. */
@@ -1006,13 +1090,36 @@ function connectWS() {
     } catch (e) {}
     diag();
   };
-  _ws.onclose = function () {
+  _ws.onclose = function (ev) {
     S.wsOpen = false;
+    /* 1008 = сервер отверг рукопожатие: куки нет или она села. Панель сама
+       себе допуск не выпишет — просит у окна свежий запуск (окно поднимает
+       флаг, сервер отвечает новым разовым пропуском). */
+    if (RELAY && ev && ev.code === 1008) {
+      _wsDenied = true;
+      rpAskRelaunch();
+    }
     _wsRetry = Math.min(30, (_wsRetry || 1) * 2);
     setTimeout(connectWS, _wsRetry * 1000);
     diag();
   };
   _ws.onerror = function () { S.apiErr++; diag(); };
+}
+
+/* Просьба к окну: «мне нужен новый допуск». В standalone-окне это pywebview-
+   мост (файл-флаг, который сервер заберёт своим сторожем); в лаунчеровом окне
+   и в обычной вкладке такого API нет — честно говорим пользователю, что нужно
+   нажать кнопку ещё раз. */
+function rpAskRelaunch() {
+  var a = rpWinApi();
+  if (a && typeof a.reauth === 'function') {
+    try {
+      var p = a.reauth();
+      if (p && p.catch) p.catch(function () {});
+      return;
+    } catch (e) { /* мост есть, но не отвечает — просим перезапуск словами */ }
+  }
+  ensureNolinkBanner('m.host.reauth');
 }
 
 /* ── Рендер ───────────────────────────────────────────────────────────────── */
@@ -1467,7 +1574,7 @@ async function fillPassport() {
     rows.map(function (r) { return '<div><b>' + esc(r[0]) + ':</b> ' + esc(r[1]) + '</div>'; }).join('') +
     '<div style="margin-top:10px"><b>' + esc(t('m.pass.engine')) + ':</b> ' + esc(eng) + '</div>' +
     '<div style="margin-top:6px"><b>' + esc(t('m.pass.host')) + ':</b> ' +
-      esc(B.live ? t('m.pass.host.bridge') : t('m.pass.host.local')) + ' · ' + esc(S.env || '?') + '</div>' +
+      esc(B.nolink ? t('m.host.nolink') : (B.live ? t('m.pass.host.bridge') : t('m.pass.host.local'))) + ' · ' + esc(S.env || '?') + '</div>' +
     '</div>';
 }
 
@@ -1574,12 +1681,48 @@ function volStep(step, c) {
    событие pywebviewready. Если хост не ответил за 5 с — панели нечего выдавать
    за «мост»: остаёмся на локальном <audio> и говорим об этом. Спрятанное окно
    шлёт bye (хост перестает слать состояние), показанное — hello заново. */
-var _hs = false, _hsRetry = null;
+var _hs = false, _hsRetry = null, _lastHostTs = 0;
+/* Любое живое слово хоста (welcome/state) — сигнал, что мост дышит. Гасим
+   баннер «нет связи» и запоминаем время для watchdog-паузы в 3 с. */
+function touchHost() {
+  _lastHostTs = Date.now();
+  if (B.nolink) setNolink(false);
+}
+/* Требование: 3 секунды без состояния → «нет связи с Рипстером», и окно само
+   приходит в норму, как только активная вкладка снова заговорит. */
+function rpLinkWatchdog() {
+  if (!RELAY || !_hs || B.nolink) return;
+  if (Date.now() - _lastHostTs > 3000) {
+    /* Сервер отверг сокет — это не «нет связи», это «нет допуска»:
+       разные баннеры, разные действия пользователя. */
+    if (_wsDenied) ensureNolinkBanner('m.host.reauth');
+    setNolink(true);
+  }
+}
+function setNolink(on) {
+  if (!!B.nolink === !!on) return;
+  B.nolink = !!on;
+  ensureNolinkBanner();
+  var el = document.getElementById('nolink');
+  if (el) el.classList.toggle('on', !!on);
+  if (on) rpHandshakeRetry();          // стучимся, пока активная вкладка не откликнется
+  renderAll();
+}
+function ensureNolinkBanner(key) {
+  var d = document.getElementById('nolink');
+  if (d) { if (key) d.textContent = t(key); return; }
+  d = document.createElement('div');
+  d.id = 'nolink'; d.className = 'nolink'; d.setAttribute('role', 'status');
+  d.textContent = t(key || 'm.host.nolink');
+  var phone = document.getElementById('phone') || document.body;
+  phone.appendChild(d);
+}
 function rpHandshake() {
   var sent = rpSend({ k: 'hello' });
   if (!sent) return false;
   if (!_hs) {
     _hs = true;
+    _lastHostTs = Date.now();
     setTimeout(function () {
       if (!B.live) { S.lastErr = 'host silent'; renderAll(); diag(); }
     }, 5000);
@@ -1610,6 +1753,11 @@ document.addEventListener('DOMContentLoaded', async function () {
   if (RELAY) window.addEventListener('pywebviewready', function () {
     document.body.classList.add('rpwin');
   });
+  /* Сначала допуск, потом всё остальное: без куки и /ws отвергает сокет, и
+     каждый /api-* отвечает 401 — панель врёт «нет связи» там, где просто
+     не пустила. */
+  var _tok = rpLaunchToken();
+  if (_tok) { rpStripLaunch(); await rpClaimLaunch(_tok); }
   try { S.fav = JSON.parse(localStorage.getItem('ripster-panel-fav') || '{}') || {}; } catch (e) { S.fav = {}; }
   document.getElementById('sq').addEventListener('input', onSearch);
   document.getElementById('lq').addEventListener('input', function () {
@@ -1642,6 +1790,7 @@ document.addEventListener('DOMContentLoaded', async function () {
   await loadConfig();
   showScreen('scr-home');
   connectWS();
+  if (RELAY) { ensureNolinkBanner(); setInterval(rpLinkWatchdog, 1000); }
   setInterval(function () { if (document.getElementById('scr-downloads').classList.contains('on')) loadDownloads(); }, 5000);
 
   if (IFRAME) rpHandshake();
