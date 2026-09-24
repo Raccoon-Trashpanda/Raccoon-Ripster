@@ -5,7 +5,7 @@ var LANG = {
     'dlorb.title':'Индикатор загрузки: круг показывает текущую загрузку, силуэты позади — что стоит следом','dlorb.more':'+{n}','dlorb.section':'🌀 Круг загрузки в панели','dlorb.enable':'Показывать круг загрузки','dlorb.enable_sub':'Выкатывается в пустом низу левой панели, когда вкладка задач не открыта. Только свои ручные загрузки — гости и автоматика его не запускают.','dlorb.variant':'Оформление круга','dlorb.variant_sub':'Семь вариантов одной системы: отличаются тем, как ведёт себя рассеивающийся свет (дышит, пульсирует, льётся ровно, гаснет) и как кольцо читает прогресс (тонкая/толстая дуга, бегущая точка). Цвет берётся из обложки: доминирующий тон или её средний цвет.','dlorb.v_neon':'Неон','dlorb.v_aurora':'Сияние','dlorb.v_vinyl':'Винил','dlorb.v_mono':'Кольцо','dlorb.v_ember':'Уголь','dlorb.v_halo':'Ореол','dlorb.v_pulse':'Пульс','dlorb.mode_dominant':'доминирующий тон','dlorb.mode_average':'средний цвет',
     // Поле метаданных слева от круга загрузки (dlorb.js). Строка «своих» верна и
     // для владельца, и для гостя: у обоих в снимке очереди только их задачи.
-    'dlmeta.running':'Скачивается','dlmeta.queued':'В очереди','dlmeta.last':'Последняя загрузка',
+    'dlmeta.running':'Скачивается','dlmeta.finishing':'Завершается','dlmeta.queued':'В очереди','dlmeta.last':'Последняя загрузка',
     'dlmeta.failed':'Последняя попытка','dlmeta.idle':'Своих загрузок в очереди нет',
     'dlmeta.unknown_title':'Название неизвестно','dlmeta.more_queued':'ещё {n} в очереди',
     // ── discography button 2026-07-19 ──
@@ -2302,7 +2302,7 @@ var LANG = {
   en: {
     'err.loopback_only':'only from this machine','err.config_reload':'could not reload the config: {e}','err.prefs_no_pool':'{svc} has no account pool','err.priority_number':'priority must be a number','err.seek_seconds':'seconds required (sec)','err.url_required':'release URL required','ff.not_configured':'feature.fm is not set up — add a login in Settings','ff.session':'feature.fm session expired — sign in again in Settings',
     'dlorb.title':'Download orb: the coloured circle is the current download, the silhouettes behind it are what comes next','dlorb.more':'+{n}','dlorb.section':'🌀 Download orb in the sidebar','dlorb.enable':'Show the download orb','dlorb.enable_sub':'Rolls out in the empty bottom of the left sidebar while the tasks tab is not open. Your own manual downloads only — guests and automation never trigger it.','dlorb.variant':'Orb design','dlorb.variant_sub':'Seven variants of one system: they differ in how the diffused light behaves (breathes, pulses, flows evenly, goes out) and how the ring reads progress (thin/thick arc, a travelling dot). Colour comes from the cover: its dominant hue or its average colour.','dlorb.v_neon':'Neon','dlorb.v_aurora':'Aurora','dlorb.v_vinyl':'Vinyl','dlorb.v_mono':'Ring','dlorb.v_ember':'Ember','dlorb.v_halo':'Halo','dlorb.v_pulse':'Pulse','dlorb.mode_dominant':'dominant hue','dlorb.mode_average':'average colour',
-    'dlmeta.running':'Downloading','dlmeta.queued':'Queued','dlmeta.last':'Last download',
+    'dlmeta.running':'Downloading','dlmeta.finishing':'Finishing','dlmeta.queued':'Queued','dlmeta.last':'Last download',
     'dlmeta.failed':'Last attempt','dlmeta.idle':'No downloads of your own in the queue',
     'dlmeta.unknown_title':'Title unknown','dlmeta.more_queued':'{n} more queued',
     // ── discography button 2026-07-19 ──

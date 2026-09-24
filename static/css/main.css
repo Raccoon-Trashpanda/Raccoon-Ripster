@@ -406,7 +406,12 @@ body{height:100%;margin:0}
 .tb-icon-btn:hover{border-color:var(--muted);background:var(--surface2)}
 .tb-restart{background:none;border:1px solid var(--border);border-radius:6px;color:var(--muted);font-size:14px;padding:2px 7px;cursor:pointer;line-height:1;flex-shrink:0}
 .tb-restart:hover{color:var(--fg);border-color:var(--muted)}
-.sidebar{background:var(--sidebar-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;padding:12px 10px 0;gap:2px;min-height:0;scrollbar-width:thin}
+/* Панель — ДВА ЭТАЖА: меню прокручивается в своей области (.nav-scroll), а
+   док загрузок стоит под ним отдельным этажом. Раньше прокручивался весь
+   <nav>, и виджетам дока некуда было встать: при низком окне они ложились на
+   пункты меню (замечание владельца 24.09.2026 — «нихера не видно»). */
+.sidebar{background:var(--sidebar-bg);border-right:1px solid var(--border);display:flex;flex-direction:column;overflow:hidden;padding:0;gap:0;min-height:0}
+.nav-scroll{flex:1 1 auto;min-height:0;display:flex;flex-direction:column;gap:2px;overflow-y:auto;overflow-x:hidden;padding:12px 10px 0;scrollbar-width:thin}
 /* padding-bottom:0 — вторая половина той же щели: нижний отступ панели входит
    в прокручиваемую область, и меню проползало через него ПОД закреплённым
    доком. Док сам прижат к самому низу, поэтому отступ там больше не нужен.
@@ -1153,7 +1158,10 @@ img[data-cover].loaded{
   .app{grid-template-columns:1fr;grid-template-rows:48px minmax(0,1fr)}
   .main{grid-column:1;padding-bottom:56px}
   /* Sidebar becomes a slide-over drawer */
-  .sidebar{display:none;position:fixed;top:0;bottom:0;left:0;width:265px;z-index:1000;box-shadow:10px 0 40px rgba(0,0,0,.65);border-right:1px solid var(--border2);overflow-y:auto;padding-bottom:calc(env(safe-area-inset-bottom) + 8px)}
+  .sidebar{display:none;position:fixed;top:0;bottom:0;left:0;width:265px;z-index:1000;box-shadow:10px 0 40px rgba(0,0,0,.65);border-right:1px solid var(--border2);overflow:hidden}
+  /* Прокрутка ящика — по-прежнему за меню: у панели на телефоне второй этаж
+     (док) скрыт, но менять владельца прокрутки ради этого не стоит. */
+  .nav-scroll{padding-bottom:calc(env(safe-area-inset-bottom) + 8px)}
   .sidebar.open{display:flex}
   /* Compact topbar */
   .topbar{height:48px;padding:0 10px;gap:7px;grid-column:1}
@@ -2659,42 +2667,56 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 .rel-dl-btn{display:block;width:100%;box-sizing:border-box;margin-top:7px;overflow:hidden;
   white-space:nowrap;text-overflow:ellipsis}
 
-/* ══ DL-ORB — круглый индикатор загрузки в пустом низу левой панели ══
+/* ══ DL-ORB — круглый индикатор загрузки в ОТДЕЛЬНОМ ЭТАЖЕ левой панели ══
    Правая граница панели — СТЕНА. Держится не арифметикой, а тремя вещами:
    1) .dlorb-dock{overflow:hidden} режет всё, что вышло за прямоугольник;
    2) contain:layout paint запрещает потомкам рисоваться снаружи (тени, blur,
       свечение варианта neon — тоже);
-   3) .sidebar{overflow-x:hidden} уже стоит в разметке панели — второй рубеж.
+   3) .sidebar{overflow:hidden} — второй рубеж.
    Даже если расчёт X ошибётся или окно окажется уже ожидаемого, на карточки
-   круг не вылезет: ему физически нечем туда попасть. */
+   круг не вылезет: ему физически нечем туда попасть.
+
+   ПОДЛОЖКА (.dlside-foot). Плотная и своя: в неон-теме --sidebar-bg —
+   полупрозрачный rgba(12,9,16,.86), и раньше сквозь док проступали пункты
+   меню, оказавшиеся под ним. Теперь подложка льёт цвет панели ПОВЕРХ цвета
+   страницы: результат непрозрачен в любой теме и в любом скине, при этом
+   оттенок совпадает с панелью — чужого прямоугольника («#9006: чёрный квадрат
+   в левом нижнем углу») не появляется. */
+.dlside-foot{
+  flex:0 0 auto;position:relative;z-index:3;
+  display:flex;flex-direction:column;gap:6px;
+  padding:6px 10px 0;
+  background-color:var(--bg);
+  background-image:linear-gradient(var(--sidebar-bg), var(--sidebar-bg));
+  -webkit-backdrop-filter:blur(14px) saturate(1.2);
+  backdrop-filter:blur(14px) saturate(1.2);
+  border:1px solid var(--border);border-bottom:0;
+  border-radius:14px 14px 0 0;
+}
+/* Нечего показывать — нет и подложки: иначе по низу панели тянулась бы
+   пустая рамка с фоном. Признак «есть круг» — тот же, что у высоты дока. */
+.dlside-foot:not(:has(.dlorb)){padding:0;border:0;background:none;
+  -webkit-backdrop-filter:none;backdrop-filter:none}
+
 .dlorb-dock{
-  margin-top:auto;          /* .sidebar — flex-колонка: док прижат к низу */
-  /* ЗАКРЕПЛЁН, а не просто «прижат». .sidebar прокручиваемая (overflow-y:auto),
-     и при низком окне пунктов меню хватало, чтобы вытолкнуть док ниже видимой
-     части: круги технически были, но до них надо было докручивать — снаружи это
-     читается как «круги пропали». sticky держит док у нижней кромки видимой
-     области панели независимо от прокрутки и высоты окна.
-     Фон обязателен: без него пункты меню просвечивают под кругами при прокрутке.
-     sticky — позиционированный элемент, поэтому absolute-круги внутри
-     продолжают считаться от дока, как и при relative. */
-  position:sticky;
-  /* bottom:0, а НЕ 4px. При 4px между доком и низом панели оставалась щель, и
-     прокручиваемое меню просвечивало через неё полоской — владелец видел срезанное
-     по горизонтали слово «Admin». Щель в органе, который специально закреплён,
-     читается как дефект, а не как отступ. */
-  bottom:0;
-  z-index:3;
-  background:var(--sidebar-bg);
+  /* Второй этаж панели, а не накладной лист: место под собой док берёт из
+     потока, поэтому меню физически не может оказаться под кругами — оно
+     кончается там, где начинается док. Прежний «sticky поверх прокрутки»
+     держал док у нижней кромки ценой того, что при низком окне он лежал НА
+     пунктах меню (замечание владельца 24.09.2026). */
+  position:relative;
+  z-index:1;
+  /* Фон не нужен: красит подложка .dlside-foot, и источник цвета один —
+     иначе между «чем залито окно» и «чем залит док» встал бы чужой слой. */
   /* ВЫСОТА — по факту кругов, а не вечно. Ровно 112px без условий означали, что
-   док выедает пятую часть панели, даже когда не качается НИЧЕГО, и последний
-   пункт меню («Admin») уезжал под его непрозрачный фон (трекер #9006).
-   flex-basis:auto — высота берётся из height, поэтому именно height и переключается
-   (при прежднем flex:0 0 112px любой height перекрывался базисом). min-height:0 —
-   чтобы нулевой док действительно схлопывался. */
+     док выедает пятую часть панели, даже когда не качается НИЧЕГО, и последний
+     пункт меню («Admin») уезжал под его непрозрачный фон (трекер #9006).
+     flex-basis:auto — высота берётся из height, поэтому именно height и переключается
+     (при прежднем flex:0 0 112px любой height перекрывался базисом). min-height:0 —
+     чтобы нулевой док действительно схлопывался. */
   flex:0 0 auto;
   height:0;
   min-height:0;
-  margin-bottom:0;   /* см. bottom:0 выше — отступ снизу и был второй половиной щели */
   overflow:hidden;
   contain:layout paint;
   pointer-events:none;
@@ -2895,28 +2917,28 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
 .dlorb-vname{font-size:10px;font-weight:700;color:var(--text);margin-top:4px;font-family:var(--display)}
 .dlorb-vmode{font-size:8.5px;color:var(--muted);margin-top:1px}
 
-/* ══ НАДПИСИ О ЗАГРУЗКЕ (#9012) — В КОЛОНКЕ ПАНЕЛИ, НАД КРУГОМ ═══════════
+/* ══ НАДПИСИ О ЗАГРУЗКЕ (#9012) — ВТОРОЙ ЭТАЖ ПАНЕЛИ, НАД КРУГОМ ═════════
    Панель 220px физически не вмещает «название + артист + год + лейбл» одной
-   строкой читаемо, поэтому стек карточек живёт НАД полоской кругов, но строго
-   ВНУТРИ колонки панели: левый край и ширина стека = прямоугольник дока,
-   низ — верхней кромке круга. Никакой правки контент-области здесь нет и
-   быть не может: контейнер `.dlcallouts` заданной ширины с overflow:hidden, и
-   всё, что шире колонки или выехало за неё на въезде, отрезается по её краям.
-   (22.09 карточки прибивали к <body> СПРАВА от панели — они ложились поверх
-   сетки релизов и закрывали карточки. Владелец это отменил: метаданные качающегося
-   релиза не имеют права ехать поперёк контента.)
+   строкой читаемо, поэтому карточки стоящих в очереди задач — отдельным
+   стеком НАД полоской кругов. Стек живёт В ТОМ ЖЕ этаже, что и док
+   (.dlside-foot), а не на <body>: с 24.09.2026 у панели два этажа, меню
+   прокручивается на своём, и наехать на пункты меню виджетам нечем.
+   (История отмен: 22.09 карточки прибивали к <body> СПРАВА от панели — они
+   ложились поверх сетки релизов и закрывали карточки, владелец это отменил.
+   Потом стек прибивали к <body> поверх колонки панели — на низком окне он лёг
+   на пункты меню. Теперь у стека нет права на позицию поверх чего-либо.)
    «Нфс-мост» — это ОЩУЩЕНИЕ приезда, а не копия вида: карточка врывается ОТ
    ЛЕВОЙ СТЕНКИ колонки (амплитуда = вся её ширина) и встаёт в свою строку
    стека. Вправо въезд не направлен НИКОГДА: правая стенка колонки и есть
    граница контента, и даже мимолётный прямоугольник поперёк неё — это уже
    «карточка поверх релизов», пусть и на полсекунды. */
-.dlcallouts{position:fixed;left:0;bottom:0;z-index:40;pointer-events:none;
+.dlcallouts{position:relative;z-index:1;width:100%;min-width:0;pointer-events:none;
   display:flex;flex-direction:column-reverse;gap:6px;align-items:stretch;
   /* Стена стека: clip по краям колонки держит и карточку, и её въезд.
      contain:paint — тот же рубеж, что у .dlorb-dock, против теней и blur. */
   overflow:hidden;contain:layout paint;
-  /* left/width/bottom/max-height задаёт JS по прямоугольнику дока (dlorb.js). */
-  max-width:100%}
+  /* max-height задаёт JS: стек не должен съедать меню (см. NAV_RESERVE). */
+  max-height:0}
 .dlcall{position:relative;box-sizing:border-box;width:100%;min-width:0;flex:0 0 auto;
   padding:8px 34px 8px 12px;border-radius:11px;
   background:var(--surface);border:1px solid var(--border);
@@ -2933,9 +2955,9 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .dlcall-pct{position:absolute;right:9px;top:50%;transform:translateY(-50%);
   font-family:var(--display);font-size:13px;font-weight:800;color:var(--call-c,var(--text));line-height:1}
-@media(max-width:699px){.dlcallouts{display:none}}
-
-@media(max-width:699px){.dlorb-dock{display:none}}
+/* На телефоне этажа с кругами нет вовсе — вместе с ним убираем и подложку,
+   иначе по низу ящика осталась бы пустая рамка. */
+@media(max-width:699px){.dlside-foot{display:none}}
 @media(prefers-reduced-motion:reduce){
   .dlorb{transition:none}
   .dlorb-skin,.dlorb-skin::before,.dlorb-glow{animation:none!important}
@@ -3450,3 +3472,34 @@ html[data-skin="neon"] .block:hover{box-shadow:var(--k-glow)}
   font-size:9px;color:var(--muted);margin-top:2px;
   line-height:1.35;font-family:var(--mono);white-space:normal;overflow-wrap:anywhere}
 @media (prefers-reduced-motion:reduce){.sk-opt,.sk-opt:hover{transition:none;transform:none}}
+
+/* ── Карточка «Android-эмулятор» (emulator_ui.js) ──────────────────────────
+   Рисуется скриптом в настройках и в панели Telegram — классы общие, цвета
+   берём из тем, чтобы светлая тема не дала белый текст по белому фону. */
+.emu-card{display:block}
+.emu-card .emu-title{font-size:11px;font-weight:700;color:var(--text)}
+.emu-card .emu-desc{font-size:10px;color:var(--muted);line-height:1.55;margin:4px 0 8px}
+.emu-card .emu-status{font-size:11px;font-family:var(--mono);padding:6px 10px;
+  border-radius:7px;background:rgba(128,128,128,.10);border:1px solid var(--border);
+  color:var(--muted);margin-bottom:8px}
+.emu-card .emu-status.emu-ok{color:#1f9d78;border-color:rgba(31,157,120,.35)}
+.emu-card .emu-status.emu-warn{color:#c98a1e;border-color:rgba(201,138,30,.35)}
+.emu-card .emu-status.emu-bad{color:#a8506d;border-color:rgba(168,80,109,.35)}
+.emu-card .emu-btns{display:flex;gap:6px;flex-wrap:wrap}
+.emu-card .emu-btns button{padding:6px 12px;border-radius:7px;font-size:11px;
+  font-weight:600;font-family:var(--font);cursor:pointer;border:1px solid var(--border);
+  background:transparent;color:var(--text)}
+.emu-card .emu-btns button.emu-go{border-color:rgba(31,157,120,.4);color:#1f9d78}
+.emu-card .emu-btns button.emu-stop{border-color:rgba(168,80,109,.4);color:#a8506d}
+.emu-card .emu-btns button.emu-view-btn{border-color:rgba(78,163,240,.4);color:#4ea3f0}
+.emu-card .emu-btns button:disabled{opacity:.45;cursor:default}
+.emu-card .emu-msg{font-size:11px;color:var(--muted);min-height:14px;margin-top:6px;
+  font-family:var(--mono)}
+.emu-card .emu-view{margin-top:10px}
+.emu-card .emu-screen{display:block;width:100%;max-width:340px;min-height:120px;border-radius:10px;
+  border:1px solid var(--border);background:#000;touch-action:none;cursor:crosshair}
+.emu-card .emu-keys,.emu-card .emu-type{display:flex;gap:6px;flex-wrap:wrap;margin-top:8px}
+.emu-card .emu-keys button{padding:6px 10px;border-radius:7px;font-size:11px;
+  background:rgba(128,128,128,.10);color:var(--text);border:1px solid var(--border);cursor:pointer}
+.emu-card .emu-type input{flex:1;min-width:140px;font-size:11px;padding:6px 8px;
+  border-radius:7px;background:transparent;color:var(--text);border:1px solid var(--border)}
