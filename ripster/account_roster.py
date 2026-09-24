@@ -11,6 +11,8 @@
 """
 from __future__ import annotations
 
+import json
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -192,23 +194,93 @@ def as_dict(service: str, label: str, info: dict, status: str, *,
 
 
 def _card(service: str, label: str, info: dict, *, is_active: bool, premium: bool,
-          masked: str = "") -> dict:
+          masked: str = "", checked_age: float | None = None) -> dict:
     status = classify(info, is_active=is_active, premium=premium)
     d = as_dict(service, label, info, status, masked=masked, premium=premium)
     # Для строкового отчёта пригодится готовая строка.
     d["line"] = line(service, label, info, status, premium=premium)
+    # Возраст замера: панель обязана честно писать «проверено N мин назад»,
+    # иначе вчерашняя правда выдаётся за сегодняшнюю (цена 24.09 — 502 в
+    # туннеле вместо честной карточки с возрастом).
+    if checked_age is not None:
+        d["checked_age"] = int(checked_age)
+        d["checked_at"] = int(time.time() - checked_age)
+    else:
+        d["checked_age"] = None
+        d["checked_at"] = None
     return d
 
 
+def _cached(mod, secret: str) -> tuple[dict, float | None]:
+    """Последнее СОХРАНЁННОЕ измерение учётки — без единого сетевого запроса.
+
+    Возвращает `(info, возраст_секунд)`. `({}, None)` — это «не спрашивали»,
+    что по-прежнему отличается от «спрашивали, мертва» (урок 06.09.2026).
+    Сначала файл кэша модуля (его пишут и другие процессы — знание переживает
+    рестарт), затем память процесса, если она свежее.
+    """
+    secret = (secret or "").strip()
+    if not secret:
+        return {}, None
+    try:
+        k = mod._key(secret)
+    except Exception:  # noqa: BLE001
+        return {}, None
+    ts: float | None = None
+    info: dict = {}
+    try:
+        rec = mod._cache_load().get(k)
+        if isinstance(rec, dict):
+            c = rec.get("cached_at")
+            if c:
+                ts = float(c)
+            info = {x: y for x, y in rec.items() if x != "cached_at"}
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        hit = mod._MEM.get(k)
+        if isinstance(hit, tuple) and isinstance(hit[1], dict) \
+                and (not info or float(hit[0]) > (ts or 0)):
+            ts, info = float(hit[0]), dict(hit[1])
+    except Exception:  # noqa: BLE001
+        pass
+    if not info:
+        return {}, None
+    return info, (max(0.0, time.time() - ts) if ts else None)
+
+
+def _beatport_cached(bp) -> tuple[str, float | None]:
+    """Тариф Beatport из кэша движка — ровно тот же known-good, что отдаёт
+    `_tier_now` при сетевом сбое, но БЕЗ сетевой пробы на показе."""
+    tier, ts = "", None
+    try:
+        d = json.loads(bp._TIER_CACHE.read_text(encoding="utf-8"))
+        tier = str(d.get("tier") or "")
+        ts = float(d.get("ts") or 0) or None
+    except Exception:  # noqa: BLE001
+        return "", None
+    if ts is None:
+        return "", None
+    age = max(0.0, time.time() - ts)
+    if age > getattr(bp, "_TIER_CACHE_TTL", 14 * 24 * 3600.0):
+        return "", age          # как `_tier_cache_read`: протухло → «не знаю»
+    return tier, age
+
+
 def roster_cards(cfg: dict) -> dict:
-    """{service: [card, ...]} по всем сервисам с учётками. Меру берём из кэша
-    (`fresh=False`) — показ не должен гонять сеть на каждый рендер."""
-    import asyncio
+    """{service: [card, ...]} по всем сервисам с учётками.
 
+    ТОЛЬКО кэш (`_cached`): ни одного сетевого запроса, ни одного `asyncio.run`.
+    Обещание «меру берём из кэша» раньше исполнялось лишь наполовину — у
+    SoundCloud/Qobuz/Deezer ветка `fresh=False` заглядывала только в память
+    процесса и на первом же показе после рестарта гоняла probing по сети
+    (замер 24.09.2026: 21.8s прогона → 502 в туннеле через 10s у панели).
+    Сеть делает фон: `refresh_measurements` (по одному обходу за показ,
+    троттлинг в routes/accounts.py) и сторож accounts_watch по расписанию.
+    Карточка при этом честная: `checked_age` говорит, когда мерили на самом
+    деле.
+    """
     out: dict[str, list] = {}
-
-    def _run(coro):
-        return asyncio.run(coro)
 
     # ── Tidal ────────────────────────────────────────────────────────────────
     try:
@@ -222,15 +294,22 @@ def roster_cards(cfg: dict) -> dict:
             sec = ta.account_secret(acct)
             is_active = bool(sec and sec == active)
             uses = "none" if not sess else ("same" if sess == sec else "other")
-            # Активную карточку не берём из вчерашнего кэша: «жива» со вчерашнего
-            # дня переживает сегодняшнюю блокировку учётки.
-            info = dict(_run(ta.account_info(acct, fresh=is_active)))
+            # Активную учётку тоже берём из кэша: её свежестью занят фон
+            # (`refresh_measurements` меряет активную и сессию движка в первую
+            # очередь), а показ обязан успевать до таймаута туннеля.
+            info, age = _cached(ta, sec)
+            info = dict(info)
+            if not info:
+                if not sec:
+                    info = {"alive": False, "reason": "нет ни токена, ни почты"}
+                elif not (acct.get("tidal-refresh") or "").strip():
+                    info = {"alive": None, "reason": "вход по паролю — не измеряли"}
             info["engine_session"] = uses
             eng_info = info
             if is_active and uses == "other":
                 # Сессия движка — другая учётка: спрашиваем именно её, потому
                 # что решение о «можно качать» принимается по ней.
-                eng_info = _run(ta.account_info({"tidal-refresh": sess}, fresh=True))
+                eng_info, _ = _cached(ta, sess)
                 if eng_info.get("alive") is False:
                     info["alive"] = False
                 elif eng_info.get("country"):
@@ -242,7 +321,8 @@ def roster_cards(cfg: dict) -> dict:
                     info["session_drift"] = drift
             cards.append(_card("tidal", acct.get("label") or f"слот {i}", info,
                                is_active=is_active,
-                               premium=bool(info.get("lossless")), masked=_mask(sec)))
+                               premium=bool(info.get("lossless")), masked=_mask(sec),
+                               checked_age=age))
         if cards:
             out["tidal"] = cards
     except Exception as e:  # noqa: BLE001
@@ -258,10 +338,13 @@ def roster_cards(cfg: dict) -> dict:
                   or (cfg.get("soundcloud-oauth-token") or "").strip())
         cards = []
         for a in sa.configured_accounts(cfg) or []:
-            info = _run(sa.account_info(a["token"], fresh=False))
+            info, age = _cached(sa, a["token"])
+            if not info and not (a.get("token") or "").strip():
+                info = {"alive": False, "reason": "токен не задан"}
             cards.append(_card("soundcloud", a.get("label") or "?", info,
                                is_active=bool(a["token"] == active),
-                               premium=bool(info.get("go_plus")), masked=_mask(a["token"])))
+                               premium=bool(info.get("go_plus")), masked=_mask(a["token"]),
+                               checked_age=age))
         if cards:
             out["soundcloud"] = cards
     except Exception as e:  # noqa: BLE001
@@ -270,16 +353,17 @@ def roster_cards(cfg: dict) -> dict:
     # ── Qobuz ────────────────────────────────────────────────────────────────
     try:
         from . import qobuz_accounts as qa
-        appid = (cfg.get("qobuz-app-id") or "").strip()
         active = (cfg.get("qobuz-auth-token") or "").strip()
         cards = []
         for i, acct in enumerate(qa.configured_accounts(cfg) or []):
-            info = _run(qa.account_info(acct, appid, fresh=False))
             sec = qa.account_secret(acct)
+            info, age = _cached(qa, sec)
+            if not info and not sec:
+                info = {"alive": False, "reason": "нет ни токена, ни почты"}
             cards.append(_card("qobuz", acct.get("label") or f"слот {i}", info,
                                is_active=bool(sec and sec == active),
                                premium=bool(info.get("lossless") or info.get("hires")),
-                               masked=_mask(sec)))
+                               masked=_mask(sec), checked_age=age))
         if cards:
             out["qobuz"] = cards
     except Exception as e:  # noqa: BLE001
@@ -288,13 +372,15 @@ def roster_cards(cfg: dict) -> dict:
     # ── Deezer ───────────────────────────────────────────────────────────────
     try:
         from . import deezer_accounts as da
-        rows = _run(da.survey(cfg, fresh=False))
         cards = []
-        for r in rows or []:
-            cards.append(_card("deezer", r.get("label") or "?", r,
+        for r in da.configured_arls(cfg) or []:
+            # survey(fresh=False) раньше лез в сеть при холодном _MEM (тот же
+            # класс ошибки, что и в докстринге выше); список ARL — локальный.
+            info, age = _cached(da, r.get("arl") or "")
+            cards.append(_card("deezer", r.get("label") or "?", info,
                                is_active=bool(r.get("primary")),
-                               premium=bool(r.get("lossless")),
-                               masked=_mask(r.get("arl") or "")))
+                               premium=bool(info.get("lossless")),
+                               masked=_mask(r.get("arl") or ""), checked_age=age))
         if cards:
             out["deezer"] = cards
     except Exception as e:  # noqa: BLE001
@@ -303,16 +389,15 @@ def roster_cards(cfg: dict) -> dict:
     # ── Yandex ───────────────────────────────────────────────────────────────
     try:
         from . import yandex_accounts as ya
-        rows = _run(ya.survey(cfg, fresh=False))
         cards = []
-        for r in rows or []:
+        for tok in ya.configured_tokens(cfg) or []:
             # survey проносит флаг primary из configured_tokens — угадывать по
             # label больше нечем: «primary» может назвать себя и слот из пула.
-            is_primary = bool(r.get("primary"))
-            cards.append(_card("yandex", r.get("label") or "?", r,
-                               is_active=is_primary,
-                               premium=bool(r.get("plus")),
-                               masked=_mask(r.get("token") or "")))
+            info, age = _cached(ya, tok.get("token") or "")
+            cards.append(_card("yandex", tok.get("label") or "?", info,
+                               is_active=bool(tok.get("primary")),
+                               premium=bool(info.get("plus")),
+                               masked=_mask(tok.get("token") or ""), checked_age=age))
         if cards:
             out["yandex"] = cards
     except Exception as e:  # noqa: BLE001
@@ -321,7 +406,9 @@ def roster_cards(cfg: dict) -> dict:
     # ── Beatport (тариф из orpheus-модуля, одна учётка) ──────────────────────
     try:
         from .engines import orpheus_beatport as bp
-        tier = bp._tier_now()
+        # _tier_now() — синхронная сетевая проба с рефрешем токена; на показе
+        # она недопустима (24.09: 1.5s из 21.8s здесь). Берём known-good кэш.
+        tier, age = _beatport_cached(bp)
         if tier or cfg.get("beatport-username"):
             info = {"alive": bool(tier) or None,
                     "plan": tier or "?",
@@ -329,11 +416,64 @@ def roster_cards(cfg: dict) -> dict:
             out["beatport"] = [_card(
                 "beatport", cfg.get("beatport-username") or "аккаунт", info,
                 is_active=True, premium=bool(tier and tier.startswith("bp_link_pro")),
-                masked=_mask(cfg.get("beatport-username") or ""))]
+                masked=_mask(cfg.get("beatport-username") or ""), checked_age=age)]
     except Exception as e:  # noqa: BLE001
         out.setdefault("_errors", []).append(f"beatport: {type(e).__name__}")
 
     return out
+
+
+async def refresh_measurements(cfg: dict) -> None:
+    """Сетевой обход всех учёток: обновляет кэш, из которого рисует
+    `roster_cards`. Вызывается ТОЛЬКО из фона — routes/accounts.py по
+    показу панели (троттлинг + один обход за раз) и сторож accounts_watch
+    по расписанию. Исключения глушим по сервису: упавший API не должен
+    ронять ни обход, ни показ.
+    """
+    try:
+        from . import tidal_accounts as ta, tidal_pool as tp
+        # Сессию движка и активную учётку меряем в первую очередь: по ним
+        # решается «выйдет ли следующая загрузка» (урок 23.09.2026).
+        sess = ta.engine_session_secret()
+        if sess:
+            await ta.account_info({"tidal-refresh": sess}, fresh=True)
+        active = (cfg.get("tidal-refresh") or "").strip()
+        accts = tp.configured_accounts(cfg) or []
+        for acct in sorted(accts, key=lambda a: 0 if (ta.account_secret(a) == active
+                              or ta.account_secret(a) == sess) else 1):
+            await ta.account_info(acct, fresh=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[roster-refresh] tidal: {type(e).__name__}", flush=True)
+    try:
+        from . import soundcloud_accounts as sa
+        for a in sa.configured_accounts(cfg) or []:
+            await sa.account_info(a["token"], fresh=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[roster-refresh] soundcloud: {type(e).__name__}", flush=True)
+    try:
+        from . import qobuz_accounts as qa
+        appid = (cfg.get("qobuz-app-id") or "").strip()
+        for acct in qa.configured_accounts(cfg) or []:
+            await qa.account_info(acct, appid, fresh=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[roster-refresh] qobuz: {type(e).__name__}", flush=True)
+    try:
+        from . import deezer_accounts as da
+        await da.survey(cfg, fresh=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[roster-refresh] deezer: {type(e).__name__}", flush=True)
+    try:
+        from . import yandex_accounts as ya
+        await ya.survey(cfg, fresh=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[roster-refresh] yandex: {type(e).__name__}", flush=True)
+    try:
+        import asyncio
+
+        from .engines import orpheus_beatport as bp
+        await asyncio.to_thread(bp._tier_now)
+    except Exception as e:  # noqa: BLE001
+        print(f"[roster-refresh] beatport: {type(e).__name__}", flush=True)
 
 
 def _mask(secret: str) -> str:
