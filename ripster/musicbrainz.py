@@ -306,6 +306,72 @@ def artist_variants(name: str) -> list:
     return items
 
 
+def _mb_aliases_of(mbid: str) -> list:
+    """Все написания одного артиста в MB (канон + алиасы). Пусто — нет записи/сети."""
+    mbid = (mbid or "").strip()
+    if not mbid:
+        return []
+    _load()
+    key = f"almb::{mbid}"
+    ent = _cache.get(key)
+    if ent is not None:
+        if ent.get("miss"):
+            if time.time() - float(ent.get("ts", 0)) <= _TTL_MISS:
+                return []
+        else:
+            return ent.get("items") or []
+    data = _throttled_get(f"artist/{mbid}", {"inc": "aliases"})
+    if not data:
+        _cache[key] = {"miss": True, "ts": time.time()}
+        _save()
+        return []
+    names = [data.get("name", "")]
+    names += [a.get("name", "") for a in (data.get("aliases") or [])]
+    names = [n for n in (x.strip() for x in names) if n]
+    if names:
+        _cache[key] = {"items": names, "ts": time.time()}
+    else:
+        _cache[key] = {"miss": True, "ts": time.time()}
+    _save()
+    return names
+
+
+def artist_aliases(name: str) -> list:
+    """Эквивалентные написания артиста через MusicBrainz.
+
+    «16BL» и «16 Bit Lolitas» — один дуэт до и после переименования; в MB это
+    одна запись с алиасом, а витрины (Apple) плодят под каждое имя отдельный id.
+    Дискография обязана склеить их в одного человека: иначе собственная работа
+    под прежним именем читается чужой и уезжает в «участие у постороннего».
+    Возвращает список написаний (канон + алиасы) по всем MB-варинтам имени; [] —
+    MB не отвечает (сеть/нет записи), тогда вызывающий откатывается к строгому
+    равенству имён.
+    """
+    name = (name or "").strip()
+    if not name:
+        return []
+    _load()
+    key = f"alias::{_norm(name)}"
+    ent = _cache.get(key)
+    if ent is not None:
+        if ent.get("miss"):
+            if time.time() - float(ent.get("ts", 0)) <= _TTL_MISS:
+                return []
+        else:
+            return ent.get("items") or []
+    out: list = []
+    for v in artist_variants(name):
+        for n in _mb_aliases_of(v.get("mbid") or ""):
+            if n not in out:
+                out.append(n)
+    if out:
+        _cache[key] = {"items": out, "ts": time.time()}
+    else:
+        _cache[key] = {"miss": True, "ts": time.time()}
+    _save()
+    return out
+
+
 def person_index(name: str) -> dict:
     """{витрина: {id: [mbid, …]}} — чем MB считает каждого носителя имени.
 

@@ -274,62 +274,75 @@ class ZhaereyEngine(EngineBase):
 
     async def get_artist(self, artist_id: str, types: str, config: dict) -> dict:
         import httpx as _httpx
+        import asyncio as _aio
+        from ripster import compilations as _comps
         wanted = {t.strip() for t in types.split(",") if t.strip()}
         lang = config.get("language", "en-US")
         cc = lang.split("-")[-1].upper() if "-" in lang else "US"
         try:
+            async def _lookup(entity, limit):
+                async with _httpx.AsyncClient(timeout=10) as c:
+                    r = await c.get("https://itunes.apple.com/lookup", params={
+                        "id": artist_id, "entity": entity, "limit": limit,
+                        "country": cc,
+                    })
+                    return r.json().get("results") or []
+
             async with _httpx.AsyncClient(timeout=10) as c:
                 r = await c.get("https://itunes.apple.com/lookup", params={
                     "id": artist_id, "entity": "album", "limit": 200, "country": cc,
                 })
-                data = r.json()
-            results = data.get("results") or []
-            if not results:
+                album_results = r.json().get("results") or []
+            # Второй проход — трековый: у каждой строки есть родительская
+            # коллекция, и именно так в дискографию попадают VA-сборники и
+            # диджей-миксы, где у артиста одна дорожка. entity=album их НЕ
+            # отдаёт никогда (альбом-артист — не он), поэтому раньше они просто
+            # исчезали: жалоба владельца «рипстер открывает один трек вместо
+            # компилы» растёт отсюда.
+            try:
+                song_results = await _lookup("song", 200)
+            except Exception:
+                song_results = []
+            if not album_results:
                 return {"error": "Artist not found", "releases": []}
-            artist_rec = next((x for x in results if x.get("wrapperType") == "artist"), None)
-            albums = [x for x in results if x.get("wrapperType") == "collection"]
-            releases = []
-            for a in albums:
-                coll_type = (a.get("collectionType") or "").lower()
-                tracks = a.get("trackCount") or 0
-                if coll_type == "compilation":
-                    rtype = "compilation"
-                elif tracks <= 3:
-                    rtype = "single"
-                elif tracks <= 6:
-                    rtype = "ep"
-                else:
-                    rtype = "album"
-                releases.append({
-                    "id":      str(a.get("collectionId", "")),
-                    "title":   a.get("collectionName", ""),
-                    "cover":   (a.get("artworkUrl100", "") or "").replace("100x100", "600x600"),
-                    "year":    (a.get("releaseDate", "") or "")[:4],
-                    "date":    (a.get("releaseDate", "") or "")[:10],
-                    "tracks":  tracks,
-                    "type":    rtype,
-                    "url":     a.get("collectionViewUrl", ""),
-                    "explicit":(a.get("collectionExplicitness") == "explicit"),
-                    "service": "apple",
-                })
-            if wanted and wanted != {"all"}:
-                releases = [r for r in releases if r["type"] in wanted]
-            releases.sort(key=lambda r: r.get("date", ""), reverse=True)
+            artist_rec = next((x for x in album_results
+                               if x.get("wrapperType") == "artist"), None)
+            albums = [x for x in album_results
+                      if x.get("wrapperType") == "collection"]
+            songs = [x for x in song_results
+                     if x.get("wrapperType") == "track"]
+            artist_name = (artist_rec or (albums[0] if albums else {})
+                           ).get("artistName", "") if (artist_rec or albums) else ""
+            # Алиасы того же человека (16BL ≡ 16 Bit Lolitas) — чтобы трек под
+            # прежним именем внутри чужого микса не читался чужим. Сеть/MВ
+            # блокирующие, уводим из цикла; любой сбой — пустая группа, и
+            # сравнение откатывается к строгому равенству имён.
+            alias_group = _comps.build_alias_group(frozenset())
+            if artist_name:
+                try:
+                    from ripster import musicbrainz as _mb
+                    al = await _aio.to_thread(_mb.artist_aliases, artist_name)
+                    alias_group = _comps.build_alias_group(al)
+                except Exception:
+                    pass
+            releases = _comps.scan_artist_releases(
+                albums, songs, artist_name, alias_group,
+                wanted or {"all"}, service="apple")
             if artist_rec:
                 artist = {
                     "id":      str(artist_rec.get("artistId", "")),
                     "name":    artist_rec.get("artistName", ""),
                     "picture": "",
                     "genre":   artist_rec.get("primaryGenreName", ""),
-                    "url":     artist_rec.get("artistLinkUrl", ""),
+                    "url":     artist_rec.get("artistViewUrl") or artist_rec.get("artistLinkUrl", ""),
                     "service": "apple",
                 }
             else:
                 artist = {
                     "id":     artist_id,
-                    "name":   albums[0].get("artistName", "") if albums else "",
+                    "name":   artist_name or (albums[0].get("artistName", "") if albums else ""),
                     "url":    albums[0].get("artistViewUrl", "") if albums else "",
-                    "service":"apple",
+                    "service": "apple",
                 }
             return {"artist": artist, "releases": releases}
         except Exception as e:

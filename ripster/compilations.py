@@ -72,6 +72,17 @@ _MIX_TITLE_RE = re.compile(
 )
 
 
+# Непрерывный диджей-мит — компиляция ЧУЖИХ треков, даже когда на обложке стоит
+# один артист-сводчик (Anjunadeep Open Air Prague «(DJ Mix)» подписан 16BL, но
+# внутри 17 дорожек разных авторов). В отличие от _MIX_TITLE_RE (там голый «mix»
+# и «presents» — слишком широко для вердикта «не доказывает личность»), этот
+# распознаватель консервативен: только явные формы микса.
+_DJMIX_TITLE_RE = re.compile(
+    r"\b(?:dj[ -]?mix(?:es)?|mixed by|dj[ -]?set|mixtape)\b",
+    re.IGNORECASE,
+)
+
+
 def _norm(s: str) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
@@ -79,6 +90,36 @@ def _norm(s: str) -> str:
 def is_various_artists(name: str) -> bool:
     """Is this credit the services' placeholder for "lots of people"?"""
     return _norm(name) in _VA_NAMES
+
+
+def is_dj_mix(title: str = "", album_type: str = "") -> bool:
+    """A continuous DJ set/mix — a crowd work even when one DJ headlines it."""
+    if _norm(album_type) in ("compilation", "mix"):
+        return True
+    return bool(_DJMIX_TITLE_RE.search(title or ""))
+
+
+def build_alias_group(names) -> frozenset:
+    """Нормализованное множество написаний ОДНОГО артиста (16BL, «16 Bit
+    Lolitas», «16 Bit Lolita's»). Пустое — значит «алиасов не знаем», тогда
+    `same_artist` сводится к строгому равенству имён."""
+    return frozenset(n for n in (_norm(x) for x in (names or [])) if n)
+
+
+def same_artist(a: str, b: str, alias_group=frozenset()) -> bool:
+    """Один и тот же артист под двумя написаниями?
+
+    Равны нормализованно, или обе формы лежат в одном алиас-группе (переименованный
+    дуэт: «16BL» ≡ «16 Bit Lolitas»). Без этого чужой трек-кредит под прежним
+    именем читается как другой человек, и собственная работа артиста уезжает в
+    «участие у постороннего».
+    """
+    na, nb = _norm(a), _norm(b)
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    return bool(alias_group) and na in alias_group and nb in alias_group
 
 
 def is_compilation(album_type: str = "", album_artist: str = "",
@@ -154,3 +195,155 @@ def merge_releases(existing: list, incoming: list) -> int:
         existing.append(r)
         added += 1
     return added
+
+
+def _own_type(track_count: int, album_artist: str, artist_name: str,
+              title: str, alias_group, collection_type: str = "") -> tuple[str, str]:
+    """(type, group) for a release already credited in the artist's own list.
+
+    Свой сингл/EP/альбом — по числу дорожек. Но если пластинка помечена сборником,
+    подписана «Various Artists» или это непрерывный диджей-мит — это компиляция,
+    даже когда на обложке стоит сам артист: внутри чужие треки, и показывать её
+    надо целиком как сборник, а не как «ещё один альбом».
+    """
+    a_low = _norm(album_artist)
+    own = same_artist(album_artist, artist_name, alias_group)
+    compilation = (
+        _norm(collection_type) == "compilation"
+        or is_various_artists(album_artist)
+        or is_dj_mix(title=title)
+        or (not own and is_compilation(album_artist=album_artist, title=title,
+                                       track_artist=artist_name))
+    )
+    if compilation:
+        return "compilation", "compilation"
+    if not own and a_low and a_low != _norm(artist_name):
+        # Гостевое участие на чужом альбоме — видно только по явному запросу.
+        return "single" if track_count <= 3 else "appears_on", "appears_on"
+    if track_count <= 3:
+        return "single", "album"
+    if track_count <= 6:
+        return "ep", "album"
+    return "album", "album"
+
+
+def scan_artist_releases(album_rows: list, song_rows: list, artist_name: str,
+                         alias_group=frozenset(), wanted: set | None = None,
+                         service: str = "apple") -> list:
+    """Собрать дискографию из двух iTunes-проходов (album + song).
+
+    `album_rows` — коллекции, где артист значится альбом-артистом. `song_rows` —
+    его треки; у каждого есть родительская коллекция (collectionId/Name/Artist),
+    и именно там живут миксы и VA-сборники, в которых у артиста одна дорожка:
+    на них entity=album не отвечает никогда. Родительские коллекции, отсутствующие
+    среди album_rows, добавляются как компиляции/участие с НАСТОЯЩИМ альбом-
+    артистом, настоящей обложкой и подсветкой «вот трек(и) этого артиста».
+
+    Возвращает списки релизов; id = collectionId, поэтому `openAlbumPage` открывает
+    ВЕСЬ релиз, а не отдельный трек. Чистая функция — сеть не трогает, чтобы её
+    можно было тестировать на фикстурах сервиса.
+    """
+    def cover(row):
+        return (row.get("artworkUrl100", "") or "").replace("100x100", "600x600")
+
+    releases: list = []
+    by_id: dict = {}
+    for a in album_rows:
+        cid = str(a.get("collectionId", ""))
+        if not cid:
+            continue
+        album_artist = a.get("artistName", "") or ""
+        title = a.get("collectionName", "") or ""
+        rtype, group = _own_type(int(a.get("trackCount") or 0), album_artist,
+                                 artist_name, title, alias_group,
+                                 a.get("collectionType", ""))
+        r = {
+            "id": cid,
+            "title": title,
+            "cover": cover(a),
+            "year": (a.get("releaseDate", "") or "")[:4],
+            "date": (a.get("releaseDate", "") or "")[:10],
+            "tracks": a.get("trackCount") or 0,
+            "type": rtype,
+            "group": group,
+            "url": a.get("collectionViewUrl", ""),
+            "explicit": a.get("collectionExplicitness") == "explicit",
+            "album_artist": album_artist,
+            "is_compilation": rtype == "compilation",
+            # Для своего микса/сборника весь треклист принадлежит артисту —
+            # подсветка не нужна (пусто). Для чужой компилы заполнится ниже,
+            # когда из трекового прохода известны trackId именно его дорожек.
+            "highlight": [],
+            "service": service,
+        }
+        by_id[cid] = r
+        releases.append(r)
+
+    # Родительские коллекции из трекового прохода: компиляции, где артист — одна
+    # дорожка. Считаем, какие треки принадлежат ЭТОМУ артисту (с учётом алиасов) и
+    # под каким написанием он там указан.
+    parents: dict = {}
+    for s in song_rows:
+        if s.get("wrapperType") != "track":
+            continue
+        cid = str(s.get("collectionId") or "")
+        if not cid or cid in by_id:
+            continue
+        track_artist = s.get("artistName", "") or ""
+        is_own = same_artist(track_artist, artist_name, alias_group)
+        p = parents.get(cid)
+        if p is None:
+            p = parents[cid] = {
+                "id": cid,
+                "title": s.get("collectionName", "") or "",
+                "cover": cover(s),
+                "year": (s.get("releaseDate", "") or "")[:4],
+                "date": (s.get("releaseDate", "") or "")[:10],
+                "tracks": 0,
+                "url": s.get("collectionViewUrl", ""),
+                "explicit": s.get("trackExplicitness") == "explicit",
+                "album_artist": (s.get("collectionArtistName") or track_artist or ""),
+                "highlight": [],
+                "credited_as": "",
+                "service": service,
+            }
+        p["tracks"] += 1
+        if is_own:
+            tid = str(s.get("trackId") or "")
+            if tid and tid not in p["highlight"]:
+                p["highlight"].append(tid)
+            # Артист указан ПРЕЖНИМ именем внутри чужого микса — показать это
+            # написание («как 16 Bit Lolitas»), но не чужим артистом.
+            if track_artist and _norm(track_artist) != _norm(artist_name):
+                p["credited_as"] = track_artist
+
+    for cid, p in parents.items():
+        album_artist = p["album_artist"]
+        own_headline = same_artist(album_artist, artist_name, alias_group)
+        # Релиз, где у артиста хотя бы один СВОЙ трек, но заголовок — не он
+        # (VA/лейбл/другой диджей) или это непрерывный микс — компиляция.
+        compilation = (
+            is_various_artists(album_artist)
+            or is_dj_mix(title=p["title"])
+            or (not own_headline and p["highlight"])
+            or is_compilation(album_artist=album_artist, title=p["title"],
+                               track_artist=artist_name)
+        )
+        if compilation:
+            p["type"], p["group"] = "compilation", "compilation"
+            p["is_compilation"] = True
+        elif own_headline:
+            p["type"], p["group"] = _own_type(p["tracks"], album_artist, artist_name,
+                                              p["title"], alias_group)
+            p["is_compilation"] = p["type"] == "compilation"
+        else:
+            p["type"], p["group"] = "appears_on", "appears_on"
+            p["is_compilation"] = False
+        p.setdefault("year", p.get("year", ""))
+        releases.append(p)
+        by_id[cid] = p
+
+    if wanted and wanted != {"all"}:
+        releases = [r for r in releases if r.get("type") in wanted]
+    releases.sort(key=lambda r: r.get("date", ""), reverse=True)
+    return releases
