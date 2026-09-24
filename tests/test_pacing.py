@@ -39,11 +39,14 @@ def _napper(sink: list):
 def test_caps_default_and_are_documented():
     assert pacing.caps("apple") == {"hour": 1500, "day": 15000}
     assert pacing.caps("qobuz_playlist") == {"hour": 120, "day": 1200}
-    # ключей конфига четыре, и они ровно те, что объявлены в config_service
+    assert pacing.caps("relay-upstream") == {"hour": 1200, "day": 12000}
+    # ключей конфига ровно столько, сколько сервисов, и все они объявлены в
+    # config_service (см. следующий тест)
     keys = {d["cfg_hour"] for d in pacing.DEFAULTS.values()} | \
            {d["cfg_day"] for d in pacing.DEFAULTS.values()}
     assert keys == {"apple-requests-per-hour", "apple-requests-per-day",
-                    "qobuz-playlist-per-hour", "qobuz-playlist-per-day"}
+                    "qobuz-playlist-per-hour", "qobuz-playlist-per-day",
+                    "relay-upstream-per-hour", "relay-upstream-per-day"}
 
 
 def test_config_service_declares_the_pacing_keys():
@@ -61,6 +64,15 @@ def test_config_service_declares_the_pacing_keys():
 def test_caps_config_wins_zero_means_off():
     cfg = {"apple-requests-per-hour": 10, "apple-requests-per-day": 0}
     assert pacing.caps("apple", cfg) == {"hour": 10, "day": 0}
+
+
+def test_caps_of_an_unregistered_service_is_no_cap():
+    """Сервис, которого нет в DEFAULTS, — не ошибка, а «потолка нет». Раньше
+    `caps` падал KeyError('cfg_hour') на первом же обращении нового сервиса и
+    ронял дорогу целиком, а не только лимит."""
+    assert pacing.caps("never_seen_before") == {"hour": 0, "day": 0}
+    assert pacing.wait_seconds("never_seen_before", "acct", {}) == 0.0
+    assert pacing.blocked("never_seen_before", "acct", {}) is False
 
 
 def test_caps_garbage_falls_back_to_default():

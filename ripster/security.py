@@ -52,6 +52,10 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     # официальному эндпоинту плейлистов Qobuz. Без этой строки поле в Настройках
     # сохранялось бы «успешно» и молча не действовало.
     "apple-requests-per", "qobuz-playlist-per",
+    # Свой реле-сервер ключей (ripster/relay_store.py + routes/relay.py) и его
+    # потолок на враппер. Без этой строки любой из ключей сохранялся бы
+    # «успешно» и молча не действовало — ровно тот класс, что ловили 02.08.
+    "relay-",
     "atmos-max", "max-memory",
     "media-user",
     "storefront",

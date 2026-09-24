@@ -44,6 +44,13 @@ DEFAULTS = {
     "qobuz_playlist": {"hour": 120,  "day": 1200,
                        "cfg_hour": "qobuz-playlist-per-hour",
                        "cfg_day":  "qobuz-playlist-per-day"},
+    # Своё реле (24.09.2026): сколько ключей просим с ОДНОГО враппер-контейнера.
+    # Это не про скорость клиента, а про расход учётки: 1200 обращений к Apple в
+    # час на один device-info — далеко за пределами человеческой закачки и уже
+    # внутри того, за что режут.
+    "relay-upstream": {"hour": 1200, "day": 12000,
+                       "cfg_hour": "relay-upstream-per-hour",
+                       "cfg_day":  "relay-upstream-per-day"},
 }
 
 #: Ступени штрафа: 30 с, 60, 120 … и не дольше полудня. Первая ступень —

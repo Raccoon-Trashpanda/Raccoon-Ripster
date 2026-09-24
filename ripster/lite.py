@@ -38,11 +38,16 @@ _MAX_ENTRIES = 5000
 
 
 class LiteError(RuntimeError):
-    """Ошибка lite-сервера (конверт code!=0) или невозможность до него дойти."""
+    """Ошибка lite-сервера (конверт code!=0) или невозможность до него дойти.
 
-    def __init__(self, msg: str, code: int = -1):
+    `http_status` отделён от `code` намеренно: `code` — это поле конверта,
+    которое реле отдаёт клиенту как есть, а по `http_status` решают про штраф
+    (429/403 от туннеля или враппера в конверт не ложатся никогда)."""
+
+    def __init__(self, msg: str, code: int = -1, http_status: int = 0):
         super().__init__(msg)
         self.code = code
+        self.http_status = int(http_status or 0)
 
 
 def lite_url(config: dict) -> str:
@@ -160,14 +165,17 @@ class LiteClient:
     # ── transport ─────────────────────────────────────────────────────────
     def _envelope(self, resp: httpx.Response) -> dict:
         if resp.status_code >= 500:
-            raise LiteError(f"lite HTTP {resp.status_code}", code=resp.status_code)
+            raise LiteError(f"lite HTTP {resp.status_code}",
+                            code=resp.status_code, http_status=resp.status_code)
         try:
             env = resp.json()
         except ValueError:
-            raise LiteError("lite вернул не-JSON", code=-1)
+            raise LiteError("lite вернул не-JSON", code=-1,
+                            http_status=resp.status_code)
         if not isinstance(env, dict) or int(env.get("code", -1)) != 0:
             raise LiteError(str(env.get("msg") or "lite error"),
-                            code=int(env.get("code", -1)) if isinstance(env, dict) else -1)
+                            code=int(env.get("code", -1)) if isinstance(env, dict) else -1,
+                            http_status=resp.status_code)
         return env.get("data") or {}
 
     def _get(self, path: str, params: dict, timeout: float | None = None) -> dict:
@@ -186,6 +194,17 @@ class LiteClient:
             raise LiteError(f"Wrapper Lite недоступен: {e.__class__.__name__}", code=-1)
         return self._envelope(r)
 
+    def get_data(self, path: str, params: dict | None = None,
+                 timeout: float | None = None) -> dict:
+        """Общий GET: `data` из конверта дословно. Нужен реле, которое обязано
+        вернуть клиенту ровно те поля, что отдал враппер, — отбросив половину
+        конверта, мы рассинхронизируемся с AMDL и прочими lite-клиентами."""
+        return self._get(path, params or {}, timeout=timeout)
+
+    def post_data(self, path: str, payload: dict | None = None,
+                  timeout: float | None = None) -> dict:
+        return self._post(path, payload or {}, timeout=timeout)
+
     # ── API ───────────────────────────────────────────────────────────────
     def status(self) -> dict:
         return self._get("/status", {}, timeout=6.0)
@@ -200,6 +219,15 @@ class LiteClient:
         if not url:
             raise LiteError(f"lite не отдал m3u8 для {adam_id}")
         return url
+
+    def webplayback(self, adam_id: str) -> dict:
+        """Плейлист WebPlay (dev-токен стриминга): {adamId, m3u8}.
+
+        Роут есть во враппере (`lite_main.cpp`, GET /webplayback), а в нашем
+        Python-клиент его до сих пор никто не звал. Реле обязано его отдавать:
+        это единственный путь для браузера, которому нужен список воспроизведения
+        без хозяйского media-user-token."""
+        return self._get("/webplayback", {"adamId": adam_id}, timeout=60.0)
 
     def key(self, adam_id: str, uri: str) -> dict:
         """data-объект /key: contentKey + шаблон Temari (ctx/state/регистры).

@@ -314,6 +314,11 @@ DEFAULT_CONFIG: dict = {
     "apple-requests-per-day":   15000,
     "qobuz-playlist-per-hour":  120,
     "qobuz-playlist-per-day":   1200,
+    # Расход ОДНОГО key-сервера в нашем же реле (ripster/relay_pool.py): эти же
+    # ключи считают и штраф, и «у кого просить». Без строки здесь настройка в
+    # интерфейсе сохранялась бы «успешно» и молча не действовала.
+    "relay-upstream-per-hour":  1200,
+    "relay-upstream-per-day":   12000,
     # ── Qobuz ───────────────────────────────────────────────────────────────
     "qobuz-user-id":    "",
     "qobuz-auth-token": "",
@@ -394,6 +399,33 @@ DEFAULT_CONFIG: dict = {
     "apple-lite-url": "http://127.0.0.1:12340",
     "apple-lite-decrypt-port": "127.0.0.1:12345",
     "apple-lite-m3u8-port": "127.0.0.1:12346",
+    # ── Своё реле ключей (docs/OWN_KEY_RELAY.md) ────────────────────────────
+    # Мы сами для себя — тот wm.wol.moe, но на ХОЗЯЙСКИХ учётках: наружу
+    # торчит одно реле с API-ключами, а key-серверы (контейнеры wrapper-lite)
+    # остаются на петле. По умолчанию ВЫКЛЮЧЕНО: наружу никто ничего не
+    # выставляет без явного решения владельца.
+    "relay-enabled": False,
+    # [{url, label, account, streams}] — пусто = один инстанс по apple-lite-url.
+    "relay-instances": [],
+    # Квота ключа по умолчанию. Консервативно: один ключ не должен иметь
+    # возможности сжечь учётку раньше, чем мы это заметим в админке.
+    # 0 = потолок снят, при выпуске ключа 0 значит «наследовать это значение».
+    "relay-default-qps": 2,
+    "relay-default-concurrency": 2,
+    "relay-default-per-hour": 120,
+    "relay-default-per-day": 2000,
+    "relay-max-keys": 50,
+    # /license — самая дорогая ручка (FairPlay-лицензия с НАШЕЙ учётки, вне
+    # sample-AES-CTR стриминга). По умолчанию закрыта: наружу отдаём ключи.
+    "relay-license-allow": False,
+    # Сколько запросов БЕЗ ключа в минуту примет один сырой peer (за туннелем
+    # все внешние приходят как 127.0.0.1, то есть потолок де-факто глобальный —
+    # разбор в auth._client_ip). Нужен, чтобы перебор ключа не был бесплатным.
+    "relay-unauth-per-minute": 30,
+    # ПК как клиент собственного реле: адрес + ключ вместо прямого контейнера
+    # (пусто = ходить в apple-lite-url напрямую, как ходило всегда).
+    "relay-client-url": "",
+    "relay-client-key": "",
     "max-memory": 256,
     "downloader-path": "apple-music-downloader",
     "use-go-run": True,
