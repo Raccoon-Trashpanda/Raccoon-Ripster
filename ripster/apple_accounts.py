@@ -158,6 +158,11 @@ def container_running(container: str) -> bool:
 # отказ логина (response type 4) лечатся ПО-РАЗНОМУ — первое продлением
 # ожидания и своим identity, второе только временем, — и оба неотличимы снаружи
 # от «нет прав в регионе», пока не заглянешь в контейнер.
+#
+# Порядок списков значим: возвращается ПЕРВЫЙ совпавший класс. `device_limit`
+# стоит раньше `plan_single_stream` намеренно — оба означают «слишком много
+# сессий», но 3062 стоит учётке слота устройства, а ложная мягкая реакция на
+# него заставила бы пул перелогиниться и сжечь следующий слот.
 _BLOCK_PATTERNS = (
     # «Your account is disabled. This Apple Account has been disabled for
     # security reasons» — 24.09.2026 три учётки владельца получили этот диалог и
@@ -167,6 +172,14 @@ _BLOCK_PATTERNS = (
                           "disabled for security reasons", "apple account has been disabled")),
     ("device_limit", ("device limit", "concurrent playing devices",
                       "lease code 3062", "response type 6")),
+    # «More than one device is trying to play music» + `end lease code 3084`
+    # (#343764, #348845): второй поток на учётку, которой тариф позволяет один
+    # (личная подписка). Это НЕ смерть учётки — Apple освобождает лизинг сам за
+    # минуты, и лечится оно НАШИМ порядком, а не временем: меньше одновременных
+    # потоков на эту учётку. Поэтому класс мягкий и в HARD не входит
+    # (см. `ripster.apple_plan`).
+    ("plan_single_stream", ("more than one device is trying to play music",
+                            "lease code 3084", "end lease 3084")),
     ("login_failed", ("login failed", "response type 4")),
     ("no_session", ("playback error",)),
 )

@@ -74,6 +74,23 @@ def _bound_to_loopback(ct) -> bool:
 _HARD_LOGIN_REASONS = ("device_limit", "login_failed", "account_disabled")
 LOGIN_PAUSE_S = 12 * 3600
 
+#: «More than one device is trying to play music» / `end lease code 3084` —
+#: Симптом ДРУГОЙ природы: учётка жива, логин принят, просто мы попросили у неё
+#: больше одновременных потоков, чем позволяет тариф. Долгая пауза входа здесь
+#: лечила бы ровно обратное — Apple сам освобождает лизинг за минуты, и
+#: достаточно перестать давать учётке второй поток (см. `ripster.apple_plan`).
+_SOFT_LOGIN_REASONS = ("plan_single_stream",)
+LEASE_PAUSE_S = 15 * 60
+
+
+def _pause_len(reason: str) -> float:
+    return LEASE_PAUSE_S if reason in _SOFT_LOGIN_REASONS else LOGIN_PAUSE_S
+
+
+def _block_reason_key(reason: str) -> str:
+    return "plan_single_stream" if reason in _SOFT_LOGIN_REASONS else reason
+
+
 
 def _blocks_path():
     from pathlib import Path as _P
@@ -97,13 +114,14 @@ def _blocks_load() -> dict:
         return {}
 
 
-def mark_login_blocked(acct: dict, reason: str, now: float | None = None) -> None:
+def mark_login_blocked(acct: dict, reason: str, now: float | None = None,
+                       seconds: float = LOGIN_PAUSE_S) -> None:
     import json as _j
     if not (acct or {}).get("id"):
         return
     now = time.time() if now is None else now
     d = _blocks_load()
-    d[_acct_key(acct)] = {"reason": reason, "until": now + LOGIN_PAUSE_S}
+    d[_acct_key(acct)] = {"reason": reason, "until": now + seconds}
     try:
         p = _blocks_path()
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -126,7 +144,8 @@ def login_pause(acct: dict, now: float | None = None) -> dict | None:
 
 
 class WrapperPool:
-    def __init__(self, accounts: list[dict], size: int | None = None):
+    def __init__(self, accounts: list[dict], size: int | None = None,
+                 salt: str = ""):
         """accounts: [{"id": str, "password": str, "label": str}, ...] — ONE
         DISTINCT Apple account per slot. accounts[0] is the primary
         (wrapper-apple-id/wrapper-password), accounts[1:] come from the
@@ -141,6 +160,7 @@ class WrapperPool:
         identity under the same account would have re-collided with itself.
         """
         self.accounts = accounts
+        self._salt = str(salt or "")
         logins = [a for a in accounts if a.get("kind", "login") == "login"]
         self.size = max(1, min(int(size or len(logins)), max(1, len(logins))))
         self._lock = threading.Lock()
@@ -254,9 +274,13 @@ class WrapperPool:
             c.containers.get(self._name(i)).remove(force=True)
         except Exception:
             pass
+        args = f"-H 0.0.0.0 -L {acct['id']}:{acct['password']}"
+        di = self._device_info(i)
+        if di:
+            args += f" -I {di}"
         c.containers.run(
             IMAGE, detach=True, name=self._name(i),
-            environment={"args": f"-H 0.0.0.0 -L {acct['id']}:{acct['password']}"},
+            environment={"args": args},
             ports={"10020/tcp": ("127.0.0.1", dec), "20020/tcp": ("127.0.0.1", m3u)},
             volumes={self._data_dir(i): {"bind": "/app/rootfs/data", "mode": "rw"}},
             # БЕЗ restart_policy: автоподъём докером при старте системы —
@@ -264,6 +288,34 @@ class WrapperPool:
             # Пул сам поднимает слот, когда он нужен.
         )
         return dec, m3u
+
+    def _device_info(self, i: int) -> str | None:
+        """Уникальный `-I` device-info для слота i (см. ripster/wrapper_device_info).
+
+        Слот 0 возвращает None: его отпечаток меняет ТОЛЬКО явное действие
+        владельца, потому что слот 0 — единственная живая учётка, а новый
+        device-info для Apple = новое устройство = риск device_limit. Пул к
+        тому же слот 0 не пересоздаёт (`_start` поднимает существующий).
+
+        Для новых аккаунтов — детерминированный отпечаток, назначенный один раз
+        и сохранённый в реестре, чтобы пережить рестарты и правки кода, не
+        двигая устройство уже прогретой учётки."""
+        if i == 0:
+            return None
+        acct = self.accounts[i] if 0 <= i < len(self.accounts) else {}
+        acct_id = str(acct.get("id") or "")
+        if not acct_id:
+            return None
+        try:
+            from ripster import wrapper_device_info as _di
+            return _di.assign_new_account(acct_id, self._salt,
+                                          str(acct.get("country") or ""))
+        except Exception as e:                              # noqa: BLE001
+            # Без отпечатка слот поднимется на дефолте — лучше так, чем не
+            # поднимется вовсе; но молча глотать нельзя, иначе уникальный
+            # device-info тихо перестанет быть уникальным.
+            print(f"[pool] slot {i}: device-info не назначен: {e}", flush=True)
+            return None
 
     def _refuse_if_paused(self, i: int) -> None:
         """Не логинить учётку, которой Apple только что отказал.
@@ -408,6 +460,34 @@ class WrapperPool:
         """Номера слотов с живым портом И закешированной учёткой (по факту)."""
         return [i for i in range(self.reach()) if self._usable(i)]
 
+    def fanout_slots(self) -> list[int]:
+        """Слоты, которым можно доверить ОДНОВРЕМЕННЫЙ поток веера.
+
+        `usable_slots` отвечает на вопрос «поднят ли контейнер», а Apple считает
+        не контейнеры, а устройства одной учётки: два слота с одной личной
+        подпиской в веере треков — это тот самый второй поток и `lease 3084`.
+        Отсюда потолок: не больше `cap_for(учётка)` слотов на учётку, и ни
+        одного слота остывающей после отказа учётки."""
+        try:
+            from ripster import apple_plan
+        except Exception:                                   # noqa: BLE001
+            return self.usable_slots()
+        taken: dict[str, int] = {}
+        out = []
+        for i in self.usable_slots():
+            if self.cooling_down(i):
+                continue
+            ident = self._identity(i) or f"#slot{i}"
+            try:
+                cap = apple_plan.cap_for(ident)
+            except Exception:                               # noqa: BLE001
+                cap = 1
+            if taken.get(ident, 0) >= cap:
+                continue
+            taken[ident] = taken.get(ident, 0) + 1
+            out.append(i)
+        return out
+
     def _wait_listening(self, c, i: int, timeout: float = 25.0) -> bool:
         """Block until the instance logged in + is serving (account cached)."""
         name = self._name(i)
@@ -470,8 +550,30 @@ class WrapperPool:
                   f"{'открыт' if self._serving(i) else 'мёртв'}, сессии учётки нет"
                   f"{'' if not why else ' (' + why + ')'}", flush=True)
             self._note(i, ready=False, reason=why)
-            if why in _HARD_LOGIN_REASONS and 0 <= i < len(self.accounts):
-                mark_login_blocked(self.accounts[i], why)
+            if 0 <= i < len(self.accounts):
+                acct = self.accounts[i]
+                if why in _HARD_LOGIN_REASONS:
+                    mark_login_blocked(acct, why)
+                elif why in _SOFT_LOGIN_REASONS:
+                    # 3084: учётку не хороним, но на второй поток не пускаем и
+                    # даём лизингу освободиться.
+                    from ripster import apple_plan
+                    ident = self._identity(i)
+                    if ident and apple_plan.note_lease_conflict(ident):
+                        print(f"[pool] слот {i}: тариф выдерживает один поток — "
+                              f"учётка переведена в однопоточный режим", flush=True)
+                    mark_login_blocked(acct, why, seconds=_pause_len(why))
+        elif fresh:
+            # Тариф учётки спрашиваем ровно один раз на подъём слота и не чаще
+            # часа на учётку (`apple_plan.measure_container`): с этого пути
+            # начинается закачка, и задержка здесь дороже скорости проверки.
+            try:
+                from ripster import apple_plan
+                ident = self._identity(i)
+                if ident:
+                    apple_plan.measure_container(ident, self._name(i))
+            except Exception as e:                          # noqa: BLE001
+                print(f"[pool] slot {i}: тариф не измерен: {e}", flush=True)
         return ok
 
     def _note(self, i: int, **kw) -> None:
@@ -493,7 +595,7 @@ class WrapperPool:
             for i in parallel:
                 s = self._slots.get(i)
                 if (s and not s["busy"] and self._running(c, i)
-                        and self._usable(i)):
+                        and self._usable(i) and self._account_room(i)):
                     s["busy"] = True
                     s["last_used"] = time.time()
                     s.pop("ready", None); s.pop("reason", None)
@@ -504,6 +606,8 @@ class WrapperPool:
             # лишать задачу остальных.
             for i in parallel:
                 if i in self._slots and self._slots[i]["busy"]:
+                    continue
+                if not self._account_room(i):
                     continue
                 try:
                     dec, m3u = self._start(c, i)
@@ -533,6 +637,104 @@ class WrapperPool:
             if slot in self._slots:
                 self._slots[slot]["busy"] = False
                 self._slots[slot]["last_used"] = time.time()
+
+    # ── потоки на учётку (тариф) ──────────────────────────────────────────────
+    def account_of(self, slot: int) -> dict:
+        return (self.accounts[slot] if 0 <= slot < len(self.accounts) else {}) or {}
+
+    def _identity(self, slot: int) -> str:
+        """Ключ учётки слота — тот же, что у паузы входа. Номер слота ключом не
+        является: `wrapper-accounts` человек переставляет, а тариф — свойство
+        учётки, а не позиции в списке."""
+        try:
+            return account_identity(self.account_of(slot))
+        except Exception:                                   # noqa: BLE001
+            return ""
+
+    def streams_in_use(self, ident: str) -> int:
+        """Сколько слотов этой учётки заняты ПРЯМО сейчас."""
+        if not ident:
+            return 0
+        return sum(1 for j, s in self._slots.items()
+                   if s.get("busy") and self._identity(j) == ident)
+
+    def plan_limited_size(self) -> int:
+        """Потолок одновременных задач для ЛЮБОГО слота: сумма прав учёток по
+        их тарифам, а не число слотов.
+
+        Нужен именно глобальный ответ, а не отказ `_account_room`: полоса
+        `zh_cap` в планировщике обязана знать, что два слота с одной личной
+        подпиской — это ОДИН поток, а не два. Иначе вторая задача встаёт в
+        полосу, час ждёт слота и получает его только когда соседка освободится,
+        а владелец видит «очередь стоит» без причины.
+
+        Неизвестный тариф = 1 поток (см. docstring `apple_plan`), поэтому по
+        умолчанию метод возвращает то же, что и раньше: слотов столько, сколько
+        разных учёток."""
+        try:
+            from ripster import apple_plan
+        except Exception:                                   # noqa: BLE001
+            return self.size
+        slots: dict[str, int] = {}
+        for i in self._parallel_slots():
+            ident = self._identity(i) or f"#slot{i}"
+            slots[ident] = slots.get(ident, 0) + 1
+        total = 0
+        for ident, n in slots.items():
+            try:
+                cap = apple_plan.cap_for(ident)
+            except Exception:                               # noqa: BLE001
+                cap = 1
+            total += min(n, cap)
+        return max(1, total)
+
+    def _account_room(self, i: int) -> bool:
+        """Есть ли у учётки слота i право ещё на один одновременный поток.
+
+        Пул считает слоты, а Apple считает УСТРОЙСТВА одной учётки. Пока в
+        списке одна строка на учётку это одно и то же, но проверка обязана
+        смотреть на учётку: стоит вписать один Apple ID дважды (или оставить
+        его и в «primary», и в списке), и два слота уедут двумя потоками по
+        личной подписке — то есть ровно `end lease code 3084`."""
+        try:
+            from ripster import apple_plan
+        except Exception:                                   # noqa: BLE001
+            return True
+        ident = self._identity(i)
+        if not ident:
+            return True
+        try:
+            return self.streams_in_use(ident) < apple_plan.cap_for(ident)
+        except Exception:                                   # noqa: BLE001
+            return True
+
+    def reserve_slot(self, i: int) -> bool:
+        """Занять конкретный слот с учётом тарифа его учётки. True — слот наш.
+
+        Второй вход для закреплённых задач: `runner` брал порт слота напрямую и
+        не помечал его занятым, поэтому две задачи, которым маршрутизатор
+        подсказал одну витрину, садились на одну учётку двумя потоками. Теперь
+        закрепление идёт через этот метод — и если у учётки один поток по
+        тарифу, вторая задача честной очередью подождёт, а не словёт диалог
+        Apple."""
+        with self._lock:
+            if not self.is_login_slot(i) or not self._account_room(i):
+                return False
+            s = self._slots.setdefault(i, {"busy": False, "last_used": time.time()})
+            if s.get("busy"):
+                return False
+            s["busy"] = True
+            s["last_used"] = time.time()
+            return True
+
+    def cooling_down(self, i: int) -> bool:
+        """Учётка слота только что поймала 3084 и остывает (см. `apple_plan`)."""
+        try:
+            from ripster import apple_plan
+            ident = self._identity(i)
+            return bool(ident) and apple_plan.lease_cooling(ident)
+        except Exception:                                   # noqa: BLE001
+            return False
 
     def scale_down_idle(self) -> int:
         """Stop instances idle longer than IDLE_COOLDOWN (keep slot 0 warm).
@@ -574,15 +776,28 @@ class WrapperPool:
         `country` пустой при живом порте — это и есть тот слот, который раньше
         молча отдавал Invalid CKC."""
         c = _client()
+        try:
+            from ripster import apple_plan
+        except Exception:                                   # noqa: BLE001
+            apple_plan = None
         out = []
         for i in range(self.reach()):
             run = self._running(c, i)
             open_ = run and self._serving(i)
             cc = self._session_country(i) if open_ else ""
-            out.append({"slot": i, "decrypt": self._ports(i)[0],
-                        "country": cc, "running": run,
-                        "port_open": bool(open_), "ready": bool(open_ and cc),
-                        "reason": ("" if (open_ and cc) else self.blocked_reason(i))})
+            row = {"slot": i, "decrypt": self._ports(i)[0],
+                   "country": cc, "running": run,
+                   "port_open": bool(open_), "ready": bool(open_ and cc),
+                   "reason": ("" if (open_ and cc) else self.blocked_reason(i))}
+            if apple_plan is not None:
+                # Тариф и право на потоки — то, чего владельцу не хватало,
+                # когда учётка молча вставала в позу на втором треке.
+                snap = apple_plan.snapshot(self._identity(i))
+                row["plan"] = snap["plan"]
+                row["streams"] = snap["streams"]
+                if snap["cooling_until"]:
+                    row["cooling_until"] = snap["cooling_until"]
+            out.append(row)
         return out
 
 
@@ -768,7 +983,8 @@ def get_pool(config: dict) -> "WrapperPool | None":
                 size = int(config.get("apple-pool-size", DEFAULT_POOL_SIZE) or DEFAULT_POOL_SIZE)
             except Exception:
                 size = DEFAULT_POOL_SIZE
-            _POOL = WrapperPool(accounts, size=size)
+            _POOL = WrapperPool(accounts, size=size,
+                                salt=str(config.get("apple-device-salt") or ""))
         if not _REAPER_STARTED:
             _REAPER_STARTED = True
             threading.Thread(target=_reaper_loop, args=(_POOL,),
@@ -777,9 +993,13 @@ def get_pool(config: dict) -> "WrapperPool | None":
 
 
 def pool_size(config: dict) -> int:
-    """Concurrency cap for the Apple-local lane (1 when the pool is off)."""
+    """Concurrency cap for the Apple-local lane (1 when the pool is off).
+
+    Потолок берётся из тарифов учёток (`plan_limited_size`), а не из числа
+    контейнеров: два слота с одной личной подпиской — это один поток Apple, и
+    врать полосе планировщика двумя нельзя."""
     p = get_pool(config)
-    return p.size if p else 1
+    return p.plan_limited_size() if p else 1
 
 
 def managed_slot(config: dict, slot: int) -> bool:
@@ -882,13 +1102,16 @@ def ensure_all_decrypt_ports(config: dict) -> list[str]:
     строился по номерам `range(n)` — «n слотов поднято, значит это слоты
     0..n-1», — и в него попадали мёртвые порты: Go веером гнал треки в
     `connection refused`, а наружу выходило «Invalid CKC / нет прав в регионе».
+
+    🔴 И ТОЛЬКО те, у кого есть право на поток: `fanout_slots` (два слота одной
+    личной подписки — это один поток Apple, а не два).
     """
     p = get_pool(config)
     if p is None:
         return []
     try:
         p.ensure(p.size)
-        up = p.usable_slots()
+        up = p.fanout_slots()
     except Exception as e:
         print(f"[pool] ensure_all_decrypt_ports: {e}", flush=True)
         up = []

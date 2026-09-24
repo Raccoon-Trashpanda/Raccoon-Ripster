@@ -1858,6 +1858,20 @@ async def _amd_preflight(task: dict, quality: str) -> bool:
     secure   = _config.get("amd-instance-secure", True)
     await _broadcast(_i18n.log_event("console.amd_wm_checking", level="info",
                                      instance=instance, task_id=tid))
+    # Сначала дешёвый HTTP /status с ключом (apple_router.probe): он умеем
+    # различать «нужен ключ», «квота исчерпана» и «сервер лежит», чего gRPC
+    # Status() не скажет — тот на все отказе даст безликое unreachable.
+    # 429 здесь терминален и без повторов: дневную квоты повторами не вернуть.
+    from ripster import apple_router as _ar_probe
+    _probe = await asyncio.to_thread(_ar_probe.public_wrapper_probe, dict(_config))
+    if _probe.get("reason") == "api_key":
+        await _log_key("console.amd_wm_need_key", "error", tid)
+        _try_advance_task(task, TaskStatus.ERROR)
+        return False
+    if _probe.get("reason") == "quota":
+        await _log_key("console.amd_wm_quota", "error", tid)
+        _try_advance_task(task, TaskStatus.ERROR)
+        return False
     wm = await _amd_mod.amd_wrapper_status(instance, secure)
     if wm.get("error"):
         await _broadcast(_i18n.log_event("console.amd_wm_down", level="error",
@@ -2677,6 +2691,9 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 "PYTHONIOENCODING":         "utf-8",
                 "PYTHONLEGACYWINDOWSSTDIO": "0",
                 "PATH":                     _amd_dir_str + os.pathsep + os.environ.get("PATH", ""),
+                # Ключ wm.wol.moe — окружением, не argv (argv попадает в логи
+                # процессов) и не config.toml (пишут руки пользователя).
+                "AMD_WM_API_KEY":           str(_config.get("amd-wm-api-key") or ""),
             }
         elif engine_name == "orpheus_spotify":
             extra_env = {"PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python", "PYTHONIOENCODING": "utf-8"}
@@ -2729,16 +2746,32 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     _acq = None
                     if _forced is not None:
                         try:
-                            _fp = _pool._ports(int(_forced))
+                            _fs = int(_forced)
+                            _fp = _pool._ports(_fs)
                             from ripster import apple_accounts as _AAp
-                            _name = "amd-wrapper" if int(_forced) == 0 else f"rip-wrapper-{int(_forced)}"
-                            if await asyncio.to_thread(
-                                    _AAp.ensure_slot_up, _name, _fp[0], 90.0, _config):
-                                _acq = (int(_forced), _fp[0], _fp[1])
+                            _name = "amd-wrapper" if _fs == 0 else f"rip-wrapper-{_fs}"
+                            # Слот занимаем ДО ожидания подъёма: без этого две
+                            # задачи, которым маршрутизатор подсказал одну
+                            # витрину, садились на одну учётку двумя потоками —
+                            # а личная подписка Apple отвечает на второй поток
+                            # «More than one device is trying to play music»
+                            # (lease 3084). Право на второй поток считает пул
+                            # по тарифу учётки (`WrapperPool.reserve_slot`).
+                            _room = await asyncio.to_thread(_pool.reserve_slot, _fs)
+                            if not _room:
                                 task["log"].append(
-                                    f"🦝 слот закреплён за задачей: {_forced} (порт {_fp[0]})")
-                                print(f"[runner] slot {_forced} pinned, port {_fp[0]}", flush=True)
+                                    f"🦝 слот {_fs} занят соседкой по этой учётке — "
+                                    f"тариф не даёт второго потока, беру другой")
+                                print(f"[runner] slot {_fs} refused: no room for a "
+                                      f"second stream on this account", flush=True)
+                            elif await asyncio.to_thread(
+                                    _AAp.ensure_slot_up, _name, _fp[0], 90.0, _config):
+                                _acq = (_fs, _fp[0], _fp[1])
+                                task["log"].append(
+                                    f"🦝 слот закреплён за задачей: {_fs} (порт {_fp[0]})")
+                                print(f"[runner] slot {_fs} pinned, port {_fp[0]}", flush=True)
                             else:
+                                await asyncio.to_thread(_pool.release, _fs)
                                 task["log"].append(
                                     f"🦝 pinned slot {_forced} did not come up - taking any")
                                 print(f"[runner] pinned slot {_forced} did NOT come up", flush=True)
@@ -4053,8 +4086,40 @@ async def run_task(task: dict) -> None:
                     await _broadcast({"type": "log", "msg": msg, "level": "warn"})
                     await _broadcast({"type": "wrapper_status", "running": False})
 
+        # Ключ враппера Apple выдаёт по витрине АККАУНТА, а не по витрине ссылки
+        # (факт из переписки авторов wrapper'а; разбор — docs/APPLE_STOREFRONT_-
+        # MISMATCH_2026-09-24.md). Раньше ПЕРВЫЙ заход шёл по витрине ссылки →
+        # заведомый «Invalid store / Invalid CKC», и только реактивный блок ниже
+        # (после провала) переписывал ссылку на витрину аккаунта. Переписываем
+        # сразу, до первого запроса ключа: ровно то же действие, что и там, — но
+        # без гарантированно провального запроса (лишний CKC жжёт слот сессии).
+        # Мутируем ТОЛЬКО `_first_url` (даём ему переписать первый заход), а `url`
+        # остаётся ссылкой витрины: на нём работают фолбэк на публичный AMD и
+        # многоаккаунтная лестница ниже, где регион решает уже конкретный слот.
+        _first_url = url
+        if engine == "zhaarey" and not task.get("_sf_retried"):
+            try:
+                from ripster.apple_router import (key_request_storefront,
+                                                  rewrite_storefront_resolved,
+                                                  local_wrapper_storefront,
+                                                  url_storefront)
+                _acct_sf0 = await asyncio.to_thread(local_wrapper_storefront)
+                _cc, _changed = key_request_storefront(url, _acct_sf0)
+                if _changed:
+                    task["_sf_retried"] = True   # реактивный блок не повторит
+                    _first_url = await asyncio.to_thread(
+                        rewrite_storefront_resolved, url, _cc)
+                    task["log"].append(
+                        f"─── ключ: витрина ссылки '{url_storefront(url)}' "
+                        f"→ аккаунта '{_cc}' ───")
+                    await _broadcast(_i18n.log_event(
+                        "console.wrapper_local_sf_retry", level="warn",
+                        frm=url_storefront(url), to=_cc, task_id=task.get("id", "")))
+            except Exception:
+                pass
+
         try:
-            await _run_engine_task(task, engine, url, qid)
+            await _run_engine_task(task, engine, _first_url, qid)
         except _NeedAMDFallback:
             if _apple_local_only:
                 # Local-only: do NOT salvage via the public wrapper. Surface the

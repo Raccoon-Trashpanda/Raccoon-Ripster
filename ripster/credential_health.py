@@ -203,6 +203,9 @@ APPLE_HARD_CLASSES = ("account_disabled", "subscription_inactive", "token_reject
 _REASON_TEXT = {
     "account_disabled":     "Apple заблокировал аккаунт («account is disabled»)",
     "device_limit":         "Apple: лимит устройств (device limit / lease 3062)",
+    "plan_single_stream":   ("Apple: второй поток на тариф, который выдерживает "
+                             "один («More than one device is trying to play "
+                             "music», lease 3084)"),
     "login_failed":         "Apple отвергает логин (login failed / response type 4)",
     "subscription_inactive": "подписка Apple Music неактивна",
     "token_rejected":       "Apple отвергает media-user-token (403)",
@@ -335,18 +338,16 @@ def disable_apple_slot(kind: str, container: str) -> None:
         pass
 
 
-def _apple_subscription_active(raw: dict) -> "tuple[bool | None, str]":
-    """(True | False | None, причина).
+def subscription_meta(raw: dict) -> dict:
+    """`meta.subscription` учётки по её токенам. Пусто — спросить не удалось
+    (нет токенов, сеть, любой не-200).
 
-    None — не смогли проверить (нет токенов, сеть, любой не-200): трактуем как
-    «жив», чтобы транзиентная ошибка amp-api не отправила в архив живой аккаунт.
-    Хоронит только явный ответ ``subscription.active == false`` на 200 — и то не
-    сразу, а после DEFAULT_THRESHOLD проходов подряд (см. record_check).
-    """
+    Единственный владелец этого запроса: вторая копия тех же заголовков рано или
+    поздно стало бы известно меньше, чем известно здесь."""
     mut = str((raw or {}).get("music_token") or "")
     dev = str((raw or {}).get("dev_token") or "")
     if len(mut) < 50 or len(dev) < 50:
-        return None, ""
+        return {}
     try:
         import httpx
         r = httpx.get("https://amp-api.music.apple.com/v1/me/account",
@@ -356,10 +357,21 @@ def _apple_subscription_active(raw: dict) -> "tuple[bool | None, str]":
                                "Origin": "https://music.apple.com"},
                       timeout=8.0)
         if r.status_code != 200:
-            return None, ""
-        sub = ((r.json() or {}).get("meta") or {}).get("subscription") or {}
+            return {}
+        return ((r.json() or {}).get("meta") or {}).get("subscription") or {}
     except Exception:
-        return None, ""
+        return {}
+
+
+def _apple_subscription_active(raw: dict) -> "tuple[bool | None, str]":
+    """(True | False | None, причина).
+
+    None — не смогли проверить (нет токенов, сеть, любой не-200): трактуем как
+    «жив», чтобы транзиентная ошибка amp-api не отправила в архив живой аккаунт.
+    Хоронит только явный ответ ``subscription.active == false`` на 200 — и то не
+    сразу, а после DEFAULT_THRESHOLD проходов подряд (см. record_check).
+    """
+    sub = subscription_meta(raw)
     if not sub:
         return None, ""
     return (bool(sub.get("active")),
