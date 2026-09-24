@@ -14,9 +14,15 @@
   region_locked       в этом сторефронте не будет    → перепроверять бессмысленно
   no_token            наша недоработка, не витрины   → чинится настройками
 
-Сверяем только точными идентификаторами — по названию нельзя: одноимённые синглы,
+Сверяем точными идентификаторами — по названию нельзя: одноимённые синглы,
 делюксы и ремастеры дают ложные совпадения. Штрихкод (UPC) для Apple и Deezer,
-ISRC первого трека для Qobuz и Tidal.
+ISRC — для Qobuz и Tidal, у которых поиска по штрихкоду нет. Один и тот же
+релиз при этом живёт в витринах под РАЗНЫМИ штрихкодами (24.09.2026,
+Evanescence «Sweet Sacrifice (Remastered 2026)»: Spotify 00888072836037,
+Deezer 888072836020) — поэтому промах по одному ключу не вердикт, а ступенька
+лестницы: UPC → ISRC → нормализованные варианты штрихкода → и лишь последней
+консервативная сверка изданием (артист точный, название точное с учётом шума
+переизданий, то же число треков, длительность ±3 с).
 
 Кэш живёт на диске, иначе он не переживает перезапуск и каждое утро всё
 опрашивается заново.
@@ -24,6 +30,7 @@ ISRC первого трека для Qobuz и Tidal.
 from __future__ import annotations
 
 import json
+import re
 import time
 from pathlib import Path
 from typing import Optional
@@ -181,50 +188,285 @@ def _apple_storefronts() -> list[str]:
     return out or ["us"]
 
 
-async def _probe_one(service: str, upc: str, isrc: str) -> dict:
-    """Спросить один сервис. Возвращает запись матрицы."""
+def _upc_variants(upc: str) -> list[str]:
+    """Все честные формы одного штрихкода: как пришёл, без ведущих нулей и в
+    разрядностях 12/13/14.
+
+    Витрины заносят один релиз под разной разрядностью: Apple отдаёт
+    `00600574110367`, Deezer — `0600574110367`, Odesli — `886443927087`.
+    Промах по одной форме — это «не тем числом спросили», а не «релиза нет»,
+    поэтому последней точной ступенью перебираем остальные."""
+    d = "".join(ch for ch in (upc or "") if ch.isdigit())
+    if not d:
+        return []
+    bare = d.lstrip("0")
+    out: list[str] = []
+    for v in (d, bare, bare.rjust(12, "0"), bare.rjust(13, "0"), bare.rjust(14, "0")):
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
+# Шум переизданий: тем, чем лейбл обвешивает ОДНО и то же название, — снимаем
+# только скобки с этими словами. «(In the Style of Evanescence)» шумом не
+# считается и остаётся частью названия, отчего караоке-подделка под
+# «Sweet Sacrifice (Remastered 2026)» сверку не проходит.
+_FZ_EDITION = re.compile(
+    r"[()\[\]]*\b(?:digitally\s+)?(?:remaster(?:ed)?|deluxe|bonus(?: track)?s?|"
+    r"expanded|anniversary|reissue|single\s+version|stereo|mono)\b[^()\[\]]*[()\[\]]*",
+    re.I)
+# Караоке/трибьюн-маркеры: релиз с таким словом — чужая запись, каким бы ни
+# было остальное название.
+_FZ_BAD = re.compile(
+    r"in the style of|karaoke|tribute to|made famous by|originally performed|"
+    r"originally by|cover (?:of|version)|sing[- ]?along", re.I)
+
+# Допуск длительности между витринами, секунды: сервисы округляют длины
+# треков по-разному; 3 с покрывают наблюдаемый разброс и не пускают чужую запись.
+_FZ_TOL_S = 3
+
+
+def _fz_norm(s: str) -> str:
+    s = _FZ_EDITION.sub(" ", s or "")
+    s = re.sub(r"[^a-z0-9\u0430-\u044f\u0451]+", " ", s.lower())
+    return " ".join(s.split())
+
+
+def _fuzzy_ok(cand: dict, title: str, artist: str, expect: dict) -> bool:
+    """Пройдёт ли кандидат консервативную сверку.
+
+    Требует ТОЧНОГО совпадения артиста после нормализации и названия — с
+    точностью до шума переизданий. Что известно с обеих сторон (число треков,
+    длительность ±3 с) — обязано совпасть; чего не знают — не проверяется,
+    но и само совпадением не становится."""
+    if not title or not artist:
+        return False
+    if _FZ_BAD.search(str(cand.get("title", ""))) or _FZ_BAD.search(str(cand.get("artist", ""))):
+        return False
+    if _fz_norm(cand.get("artist", "")) != _fz_norm(artist):
+        return False
+    if _fz_norm(cand.get("title", "")) != _fz_norm(title):
+        return False
+    try:
+        want_n, have_n = int(expect.get("tracks") or 0), int(cand.get("tracks") or 0)
+    except (TypeError, ValueError):
+        want_n = have_n = 0
+    if want_n and have_n and want_n != have_n:
+        return False
+    try:
+        want_d = int(expect.get("duration_s") or 0)
+        have_d = int(cand.get("duration") or cand.get("duration_s") or 0)
+    except (TypeError, ValueError):
+        want_d = have_d = 0
+    if want_d and have_d and abs(want_d - have_d) > _FZ_TOL_S:
+        return False
+    return True
+
+
+async def _fuzzy_find(service: str, title: str, artist: str, expect: dict) -> Optional[dict]:
+    """Последняя ступень: поиск по изданию с проверкой консервативной сверкой."""
+    if not title or not artist:
+        return None
+    from ripster.routes import discovery as _disc
+    term = f"{artist} {title}".strip()
+    try:
+        if service == "apple":
+            r = await _disc._search_apple(term, "album", 5, "")
+        elif service == "deezer":
+            r = await _disc._search_deezer(term, "album", 5)
+        elif service == "qobuz":
+            r = await _disc._search_qobuz(term, "album", 5)
+        elif service == "tidal":
+            r = await _disc._search_tidal(term, "album", 5)
+        elif service == "beatport":
+            r = await _disc._search_beatport(term, "album", 5)
+        else:
+            return None
+    except Exception:
+        return None
+    for cand in (r.get("results") or []):
+        if _fuzzy_ok(cand, title, artist, expect or {}):
+            return {"id": str(cand.get("id") or ""), "title": cand.get("title", ""),
+                    "artist": cand.get("artist", ""), "url": cand.get("url", ""),
+                    "cover": cand.get("cover", ""), "service": service,
+                    "type": "album", "matched_by": "fuzzy"}
+    return None
+
+
+async def _qobuz_by_barcode(upcs: list[str]) -> Optional[dict]:
+    """Qobuz по штрихкоду: его `/album/search` принимает UPC текстовым
+    запросом (тот же приём у движка, engines/qobuz.py
+    `_resolve_upc_to_album_id`), но верим мы только кандидату, у которого
+    поле `upc` СОВПАЛО с нашей цифрой — поисковая строка сама по себе ничего
+    не гарантирует."""
+    if not upcs:
+        return None
+    from ripster import http_client as _HTTP
+    c = _cfg or {}
+    app_id = str(c.get("qobuz-app-id") or "").strip() or "312369995"
+    token = str(c.get("qobuz-auth-token") or "").strip()
+    want = {u.lstrip("0") for u in upcs if u}
+    try:
+        async with _HTTP.ashared() as cl:
+            for code in upcs:
+                r = await cl.get("https://www.qobuz.com/api.json/0.2/album/search",
+                                 params={"query": code, "limit": 5, "app_id": app_id},
+                                 headers={"X-User-Auth-Token": token} if token else {})
+                if r.status_code != 200:
+                    continue
+                for it in ((r.json().get("albums") or {}).get("items") or []):
+                    got = str(it.get("upc") or it.get("ean") or "").strip().lstrip("0")
+                    if not got or got not in want:
+                        continue
+                    alb_id = str(it.get("id") or "")
+                    img = it.get("image") if isinstance(it.get("image"), dict) else {}
+                    return {"id": alb_id, "title": it.get("title", ""),
+                            "artist": (it.get("artist") or {}).get("name", ""),
+                            "url": it.get("url") or f"https://www.qobuz.com/album/{alb_id}",
+                            "cover": img.get("large") or img.get("small") or "",
+                            "service": "qobuz", "type": "album", "matched_by": "upc"}
+    except Exception:
+        return None
+    return None
+
+
+async def _tidal_by_barcode(upcs: list[str]) -> Optional[dict]:
+    """Tidal по штрихкоду: текстовый поиск `/search/albums` принимает UPC, а
+    объект альбома несёт поле `upc` — принимаем только точное совпадение."""
+    if not upcs:
+        return None
+    from ripster import http_client as _HTTP
+    tok, cc = "", ""
+    try:
+        from ripster.engines import tidal as _tid
+        tok, cc = await _tid._orpheus_access_token()
+    except Exception:
+        tok = ""
+    if not tok:
+        tok = str((_cfg or {}).get("tidal-token") or "").strip()
+        cc = str((_cfg or {}).get("tidal-country") or "US").strip().upper()
+    if not tok:
+        return None
+    want = {u.lstrip("0") for u in upcs if u}
+    try:
+        async with _HTTP.ashared() as cl:
+            for code in upcs:
+                r = await cl.get("https://api.tidal.com/v1/search/albums",
+                                 params={"query": code, "limit": 5,
+                                         "countryCode": cc or "US"},
+                                 headers={"Authorization": f"Bearer {tok}"})
+                if r.status_code != 200:
+                    continue
+                for it in (r.json().get("items") or []):
+                    got = str(it.get("upc") or it.get("ean") or "").strip().lstrip("0")
+                    if not got or got not in want:
+                        continue
+                    alb_id = str(it.get("id") or "")
+                    cuuid = str(it.get("cover") or "").replace("-", "/")
+                    return {"id": alb_id, "title": it.get("title", ""),
+                            "artist": (it.get("artist") or {}).get("name", ""),
+                            "url": f"https://listen.tidal.com/album/{alb_id}",
+                            "cover": (f"https://resources.tidal.com/images/{cuuid}/320x320.jpg"
+                                      if cuuid else ""),
+                            "service": "tidal", "type": "album", "matched_by": "upc"}
+    except Exception:
+        return None
+    return None
+
+
+async def _probe_one(service: str, upc: str, isrc: str,
+                     title: str = "", artist: str = "",
+                     expect: Optional[dict] = None) -> dict:
+    """Спросить один сервис — всей лестницей, от точного ключа к осторожному:
+
+      1. точный штрихкод                     matched_by: "upc"
+         (Apple/Deezer/Beatport — прямые endpoint'ы; Qobuz/Tidal — поиск
+          текстом с проверкой поля `upc` у кандидата);
+      2. ISRC — трек и альбом, в котором он  matched_by: "isrc";
+      3. нормализованные варианты штрихкода  matched_by: "upc_variant"
+         (12↔13↔14, ведущие нули);
+      4. консервативная нечёткая сверка      matched_by: "fuzzy".
+
+    `no_identifier` — только когда идентификатора НЕ БЫЛО ВОВСЕ: с штрихкодом
+    или ISRC мы спрашиваем всем, что витрина принимает, и пустой ответ есть
+    «ещё не появился». Раньше Qobuz/Tidal без ISRC отписывались «нечем
+    спросить», даже когда UPC в руках был, — и Spotify-релиз, чей ISRC никто
+    не добыл, оказывался «нигде не доступен» при живом Deezer (24.09.2026,
+    «Sweet Sacrifice (Remastered 2026)»)."""
     now = time.time()
     if not _has_credentials(service):
         return {"available": False, "reason": REASON_NO_TOKEN, "checked_ts": now}
     try:
         from ripster.routes import discovery as _disc
+        expect = expect or {}
         hit = None
-        if service == "apple" and upc:
-            # Права выдаются на УЧЁТКУ, а не на сервис: релиза может не быть в
-            # магазине из конфига и быть в магазине второй учётки. Раньше
-            # спрашивали ровно один storefront — и «нет в Apple» означало на
-            # деле «нет в том магазине, который вписан руками» (08.08.2026:
-            # в конфиге стояло US, а учётка оказалась CA).
-            for sf in _apple_storefronts():
-                hit = await _disc._find_by_upc(upc, service, sf)
-                if hit:
-                    hit = dict(hit, storefront=sf)
-                    break
-        elif service == "deezer" and upc:
-            hit = await _disc._find_by_upc(upc, service,
-                                           str((_cfg or {}).get("storefront", "us")))
-        elif service == "beatport" and upc:
-            # Beatport умеет ОБА точных ключа (проверено 14.08.2026 на живом API:
-            # /catalog/releases/?upc= и /catalog/tracks/?isrc= оба отдают count=1),
-            # поэтому штрихкод первым, ISRC — запасной ход ниже.
-            hit = await _disc._find_by_upc(upc, service)
+        tried = False                        # ходили ли к витрине с чем-нибудь
+        upcs = _upc_variants(upc)
+        isrcs = [x.strip().upper() for x in re.split(r"[,\s]+", (isrc or "").strip())
+                 if x.strip()]
+
+        # ── 1. точный штрихкод ───────────────────────────────────────────────
+        if upcs:
+            if service == "apple":
+                # Права выдаются на УЧЁТКУ, а не на сервис: релиза может не быть в
+                # магазине из конфига и быть в магазине второй учётки. Раньше
+                # спрашивали ровно один storefront — и «нет в Apple» означало на
+                # деле «нет в том магазине, который вписан руками» (08.08.2026:
+                # в конфиге стояло US, а учётка оказалась CA).
+                tried = True
+                for sf in _apple_storefronts():
+                    hit = await _disc._find_by_upc(upcs[0], service, sf)
+                    if hit:
+                        hit = dict(hit, storefront=sf)
+                        break
+            elif service == "deezer":
+                tried = True
+                hit = await _disc._find_by_upc(
+                    upcs[0], service, str((_cfg or {}).get("storefront", "us")))
+            elif service == "beatport":
+                # Beatport умеет ОБА точных ключа (проверено 14.08.2026 на живом
+                # API: /catalog/releases/?upc= и /catalog/tracks/?isrc= оба отдают
+                # count=1), поэтому штрихкод первым, ISRC — запасной ход ниже.
+                tried = True
+                hit = await _disc._find_by_upc(upcs[0], service)
+            elif service == "qobuz":
+                tried = True
+                hit = await _qobuz_by_barcode(upcs)
+            elif service == "tidal":
+                tried = True
+                hit = await _tidal_by_barcode(upcs)
+        # ── 2. ISRC: трек и альбом, в котором он лежит ───────────────────────
         # ISRC как ЗАПАСНОЙ ключ — для всех, кто его умеет, а не только для тех,
-        # у кого нет штрихкода. Издание Deezer или Apple может нести другой
+        # у кого нет штрихкода. Издание Deezer или Apple может нести ДРУГОЙ
         # штрихкод, и тогда поиск по UPC промахивается при живом релизе.
-        if hit is None and isrc and service in ("qobuz", "tidal", "beatport", "deezer", "apple"):
-            # Список ISRC (несколько первых треков) — одного мало: его может не
-            # быть в каталоге при том, что релиз там есть.
-            for one in (isrc.split(",") if isinstance(isrc, str) else list(isrc)):
-                one = one.strip()
-                if not one:
-                    continue
+        # Список (несколько первых треков) — одного мало: его ISRC может не
+        # быть в каталоге при том, что релиз там есть.
+        if hit is None and isrcs and service in ("qobuz", "tidal", "beatport", "deezer", "apple"):
+            tried = True
+            for one in isrcs:
                 hit = await _disc._find_by_isrc(one, service)
                 if hit:
                     break
-        if hit is None and service in ("qobuz", "tidal") and not isrc:
-            return {"available": False, "reason": REASON_NO_ID, "checked_ts": now}
-        if hit is None and service == "beatport" and not upc and not isrc:
-            return {"available": False, "reason": REASON_NO_ID, "checked_ts": now}
+        # ── 3. тот же штрихкод в другой разрядности ──────────────────────────
+        if hit is None and service in ("apple", "deezer", "beatport") and len(upcs) > 1:
+            for code in upcs[1:]:
+                tried = True
+                if service == "apple":
+                    for sf in _apple_storefronts():
+                        h = await _disc._find_by_upc(code, service, sf)
+                        if h:
+                            hit = dict(h, storefront=sf, matched_by="upc_variant")
+                            break
+                else:
+                    h = await _disc._find_by_upc(code, service)
+                    if h:
+                        hit = dict(h, matched_by="upc_variant")
+                if hit:
+                    break
+        # ── 4. консервативная нечёткая сверка изданием ────────────────────────
+        if hit is None and title and artist:
+            tried = True
+            hit = await _fuzzy_find(service, title, artist, expect)
         if hit:
             return {"available": True, "url": hit.get("url", ""),
                     "title": hit.get("title", ""), "artist": hit.get("artist", ""),
@@ -234,18 +476,15 @@ async def _probe_one(service: str, upc: str, isrc: str) -> dict:
                     # именно учёткой качать.
                     "storefront": hit.get("storefront", ""),
                     "checked_ts": now}
+        # «Ещё не появился» — это ВЫВОД ИЗ ПРОВЕРКИ, а не значение по
+        # умолчанию: если к витрине не ходили НИ С ЧЕМ (ни штрихкода, ни ISRC,
+        # ни пары имя/артист), говорим правду — спросить было нечем.
+        if tried:
+            return {"available": False, "reason": REASON_NOT_YET, "checked_ts": now}
+        return {"available": False, "reason": REASON_NO_ID, "checked_ts": now}
     except Exception as e:                                     # noqa: BLE001
         return {"available": False, "reason": REASON_NOT_YET,
                 "error": str(e)[:120], "checked_ts": now}
-    # «Ещё не появился» — это ВЫВОД ИЗ ПРОВЕРКИ, а не значение по умолчанию.
-    # apple/deezer опрашиваются только `if upc` (см. выше); без штрихкода обе
-    # ветки пропускались, и сюда падал вердикт «ещё не появился» про сервисы,
-    # которых никто не спрашивал — ложь, неотличимая от настоящего результата
-    # (в кэше это видно по одинаковым до микросекунды checked_ts у всех служб).
-    # Говорим правду: идентификатора не было.
-    if service in ("apple", "deezer") and not upc:
-        return {"available": False, "reason": REASON_NO_ID, "checked_ts": now}
-    return {"available": False, "reason": REASON_NOT_YET, "checked_ts": now}
 
 
 async def _derive_isrc(service: str, hit: dict) -> str:
@@ -332,11 +571,25 @@ async def _derive_isrc(service: str, hit: dict) -> str:
 
 
 async def matrix(upc: str = "", isrc: str = "", title: str = "", artist: str = "",
-                 services: Optional[tuple] = None, force: bool = False) -> dict:
+                 services: Optional[tuple] = None, force: bool = False,
+                 seed: Optional[dict] = None) -> dict:
     """Где этот релиз можно взять прямо сейчас.
+
+    `seed` — источник, из которого релиз пришёл ({"id": ..., "service":
+    "spotify"|"deezer"}). По нему ДО опроса витрин добываются ISRC треков и
+    параметры издания (число треков, полная длительность): одно и то же
+    издание живёт в витринах под РАЗНЫМИ штрихкодами — промах по UPC это не
+    «релиза нет», а «не тем ключом спросили» (24.09.2026, Evanescence
+    «Sweet Sacrifice (Remastered 2026)»: Spotify 00888072836037, Deezer
+    888072836020, и радар из-за этого врал «нет ни на одном сервисе» при
+    живом Deezer).
 
     Кэш: найденное не перепроверяется никогда, ненайденное — по своему TTL,
     региональный отказ — раз в неделю (в этом сторефронте оно не появится).
+    Записи, рождённые БЕЗ ISRC («ещё не появился»/«нечем спросить» при
+    пустом isrc), переспрашиваются при следующем чтении, не дожидаясь TTL:
+    под этими вердиктами и прячется ошибка другого штрихкода. Один раз —
+    если и с новым ключом ничего не добыли, дальше обычный график.
     """
     _load()
     svcs = tuple(services or SERVICES)
@@ -367,13 +620,60 @@ async def matrix(upc: str = "", isrc: str = "", title: str = "", artist: str = "
     # и стоило донору стать недоступным (403 по правам, ушёл из витрины), как
     # Qobuz с Tidal снова получали «не спрашивал, нет ISRC», хотя нужный ISRC
     # лежал в этой же записи. Программа знала и выбрасывала.
-    isrc = isrc or str(rec.get("isrc") or "")
+    cached_isrc = str(rec.get("isrc") or "")
+    isrc = isrc or cached_isrc
+    name = title or str(rec.get("title") or "")
+    by_artist = artist or str(rec.get("artist") or "")
 
+    # ── самолечение уже испорченного ─────────────────────────────────────────
+    # Вердикты, поставленные БЕЗ ISRC, не заслуживают доверия: ровно так
+    # выглядела запись, где релиз есть, а штрихкод у витрины другой. Их
+    # переспрашиваем при следующем чтении, не дожидаясь TTL; повторный обход
+    # без результата не повторяем в рамках TTL, иначе молотим витрину даром.
+    def _unhealed(v: dict) -> bool:
+        return (not v.get("available")
+                and v.get("reason") in (REASON_NOT_YET, REASON_NO_ID)
+                and v.get("verified_by") != "download")
+
+    heal = (not cached_isrc) and not force and any(
+        _unhealed(v or {}) for v in out.values())
+    if heal and time.time() - float(rec.get("healed_ts") or 0) < _TTL_MISS:
+        heal = False
+
+    # ── ISRC ДО ВСЕХ ОПРОСОВ ─────────────────────────────────────────────────
+    expect: dict = {}
+    seed_id = str((seed or {}).get("id") or "").strip()
+    # Ид — токен витрины, а не ссылка: карточки кладут в id URL про запас.
+    # С таким в /v1/albums/<...> не ходят.
+    if seed_id and not re.fullmatch(r"[A-Za-z0-9]{6,}", seed_id):
+        seed_id = ""
+    seed_svc = str((seed or {}).get("service") or "").lower()
+    if seed_id and seed_svc in ("spotify", "deezer"):
+        try:
+            from ripster.routes import discovery as _disc
+            known = [x.strip().upper() for x in (isrc or "").split(",") if x.strip()]
+            prof = await _disc._seed_profile(
+                {"id": seed_id, "service": seed_svc},
+                isrcs=known or None) or {}
+            new_isrcs = [str(v).strip().upper() for v in (prof.get("isrcs") or [])
+                         if str(v).strip()]
+            merged = [x for chunk in (isrc, ",".join(new_isrcs))
+                      for x in chunk.split(",") if x.strip()]
+            isrc = ",".join(dict.fromkeys(x.strip().upper() for x in merged))
+            upc = upc or str(prof.get("upc") or "")
+            expect = {"tracks": int(prof.get("tracks") or 0),
+                      "duration_s": int(prof.get("duration_s") or 0)}
+        except Exception:
+            pass
+
+    probed_with_isrc: set = set()
     for svc in ordered:
         cur = out.get(svc)
-        if cur and not force and _fresh(cur):
+        if cur and not force and _fresh(cur) and not (heal and _unhealed(cur)):
             continue
-        out[svc] = await _probe_one(svc, upc, isrc)
+        out[svc] = await _probe_one(svc, upc, isrc, name, by_artist, expect)
+        if isrc:
+            probed_with_isrc.add(svc)
         if (svc in _SEEDERS and out[svc].get("available") and not isrc):
             isrc = await _derive_isrc(svc, out[svc])
 
@@ -384,6 +684,8 @@ async def matrix(upc: str = "", isrc: str = "", title: str = "", artist: str = "
     # по UPC не нашёл, хотя релиз у него есть.
     if isrc:
         for svc in ordered:
+            if svc in probed_with_isrc:
+                continue            # его уже спрашивали с ISRC на руках
             v = out.get(svc) or {}
             if v.get("available"):
                 continue
@@ -391,7 +693,7 @@ async def matrix(upc: str = "", isrc: str = "", title: str = "", artist: str = "
                 continue                      # регион, права, токен — ISRC не лечит
             if v.get("verified_by") == "download":
                 continue                      # вердикт загрузки важнее опроса
-            again = await _probe_one(svc, upc, isrc)
+            again = await _probe_one(svc, upc, isrc, name, by_artist, expect)
             if again.get("available"):
                 out[svc] = again
 
@@ -400,12 +702,15 @@ async def matrix(upc: str = "", isrc: str = "", title: str = "", artist: str = "
     # рантайм после загрузки — только со штрихкодом. Пока здесь стояла замена,
     # бедный вызов затирал ISRC, добытый богатым, и следующая проверка снова
     # отвечала «не спрашивал, нет ISRC» — про то, что уже знала.
-    _cache[k] = {**rec, "services": out,
-                 "upc": upc or rec.get("upc", ""),
-                 "isrc": isrc or rec.get("isrc", ""),
-                 "title": title or rec.get("title", ""),
-                 "artist": artist or rec.get("artist", ""),
-                 "ts": time.time()}
+    new_rec = {**rec, "services": out,
+               "upc": upc or rec.get("upc", ""),
+               "isrc": isrc or cached_isrc,
+               "title": title or rec.get("title", ""),
+               "artist": artist or rec.get("artist", ""),
+               "ts": time.time()}
+    if heal:
+        new_rec["healed_ts"] = time.time()
+    _cache[k] = new_rec
     _save()
     return {"key": k, "upc": upc, "isrc": isrc, "services": out,
             "available_in": [s for s, v in out.items() if v.get("available")]}
@@ -513,5 +818,5 @@ def summary_ru(matrix_services: dict) -> str:
     if no_tok:
         parts.append("🔑 " + ", ".join(no_tok) + " — нет токена")
     if no_id:
-        parts.append("❔ " + ", ".join(no_id) + " — не спрашивал, нет ISRC")
+        parts.append("❔ " + ", ".join(no_id) + " — нечем спросить: нет ни штрихкода, ни ISRC")
     return " · ".join(parts) or "нигде не найден"

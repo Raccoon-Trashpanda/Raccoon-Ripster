@@ -396,6 +396,29 @@ body{height:100%;margin:0}
 
 /* ── LAYOUT ── */
 .app{display:grid;grid-template-columns:220px minmax(0, 1fr);grid-template-rows:68px minmax(0, 1fr);flex:1 1 0;min-height:0;width:100vw;gap:0;overflow:hidden}
+/* --ui-min-w — ПРЕДЕЛ сужения (владелец, 24.09.2026): ниже него настольный
+   интерфейс НЕ сдавливается, а появляется горизонтальная прокрутка. Число
+   измерено (tools/player_bar_layout_check.py, 24.09.2026): при 1060px на баре
+   умещаются транспорт, качество, «Плеер-окно», «✕» и громкость — всё остальное
+   живёт в «⋯». Тот же предел задаёт min_size окна лаунчер
+   (ripster/launcher.py, launcher_exe.py), чтобы пределы не разъехались.
+   ТОЛЬКО ≥700px: на телефоне один столбец, и min-width там вырвал бы
+   прокрутку у настоящего экрана. */
+@media (min-width:700px){
+  :root{--ui-min-w:1060px;--ui-side-w:220px}
+  .app{width:100%;min-width:var(--ui-min-w)}
+  body{min-width:var(--ui-min-w)}
+  /* Док плеера — position:fixed, и min-width body его не касается: без этой
+     строки на узком окне бар жмётся до `viewport − 220px`, сетка не влезает в
+     свою колонку и транспорт (max-content) переполняется ПРАВЕЕ группы
+     качества — наложение ⏭ на пилюлю, замерено на 700px. Предел тот же,
+     минус боковое меню, у которого док начинается. */
+  #preview-player{min-width:calc(var(--ui-min-w) - var(--ui-side-w))}
+  /* Ниже предела — прокрутка вместо сдавливания: fixed-доки докручивает
+     player_bar_layout.js (сдвиг на scrollLeft), чтобы бар оставался при своём
+     контенте, а не висел посреди уехавшей вперёд вёрстки. */
+  html{overflow-x:auto}
+}
 .topbar{grid-column:1/-1;display:flex;align-items:center;padding:0 20px 0 20px;background:var(--topbar-bg);backdrop-filter:blur(20px);border-bottom:1px solid var(--border);gap:12px;position:relative;z-index:100;overflow:hidden;min-width:0}
 .topbar > *{flex-shrink:0}
 /* Square icon button (theme switch) — matches the pill//details heights. */
@@ -976,13 +999,13 @@ img[data-cover].loaded{
 #preview-player{ box-shadow:0 -6px 24px rgba(0,0,0,.28); }
 
 /* Round, springy control buttons — smooth hover/press on every pp-* button. */
-#pp-prev, #pp-next, #pp-play, #pp-mute, #pp-expand-btn, #pp-float-btn,
+#pp-prev, #pp-next, #pp-play, #pp-mute, #pp-expand-btn, #pp-ext-btn,
 #pp-play-big, #pp-mute-big{
   transition:transform .12s ease, background-color .15s ease,
              color .15s ease, box-shadow .15s ease;
 }
 #pp-prev:hover, #pp-next:hover, #pp-mute:hover, #pp-expand-btn:hover,
-#pp-float-btn:hover, #pp-mute-big:hover{
+#pp-ext-btn:hover, #pp-mute-big:hover{
   color:var(--text);
   background:rgba(255,255,255,.07);
 }
@@ -1185,6 +1208,8 @@ img[data-cover].loaded{
   .qi-art{width:100%}
   /* Player: above the tab bar, full width */
   #preview-player{left:0!important;bottom:56px!important}
+  /* Тот же X-сдвиг на мобильной раскладке (правило выше transform не касается). */
+  #preview-player.visible{transform:translate3d(var(--pp-sx, 0px), 0, 0)!important}
   /* When player is hidden on mobile, slide it fully below the tab bar */
   #preview-player:not(.visible){transform:translateY(calc(100% + 56px))!important}
   /* Views: don't scroll under the tab bar */
@@ -1210,6 +1235,14 @@ img[data-cover].loaded{
 /* ── TOAST ── */
 /* ── Notification stack (iOS/Windows style) ── */
 #notif-stack{position:fixed;bottom:20px;right:20px;z-index:9999;display:flex;flex-direction:column-reverse;gap:8px;align-items:flex-end;pointer-events:none;max-width:320px}
+/* Тосты НЕ должны ложиться на низ плеера: док (z 9500) ниже стека (9999), и
+   уведомление на 20 секунд закрывало качество/громкость/«⋯» — клик по кнопке
+   уходил в тост (замер 24.09: elementFromPoint мимо на 1280–1920px). Тот же
+   отступ, что резервируется под док в .view-body (78px). Гостевой режим и
+   мобильный со своими нижними панелями — не трогаем. */
+@media (min-width:700px){
+  body:not(.guest-mode):has(#preview-player.visible):not(.fp-open) #notif-stack{bottom:78px}
+}
 .notif{background:rgba(26,26,30,.96);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:0.5px solid rgba(255,255,255,.1);border-radius:14px;padding:12px 14px 10px;box-shadow:0 8px 32px rgba(0,0,0,.55),0 1px 0 rgba(255,255,255,.06) inset;pointer-events:all;display:flex;align-items:flex-start;gap:9px;width:100%;transform:translateX(0);opacity:1;transition:transform .25s ease,opacity .25s ease,max-height .3s ease,margin .3s ease,padding .3s ease}
 .notif.notif-enter{transform:translateX(110%);opacity:0}
 .notif.notif-exit{transform:translateX(110%);opacity:0;max-height:0;margin:0;padding:0;overflow:hidden}
@@ -1565,10 +1598,18 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
     }
     /* Controls float above the progress surface. #pp-bar passes clicks THROUGH its
        empty areas to the seek layer below (so the whole dock scrubs, Yandex-style);
-       only the interactive controls capture their own clicks. */
+       only the interactive controls capture their own clicks.
+       #pp-quality ЗДЕСЬ НЕ НУЖЕН: это не контрол, а обёртка с position:relative,
+       и пока она ловила события, её кнопка не получала клика — элемент под
+       курсором был родитель (замер 24.09: `pp-quality-btn ← pp-quality` на всех
+       ширинах). Кнопка пилюли берёт своё строкой `#pp-bar button` ниже. */
     #pp-bar { position: relative; z-index: 1; pointer-events: none; }
+    /* .pp-of-menu/.pp-of — сюда ОБЯЗАНЫ попасть: меню «⋯» лежит внутри бара,
+       и без этой строки клики по его полям и промежуткам проваливаются сквозь
+       меню в слой перемотки (замер 24.09: пункты меню не кликались). */
     #pp-bar button, #pp-bar input, #pp-bar select, #pp-bar a,
-    #pp-bar #pp-art, #pp-bar #pp-mini-meta, #pp-bar #pp-quality { pointer-events: auto; }
+    #pp-bar #pp-art, #pp-bar #pp-mini-meta,
+    #pp-bar #pp-vol-wrap, #pp-bar .pp-of, #pp-bar .pp-of-menu { pointer-events: auto; }
     /* True geometric centering for transport+time. The left zone (art+title,
        often short) and right zone (quality pill + volume + 4 icon buttons, all
        flex-shrink:0 — reliably wide) never have equal content width, so
@@ -1590,157 +1631,102 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
     }
     /* …but on roomy desktops the side zones are never equal-width (left art+title
        vs right pill+volume+4 tiles), so in-flow always parks the transport left of
-       the dock's real middle («кнопки не по середине» report). Pin the group to
-       #pp-bar's true midpoint ONLY where there is guaranteed spare width. */
-    /* 29.08.2026: the `position:absolute;left:50%` fix above DID center the
-       group — but centering against the bar's midpoint while the right zone's
-       content stays pinned to the bar's real right edge means the gap between
-       them shrinks at TWICE the rate the window narrows (center moves at ΔW/2,
-       the right-edge content at ΔW). Measured live at the OLD ≥860px gate: the
-       quality pill was already overlapping the transport group at 1200px — an
-       ordinary desktop width, not an edge case («флак накладывается на кнопки»
-       report). Grid instead of absolute positioning: the centre column's width
-       is a real reserved track, not a box floating over whatever the flex
-       siblings decide to occupy — the two content zones physically cannot
-       share a pixel. minmax(0,1fr) on both content columns keeps them
-       equal-width regardless of what's inside (the reason the OLD flex 50/50
-       split ever broke: the left zone's max-width:320 cap let the right
-       zone's flex-grow balloon past it unopposed) — which is what puts the
-       middle column at the bar's true centre, matching the intent of the old
-       fix without its bug. The canvas visualiser gets its own fixed-width
-       column so it doesn't skew the left/right balance the centering depends on.
-       Grid stops the two content zones' BOXES from ever overlapping the centre
-       track — but a track can still be narrower than its own content's natural
-       width, and content spills past its box edge when that happens (measured:
-       still true right up to 1360px). So the gate moved from 860px to 1400px —
-       live-measured (headless Chrome, real button/pill markup, 20px binary-
-       search step) as the width where the right zone's actual content (quality
-       pill + volume + 4 icon buttons) first fits its reserved column with zero
-       overflow, with a small margin above the measured 1380px floor. Below
-       1400px this whole block doesn't apply and the in-flow default above
-       runs instead — same layout that already served <860px safely, now
-       covering the range where "true centre" genuinely doesn't have room. */
-    @media (min-width: 1400px){
+       the dock's real middle («кнопки не по середине» report). История этого
+       центрирования (absolute → grid с ярусом 1400px) переехала в блок ниже:
+       сетка теперь одна, с 700px, а переполнение правой группы убирает не ярус
+       media-query, а «⋯» в player_bar_layout.js. */
+    /* ══ Низ плеера: СЕТКА С ИМЕНОВАННЫМИ ОБЛАСТЯМИ (владелец, 24.09.2026) ══
+       Задача — чтобы кнопки никогда не наползали друг на друга при сужении.
+       Раньше это держалось на трёх ярусах media-query, которые кнопки просто
+       ГАСИЛИ (900/1199/759): кнопка исчезала без следа и без входа. Теперь:
+
+       • 4 колонки: `auto` (визуализатор) | `minmax(150px,1fr)` (обложка+метаданные)
+         | `max-content` (транспорт) | `minmax(0,1fr)` (группа справа).
+         Динамические колонки равны (1fr и 1fr) — транспорт стоит ровно на
+         середине бара, как просил владелец 29.08; средняя колонка `max-content`
+         — под транспорт нельзя положить ни один пиксель чужого контента.
+       • крайняя правая группа НЕ сжимается в невидимое (min-width:max-content
+         больше не нужен и даже вреден: он превращал переполнение в наезд);
+         её содержимое перекладывает в «⋯» player_bar_layout.js, сравнивая
+         ШИРИНУ НАТУРАЛЬНУЮ с шириной колонки. Порядок сворачивания задан
+         data-pp-prio (больше = сворачивается раньше), транспорт ⏮▶⏭,
+         качество, «Плеер-окно» и «✕» не сворачиваются никогда.
+       • задел слева: текст заголовка ограничен max-width, чтобы широкое окно
+         не растягивало надпись до центра. */
+    @media (min-width: 700px){
       #pp-bar {
         display: grid !important;
-        grid-template-columns: auto minmax(0,1fr) auto minmax(0,1fr);
+        grid-template-columns: auto minmax(150px, 1fr) max-content minmax(0, 1fr);
         align-items: center;
       }
       #pp-viz { grid-column: 1; }
-      .pp-zone-left { grid-column: 2; }
+      .pp-zone-left {
+        grid-column: 2;
+        min-width: 150px !important;
+        max-width: none !important;
+      }
+      /* Метка трека — не во всю колонку: иначе на широком окне название
+         доезжает до самого транспорта. */
+      .pp-zone-left > #pp-mini-meta { max-width: 420px; }
       .pp-zone-center {
         grid-column: 3;
         position: static !important; left: auto !important; top: auto !important;
         transform: none !important;
       }
-      .pp-zone-right { grid-column: 4; }
-    }
-    /* 29.08.2026: the grid above only fixes the overlap at ≥1400px — below
-       that, #pp-bar falls back to the plain in-flow layout, which measured
-       JUST AS overlapped (quality pill spilling into the transport zone,
-       confirmed live down to 700px) for a separate reason: the right zone's
-       own CONTENT (quality pill + volume slider + 4 icon buttons) is wider
-       than the share of the bar it's given below ~1360px, and — because its
-       inline style carries `min-width:0` — flexbox happily compresses its box
-       past what its buttons need, and `justify-content:flex-end` then spills
-       the overflowing content LEFTWARD into whatever sits next to it. That's
-       the real, general shape of the bug: not any one positioning trick, but
-       the one zone with no graceful-shrink story sitting next to zones that
-       flex freely.
-       min-width:max-content makes the browser compute the zone's true content
-       floor itself (buttons + slider + gaps, in the real font/DPI/locale) —
-       exact, not a guessed pixel number, and immune to the quality label's
-       length varying (MP3/FLAC/Hi-Res). Below that floor the SQUEEZE now
-       lands on `.pp-zone-left` instead, which already has the ellipsis/`data-
-       mq` mechanism built for exactly this (title truncates, never overlaps)
-       — so shrinking the window hits a real floor at the buttons, per the
-       request, instead of silently overlapping them. Gated to ≥700px: below
-       that the mobile layout above already has its own (pre-existing, out of
-       scope here) compressed treatment — forcing max-content there would
-       push buttons off the edge of an actual phone screen instead. */
-    @media (min-width: 700px){
-      .pp-zone-right { min-width: max-content !important; }
-    }
-    /* Same floor idea for the LEFT zone (cover + title + artist) — the request
-       was "the whole panel", not just the button side. Unlike the right zone,
-       title/artist are UNBOUNDED (a long mix name can run to 80+ chars), so
-       max-content is the wrong tool here — it would force the entire bar to
-       overflow on an ordinary window just because one track has a long title,
-       which is worse than what it fixes. What title/artist actually need is a
-       READABLE FLOOR: enough width that the marquee (`[data-mq].mq-on` above)
-       has something legible to scroll, instead of shrinking toward a sliver.
-       150px = 42px cover + 11px gap + ~97px text column, enough for a handful
-       of real characters at the pill's font sizes (13px/11.5px) before the
-       marquee mechanism (already built, JS in player_queue.js) takes over —
-       long titles still ellipsize/scroll, they just don't get squeezed to
-       nothing first.
-       NOT the same ≥700px gate as the right zone — tried that first and it
-       was a real regression, not just a smaller version of the same fix.
-       Flooring BOTH zones at once removes the layout's only remaining give:
-       below ~1200px the two floors together need more width than #pp-bar
-       has, and since #pp-bar has no scroll/wrap, the excess doesn't compress
-       — it renders past the viewport's right edge with nothing to reveal it
-       (html,body are deliberately overflow:hidden for the app shell). Live
-       measurement: at 1200px every control was still on-screen; at 1180px
-       the ✕ close button already wasn't (close_btn_visible_in_viewport:
-       false). An invisible, unreachable button is a worse failure than the
-       overlap this whole change started from, so the floor only applies
-       where it's actually free: ≥1200px. Below that, the left zone goes back
-       to shrinking toward 0 (its original, already-safe behaviour) so the
-       deficit has somewhere to go instead of pushing buttons off-screen —
-       title/artist lose their readable floor at those widths, but every
-       control stays reachable, which matters more. */
-    /* 29.08.2026, second pass: the owner rejected the "title goes to 0 below
-       1200px" tradeoff from the first pass — wanted a real floor for the
-       WHOLE panel, text included, even if that means shrinking the transport
-       buttons. This block replaces the three separate tiers above with one
-       consistent story: title/artist keep a 150px floor at every desktop
-       width ≥700px, and everything else (icon sizes, which controls survive)
-       is what flexes to make room for it, instead of text being the only
-       thing that ever gives. */
-    @media (min-width: 700px){
-      .pp-zone-left { min-width: 150px !important; }
-    }
-    /* The right zone's min-width:max-content has the same "no give left"
-       failure below a real threshold — quality+volume+4 icon buttons need
-       ~350px the bar doesn't have below ~1040px, and controls go dark
-       off-screen rather than overlap (measured via the ✕ close button's own
-       on-screen check). Drop the least-essential ones instead of letting
-       them vanish unreachably: visualiser (decorative), float-window /
-       local-file (reachable other ways, used far less than quality/volume/
-       close). */
-    /* Second pass measured this in tiers (900px, then 800px) and each tier
-       alone still came up short once the left zone keeps its 150px floor
-       everywhere — a graduated approach here just means several widths in
-       between the tiers stay broken. One "compact" mode for the whole
-       700-1199px band instead: hide the decorative/duplicate-entry-point
-       controls (visualiser, float-window, local-file, volume — reachable via
-       system volume or the expanded player, expand/collapse — duplicates a
-       click on the cover), shrink the transport buttons (36px→28px, 42px→36px
-       play, tighter gaps — the one thing the first pass explicitly avoided
-       without live review), and drop queue-list/follow-artist (duplicate
-       entry points elsewhere in the UI). Verified live across the full
-       700-1450px sweep after this change — no width in between left the
-       close button off-screen. */
-    @media (min-width: 700px) and (max-width: 1199px){
-      #pp-viz, #pp-float-btn, #pp-local-btn, #pp-vol-wrap, #pp-expand-btn,
-      #pp-queue-btn, #pp-fav-btn { display: none !important; }
-      .pp-zone-center { gap: 5px !important; }
-      .pp-transport { width: 28px !important; height: 28px !important; font-size: 14px !important; }
-      #pp-play { width: 36px !important; height: 36px !important; font-size: 15px !important; }
-    }
-    /* Down to 760px that's a clean fit — below it, still short by a small,
-       fixed ~50px (measured), because everything above is already at its
-       floor. Trim what's left: the quality pill's dropdown caret and half
-       its horizontal padding (still tappable, still readable), and the bar's
-       own outer gutters. Cosmetic shaves, not functional drops — nothing
-       here removes a control, unlike the tier above. */
-    @media (min-width: 700px) and (max-width: 759px){
-      #pp-quality-caret { display: none !important; }
-      #pp-quality-btn { padding: 0 6px !important; }
-      #pp-bar { padding: 0 4px !important; gap: 4px !important; }
-      .pp-zone-right { gap: 4px !important; }
-      .pp-extra, #pp-mute { width: 28px !important; height: 28px !important; }
+      .pp-zone-right {
+        grid-column: 4;
+        min-width: 0 !important;
+        display: flex !important; align-items: center; justify-content: flex-end;
+        gap: 8px !important;
+      }
+      .pp-extras { display: flex !important; align-items: center; gap: 3px; flex-shrink: 0; }
+      /* Свёрнутая в «⋯» кнопка живёт ВНУТРИ меню своим узлом — не дубликат,
+         поэтому обработчики, значения (ползунок громкости) и состояния
+         (♡/🚫 «.on») не разъезжаются с оригиналом. */
+      #pp-bar .pp-collapsed { display: none !important; }
+      #pp-of { display: none; position: relative; flex-shrink: 0; }
+      #pp-of.pp-of-on { display: flex; align-items: center; }
+      .pp-extra.rp-on { color: var(--red); background: rgba(192,132,160,.16); }
+      .pp-of-menu {
+        display: none; position: absolute; bottom: 40px; right: 0; z-index: 9650;
+        flex-direction: column; gap: 4px; padding: 6px; min-width: 168px;
+        background: var(--player-bg); backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        border: 1px solid var(--border); border-radius: 10px;
+        box-shadow: 0 8px 28px rgba(0,0,0,.55);
+        pointer-events: auto;
+      }
+      .pp-of-menu.open { display: flex; }
+      /* Пункт меню — ОНА ЖЕ кнопка, переложенная из бара (не дубликат):
+         подпись берётся из её же title, поэтому i18n и состояния не разъезжаются. */
+      .pp-of-menu > button {
+        width: auto; height: 30px; padding: 0 9px; gap: 9px;
+        display: flex; align-items: center; border-radius: 7px;
+      }
+      .pp-of-menu > button::after {
+        content: attr(title); font-size: 11.5px; color: var(--muted);
+        font-family: var(--display); white-space: nowrap;
+      }
+      .pp-of-menu > #pp-vol-wrap, .pp-of-menu > .pp-time-box {
+        padding: 2px 6px; width: auto;
+      }
+      /* Меню выбора места для кнопки «Плеер-окно» (долгое нажатие / ПКМ). */
+      .pp-wm {
+        position: fixed; z-index: 9700; display: none; flex-direction: column; gap: 3px;
+        padding: 5px; min-width: 210px;
+        background: var(--player-bg); backdrop-filter: blur(14px);
+        -webkit-backdrop-filter: blur(14px);
+        border: 1px solid var(--border); border-radius: 10px;
+        box-shadow: 0 8px 28px rgba(0,0,0,.55);
+      }
+      .pp-wm.open { display: flex; }
+      .pp-wm button {
+        display: flex; align-items: center; gap: 8px; width: 100%;
+        padding: 7px 10px; border: 0; border-radius: 7px; background: transparent;
+        color: var(--text); font: 12px var(--display); text-align: left; cursor: pointer;
+      }
+      .pp-wm button:hover { background: rgba(255,255,255,.07); }
+      .pp-wm .pp-wm-note { font-size: 10.5px; color: var(--muted2); padding: 2px 10px 5px; }
     }
     /* BIG time readout on the LEFT of the transport buttons — sized like the Play
        button so the seconds are clearly readable. Flat (no chip). Fixed width so
@@ -2009,7 +1995,12 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
       backface-visibility: hidden;
       -webkit-backface-visibility: hidden;
     }
-    #preview-player.visible { transform: translate3d(0, 0, 0); pointer-events: auto; }
+    #preview-player.visible {
+      /* --pp-sx — горизонтальная поправка на прокрутку ниже предела (--ui-min-w),
+         её пишет player_bar_layout.js. Держим именно переменной: transform
+         целиком принадлежит CSS (им панель и выезжает), и JS, запиши он его
+         сам, либо воровал бы анимацию, либо срывал панель на её высоту вниз. */
+      transform: translate3d(var(--pp-sx, 0px), 0, 0); pointer-events: auto; }
     /* Pad the scrollable body so content isn't hidden behind the player.
        Views with .view-body use that inner element; views without (releases,
        soundcloud tab, etc.) use the .view itself as the scroll container. */
@@ -2029,7 +2020,7 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
        back into a thin 16px strip pinned to the top. That design is the single
        source of truth for #pp-progress/#pp-fill and #pp-progress-big/#pp-fill-big. */
     /* Unified soft-3D for dock buttons (inline-styled, would otherwise stay flat) */
-    #pp-prev, #pp-next, #pp-mute, #pp-expand-btn, #pp-float-btn,
+    #pp-prev, #pp-next, #pp-mute, #pp-expand-btn, #pp-ext-btn,
     #pp-mute-big {
       box-shadow:
         inset 0 1px 0 rgba(255,255,255,.08),
@@ -2040,12 +2031,12 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
                   background .12s !important;
     }
     #pp-prev:hover, #pp-next:hover, #pp-mute:hover, #pp-expand-btn:hover,
-    #pp-float-btn:hover, #pp-mute-big:hover {
+    #pp-ext-btn:hover, #pp-mute-big:hover {
       background: rgba(255,255,255,.08) !important;
       color: var(--text) !important;
     }
     #pp-prev:active, #pp-next:active, #pp-mute:active, #pp-expand-btn:active,
-    #pp-float-btn:active, #pp-mute-big:active,
+    #pp-ext-btn:active, #pp-mute-big:active,
     #pp-play:active, #pp-play-big:active {
       transform: scale(.88);
       box-shadow: inset 0 2px 4px rgba(0,0,0,.3) !important;

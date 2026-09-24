@@ -24,7 +24,6 @@ def test_fmt_name_non_numeric_track():
     assert _fmt_name("{track}-{title}", {"track": "A", "title": "X"}) == "A-X"
 
 
-def test_fmt_name_empty_render_falls_back():
-    # empty render → mixcue._sanitize("") itself returns "mix" (its own fallback),
-    # so _fmt_name yields "mix" rather than reaching the title fallback.
-    assert _fmt_name("{artist}", {"artist": "", "title": "Fallback"}) == "mix"
+# Пустой после подстановки шаблон именуется по title; этот случай был забит
+# здесь как known-xfail за «mix» и переехал в контракт модуля:
+# tests/test_mixcue_contract.py::test_fmt_name_empty_template_falls_back_to_title.

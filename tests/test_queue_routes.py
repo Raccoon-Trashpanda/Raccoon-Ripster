@@ -11,9 +11,13 @@ def test_make_task_shape():
     assert set(t) == {
         "id", "url", "quality", "engine", "service", "status", "progress",
         "meta", "log", "added", "source", "session_id", "lyrics",
+        "public_wrapper",
     }
     # None = взять глобальную настройку; True/False = галка на карточке релиза
     assert t["lyrics"] is None
+    # False = решает настройка apple-public-mode; True = человек попросил
+    # публичный враппер для ЭТОЙ задачи (чекбокс диалога, только владелец)
+    assert t["public_wrapper"] is False
     assert t["status"] == "queued"
     assert t["progress"] == 0
     assert t["url"] == "https://x/y"

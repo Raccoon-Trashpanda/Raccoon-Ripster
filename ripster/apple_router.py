@@ -239,23 +239,35 @@ def _pool_envelope(config: dict, timeout: float = 6.0) -> dict:
     `{"code":-1,"msg":"invalid or missing API key","bot":"wm_auth_bot",...}`,
     и «сервер нас не пускает» это совсем не то же самое, что «сервера нет».
 
+    С 10.09.2026 wm.wol.moe требует API-ключ (`amd-wm-api-key`, секрет): шлём его
+    заголовком `Authorization: Bearer <key>` — предпочтительная форма по хелпу
+    @wm_auth_bot. Значение ключа НИКОГДА не попадает в возвращаемый словарь и не
+    печатается: здесь только HTTP-код и разобранный ответ сервиса.
+
     Кэш на ~60 с: вопрос задаётся и при маршрутизации задачи, и из интерфейса,
     а дергать волонтёрский сервис каждую секунду — значит самим создавать себе
-    «слишком много запросов» там, где его нет.
+    «слишком много запросов» там, где его нет. Сбрасываем при смене хоста ИЛИ
+    при появлении/исчезновении ключа — иначе «нет ключа» из прошлого ответа
+    прилип бы к только что вписанному.
     """
     global _pool_env, _pool_env_ts
     host = (config.get("amd-instance-url") or "").strip()
     if not host:
         _pool_env, _pool_env_ts = {}, 0.0       # без хоста кэш прошлого хоста врёт
         return {"status": None, "data": {}, "body": {}, "error": "no_host"}
+    key = str(config.get("amd-wm-api-key") or "").strip()
     now = time.time()
     cached_host = _pool_env.get("host") if _pool_env else None
-    if _pool_env and cached_host == host and now - _pool_env_ts < _POOL_TTL:
+    cached_key = bool(_pool_env.get("has_key")) if _pool_env else False
+    if (_pool_env and cached_host == host and cached_key == bool(key)
+            and now - _pool_env_ts < _POOL_TTL):
         return _pool_env
     scheme = "https" if config.get("amd-instance-secure", True) else "http"
-    env = {"status": None, "data": {}, "body": {}, "error": "", "host": host}
+    env = {"status": None, "data": {}, "body": {}, "error": "",
+           "host": host, "has_key": bool(key)}
+    headers = {"Authorization": f"Bearer {key}"} if key else {}
     try:
-        r = httpx.get(f"{scheme}://{host}/status", timeout=timeout)
+        r = httpx.get(f"{scheme}://{host}/status", headers=headers, timeout=timeout)
         env["status"] = r.status_code
         try:
             body = r.json() or {}
@@ -341,23 +353,63 @@ def public_wrapper_probe(config: dict) -> dict:
         return {**base, "state": "unreachable", "reason": "transport", "ready": False,
                 "detail": env["error"] or "transport error"}
     msg = str(body.get("msg") or data.get("msg") or "")[:160]
+    quota = _quota_readout(data, body)
+    if code == 429:
+        # wm.wol.moe отвечает 429 на превышение поаккаунтной квоты (QPS/
+        # параллель/суточный объём). Это НЕ «сервер упал» и НЕ «нужен ключ»:
+        # ключ есть, но дневной лимит выбран — повторять сейчас бессмысленно.
+        return {**base, **quota, "state": "refusing", "reason": "quota",
+                "ready": False,
+                "detail": msg or "квота wm.wol.moe на сегодня исчерпана"}
     if code in (401, 403):
-        return {**base, "state": "refusing", "reason": "api_key", "ready": False,
+        return {**base, **quota, "state": "refusing", "reason": "api_key",
+                "ready": False,
                 "detail": msg or "invalid or missing API key"}
     if code >= 400:
-        return {**base, "state": "refusing", "reason": f"http_{code}", "ready": False,
+        return {**base, **quota, "state": "refusing", "reason": f"http_{code}",
+                "ready": False,
                 "detail": msg or f"HTTP {code}"}
     if "ready" not in data:
         # Живой HTTP-ответ без `ready` — это НЕ «здоров»: это мы перестали
         # понимать протокол (upstream перешёл с gRPC на HTTP, см.
         # docs/APPLE_WRAPPER_UPSTREAM.md). Промолчать тут — значит снова
         # выставить зелёную точку за неизвестность.
-        return {**base, "state": "refusing", "reason": "no_status", "ready": False,
+        return {**base, **quota, "state": "refusing", "reason": "no_status",
+                "ready": False,
                 "detail": msg or "unexpected /status response"}
     if not data.get("ready"):
-        return {**base, "state": "refusing", "reason": "pool_empty", "ready": False,
+        return {**base, **quota, "state": "refusing", "reason": "pool_empty",
+                "ready": False,
                 "detail": msg or "no ready instances"}
-    return {**base, "state": "working", "reason": "", "ready": True, "detail": msg}
+    return {**base, **quota, "state": "working", "reason": "", "ready": True,
+            "detail": msg}
+
+
+# Поля квоты в ответе /status — под разными именами у разных сборок lite-API.
+# Читаем только целые числа, НИКОГДА значения ключей/токенов: наружу (в UI и в
+# healthcheck) уходит счётчик, а не секрет.
+_QUOTA_FIELDS = {
+    "quota_remaining": ("quotaRemaining", "quota_remaining", "remaining"),
+    "quota_limit":     ("quotaLimit", "quota_limit", "dailyLimit", "daily_limit", "limit"),
+    "quota_used":      ("quotaUsed", "quota_used", "used", "todayUsed", "today_used"),
+}
+
+
+def _quota_readout(data: dict, body: dict) -> dict:
+    src = {}
+    for blob in (data, body):
+        if isinstance(blob, dict):
+            src.update(blob)
+            q = blob.get("quota")
+            if isinstance(q, dict):
+                src.update(q)
+    out = {}
+    for key, names in _QUOTA_FIELDS.items():
+        for n in names:
+            if n in src and isinstance(src[n], (int, float)) and not isinstance(src[n], bool):
+                out[key] = int(src[n])
+                break
+    return out
 
 
 def _as_int(val) -> int:

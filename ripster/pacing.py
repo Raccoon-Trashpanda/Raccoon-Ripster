@@ -87,13 +87,17 @@ def _save(d: dict) -> None:
 
 def caps(service: str, config: dict | None = None) -> dict:
     """Потолки сервиса: конфиг владельца поверх дефолтов. Ноль или пустое
-    значение = потолок снят (владелец имеет право сказать «не мешай»)."""
-    d = DEFAULTS.get(service) or {"hour": 0, "day": 0}
+    значение = потолок снят (владелец имеет право сказать «не мешай»).
+
+    Неизвестный сервис — это «потолка нет», а не «упасть»: `caps` зовётся из
+    `wait_seconds` на каждом запросе, и падение нового сервиса обрубило бы
+    дорогу, а не только лимит."""
+    d = DEFAULTS.get(service) or {"hour": 0, "day": 0, "cfg_hour": "", "cfg_day": ""}
     cfg = config or {}
     out = {}
     for key, cfgkey in (("hour", "cfg_hour"), ("day", "cfg_day")):
         try:
-            v = int(cfg.get(d[cfgkey], d[key]) or 0)
+            v = int((cfg.get(d[cfgkey], d[key]) if d[cfgkey] else d[key]) or 0)
         except (TypeError, ValueError):
             v = int(d[key])
         out[key] = max(0, v)

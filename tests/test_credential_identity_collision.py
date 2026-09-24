@@ -60,13 +60,17 @@ def test_legacy_tail_only_entries_are_dropped(_sandbox):
     ch._state_path().write_text(json.dumps({
         "qobuz_account:...0l7E4g": {"streak": 2, "last_country": ""},
         "deezer_arl:...947f15":    {"streak": 1, "last_country": ""},
-        "apple_slot:rip-wrapper-3": {"streak": 0, "last_country": ""},
+        "apple_slot:rip-wrapper-3": {"streak": 2, "last_country": ""},
+        "apple_account:...947f15#abc": {"streak": 2, "last_country": ""},
     }), encoding="utf-8")
     st = ch._load_state()
     assert "qobuz_account:...0l7E4g" not in st
     assert "deezer_arl:...947f15" not in st
-    # Слоты Apple опознаются именем контейнера — их правило не касается.
-    assert "apple_slot:rip-wrapper-3" in st
+    # С 24.09.2026 Apple считается по УЧЁТКЕ (`apple_account:`), а счётчик по
+    # имени контейнера — ровно тот осиротевший мусор, который переживает
+    # учётку и переезжает на новый аккаунт вместе с портом. Он и выбрасывается.
+    assert "apple_slot:rip-wrapper-3" not in st
+    assert "apple_account:...947f15#abc" in st, "счётчик по учётке — с хешем, живёт"
 
 
 def test_a_fresh_account_starts_from_zero_after_the_migration(_sandbox):

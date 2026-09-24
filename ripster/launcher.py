@@ -123,6 +123,13 @@ def _first_run_tool_hint(base_dir: Path = BASE_DIR, timeout: float = 8.0) -> lis
     return out
 
 
+# Предел сужения настольного интерфейса (владелец, 24.09.2026). Число — то же,
+# что `--ui-min-w` в static/css/main.css: ниже него вёрстка не сдавливается, а
+# идёт горизонтальной прокруткой, и тащить окно тоньше этого нет смысла.
+UI_MIN_W = 1060
+UI_MIN_H = 600
+
+
 def open_window(url: str, title: str = "Ripster") -> str:
     """Open `url` in a native pywebview window; fall back to the browser. Returns
     which path was taken ('webview' | 'browser'). Logs the webview error so a
@@ -130,7 +137,8 @@ def open_window(url: str, title: str = "Ripster") -> str:
     try:
         import webview                       # pywebview
         _log(f"[launcher] opening webview window → {url}")
-        webview.create_window(title, url, width=1280, height=860)
+        webview.create_window(title, url, width=1280, height=860,
+                              min_size=(UI_MIN_W, UI_MIN_H))
         webview.start()                      # blocks until the window is closed
         _log("[launcher] webview window closed normally")
         return "webview"

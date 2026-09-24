@@ -398,8 +398,17 @@ async def smart_resolve(body: dict):
                 pass
         if not _upc and ff_upc:
             _upc = ff_upc  # UPC от feature.fm, когда свой резолвер id не дал
+        # Сид источника: по Spotify-ссылке матрица добывает ISRC треков альбома
+        # ДО опроса витрин — у одного издания штрихкоды в магазинах разные
+        # (24.09.2026, Evanescence «Sweet Sacrifice (Remastered 2026)»).
+        _seed = None
+        import re as _re
+        _sm = _re.search(r"open\.spotify\.com/(?:intl-[a-z-]+/)?album/([A-Za-z0-9]+)", url or "")
+        if _sm:
+            _seed = {"id": _sm.group(1), "service": "spotify"}
         if _upc or isrc or title:
-            _m = await _av.matrix(upc=_upc, isrc=isrc, title=title, artist=artist)
+            _m = await _av.matrix(upc=_upc, isrc=isrc, title=title, artist=artist,
+                                  seed=_seed)
             _svcs = _m.get("services") or {}
             # Отсеиваем ТОЛЬКО то, что проверено загрузкой: «витрина ещё не
             # наполнилась» — не повод игнорировать наш собственный поиск, он мог

@@ -286,6 +286,45 @@ def _classify_partial_reason(log_text: str, permanent: bool) -> str:
     return "region" if permanent else "postprocess"
 
 
+def _preorder_of(task: dict) -> "dict | None":
+    """Инфо о предзаказе по задаче или None. Вердикт кэшируется в самой задаче:
+    детект — чистая функция по метаданным, а ретраи входят сюда повторно.
+    Предзаказ Means: недостающие треки откроются только после релиза — крутить
+    «дозагрузку» до него бессмысленно (24.09.2026, NORTHERN EXPOSURE: четыре
+    пустых прогона ради одного instant-grat сингла)."""
+    cached = task.get("_preorder")
+    if isinstance(cached, dict):
+        return cached
+    if cached is False:
+        return None
+    try:
+        from ripster import preorder as _pom
+        info = _pom.detect(task, _config)
+    except Exception as _pe:                                     # noqa: BLE001
+        print(f"[preorder] detect skipped: {_pe}", flush=True)
+        info = None
+    task["_preorder"] = info if isinstance(info, dict) else False
+    return info
+
+
+def _preorder_plan(task: dict, info: dict) -> None:
+    """Состояние «ожидает релиза» + план докачки, переживающий перезапуск.
+
+    План живёт в preorder_waits.json (не в очереди): настанет время — обычная
+    задача встанет в очередь сама. Ошибка планировщика не роняет загрузку:
+    худшее — собственник повторит задачу руками, как было до этой правки."""
+    try:
+        from ripster import preorder_waits as _pow
+        _row = _pow.schedule(task, info)
+        if _row:
+            task["_preorder_wait"] = _row["id"]
+        task["_awaits_release"] = info.get("release_utc") or ""
+        task.setdefault("meta", {})["_awaits_release"] = task["_awaits_release"]
+        task["meta"]["_release_cc"] = info.get("cc") or ""
+    except Exception as _pwe:                                    # noqa: BLE001
+        print(f"[preorder] schedule failed: {_pwe}", flush=True)
+
+
 # ── Итог загрузки → матрица доступности ─────────────────────────────────────────
 # Опрос витрины отвечает только «есть ли в каталоге». Скачали мы или нет — знает
 # ОДНА попытка загрузки, и до сих пор этот ответ никуда не записывался: карточка
@@ -3487,7 +3526,10 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             _MAX_PARTIAL_RETRY = 4
             _pr = int(task.get("_partial_retry", 0))
             _no_progress = _got == int(task.get("_last_got", -1))
-            if (_shortfall and not _permanent_miss
+            # Предзаказ: до релиза дозагрузка бессмысленна — вместо ретраев
+            # честное «ожидает релиза» и план докачки на полночь страны учётки.
+            _po = _preorder_of(task) if _shortfall else None
+            if (_shortfall and not _permanent_miss and not _po
                     and _pr < _MAX_PARTIAL_RETRY and not _no_progress):
                 _miss = _expected - _got
                 task["_partial_retry"] = _pr + 1
@@ -3513,10 +3555,13 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 # delivery card / web history can say WHY N of M arrived — not just
                 # that some are missing. Classified from the engine log; runner
                 # already knows `_permanent_miss`, this just names it.
-                _reason = _classify_partial_reason(log_text, _permanent_miss)
+                _reason = ("preorder" if _po
+                           else _classify_partial_reason(log_text, _permanent_miss))
                 task["_partial_reason"] = _reason
                 task.setdefault("meta", {})["_partial_reason"] = _reason
                 await _record_availability(task, _reason)
+                if _po:
+                    _preorder_plan(task, _po)
                 # Issue #5b: which tracks fell short (best-effort, engines that
                 # emit per-track failure lines). Empty for engines without a known
                 # format → card shows the aggregate reason above.
@@ -3540,9 +3585,18 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     _dm_sp.set_partial(tid, _got, _expected, _miss, _reason, _failed)
                 except Exception:
                     pass
-                _pkey = "console.partial_permanent" if _permanent_miss else "console.partial_region"
-                await _broadcast(_i18n.log_event(_pkey, level="warn", task_id=tid,
-                                                 got=_got, expected=_expected, miss=_miss))
+                if _po:
+                    from ripster import preorder as _pom
+                    await _broadcast(_i18n.log_event(
+                        "console.partial_preorder", level="warn", task_id=tid,
+                        date=_pom.human_date(_po.get("release_date") or ""),
+                        cc=_po.get("cc") or "?",
+                        got=_got, expected=_expected, miss=_miss))
+                else:
+                    _pkey = ("console.partial_permanent" if _permanent_miss
+                             else "console.partial_region")
+                    await _broadcast(_i18n.log_event(_pkey, level="warn", task_id=tid,
+                                                     got=_got, expected=_expected, miss=_miss))
             else:
                 await _broadcast(_i18n.log_event("console.done_tracks", level="success",
                                                  task_id=tid, n=result.tracks_ok))
@@ -3553,6 +3607,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 print(f"[coder] auto-mix skipped: {_e}", flush=True)
         elif (result.tracks_err > 0
               and not task.get("_auto_retry")
+              and not (int(result.tracks_ok or 0) > 0 and _preorder_of(task))
               and not _wrapper_down_empty
               and not _engine_aborted   # движок уже сказал «дальше бессмысленно»
               # Брак по decode-check — не «недокачка»: второй прогон писал бы
@@ -3609,6 +3664,26 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 task["_sc_fallback_tried"] = True
                 asyncio.create_task(_sc_drm_fallback(task))
 
+            # Предзаказ и здесь решает: движок сорвался на альбоме, который
+            # ещё не вышел, — гонять ошибки по кругу бессмысленно. Отдаём, что
+            # есть (страховочная сетка ниже соберёт partial из файлов на диске),
+            # ставим план докачки и отпускаем задачу без ретраев.
+            _po_e = _preorder_of(task)
+            if _po_e:
+                _preorder_plan(task, _po_e)
+                _meta_e = task.get("meta") or {}
+                try:
+                    _exp_e = int(_meta_e.get("trackCount") or _meta_e.get("totalTracks") or 0)
+                except (TypeError, ValueError):
+                    _exp_e = 0
+                if _exp_e > 1:
+                    from ripster import preorder as _pom
+                    await _broadcast(_i18n.log_event(
+                        "console.partial_preorder", level="warn", task_id=tid,
+                        date=_pom.human_date(_po_e.get("release_date") or ""),
+                        cc=_po_e.get("cc") or "?", got=len(task.get("_files") or []),
+                        expected=_exp_e, miss=_exp_e - len(task.get("_files") or [])))
+
             retry_n = task.get("_retry_count", 0)
             # Transient wrapper overload → patient (many) retries; otherwise the
             # normal small cap. Either way capped at 120s spacing (no hammering).
@@ -3631,6 +3706,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 and not _no_retry
                 and not _engine_aborted   # вердикт движка сильнее любой регулярки
                 and not task.get("_auto_retry")   # don't chain onto partial-fail retry
+                and not _po_e             # предзаказ: повтор до релиза ничего не добавит
                 # Битый по decode-check файл повтором не лечится: эфир — окно
                 # в прошлом, и новый прогон писал бы ПРЯМО СЕЙЧАС совсем другую
                 # передачу под именем запланированной (24.09.2026). Судьба

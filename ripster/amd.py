@@ -805,6 +805,26 @@ def _has_saved_session() -> bool:
     return adi.exists() and adi.stat().st_size > 0
 
 
+def _slot0_device_info(apple_id: str) -> str:
+    """Назначенный владельцем `-I` отпечаток слота 0, либо '' (тогда слот
+    стартует на заводском дефолте образа — ровно как до этой правки).
+
+    Слот 0 — единственная живая учётка, и новый device-info для Apple = новое
+    устройство (риск device_limit), поэтому молча подставлять отпечаток нельзя.
+    `get_assigned` ничего не вычисляет: вернёт значение, только если его положил
+    туда владелец через «Сменить отпечаток устройства» (routes/setup.py)."""
+    if not apple_id:
+        return ""
+    try:
+        from ripster import wrapper_device_info as _di
+        return _di.get_assigned(apple_id) or ""
+    except Exception as e:                              # noqa: BLE001
+        # Без отпечатка слот поднимется как раньше; ронять запуск из-за этого
+        # нельзя, но и молча глотать — нельзя (урок `_device_info` в пуле).
+        print(f"[wrapper] slot0 device-info не прочитан: {e}", flush=True)
+        return ""
+
+
 async def _start_wrapper_docker(force_login: bool = False) -> dict:
     """Start wrapper via Docker (remote или local image). Returns {ok, msg}."""
     global _wrapper_log_task
@@ -848,7 +868,8 @@ async def _start_wrapper_docker(force_login: bool = False) -> dict:
                                    rootfs, apple_id, apple_pwd, force_login)
 
     # ── NORMAL path: saved session → detached, auto-restart, no 2FA. ──
-    wrapper_args = "-H 0.0.0.0"
+    _di0 = _slot0_device_info(apple_id)
+    wrapper_args = "-H 0.0.0.0" + (f" -I {_di0}" if _di0 else "")
     cmd = [
         docker_path, "run", "-d",
         "--name", WRAPPER_CONTAINER_NAME,
@@ -959,7 +980,10 @@ async def _docker_login(docker_path: str, image: str, dec_port: str, m3u_port: s
     expired code must not loop into an Apple lock. The log monitor is started
     immediately so the 2FA prompt AND a failed login are caught during login."""
     global _wrapper_log_task
-    args_str = f"-H 0.0.0.0 -L {apple_id}:{apple_pwd}" + (" -F" if force else "")
+    _di0 = _slot0_device_info(apple_id)
+    args_str = (f"-H 0.0.0.0 -L {apple_id}:{apple_pwd}"
+                + (f" -I {_di0}" if _di0 else "")
+                + (" -F" if force else ""))
     # Clear any leftover 2FA code first — otherwise the wrapper instantly
     # "detects" a stale (expired) code file and fails the login with
     # "Check the account information". Wait for a FRESH code from the UI.
@@ -1087,6 +1111,9 @@ async def _start_wrapper_direct(force_login: bool = False) -> dict:
         wrapper_args += ["-L", f"{apple_id}:{apple_pwd}", "-F"]
     elif not has_session and apple_id and apple_pwd:
         wrapper_args += ["-L", f"{apple_id}:{apple_pwd}"]
+    _di0 = _slot0_device_info(apple_id)
+    if _di0:
+        wrapper_args += ["-I", _di0]
 
     _rootfs_data("non-docker").mkdir(parents=True, exist_ok=True)
     dist_dir = _dist_dir("non-docker")

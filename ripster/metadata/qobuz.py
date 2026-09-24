@@ -103,16 +103,21 @@ async def fetch_meta_qobuz(url: str) -> Optional[dict]:
             artist_name = (d.get("artist") or {}).get("name", "")
             year        = _year_from_ts(d.get("released_at")) or (d.get("release_date_original") or "")[:4]
             date        = d.get("release_date_original", "")
+            _items = (d.get("tracks") or {}).get("items") or []
             tracks = [
                 {
                     "title":    t.get("title", ""),
                     "duration": t.get("duration", 0),
                     "artist":   (t.get("performer") or {}).get("name", "") or artist_name,
                 }
-                for t in ((d.get("tracks") or {}).get("items") or [])
+                for t in _items
             ]
             tc = d.get("tracks_count") or len(tracks)
-            return {
+            # Предзаказ (24.09.2026): streamable_at/purchasable_at — точные
+            # unix-моменты открытия витрины, streamable у трека — «уже льётся».
+            # Движок принёс их в том же ответе; здесь только сохраняем.
+            _str_flags = [t.get("streamable") for t in _items if "streamable" in t]
+            out = {
                 "id":          str(d.get("id", id_)),
                 "type":        "album",
                 "title":       d.get("title", ""),
@@ -128,8 +133,13 @@ async def fetch_meta_qobuz(url: str) -> Optional[dict]:
                 "totalTracks": tc,
                 "tracks":      tracks,
                 "hires":       d.get("hires", False),
+                "streamableAt":  d.get("streamable_at"),
+                "purchasableAt": d.get("purchasable_at"),
                 "service":     "qobuz",
             }
+            if _str_flags:
+                out["availableTracks"] = sum(1 for x in _str_flags if x)
+            return out
 
         # tp == "track"
         alb   = d.get("album") or {}

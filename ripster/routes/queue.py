@@ -25,7 +25,8 @@ from ripster.i18n_msg import imsg
 
 def _make_task(url: str, quality: str, engine: str, svc: str,
                source: str = "manual", session_id: str = "",
-               lyrics: bool | None = None) -> dict:
+               lyrics: bool | None = None,
+               public_wrapper: bool = False) -> dict:
     """Single factory so add_to_queue and queue_batch always produce identical shapes."""
     return {
         "id":         str(uuid.uuid4())[:8],
@@ -43,6 +44,11 @@ def _make_task(url: str, quality: str, engine: str, svc: str,
         # None = use the global save-lrc-file/embed-lrc default; True/False =
         # per-release checkbox override (see release-card lyrics toggle).
         "lyrics":     lyrics,
+        # False = решает настройка `apple-public-mode`; True = человек сам
+        # попросил публичный враппер ДЛЯ ЭТОЙ задачи (чекбокс в диалоге
+        # скачивания). Настройку гостю переключить нельзя, поэтому флаг ставится
+        # здесь и живёт в самой задаче.
+        "public_wrapper": bool(public_wrapper),
     }
 
 router = APIRouter()
@@ -268,6 +274,9 @@ async def add_to_queue(body: dict, request: Request):
     # degrading to the best available result when no wrapper is reachable.
     # Music-video URLs always force the video path regardless of selected codec.
     _route_note = ""
+    # Чекбокс «через публичный враппер» — жест человека про ОДНУ задачу. Гость
+    # его выставить не может: у него нет права выбирать движок (см. выше).
+    _pub_force = bool(body.get("public_wrapper")) and not sid
     if svc == "apple":
         # Single source of truth for Apple routing: route_apple inspects the URL
         # (music-video detection + region) and the requested quality, then picks
@@ -279,7 +288,9 @@ async def add_to_queue(body: dict, request: Request):
         # route_apple may do a sync httpx probe (up to ~6s) of the public wrapper
         # on a cache miss — run it off the event loop so adding an Apple URL can
         # never freeze the whole server.
-        routed = await asyncio.to_thread(route_apple, quality, _cfg, url)
+        routed = await asyncio.to_thread(
+            route_apple, quality, _cfg, url,
+            {"public_wrapper": True} if _pub_force else None)
         engine, quality = routed["engine"], routed["quality"]
         _route_note = routed.get("note", "")
         if _avail_note:
@@ -333,7 +344,8 @@ async def add_to_queue(body: dict, request: Request):
         if _same:
             dupes.append(_same[0])
             return None
-        t = _make_task(turl, quality, engine, svc, source, session_id=sid, lyrics=lyrics_override)
+        t = _make_task(turl, quality, engine, svc, source, session_id=sid,
+                       lyrics=lyrics_override, public_wrapper=_pub_force)
         if _route_note:
             t.setdefault("meta", {})["route_note"] = _route_note
         if tmeta:

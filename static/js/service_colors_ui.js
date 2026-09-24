@@ -385,6 +385,17 @@ function addCurrentPage() {
   addUrl();
 }
 
+// Обложка ряда очереди: ячейка .qi-art — 44×44, а mzstatic/dzcdn/… отдают
+// полный адрес в ~600×600. relCover (живёт в sc_tab.js, грузится ПОЗЖЕ этого
+// файла — отсюда guarded вызов) переписывает размер на ~96px (retina-ocr,
+// ~2–4 КБ вместо ~40 КБ). По клику lightbox.js апгрейдит обратно до 1000, а
+// чтобы зум не зависел от формата миниатюры — несём оригинал в data-lightbox-src.
+function _qiCoverThumb(url) {
+  if (!url) return url;
+  try { return (typeof relCover === 'function') ? relCover(url, 96) : url; }
+  catch (e) { return url; }
+}
+
 function renderQueue() {
   const el = document.getElementById('queue-list');
   const empty = document.getElementById('queue-empty');
@@ -545,6 +556,7 @@ function _visibleLog(task) {
 }
 
 function _qiStatusChip(task) {
+  if(task._awaits_release) return `<span class="qi-st st-partial">⏳ ${t('q.st_awaits')}</span>`;
   if(task.partial || task._partial) return `<span class="qi-st st-partial">⚠ ${t('q.st_partial')}</span>`;
   if(task.status==='running') return `<span class="qi-st st-run"><span class="qi-spinner"></span>${task._retry_count?(t('q.st_refetch')+' '+task._retry_count):(task._auto_retry?t('q.st_refetch'):t('q.st_dl'))}</span>`;
   if(task.status==='done')   return `<span class="qi-st st-done">✓ ${t('q.st_done')}</span>`;
@@ -623,7 +635,7 @@ function buildQueueItem(task) {
   // а текст — он уезжает в DOM каждого ряда и взрывается на обратных кавычках
   // (08.08.2026 очередь перестала рисоваться целиком).
   el.innerHTML = `
-    <div class="qi-art">${m?.artworkUrl?`<img src="${esc(m.artworkUrl)}" data-cover data-lightbox onload="this.classList.add('loaded')" style="cursor:zoom-in" loading="lazy"/>`:'🎵'}</div>
+    <div class="qi-art">${m?.artworkUrl?`<img src="${esc(_qiCoverThumb(m.artworkUrl))}" data-cover data-lightbox data-lightbox-src="${esc(m.artworkUrl)}" onload="this.classList.add('loaded')" style="cursor:zoom-in" loading="lazy"/>`:'🎵'}</div>
     <div class="qi-body">
       <div class="qi-l1">
         <span class="qi-title">${esc(m?.title || _titleFromUrl(task.url))}</span>

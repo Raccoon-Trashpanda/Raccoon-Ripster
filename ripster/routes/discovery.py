@@ -193,6 +193,22 @@ def _sp_bg_admit() -> bool:
     return True
 
 
+async def _sp_bg_admit_wait() -> bool:
+    """То же разрешение, но с одной короткой паузой, если щель свежая.
+
+    «Альбом → треки» — ОДИН логический обход, а каждое разрешение сдвигает
+    паузу на 2 с: без ожидания вторая половина sequence отбивалась молча,
+    ISRC из Spotify не добывался никогда, и релиз с другим штрихкодом в
+    магазине оставался «нигде нет» (замер 24.09.2026). Долги бан не ждём."""
+    if _sp_bg_admit():
+        return True
+    wait = _sp_bg_gap_until - _time.time()
+    if 0 < wait <= _SP_BG_GAP:
+        import asyncio
+        await asyncio.sleep(wait)
+    return _sp_bg_admit()
+
+
 def _sp_bg_state_reset() -> None:
     """Только для тестов и перезапуска: забыть накопленный бюджет и провалы."""
     global _sp_bg_gap_until, _sp_bg_fail_streak
@@ -1166,7 +1182,7 @@ async def _seed_isrcs(seed: dict, limit: int = 4) -> list[str]:
     out: list[str] = []
     try:
         if svc == "spotify":
-            if not _sp_bg_admit():
+            if not await _sp_bg_admit_wait():
                 return []
             token = await _get_spotify_app_token()
             if not token:
@@ -1181,17 +1197,39 @@ async def _seed_isrcs(seed: dict, limit: int = 4) -> list[str]:
                 ids = [it.get("id") for it in (r.json().get("items") or []) if it.get("id")]
                 if not ids:
                     return []
-                if not _sp_bg_admit():
+                if not await _sp_bg_admit_wait():
                     return []
                 r2 = await c.get("https://api.spotify.com/v1/tracks",
                                  params={"ids": ",".join(ids[:limit])}, headers=h)
                 if r2.status_code == 429:
                     _record_sp_rate_limit(int(r2.headers.get("Retry-After", 30)))
                     return []
-                for t in (r2.json().get("tracks") or []):
-                    v = str(((t or {}).get("external_ids") or {}).get("isrc") or "").upper()
-                    if v and v not in out:
-                        out.append(v)
+                batch = r2.json().get("tracks") if r2.status_code == 200 else None
+                if batch:
+                    for t in (batch or []):
+                        v = str(((t or {}).get("external_ids") or {}).get("isrc") or "").upper()
+                        if v and v not in out:
+                            out.append(v)
+                else:
+                    # Замер 24.09.2026: пачка /v1/tracks на наш app-токен
+                    # отвечает 403 Forbidden, а одиночный /v1/tracks/{id} —
+                    # 200 с external_ids.isrc. Без этого хода ISRC-мост к
+                    # Deezer/Qobuz не строился никогда.
+                    for tid in ids[:limit]:
+                        if not await _sp_bg_admit_wait():
+                            break
+                        r3 = await c.get(f"https://api.spotify.com/v1/tracks/{tid}",
+                                         headers=h)
+                        if r3.status_code == 429:
+                            _record_sp_rate_limit(int(r3.headers.get("Retry-After", 30)))
+                            break
+                        if r3.status_code != 200:
+                            continue
+                        v = str(((r3.json() or {}).get("external_ids") or {}).get("isrc") or "").upper()
+                        if v and v not in out:
+                            out.append(v)
+                        if len(out) >= 2:
+                            break
             return out
         if svc == "deezer":
             async with _HTTP.ashared() as c:
@@ -1215,6 +1253,61 @@ async def _seed_isrc(seed: dict) -> str:
     """ISRC первого трека — обратная совместимость для старых вызовов."""
     v = await _seed_isrcs(seed, limit=1)
     return v[0] if v else ""
+
+
+async def _seed_profile(seed: dict, isrcs: "list[str] | None" = None) -> dict:
+    """Паспорт ИСХОДНОГО релиза: штрихкод, ISRC, число треков, длительность.
+
+    Матрице доступа нужны последние два: одно и то же издание живёт в витринах
+    под РАЗНЫМИ штрихкодами (замер 24.09.2026, Evanescence «Sweet Sacrifice
+    (Remastered 2026)»: Spotify 00888072836037, Deezer 888072836020), и когда
+    точные ключи промахнулись, издание опознаётся парой «то же число треков +
+    та же длительность», а не одним названием. ISRC берём тем же путем, что
+    фоллбэк «Spotify не отдаёт» (23.09.2026) — `_seed_isrcs`, а не его копией.
+    `isrcs` — уже добытые, чтобы не ходить дважды.
+    """
+    prof = {"upc": "", "isrcs": list(isrcs or []), "tracks": 0, "duration_s": 0}
+    sid, svc = str(seed.get("id") or ""), str(seed.get("service") or "").lower()
+    if not sid:
+        return prof
+    if not prof["isrcs"]:
+        prof["isrcs"] = await _seed_isrcs(seed)
+    try:
+        if svc == "spotify":
+            if not await _sp_bg_admit_wait():
+                return prof
+            token = await _get_spotify_app_token()
+            if not token:
+                return prof
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.spotify.com/v1/albums/{sid}",
+                                params={"limit": 50},
+                                headers={"Authorization": f"Bearer {token}"})
+                if r.status_code == 429:
+                    _record_sp_rate_limit(int(r.headers.get("Retry-After", 30)))
+                    return prof
+            j = r.json() if r.status_code == 200 else {}
+            prof["upc"] = str(((j.get("external_ids") or {}).get("upc") or "")).strip()
+            tr = j.get("tracks") or {}
+            items = tr.get("items") or []
+            prof["tracks"] = int(tr.get("total") or j.get("total_tracks") or len(items) or 0)
+            # Длительность считаем только когда весь треклист влез в ответ:
+            # частичная сумма хуже отсутствующей — сверку ±3 с ней не пройти.
+            if items and prof["tracks"] and prof["tracks"] <= len(items):
+                prof["duration_s"] = int(round(
+                    sum(int(i.get("duration_ms") or 0) for i in items) / 1000.0))
+        elif svc == "deezer":
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.deezer.com/album/{sid}")
+            j = r.json() if r.status_code == 200 else {}
+            prof["upc"] = str(j.get("upc") or "").strip()
+            items = ((j.get("tracks") or {}).get("data") or [])
+            prof["tracks"] = int(j.get("nb_tracks") or len(items) or 0)
+            if items and prof["tracks"] and prof["tracks"] <= len(items):
+                prof["duration_s"] = sum(int(i.get("duration") or 0) for i in items)
+    except Exception:
+        return prof
+    return prof
 
 
 async def _find_by_isrc(isrc: str, service: str) -> dict | None:
@@ -3296,7 +3389,21 @@ async def api_availability(upc: str = "", isrc: str = "", title: str = "",
         upc = await _upc_from_url(url)
     if not (upc or isrc or title):
         return {"ok": False, "error_key": "err.need_query_id", "error": "нужен upc, isrc, ссылка или название"}
-    m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist, force=force)
+    # Сид источника — чтобы матрица добыла ISRC треков ДО опроса витрин: у
+    # одного издания штрихкоды в магазинах разные (24.09.2026, Evanescence
+    # «Sweet Sacrifice (Remastered 2026)»: Spotify 00888072836037, Deezer
+    # 888072836020), и карточка радара врала «нигде нет» при живом Deezer.
+    seed = None
+    sm = _re_mod.search(r"open\.spotify\.com/(?:intl-[a-z-]+/)?album/([A-Za-z0-9]+)",
+                        url or "")
+    if sm:
+        seed = {"id": sm.group(1), "service": "spotify"}
+    else:
+        dm = _re_mod.search(r"deezer\.com/[a-z]{2}/album/(\d+)", url or "")
+        if dm:
+            seed = {"id": dm.group(1), "service": "deezer"}
+    m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist,
+                         force=force, seed=seed)
     return {"ok": True, **m,
             "recommended": _av.pick_source(m["services"]),
             "summary": _av.summary_ru(m["services"])}

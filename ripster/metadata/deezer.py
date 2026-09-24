@@ -37,6 +37,7 @@ async def fetch_meta_deezer(url: str) -> Optional[dict]:
 
         if tp == "album":
             tracks = []
+            _avail_fields = []
             try:
                 for t in (d.get("tracks", {}).get("data") or []):
                     tracks.append({
@@ -44,9 +45,13 @@ async def fetch_meta_deezer(url: str) -> Optional[dict]:
                         "duration": t.get("duration", 0),
                         "artist":   (t.get("artist") or {}).get("name", ""),
                     })
+                    # available_products есть не во всех ответах Deezer; если
+                    # есть — по нему видно, что треку уже можно отдаваться.
+                    if "available_products" in t:
+                        _avail_fields.append(t.get("available_products"))
             except Exception as e:
                 print(f"[meta] deezer track parse failed: {e}", file=sys.stderr, flush=True)
-            return {
+            out = {
                 "id":          str(d.get("id", id_)),
                 "type":        "album",
                 "title":       d.get("title", "—"),
@@ -65,6 +70,9 @@ async def fetch_meta_deezer(url: str) -> Optional[dict]:
                 "tracks":      tracks,
                 "service":     "deezer",
             }
+            if _avail_fields:
+                out["availableTracks"] = sum(1 for x in _avail_fields if x)
+            return out
 
         if tp == "track":
             alb = d.get("album") or {}

@@ -221,6 +221,18 @@ def _genre_is_shallow(genre: str) -> bool:
     return is_bucket(genre) or not f or f in BUCKET_FAMILIES
 
 
+def title_marker(title: str) -> str:
+    """Функциональный узор заголовка без цифр — или "", если заголовок молчит.
+
+    «639 Hz Inner Worth» и «963 Hz Meet the Infinite» дают один маркер «hz»:
+    цифры в узоре — номер частоты, а не личность, и с ними обобщение не
+    работало бы (слово владельца должно расползаться на класс, а не на одну
+    карточку).
+    """
+    m = _FUNC_TITLE_RE.search(str(title or ""))
+    return re.sub(r"\s+", " ", re.sub(r"\d+", "", m.group(0))).strip().lower() if m else ""
+
+
 def title_family(title: str) -> str:
     """Семья по заголовку — или "", если заголовок молчит о назначении записи."""
     return "meditation" if _FUNC_TITLE_RE.search(str(title or "")) else ""
@@ -237,7 +249,8 @@ _SPLIT_RE = re.compile(
 # ленты: «сколько карточек правило не тронуло, потому что судить было нечем» —
 # цифра, которую нельзя прятать, иначе «скрыто 12» выглядит победой.
 _COUNTS = {"anchor_show": 0, "anchor_hide": 0, "anchor_unknown": 0,
-           "no_anchor": 0, "stitch_dropped": 0, "name_claim_dropped": 0}
+           "no_anchor": 0, "stitch_dropped": 0, "name_claim_dropped": 0,
+           "feedback_show": 0, "feedback_hide": 0}
 
 _MAX_PER_SOURCE = 15
 # Витрины, которых можно спросить лейбл/жанр БЕЗ хозяина: публичный Deezer,

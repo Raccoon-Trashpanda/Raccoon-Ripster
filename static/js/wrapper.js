@@ -182,6 +182,29 @@ async function loadWrapperSessionStatus() {
   await checkWrapperStatus();
 }
 
+async function changeDeviceFingerprint() {
+  // Новый отпечаток = новое устройство у Apple: только по явному желанию,
+  // с предупреждением. Перелогин (применение) — следующий шаг владельца.
+  if (!confirm(t('as.fingerprint_confirm'))) return;
+  const btn = document.getElementById('btn-device-fingerprint');
+  if (btn) btn.disabled = true;
+  try {
+    const r = await fetch('/api/wrapper/device-info', {method:'POST'});
+    const d = await r.json();
+    const body = (d && typeof d === 'object') ? d : {};
+    const detail = body.detail || body;
+    const ok = r.ok && body.ok;
+    const key = detail.msg_key;
+    const text = ok ? (key ? ti(key, detail.params) : (detail.msg || ''))
+                    : ('✗ ' + (key ? ti(key, detail.params) : (detail.msg || '')));
+    toast(text, ok ? 'var(--orange)' : 'var(--red)');
+  } catch(e) {
+    toast(t('err.generic') + ': ' + e.message, 'var(--red)');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
 async function stopWrapper() {
   await fetch('/api/wrapper/stop', {method:'POST'});
   toast(t('s.wrapper_stopped'), 'var(--orange)');

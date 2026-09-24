@@ -18,7 +18,7 @@ def _clean(tmp_path):
     av._cache, av._loaded = {}, False
 
 
-async def _no_probe(service, upc, isrc):
+async def _no_probe(service, upc, isrc, title="", artist="", expect=None):
     return {"available": False, "reason": av.REASON_NOT_YET, "checked_ts": 0}
 
 
@@ -53,7 +53,7 @@ async def test_known_isrc_is_used_even_when_its_source_became_unavailable(monkey
     """
     asked = {}
 
-    async def _probe(service, upc, isrc):
+    async def _probe(service, upc, isrc, title="", artist="", expect=None):
         asked[service] = isrc
         return {"available": False, "reason": av.REASON_NOT_YET, "checked_ts": 0}
 
@@ -72,7 +72,7 @@ async def test_known_isrc_is_used_even_when_its_source_became_unavailable(monkey
 async def test_download_verdict_survives_a_later_catalog_probe(monkeypatch):
     """«Каталог говорит есть» не должно перебивать «мы пробовали и не смогли»
     раньше, чем истечёт срок вердикта."""
-    async def _probe_says_available(service, upc, isrc):
+    async def _probe_says_available(service, upc, isrc, title="", artist="", expect=None):
         return {"available": True, "url": "u", "checked_ts": 0}
 
     monkeypatch.setattr(av, "_probe_one", _probe_says_available)

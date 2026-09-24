@@ -43,6 +43,10 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "amd-wm-api-key",   # ключ wm.wol.moe (с 10.09.2026 обязателен) — секрет, маску см. routes/core
     "amd-parallel", "amd-save-lyrics", "amd-lyrics-format",
     "amd-codec-alt",
+    # Публичный враппер wm.wol.moe: суточный потолок запросов и принуждённая
+    # витрина. Без этих строк поле в Настройках сохранялось бы «успешно» и молча
+    # не действовало.
+    "amd-daily-cap", "amd-region-force",
     "apple-parallel",   # apple-parallel-tracks / apple-parallel-count (zhaarey)
     # Мягкие потолки пейсинга (ripster/pacing.py): наши запросы к amp-api и к
     # официальному эндпоинту плейлистов Qobuz. Без этой строки поле в Настройках
@@ -100,6 +104,9 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "minimize-to-tray",
     "minimize-to",      # where a plain minimize goes: taskbar (default) / tray
     "wrapper-apple-id", "wrapper-password", "wrapper-mode", "apple-wrapper",
+    # Режим публичного враппера (6 сценариев владельца, 24.09.2026). По умолчанию
+    # «off»: код сам публичный враппер не включает никогда.
+    "apple-public-mode",
     "wrapper-accounts",   # multi-account Apple wrapper pool — list of {id,password,label}
     "apple-pool", "apple-pool-size",
     "decrypt-port", "m3u8-port",

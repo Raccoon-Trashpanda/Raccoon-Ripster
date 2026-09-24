@@ -67,6 +67,7 @@ _SECRET_KEYS = {
     "soundcloud-oauth-token",
     "beatport-password",
     "wrapper-password", "wrapper-apple-id",
+    "amd-wm-api-key",              # ключ wm.wol.moe (Bearer) — секрет, гостям маскируется
     "tl1001-password",
     "yandex-token",
     "amazon-token",

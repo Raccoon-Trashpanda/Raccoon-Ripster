@@ -74,10 +74,19 @@ def test_store_file_utc_and_atomic(ctx, tmp_path):
 # ── Переживает перезапуск ────────────────────────────────────────────────────
 
 def test_survives_restart(ctx):
+    """План переживает перезапуск в СВОЁМ файле, а не карточкой в очереди.
+
+    Переписан 22.09.2026 вместе со сменой контракта. Раньше карточка
+    создавалась при планировании и восстанавливалась при старте — тест это и
+    проверял. Теперь календарь и очередь разделены: `bbc_scheduled.json`
+    хранит план, а очередь узнаёт о нём только когда наступит час. Поэтому
+    после «перезапуска» план обязан читаться с диска, а очередь — остаться
+    пустой.
+    """
     store, queue = ctx[0], ctx[1]
     row = bs.schedule_recording(channel="bbc_6music", start_utc=_future(),
                                 duration=3600, title="Mix")
-    assert len(queue) == 1 and queue[0]["status"] == TaskStatus.SCHEDULED.value
+    assert queue == [], "план не вешает карточку заранее"
 
     # «Перезапуск»: тот же файл на диске — новый процесс с пустой очередью.
     from ripster.routes.queue import _make_task
@@ -87,22 +96,44 @@ def test_survives_restart(ctx):
                broadcast=None, process_queue=None, make_task=_make_task,
                queue_snapshot=lambda: fresh_queue)
     assert fresh_store.load()          # план читается с диска
-    n = bs.restore()
-    assert n == 1
-    card = fresh_queue[0]
-    assert card["id"] == row["id"]
-    assert card["status"] == TaskStatus.SCHEDULED.value
-    assert card["scheduled_for"] == row["start_utc"]
-    assert card["meta"]["channel"] == "bbc_6music"
-    assert card["engine"] == "bbc_live"
+    assert asyncio.run(bs.restore()) == 0, "снимать нечего — карточек и не было"
+    assert fresh_queue == []
+
+    survived = fresh_store.get(row["id"])
+    assert survived is not None and survived["status"] == "pending"
+    assert survived["start_utc"] == row["start_utc"]
+    assert survived["channel"] == "bbc_6music"
 
 
-def test_restore_keeps_existing_cards(ctx):
+def test_restore_drops_legacy_cards_from_old_builds(ctx):
+    """`restore()` теперь снимает карточки, а не воссоздаёт их.
+
+    Смысл поменялся на противоположный 22.09.2026, и тест переписан целиком.
+    Старые сборки вешали в очередь карточку «запланировано на …» с нулём
+    прогресса, и `queue_pending.json` послушно возвращает её на каждом старте —
+    она висела бы сутками и не давала очереди опустеть. После обновления такую
+    карточку надо снять один раз; сам план при этом не трогается и дождётся
+    своего часа в календаре.
+    """
+    store, queue = ctx[0], ctx[1]
+    row = bs.schedule_recording(channel="bbc_6music", start_utc=_future(), duration=60)
+
+    # Карточка из старой сборки, какой её вернул бы queue_pending.json.
+    queue.append({"id": row["id"], "source": "bbc_schedule",
+                  "status": TaskStatus.SCHEDULED.value, "engine": "bbc_live"})
+
+    assert asyncio.run(bs.restore()) == 1, "наследие прошлой сборки снято"
+    assert queue == []
+    assert store.get(row["id"])["status"] == "pending", "сам план не пострадал"
+
+
+def test_restore_is_idempotent(ctx):
+    """Второй запуск не должен ничего находить — иначе на каждом старте
+    пересчитывалось бы и писалось в queue_pending.json впустую."""
     store, queue = ctx[0], ctx[1]
     bs.schedule_recording(channel="bbc_6music", start_utc=_future(), duration=60)
-    # queue_pending.json вернул карточку сам — restore не должен плодить вторую.
-    assert bs.restore() == 0
-    assert len(queue) == 1
+    assert asyncio.run(bs.restore()) == 0
+    assert asyncio.run(bs.restore()) == 0
 
 
 # ── Отмена ───────────────────────────────────────────────────────────────────
@@ -117,11 +148,26 @@ def test_cancel_removes_plan_and_card(ctx):
 
 
 def test_cancel_leaves_running_recording(ctx):
+    """Отмена плана не трогает запись, которая УЖЕ идёт.
+
+    Тест переписан 22.09.2026 вместе со сменой контракта: раньше карточка
+    появлялась в очереди сразу при планировании, и тест просто красил её в
+    RUNNING. Теперь до наступления часа карточки нет вовсе (см. докстринг
+    модуля), поэтому идущую запись надо честно родить через fire().
+    Проверяемое поведение не изменилось — изменился способ до него добраться.
+    """
     store, queue = ctx[0], ctx[1]
-    row = bs.schedule_recording(channel="bbc_radio_one", start_utc=_future(), duration=60)
+    row = bs.schedule_recording(channel="bbc_radio_one",
+                                start_utc=bs.utcnow(), duration=60)
+    asyncio.run(bs.fire(store.get(row["id"])))      # час настал — задача создана
+    assert len(queue) == 1
     queue[0]["status"] = TaskStatus.RUNNING.value
-    assert bs.cancel_recording(row["id"]) is True
-    assert len(queue) == 1           # идущую запись отмена плана не трогает
+
+    # План уже сработал, и в календаре отменять нечего — отсюда False. Это не
+    # отказ, а честный ответ: остановить ИДУЩУЮ запись — дело кнопки отмены в
+    # очереди, а не планировщика. Главное, что он её не трогает.
+    assert bs.cancel_recording(row["id"]) is False
+    assert len(queue) == 1
     assert queue[0]["status"] == TaskStatus.RUNNING.value
 
 
@@ -141,8 +187,15 @@ def test_past_start_rejected(ctx):
 
 
 def test_fire_skips_long_missed(ctx):
-    """План, который «настал», пока приложение было выключено (больше grace
-    окна назад), не пишется задним числом — снимается."""
+    """Пропущенный эфир не пишется задним числом — но и НЕ исчезает.
+
+    Контракт изменён 22.09.2026, и это не косметика. Раньше план просто
+    снимался, и человек, вернувшись к выключенному на сутки компьютеру, не
+    находил ни записи, ни следа того, что он вообще что-то планировал. Теперь
+    план остаётся в календаре с вердиктом «пропущен» и числом минут опоздания
+    (``_miss``), и это видно на вкладке BBC. Ровно этот случай произошёл
+    22.09.2026: машина стояла с 01:36 до 17:02.
+    """
     store, queue = ctx[0], ctx[1]
     row = bs.schedule_recording(channel="bbc_world_service", start_utc=_future(),
                                 duration=3600)
@@ -150,8 +203,15 @@ def test_fire_skips_long_missed(ctx):
     store.mark(row["id"], start_utc=bs.fmt_utc(bs.utcnow() - timedelta(hours=9)))
     fired = asyncio.run(bs.fire(store.get(row["id"])))
     assert fired is False
-    assert store.get(row["id"]) is None
-    assert queue == []
+    assert queue == []                       # задним числом не пишем
+
+    kept = store.get(row["id"])
+    assert kept is not None, "план обязан остаться — иначе пропажа немая"
+    assert kept["status"] == "missed"
+    assert kept["verdict"]["state"] == "missed"
+    assert kept["verdict"]["late_minutes"] >= 8 * 60, "опоздание считается честно"
+    assert row["id"] not in [r["id"] for r in store.pending()], \
+        "в ожидающих ему больше не место — час прошёл"
 
 
 def test_fire_queues_task_at_time(ctx):
@@ -165,12 +225,21 @@ def test_fire_queues_task_at_time(ctx):
     assert store.get(row["id"])["status"] == "fired"
 
 
-def test_fire_without_card_drops_plan(ctx):
+def test_fire_works_with_an_empty_queue(ctx):
+    """Пустая очередь до срабатывания — это НОРМА, а не сбой.
+
+    Тест раньше назывался `test_fire_without_card_drops_plan` и проверял
+    обратное: карточка создавалась при планировании, и её отсутствие считалось
+    признаком того, что человек удалил задачу руками, — план тогда снимался.
+    С 22.09.2026 карточки до наступления часа нет ни у кого и никогда, поэтому
+    прежняя проверка запрещала бы единственный штатный путь.
+    """
     store, queue = ctx[0], ctx[1]
     row = bs.schedule_recording(channel="bbc_1xtra", start_utc=bs.utcnow(), duration=60)
-    queue.clear()                       # карточку удалили руками
-    assert asyncio.run(bs.fire(store.get(row["id"]))) is False
-    assert store.pending() == []
+    assert queue == [], "план не должен создавать карточку заранее"
+    assert asyncio.run(bs.fire(store.get(row["id"]))) is True
+    assert len(queue) == 1
+    assert store.get(row["id"])["status"] == "fired"
 
 
 def test_fire_actually_starts_the_queue_processor(ctx):
@@ -235,7 +304,11 @@ def test_duplicate_rejected(ctx):
     # и тот же канал, но другой эфир — тоже
     assert store.add(channel="bbc_radio_three", start_utc=start + timedelta(hours=3),
                      duration=60)["status"] == "pending"
-    assert len(queue) == 1              # дубли карточки не создали
+    # Карточек нет ни одной — их вообще не создают заранее (контракт 22.09.2026).
+    # Раньше здесь стояло `len(queue) == 1`: планирование сразу вешало карточку,
+    # и проверка сторожила, что дубль не повесит вторую. Сторожить теперь нечего,
+    # но сам смысл теста — «отказ по дублю не наплодил лишнего» — остаётся.
+    assert queue == []
 
 
 def test_bad_duration_rejected(ctx):

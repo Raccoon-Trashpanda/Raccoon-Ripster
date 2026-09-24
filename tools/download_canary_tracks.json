@@ -1,0 +1,51 @@
+{
+ "_comment": "Canary-треки для tools/download_canary.py. Правила отбора (24.09.2026): один и тот же всемирно известный записанный релиз там, где каталог позволяет (The Beatles «Octopus's Garden», Abbey Road Remastered — каталог Universal, без регионалок, живёт на витринах с 2009-го); для Beatport — Darude «Sandstorm» (каталог Nervous, правится с 1999-го, EDM-витрина не продаёт Beatles); для SoundCloud — релиз официального артист-аккаунта с миллионом прослушиваний (не кавер-пользователь: такие исчезают). Длительности сняты с публичных API витрин (iTunes/Deezer) при отборе, кодек-лист — факт первой реальной проверки; длительность в ±2 с и >100 КБ ловят «скачался заглушенный 30-секундный preview» или пустой контейнер.",
+ "apple": {
+   "url": "https://music.apple.com/us/album/octopuss-garden/1441164426?i=1441164586",
+   "duration_s": 170,
+   "codecs": ["alac", "aac"],
+   "note": "Abbey Road Remastered 2009 (album 1441164426, track 1441164586): US-storefront, Apple owns the catalog locally, no region lock, 2:50.trackTimeMillis=170000 (iTunes API 24.09.2026)."
+ },
+ "deezer": {
+   "url": "https://www.deezer.com/track/116348460",
+   "duration_s": 169,
+   "codecs": ["flac", "mp3"],
+   "note": "Octopus's Garden (Remastered 2009), Deezer album 12047952 (Abbey Road Remastered, UPC 602547670342), duration 169 из публичного API Deezer 24.09.2026."
+ },
+ "qobuz": {
+   "url": "https://open.qobuz.com/track/30369899",
+   "duration_s": 169,
+   "codecs": ["flac"],
+   "note": "The Beatles «Octopus's Garden» — тот же remastered Abbey Road (обложка 0060254767… = UPC 602547670342). id из `qobuz.search('Octopus's Garden Beatles')` 24.09.2026; формат open.qobuz.com — то, во что движок сам нормализует любой URL."
+ },
+ "tidal": {
+   "url": "https://listen.tidal.com/track/55130635",
+   "duration_s": 169,
+   "codecs": ["flac", "mp4a", "aac"],
+   "note": "Первый результат `tidal.search(\"Octopus's Garden Beatles\", track)` 24.09.2026; Beatles на Tidal — глобальный каталог Universal, без регионалок."
+ },
+ "spotify": {
+   "url": "https://open.spotify.com/track/0suLngfo7rJoetk7Ub6N8l",
+   "duration_s": 169,
+   "codecs": ["opus", "vorbis", "flac", "ogg"],
+   "note": "«Octopus's Garden - Remastered 2009» — /api/search service=spotify 24.09.2026. Идём через orpheus (тот же путь, что у гостей), не через legacy-конверт."
+ },
+ "beatport": {
+   "url": "https://www.beatport.com/track/sandstorm/18448267",
+   "duration_s": null,
+   "codecs": ["flac"],
+   "note": "Darude — Sandstorm, Extended Mix (2023 reissue, release 4368186) — трек живёт на Beatport с 1999-го, reissue стабилен; duration будет замерена первым реальным прогоном и вписана сюда (beatport API duration не отдаёт)."
+ },
+ "soundcloud": {
+   "url": "https://soundcloud.com/dragonette/martin-solveig-dragonette-hello",
+   "duration_s": 281,
+   "codecs": ["mp3", "aac"],
+   "note": "Martin Solveig & Dragonette — Hello, официальный аккаунт dragonette, 2.7 млн plays, duration 281 с из /api/soundcloud/search 24.09.2026. Пользовательские каверы не годятся — удаляются."
+ },
+ "yandex": {
+   "url": "https://music.yandex.ru/album/3277262/track/27373952",
+   "duration_s": 169,
+   "codecs": ["mp3", "aac", "flac"],
+   "note": "The Beatles — Octopus's Garden, album 3277262. /api/search service=yandex 24.09.2026; при первой проверке длительность уточняется."
+ }
+}

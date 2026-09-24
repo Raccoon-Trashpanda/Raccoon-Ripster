@@ -313,6 +313,9 @@ async def fetch_meta(url: str) -> Optional[dict]:
             "artist":      item.get("artistName", ""),
             "album":       item.get("collectionName", ""),
             "year":        (item.get("releaseDate") or "")[:4],
+            # Полная дата — preorder.detect: у предзаказа releaseDate в будущем,
+            # а «год» для плана «докачать после полуночи учётки» слишком груб.
+            "date":        (item.get("releaseDate") or "")[:10],
             "genre":       item.get("primaryGenreName", ""),
             "trackNumber": item.get("trackNumber"),
             "totalTracks": 1 if is_track else item.get("trackCount"),
@@ -385,6 +388,10 @@ async def fetch_meta(url: str) -> Optional[dict]:
         "artist":      a.get("artistName", ""),
         "album":       a.get("albumName") or a.get("name") or "",
         "year":        (a.get("releaseDate") or "")[:4],
+        "date":        (a.get("releaseDate") or "")[:10],
+        # Каталог Apple честно говорит «это предзаказ» и когда его открыть.
+        "isPreRelease": bool(a.get("isPreRelease")),
+        "preReleaseReleaseDate": (a.get("preReleaseReleaseDate") or "")[:10],
         "genre":       (a.get("genreNames") or [""])[0],
         "trackNumber": a.get("trackNumber"),
         "totalTracks": _single_tc,

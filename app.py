@@ -287,7 +287,7 @@ APP_VERSION = "3.0.0"
 # tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
 # version lines don't collide. MUST be bumped together with
 # github_setup/installer/ripster.iss AppVersion on every packaged build.
-RELEASE_VERSION = "3.8.0"
+RELEASE_VERSION = "3.9.0"
 try:
     import hashlib as _hlib
     APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
@@ -812,6 +812,15 @@ async def lifespan(app: FastAPI):
     except Exception as _e:
         print(f"[bbc-schedule] wiring error: {type(_e).__name__}: {_e}", flush=True)
 
+    # Предзаказы: планы «докачать после выхода» живут в preorder_waits.json и
+    # переживают перезапуск (та же форма, что у bbc_schedule: карточек в
+    # очереди нет, наступивший план цикл сам ставит обычной задачей).
+    # Проспанные за простой окна не теряются — первый тик снимает их в очередь.
+    try:
+        asyncio.create_task(_preorder_waits.run_loop())
+    except Exception as _e:
+        print(f"[preorder] wiring error: {type(_e).__name__}: {_e}", flush=True)
+
     asyncio.create_task(_startup_sync_orpheus())
     asyncio.create_task(_apple_bearer_keeper())
     asyncio.create_task(_soundcloud_routes._prewarm_client_id())
@@ -1183,7 +1192,6 @@ from ripster.routes import audio        as _audio_routes
 from ripster.routes import stations     as _stations_routes
 from ripster.routes import featurefm    as _featurefm_routes
 from ripster.routes import accounts     as _accounts_routes
-from ripster.routes import tg_panel     as _tg_panel_routes
 from ripster import telemetry as _telemetry
 from ripster import tl1001 as _tl1001
 
@@ -1213,6 +1221,13 @@ from ripster.routes import queue as _queue_mod
 BBC_SCHEDULE_FILE = BASE_DIR / "bbc_scheduled.json"
 _bbc_sched.install(
     store=_ScheduledStore(BBC_SCHEDULE_FILE),
+    queue=queue, qs=_qs, config=config, broadcast=broadcast,
+    process_queue=process_queue, queue_snapshot=queue_snapshot,
+    make_task=lambda *a, **k: _queue_mod._make_task(*a, **k),
+)
+from ripster import preorder_waits as _preorder_waits
+_preorder_waits.install(
+    path=BASE_DIR / "preorder_waits.json",
     queue=queue, qs=_qs, config=config, broadcast=broadcast,
     process_queue=process_queue, queue_snapshot=queue_snapshot,
     make_task=lambda *a, **k: _queue_mod._make_task(*a, **k),
@@ -1259,8 +1274,6 @@ _pairing_routes.install(app, _ctx)
 _upcoming_routes.install(app, _ctx)
 _featurefm_routes.install(app, _ctx)
 _accounts_routes.install(app, _ctx)
-# Панель владельца в Telegram (фаза 1): вход по подписи initData → хозяинская кука.
-_tg_panel_routes.install(app, _ctx)
 # Кнопка «Открыть внешний плеер» (трекер #37): OS-окно с панелью из ЛЮБОЙ
 # вкладки — фокус живого окна, просьба лаунчеру или standalone-процесс.
 from ripster.routes import player_window as _player_window_routes

@@ -131,7 +131,7 @@ const _REL_PREF_KEY  = 'ripster_rel_prefs';
 const _REL_PAGE_SIZE = 120;
 let _relShowing = _REL_PAGE_SIZE;
 let _relFilteredData = [];
-let _relView    = 'all';        // 'all' | 'new' | 'fav'
+let _relView    = 'all';        // 'all' | 'new' | 'fav' | 'labels' | 'hidden'
 let _relTypeOff = new Set();     // release types toggled off via chips
 // Источники ленты, скрытые тумблерами над радаром: 'releases' | 'bbc' |
 // 'soundcloud' | 'apple'. Скрытие — это ВИД, а не конфиг: источник продолжает
@@ -183,7 +183,15 @@ function _relRestorePrefs() {
   if (Array.isArray(p.srcOff))  _relSrcOff  = new Set(p.srcOff);
 }
 
-function setRelView(v) { _relView = v; _relSavePrefs(); _applyRelFilter(); }
+function setRelView(v) {
+  _relView = v; _relSavePrefs();
+  // «Скрытые» живут на сервере (отметка на подписке), а не в этой ленте:
+  // список добирается при первом открытии вида.
+  if (v === 'hidden' && typeof nmaOpenHidden === 'function' && !nmaHiddenCount()) {
+    nmaOpenHidden();
+  }
+  _applyRelFilter();
+}
 function toggleRelType(t) {
   if (_relTypeOff.has(t)) _relTypeOff.delete(t); else _relTypeOff.add(t);
   _relSavePrefs(); _applyRelFilter();
@@ -276,6 +284,7 @@ function renderRelChips() {
   const newCount = data.filter(_relIsNew).length;
   const favCount = _relFavs.length;
   const labelCount = data.filter(_relIsLabelRel).length;
+  const hiddenCount = (typeof nmaHiddenCount === 'function') ? nmaHiddenCount() : 0;
   const vc = document.getElementById('rel-view-chips');
   if (vc) {
     const mk = (id, label, clr) => {
@@ -292,7 +301,13 @@ function renderRelChips() {
       // не читаются — владелец назвал это кашей, и он прав. Чип сужает ленту,
       // оставляя её одной и по датам. Показываем только когда лейбловое есть:
       // чип, который всегда даёт пусто, — это шум.
-      (labelCount ? mk('labels', '🏷 '+t('rl.labels_block') + ' ' + labelCount, 'var(--green)') : '');
+      (labelCount ? mk('labels', '🏷 '+t('rl.labels_block') + ' ' + labelCount, 'var(--green)') : '') +
+      // «Скрытые» — единственное место, где видно, кого радар не выпустил.
+      // Чип появляется, только когда прятать есть чего (или когда человек уже
+      // внутри вида): вечно висячий чип, дающий пустой экран, — это шум.
+      (hiddenCount || _relView === 'hidden'
+        ? mk('hidden', '🙈 '+t('rl.hidden_word') + (hiddenCount ? ' ' + hiddenCount : ''), 'var(--orange)')
+        : '');
   }
   const tc = document.getElementById('rel-type-chips');
   if (tc) {
@@ -659,7 +674,10 @@ function _applyRelFilterCore(resetPage) {
     if (!(_radarScan && _radarScan.done < _radarScan.total)) _relShowing = _REL_PAGE_SIZE;
   }
 
-  let data = (_relView === 'fav') ? _relFavs.slice() : (_relCache.data || []).slice();
+  let data = (_relView === 'fav') ? _relFavs.slice()
+           : (_relView === 'hidden' && typeof nmaHiddenItems === 'function')
+             ? nmaHiddenItems().slice()
+           : (_relCache.data || []).slice();
 
   const q = (document.getElementById('rel-search')?.value || '').toLowerCase().trim();
   if (q) data = data.filter(r => (r.title||'').toLowerCase().includes(q) || (r.artist||'').toLowerCase().includes(q));
@@ -718,6 +736,7 @@ function _applyRelFilterCore(resetPage) {
         if (allSrcOff)                                empty.textContent = t('rl.src_all_off');
         else if (_relView === 'fav')                  empty.textContent = t('rl.no_fav');
         else if (_relView === 'new')                  empty.textContent = t('rl.no_new');
+        else if (_relView === 'hidden')               empty.textContent = t('rl.no_hidden');
         // «Ничего нет» после законченного обхода — честный вердикт с периодом и
         // фильтрами, а не безликая строка из разметки (требование п.4).
         else if (!_radarScan || _radarScan.done >= _radarScan.total) empty.textContent = _radarEmptyMessage();
@@ -1423,6 +1442,11 @@ async function _radarLoadReleases(force = false) {
   _relRestorePrefs();
   _renderRelActiveSvcs();
   _relMaybeShowXsvc();
+  // Чип «Скрытые» без числа — это догадка, а не отчёт: список добирается молча
+  // и в фоне, вместе с ним появляется счётчик.
+  if (typeof nmaLoadHidden === 'function') {
+    nmaLoadHidden(force).then(() => { if (typeof renderRelChips === 'function') renderRelChips(); });
+  }
 
   const grid  = document.getElementById('releases-grid');
   const st    = document.getElementById('rel-status');
@@ -1563,6 +1587,7 @@ function _relMixCard(rel, attrs) {
         ${isBbc && !liveStart ? `<button onclick="event.stopPropagation();bbcGetCue('${escJ(pid)}','${escJ(rel.title)}','${escJ(rel.artist)}')" style="${btnS};font-size:10px" title="${t('b.dl_cue')}">CUE</button>` : ''}
         <button onclick="toggleRelFav('${escJ(uid)}')" style="${btnS};border-color:${isFav?'var(--orange)':'var(--border)'};color:${isFav?'var(--orange)':'var(--muted)'}" title="${isFav?t('sc2.unfav'):t('sc2.fav')}">${isFav?'★':'☆'}</button>
         <button onclick="navigator.clipboard.writeText('${escJ(rel.url)}');toast(t('toast.link_copied'))" style="${btnS};font-size:10px" title="${t('ck.copy_link')}">⎘</button>
+        ${typeof nmaButton === 'function' ? nmaButton(rel) : ''}
         <a href="${esc(rel.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" style="${btnS};font-size:10px;text-decoration:none;display:flex;align-items:center;justify-content:center" title="${t('ck.open_on')} ${isBbc ? 'BBC' : 'SoundCloud'}">↗</a>
       </div>
     </div>
@@ -1643,6 +1668,7 @@ function renderReleaseCard(rel, attrs) {
         onclick="event.stopPropagation();openLabelPage('${escJ(rel.label)}')"
         onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${rel.via_label ? '🏷 ' : ''}${esc(rel.label)}</div>` : ''}
       <div style="font-size:10px;color:var(--muted);margin-top:2px">${dt}${rel.tracks ? ' · ' + rel.tracks + ' ' + t('p.trk_abbr') : ''}</div>
+      ${_relView === 'hidden' && rel.reason ? `<div style="font-size:10px;color:var(--orange);margin-top:3px;line-height:1.45;overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical" title="${esc(rel.reason)}">${esc(rel.reason)}</div>` : ''}
       ${qualSelect}
       ${lyricsToggle}
       <div class="rel-avail" style="margin-top:6px;font-size:10px;line-height:1.5">
@@ -1663,6 +1689,7 @@ function renderReleaseCard(rel, attrs) {
         ${typeof afButton === 'function' ? afButton(rel.artist, 'background:transparent;border:1px solid var(--border);border-radius:7px;font-size:11px;cursor:pointer;font-family:var(--font)') : ''}
         <button onclick="toggleRelFav('${escJ(uid)}')" style="background:transparent;border:1px solid ${isFav?'var(--orange)':'var(--border)'};border-radius:7px;font-size:11px;color:${isFav?'var(--orange)':'var(--muted)'};cursor:pointer;font-family:var(--font)" title="${isFav?t('sc2.unfav'):t('sc2.fav')}">${isFav?'★':'☆'}</button>
         <button onclick="navigator.clipboard.writeText('${escJ(rel.url)}');toast(t('toast.link_copied'))" style="background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);cursor:pointer;font-family:var(--font)" title="${t('ck.copy_link')}">⎘</button>
+        ${typeof nmaButton === 'function' ? nmaButton(rel) : ''}
         <a href="${esc(rel.url)}" onclick="event.preventDefault();event.stopPropagation();openExternal(this.href);return false" style="background:transparent;border:1px solid var(--border);border-radius:7px;font-size:10px;color:var(--muted);text-decoration:none" title="${t('ck.open_on')} ${escapeHtml(rel.service)}">↗</a>
       </div>
     </div>

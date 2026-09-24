@@ -46,7 +46,15 @@ from ripster.py_runtime import app_python
 
 # ── OrpheusDL paths ───────────────────────────────────────────────────────────
 def _base_dir() -> Path:
-    return Path(sys.argv[0]).resolve().parent if sys.argv else Path(".").resolve()
+    # Каталог запущенного скрипта (app.py / frozen exe) — если рядом лежит orpheus/.
+    # Иначе корень пакета: 24.09.2026 tools/ripster_healthcheck.py искал сессию
+    # в tools/orpheus/… и слал владельцу «у движка нет сессии Tidal» при живой.
+    base = Path(sys.argv[0]).resolve().parent if sys.argv else Path(".").resolve()
+    if not (base / "orpheus").is_dir():
+        root = Path(__file__).resolve().parents[2]
+        if (root / "orpheus").is_dir():
+            return root
+    return base
 
 def _orpheus_dir() -> Path:
     return _base_dir() / "orpheus"

@@ -287,6 +287,15 @@ DEFAULT_CONFIG: dict = {
     "amd-region-rewrite": True,
     "amd-region-preference": ["nz", "jp", "it", "tw", "kr", "sg", "my", "th"],
     "amd-instance-secure": True,
+    # ── Публичный враппер: политика допуска (решение владельца, 24.09.2026) ───
+    # off / on_fail / on_region / on_limit / only / manual_region. Код сам его
+    # НЕ включает: только человек в Настройках или чекбокс одной задачи.
+    "apple-public-mode": "off",
+    # Суточный потолок ОБРАЩЕНИЙ к публичному врапперу (считаем уникальные
+    # релизы). 0 — не ограничивать.
+    "amd-daily-cap": 50,
+    # Принуждённая витрина для режима «ручной регион»; пусто — берёт живой пул.
+    "amd-region-force": "",
     "amd-parallel":      8,
     "amd-save-lyrics":   True,
     "amd-lyrics-format": "lrc",

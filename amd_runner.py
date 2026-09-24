@@ -564,6 +564,27 @@ async def main():
     # Wrapper-manager connection
     wm  = it(WrapperManager)
     cfg = it(Config)
+    # wm.wol.moe с 10.09.2026 требует API-ключ (Bearer в HTTP lite), а наш
+    # gRPC-клиент заголовков поставить не может. Дешёвый /status с ключом из
+    # окружения (AMD_WM_API_KEY — не argv, не config.toml, не лог) отвечает
+    # честной причиной вместо 30-секундного gRPC-deadline: 401/403 — ключа нет
+    # или он неверный, 429 — дневная квота выбрана (повторы её не вернут).
+    _wm_key = os.environ.get("AMD_WM_API_KEY", "").strip()
+    try:
+        import httpx as _httpx
+        _scheme = "https" if cfg.instance.secure else "http"
+        _st = _httpx.get(f"{_scheme}://{cfg.instance.url}/status",
+                         headers={"Authorization": f"Bearer {_wm_key}"} if _wm_key else {},
+                         timeout=8.0)
+        diag("WM", f"HTTP /status → {_st.status_code}", "INFO")
+        if _st.status_code in (401, 403):
+            diag("WM", "AMD_WM_NEED_KEY: wm.wol.moe требует ключ — получи в @wm_auth_bot", "ERROR")
+            return 1
+        if _st.status_code == 429:
+            diag("WM", "AMD_WM_QUOTA: квота wm.wol.moe на сегодня исчерпана — повторять сейчас бессмысленно", "ERROR")
+            return 1
+    except Exception as _se:                                       # noqa: BLE001
+        diag("WM", f"HTTP /status не ответил ({type(_se).__name__}) — иду как раньше, через gRPC", "INFO")
     diag("WM", f"Connecting to {cfg.instance.url} (secure={cfg.instance.secure})…", "STEP")
     try:
         await wm.init(cfg.instance.url, cfg.instance.secure)

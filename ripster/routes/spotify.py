@@ -440,7 +440,22 @@ def _sp_identity_filter(rels: list) -> list:
                     _ident.hidden_add(e, r, why)
                 touched = True
                 continue
-            out.append(r)
+            # Pending-привязка: карточка несёт id, который мы ещё НЕ подтвердили
+            # для Spotify (Aruna подтверждена на Qobuz, но pending на Spotify).
+            # Раньше она проходила молча — и ровно так проходил однофамилец:
+            # медитативная Aruna со своим Spotify-id, пока настоящая Aruna
+            # pending (жалоба 24.09.2026). `home_show` тут неприменим — он судит
+            # кластерным профилем подтверждённого id ДРУГОЙ витрины. Судит якорь
+            # по ИМЕНИ и консервативно: молчит («нечем судить») — не трогаем,
+            # 299 реальных pending-подписок (Above & Beyond, Bonobo) целы.
+            for cand in same_name:
+                keep, why = _ident.anchor_gate(cand, r)
+                if not keep:
+                    _ident.hidden_add(cand, r, why)
+                    touched = True
+                    break
+            else:
+                out.append(r)
             continue
         if not (aid and aid in conf):
             why = ("followed Spotify id differs from the one confirmed for "
@@ -2557,16 +2572,22 @@ def _hit_from_matrix(m: dict, service: str, title: str, artist: str):
 
 
 async def _convert_available_elsewhere(requested: str, upc: str, isrc: str,
-                                       title: str, artist: str, m: dict = None) -> list:
+                                       title: str, artist: str, m: dict = None,
+                                       seed: dict = None) -> list:
     """Where the release DOES live, so the UI can offer it as an explicit choice.
 
     Reuses the availability matrix (the same machinery as /api/availability) —
     the seeder/ISRC-derivation dance there is what lets us honestly answer for
-    Qobuz and Tidal, which can't be looked up by barcode directly."""
+    Qobuz and Tidal, which can't be looked up by barcode directly. `seed` is
+    the source release ({id, service}) — with it the matrix pulls track ISRCs
+    from Spotify BEFORE probing storefronts, which is the only way a release
+    carrying a different barcode per store is found at all (24.09.2026,
+    Evanescence «Sweet Sacrifice (Remastered 2026)»)."""
     if m is None:
         try:
             from ripster import availability as _av
-            m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist)
+            m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist,
+                                 seed=seed)
         except Exception:
             return []
     out = []
@@ -2639,6 +2660,16 @@ async def api_convert_spotify(body: dict):
 
     sp_type = "album" if "/album/" in sp_url else "track" if "/track/" in sp_url else "album"
 
+    # Сид источника для матрицы: по нему она добывает ISRC треков альбома из
+    # самого Spotify ДО опроса витрин — один релиз несёт разные штрихкоды в
+    # разных магазинах (24.09.2026, Evanescence «Sweet Sacrifice (Remastered
+    # 2026)»: Spotify 00888072836037, Deezer 888072836020).
+    import re as _re
+    _seed = None
+    _sm = _re.search(r"open\.spotify\.com/(?:intl-[a-z-]+/)?album/([A-Za-z0-9]+)", sp_url)
+    if _sm:
+        _seed = {"id": _sm.group(1), "service": "spotify"}
+
     # Search ONLY the requested service. The old code had no branch for qobuz or
     # tidal, so both fell into an `else` that ran the Apple search and returned
     # the Apple URL as `ok: True` — the UI then queued an Apple link under the
@@ -2658,7 +2689,8 @@ async def api_convert_spotify(body: dict):
         # (Deezer/Apple/Beatport by UPC) → derive ISRC → probe Qobuz/Tidal chain.
         try:
             from ripster import availability as _av
-            matrix_m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist)
+            matrix_m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist,
+                                        seed=_seed)
             found = _hit_from_matrix(matrix_m, service, title, artist)
         except Exception:
             found = None
@@ -2677,7 +2709,7 @@ async def api_convert_spotify(body: dict):
     # Not on the requested service — never answer with a substitute. Say where it
     # isn't and list, explicitly, where it IS, so the UI can offer a real choice.
     available_on = await _convert_available_elsewhere(
-        service, upc, isrc, title, artist, matrix_m)
+        service, upc, isrc, title, artist, matrix_m, seed=_seed)
     # Матрица ищет по UPC/ISRC, а предрелиз у Apple по штрихкоду не находится.
     # 23.09.2026, CHVRCHES «Roses» (выход 25.09): Apple отдавал сингл по
     # названию с проверкой, а владелец видел «нет на Qobuz» без единого
