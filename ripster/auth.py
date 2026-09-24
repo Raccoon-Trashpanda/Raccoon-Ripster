@@ -200,6 +200,21 @@ def verify_session_cookie(cookie: str) -> bool:
     return hmac.compare_digest(mac_provided, mac_expected)
 
 
+SESSION_COOKIE = "ripster-session"
+
+
+def new_session_value() -> str:
+    """Свежее значение хозяйской куки сессии (то же, что ставит /api/login).
+    Нужен внешнему окну плеера: оно входит разовым токеном запуска, а живёт
+    потом обычной сессией — отдельного сорта допуска вводить незачем."""
+    return _sign_session(int(time.time()))
+
+
+def session_secure(request) -> bool:
+    """Флаг Secure для куки: https прямо или через X-Forwarded-Proto."""
+    return _request_is_https(request)
+
+
 # ── Bearer-токен: хозяинский пропуск для WebView, который не везёт куки ───────
 # Telegram Mini App на Android/iOS не сохраняет SameSite=None+Secure куку, и
 # хозяйская панель молча получала 401 на каждую ручку — «очередь не работает»

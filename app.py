@@ -815,6 +815,13 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_startup_sync_orpheus())
     asyncio.create_task(_apple_bearer_keeper())
     asyncio.create_task(_soundcloud_routes._prewarm_client_id())
+    # Внешнее окно плеера: если хозяйская кука окна села, панель поднимает
+    # файл-флаг «reauth» — сервер отвечает новым разовым пропуском. Без этого
+    # окно с истёкшим допуском молчит до перезапуска Рипстера.
+    try:
+        _player_window_routes.start_reauth_watcher()
+    except Exception as _e:
+        print(f"[player-window] reauth watcher wiring error: {_e}", flush=True)
     # Сторож: поднимает упавший сервис сам. Первая проверка через 10 с,
     # попыток мало и они дорожают, а при причине, которую перезапуск не
     # лечит (лимит устройств Apple), не трогает вовсе — ripster/watchdog.py.
@@ -866,6 +873,31 @@ async def lifespan(app: FastAPI):
         asyncio.create_task(_acc_watch.run(config, BASE_DIR))
     except Exception as _e:
         print(f"[accounts-watch] wiring error: {_e}", flush=True)
+
+    # Download canary: раз в 3 часа КАЧАЕТ по одному короткому треку каждого
+    # настроенного сервиса через собственный путь задач (runner.run_task) и
+    # проверяет файл. 24.09.2026 Apple 12 часов отвечала Invalid CKC на всё —
+    # службы «отвечали», а скачать было нельзя ничего; probe-all это пропускает,
+    # canary — нет. Часы (последний проход) живут в C:\dev\LOG, поэтому
+    # рестарт не обнуляет расписание (урок 09.08 с watchlist).
+    try:
+        from tools import download_canary as _canary
+        asyncio.create_task(_canary.run_loop(config, BASE_DIR))
+    except Exception as _e:
+        print(f"[canary] wiring error: {_e}", flush=True)
+
+    # Самоаудит однофамильцев: раз в сутки (и сразу, если правила с прошлого
+    # запуска менялись) перебрать весь склад текущими доказательствами —
+    # спрятать то, что теперь не проходит, и ВЕРНУТЬ то, что прежнее правило
+    # спрятало по ошибке. Дверь судит при чтении, но отметка «скрыто» с подписки
+    # сама не снимается: без этого прогона «вылечили алгоритм» не означает, что
+    # залеченные раньше релизы вернулись.
+    try:
+        from ripster import namesake_audit as _ns_audit
+        _ns_audit.configure(BASE_DIR)
+        asyncio.create_task(_ns_audit.run_loop(watchlist, save_watchlist, BASE_DIR))
+    except Exception as _e:
+        print(f"[namesake] wiring error: {_e}", flush=True)
 
     # Deferred "restart when guests idle" watcher (no-op until staged via
     # /api/admin/restart-when-idle).
@@ -1151,6 +1183,7 @@ from ripster.routes import audio        as _audio_routes
 from ripster.routes import stations     as _stations_routes
 from ripster.routes import featurefm    as _featurefm_routes
 from ripster.routes import accounts     as _accounts_routes
+from ripster.routes import tg_panel     as _tg_panel_routes
 from ripster import telemetry as _telemetry
 from ripster import tl1001 as _tl1001
 
@@ -1194,6 +1227,21 @@ _stats_routes.install(app, config, ws_clients_ref=ws_clients)
 _soundcloud_routes.install(app, _ctx)
 _library_routes.install(app, _ctx)
 _admin_routes.install(app, _ctx)
+# Несносимая история гостевых загрузок + owner-only вкладка «Гости» в админке.
+# Только в домашней сборке (в публичной нет гостей/админки) — отсюда try.
+try:
+    from ripster.routes import guest_audit as _guest_audit_routes
+    _guest_audit_routes.install(app, _ctx)
+except Exception as _e:
+    print(f"[guest-history] not installed: {_e}", flush=True)
+# Локальный Agent Tracker (C:\dev\agent-tracker, 127.0.0.1:7801) — owner-only
+# прокси /tracker для просмотра с телефона через туннель. Только в домашней
+# сборке (публичная трекер не несёт) — отсюда try.
+try:
+    from ripster.routes import tracker_proxy as _tracker_proxy_routes
+    _tracker_proxy_routes.install(app, _ctx)
+except Exception as _e:
+    print(f"[tracker-proxy] not installed: {_e}", flush=True)
 # События прослушивания станций (скипы/дослушивания/лайки/скачивания) — на них
 # станция подстраивается под вкус. Своя база stations.db, наружу ничего не шлёт.
 from ripster.routes import station_events as _station_event_routes
@@ -1211,10 +1259,27 @@ _pairing_routes.install(app, _ctx)
 _upcoming_routes.install(app, _ctx)
 _featurefm_routes.install(app, _ctx)
 _accounts_routes.install(app, _ctx)
+# Панель владельца в Telegram (фаза 1): вход по подписи initData → хозяинская кука.
+_tg_panel_routes.install(app, _ctx)
 # Кнопка «Открыть внешний плеер» (трекер #37): OS-окно с панелью из ЛЮБОЙ
 # вкладки — фокус живого окна, просьба лаунчеру или standalone-процесс.
 from ripster.routes import player_window as _player_window_routes
 _player_window_routes.install(app, _ctx)
+# Диагностика моста (GET /api/player-window/relay-status) смотрит в тот же
+# ретранслятор, через который живёт окно панели.
+_player_window_routes.set_relay(_rp_relay)
+# Кнопка «поднять Android-эмулятор» для хозяина: он смотрит на него с телефона
+# по удалённому доступу и раньше каждый раз звал на помощь оркестратора.
+# Только домашняя сборка (публичная SDK не несёт) — отсюда try.
+try:
+    from ripster.routes import emulator as _emulator_routes
+except Exception as _e:
+    print(f"[emulator] import failed: {_e}", flush=True)
+    _emulator_routes = None
+try:
+    _emulator_routes.install(app, _ctx)
+except Exception as _e:
+    print(f"[emulator] not installed: {_e}", flush=True)
 # Свой аудиотракт ПК: вывод локального lossless мимо микшера Windows.
 # Замер 05.09.2026: WASAPI exclusive берёт 44.1/48/96 кГц, shared — только 48,
 # то есть web-плеер физически не может отдать частоту файла без пересчёта.
@@ -1264,6 +1329,14 @@ def _spawn_restart(delay: float = 0.4) -> None:
             os._exit(0)     # launcher respawns us (single owner, no console flash)
             return
         restart_env = {**os.environ, "RIPSTER_IS_RESTART": "1"}
+        # БЕЗ DETACHED_PROCESS. По документации Windows он ОТМЕНЯЕТ
+        # CREATE_NO_WINDOW: процесс остаётся вовсе без консоли. А sys.executable
+        # в венве — это перенаправитель .venv\Scripts\python.exe, который сам
+        # запускает настоящий python.exe; тому консоль наследовать не от кого,
+        # и он заводит новую ВИДИМУЮ — чёрное окно на каждый рестарт (22.09.2026
+        # их висело семь). С одним CREATE_NO_WINDOW у перенаправителя появляется
+        # консоль без окна, и её унаследуют и настоящий интерпретатор, и всё, что
+        # он потом запускает (ffmpeg, Go, OrpheusDL) — окон нет нигде.
         subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:],
             cwd=str(BASE_DIR),
@@ -1486,7 +1559,12 @@ async def websocket_endpoint(ws: WebSocket):
             t = data.get("type")
             if t == "rp-role":
                 if not _ws_is_guest and not _is_paired_phone:
-                    _rp_relay.register(ws, data.get("role"))
+                    if _rp_relay.register(ws, data.get("role")):
+                        # Новый хост при живом окне: сервер сам сообщает ему про
+                        # панель и про то, активен ли он (иначе вкладка молчала
+                        # бы, пока панель не поздоровается — см. исправление 24.09).
+                        for target, payload in _rp_relay.on_register(ws):
+                            _ws_broker.enqueue(target, payload)
                 continue
             if t == "rp":
                 if _rp_relay.role(ws) is not None:

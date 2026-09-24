@@ -26,10 +26,15 @@ var RP = {
   open: false, ready: false, mode: 'dock', frame: null, root: null,
   tick: null, watchdog: null, seq: 0, err: '', queueSent: null,
   _extBusy: false,
-  transport: 'iframe'          // 'iframe' | 'oswin' | 'relay'
+  transport: 'iframe',          // 'iframe' | 'oswin' | 'relay'
+  // relay-выборы (исправление 24.09): эта вкладка знает, есть ли окно-панель
+  // на сервере и назначена ли она активной. Состояние публикует только активная
+  // вкладка игры; остальные шлют лишь heartbeat для выборов.
+  tabId: 'T' + Math.random().toString(36).slice(2, 8),
+  panelPresent: false, active: false, hb: null
 };
 
-var RP_SRC = '/static/panel/index.html?v=4';
+var RP_SRC = '/static/panel/index.html?v=6';
 
 /* pywebview-мост есть только в окне лаунчера. */
 function rpApi() {
@@ -90,6 +95,8 @@ function rpOswinAdopt(res, api) {
    переживает перезагрузку вкладки так же, как oswin — перезагрузку окна). */
 function rpAdoptFromPanel(via) {
   RP.transport = (via === 'relay') ? 'relay' : 'oswin';
+  // Hello дошёл до нас — значит сервер выбрал активным именно нас и окно есть.
+  if (via === 'relay') { RP.panelPresent = true; RP.active = true; }
   RP.open = true; RP.ready = true; RP.err = ''; RP.queueSent = null;
   rpNavMark(true);
   rpPanelStartTick();
@@ -174,14 +181,20 @@ function rpOpenExternalPlayer() {
 function rpExtResult(st, j) {
   if (st === 401 || st === 403) { rpExtSay(rpT('panel.ext.auth')); return; }
   if (j && j.ok) {
-    /* Окно есть; готова ли связь — скажет hello: ждём 8 с и говорим вслух. */
-    RP.transport = 'relay'; RP.open = true; RP.ready = false;
-    RP.err = ''; RP.queueSent = null;
-    rpNavMark(true);
-    rpPanelStartTick();
+    /* Окно подняли. Публикует ТОЛЬКО активная вкладка игры — сервер сам скажет
+       кому (panel-present + host-active). Здесь лишь говорим, что панель есть,
+       и optimistic-activate: если играем мы — стартуем немедленно, без гонки
+       с первым heartbeat. Состояние неактивной вкладки релей всё равно выбросит. */
+    RP.transport = 'relay'; RP.err = ''; RP.queueSent = null;
+    RP.panelPresent = true;
+    if (rpIsPlaying()) RP.active = true;
+    rpRelayEvaluate();
+    /* Watchdog: предупреждаем о «тишине» только если ДОЛЖНЫ были быть мостом
+       (мы играем), а hello так и не пришли. Иначе окно обслуживает другая
+       вкладка — тревожить незачем. */
     clearTimeout(RP.watchdog);
     RP.watchdog = setTimeout(function () {
-      if (!RP.ready) rpExtSay(rpT('panel.ext.silent'));
+      if (!RP.ready && rpIsPlaying()) rpExtSay(rpT('panel.ext.silent'));
     }, 8000);
     rpExtSay(rpT(j.how === 'focus' ? 'panel.ext.focus' : 'panel.ext.opened'), true);
     return;
@@ -423,20 +436,78 @@ function rpRelaySend(msg) {
   } catch (e) {}
 }
 
-/* app.js зовёт это на каждом ws.onopen (свой сокет — своя роль на сервере). */
+/* app.js зовёт это на каждом ws.onopen (свой сокет — своя роль на сервере).
+   Заодно заводим heartbeat: релей выбирает активной ту вкладку, что играет,
+   а для этого должен ВСЕГДА знать, кто играет, — даже когда окно ещё закрыто
+   (иначе первая заигравшая вкладка не успела бы представиться живому окну). */
 function rpHostWsOpen() {
   try {
     if (typeof ws !== 'undefined' && ws && ws.readyState === 1)
       ws.send(JSON.stringify({ type: 'rp-role', role: 'host' }));
   } catch (e) {}
+  if (!RP.hb) RP.hb = setInterval(rpHbTick, 1000);
+}
+
+/* Играет ли ЭТА вкладка прямо сейчас — по тому же движку, что показывает
+   интерфейс (BBC/нативный/gapless/<audio>/спаренный телефон). elect-сигнал. */
+function rpIsPlaying() {
+  try {
+    var eng = rpEngine();
+    if (eng === 'native' && typeof _NA !== 'undefined') return !!_NA.active && !_NA.paused;
+    if (eng === 'bbc') { var b = document.getElementById('bbc-audio'); return !!(b && !b.paused); }
+    var el = rpAudioEl();
+    if (!el || el.paused) return false;
+    var have = false;
+    try { have = !!(typeof Preview !== 'undefined' && Preview.queue && Preview.queue[Preview.idx | 0]); } catch (e) {}
+    return have || !!(el.currentSrc || el.src);
+  } catch (e) { return false; }
+}
+
+function rpHbTick() {
+  rpRelaySend({ rp: 1, k: 'hb', playing: rpIsPlaying(), ts: Date.now(), tabId: RP.tabId });
+}
+
+/* Сервер назначил нас активным при живом окне — заводим цикл рассылки и
+   СРАЗУ шлём welcome+state+queue: панель могла открыться раньше нас и ждать,
+   а health-команды шлём, не дожидаясь её hello. */
+function rpActivateAsHost() {
+  RP.transport = 'relay'; RP.open = true; RP.ready = true; RP.err = ''; RP.queueSent = null;
+  clearTimeout(RP.watchdog); RP.watchdog = null;
+  rpNavMark(true);
+  var s = rpState();
+  rpPost({ rp: 1, k: 'welcome', caps: rpCaps(), env: rpEnv() });
+  rpPost(s);
+  rpPost({ rp: 1, k: 'queue', items: rpSlimQueue(), idx: s.idx, stamp: s.queue });
+  RP.queueSent = s.queue;
+  rpPanelStartTick();
+}
+
+/* Перестали быть активными (другая вкладка заиграла / окно село) — гасим
+   рассылку состояния, но heartbeat оставляем: выборы идут именно по нему. */
+function rpDeactivateAsHost() {
+  rpPanelStopTick();
+  RP.open = false; RP.ready = false; RP.queueSent = null;
+  rpNavMark(false);
+}
+
+function rpRelayEvaluate() {
+  /* oswin/iframe-мост приоритетнее: он у хозяина в-process и свой канал жив —
+     relay не имеет права его переприсвоить. */
+  if (RP.open && RP.transport !== 'relay') return;
+  var should = RP.panelPresent && RP.active;
+  if (should && !(RP.open && RP.transport === 'relay')) rpActivateAsHost();
+  else if (!should && RP.transport === 'relay' && RP.open) rpDeactivateAsHost();
 }
 
 /* app.js зовёт это для каждого входящего {type:'rp'} — сервер переложил
-   сообщение панели. oswin/iframe живут своими каналами, relay-мошенничество
-   между ними невозможно: роль на сервере уже развела потоки. */
+   сообщение. Сначала служебные сообщения выборов (panel-present/host-active/
+   bye — их шлёт СЕРВЕР, не панель), потом обычные команды панели. */
 function rpHostWsMessage(packet) {
   var d = packet && packet.msg;
   if (!d || d.rp !== 1) return;
+  if (d.k === 'panel-present') { RP.panelPresent = true; rpRelayEvaluate(); return; }
+  if (d.k === 'host-active')   { RP.active = !!d.on;     rpRelayEvaluate(); return; }
+  if (d.k === 'bye')           { RP.panelPresent = false; rpRelayEvaluate(); return; }
   if (RP.open && RP.transport !== 'relay') return;
   rpHostMessage(d, 'relay');
 }
