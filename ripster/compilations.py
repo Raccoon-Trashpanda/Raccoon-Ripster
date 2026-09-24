@@ -305,6 +305,7 @@ def scan_artist_releases(album_rows: list, song_rows: list, artist_name: str,
                 "album_artist": (s.get("collectionArtistName") or track_artist or ""),
                 "highlight": [],
                 "credited_as": "",
+                "appears_as": "",
                 "service": service,
             }
         p["tracks"] += 1
@@ -312,6 +313,11 @@ def scan_artist_releases(album_rows: list, song_rows: list, artist_name: str,
             tid = str(s.get("trackId") or "")
             if tid and tid not in p["highlight"]:
                 p["highlight"].append(tid)
+            # Название СВОЕГО трека на чужом релизе — телефон показывает его в
+            # подписи карточки («… · как <трек>»), иначе пользователю видно только
+            # чужой альбом-артист и неясно, причём тут вообще его артист.
+            if not p["appears_as"]:
+                p["appears_as"] = s.get("trackName", "") or ""
             # Артист указан ПРЕЖНИМ именем внутри чужого микса — показать это
             # написание («как 16 Bit Lolitas»), но не чужим артистом.
             if track_artist and _norm(track_artist) != _norm(artist_name):
