@@ -704,6 +704,48 @@ function _detailError(msg){
   if(c) c.innerHTML = `<div style="text-align:center;padding:80px 0;color:var(--red)">${t('t.error_c')}${esc(msg)}</div>`;
 }
 
+// Строки компиляций заводим здесь, а не в i18n.js: тот файл занят другой
+// задачей, и править его значило бы увязать чужую работу в свой коммит.
+// `t()` добирает ключи из LANG напрямую (падение на en→ru), так что
+// регистрация через Object.assign полностью совместима с общим механизмом;
+// заполняем все пять локателей разом.
+(function registerCompilationStrings(){
+  if (typeof LANG === 'undefined') return;
+  const add = {
+    ru: {'ck.comp_section':'Сборники и участие','ck.dl_only_tracks':'⬇ Только треки артиста','ck.as_alias':'как {name}','ck.tracks_here':'Выделены треки этого артиста ({n}) — «Скачать выбранное» заберёт только их','ck.tracks_here_none':'У артиста {name} на этом релизе нет собственного трека (только упоминание)'},
+    en: {'ck.comp_section':'Compilations & appearances','ck.dl_only_tracks':'⬇ This artist only','ck.as_alias':'as {name}','ck.tracks_here':"This artist's tracks are selected ({n}) — “Download selected” grabs only them",'ck.tracks_here_none':'{name} has no own track on this release (credit only)'},
+    hi: {'ck.comp_section':'संग्रह और उपस्थिति','ck.dl_only_tracks':'⬇ केवल इस कलाकार','ck.as_alias':'के रूप में {name}','ck.tracks_here':'इस कलाकार के ट्रैक चयनित हैं ({n}) — “चयनित डाउनलोड” केवल उन्हें लेगा','ck.tracks_here_none':'इस रिलीज़ पर {name} का अपना ट्रैक नहीं है'},
+    ja: {'ck.comp_section':'オムニバス / 参加作品','ck.dl_only_tracks':'⬇ このアーティストのみ','ck.as_alias':'({name} 名義)','ck.tracks_here':'このアーティストの曲を選択中です（{n}）—「選択をダウンロード」でこの曲のみ取得','ck.tracks_here_none':'この作品に {name} 自身の曲はありません'},
+    zh: {'ck.comp_section':'合辑与参与','ck.dl_only_tracks':'⬇ 仅此艺人','ck.as_alias':'以 {name} 名义','ck.tracks_here':'已选中该艺人的曲目（{n}）—「下载所选」只取这些','ck.tracks_here_none':'该发行中 {name} 没有自己的曲目'},
+  };
+  for (const lang in add) if (LANG[lang]) Object.assign(LANG[lang], add[lang]);
+})();
+
+// Открытие страницы релиза из дискографии: несём, какие дорожки принадлежат
+// ЭТОМУ артисту (подсветка) и под каким именем он там указан (алиас), чтобы
+// страница компиляции сразу показала ВЕСЬ треклист с выделенными треками.
+// Релиз ищем по id в текущем контексте — в onclick-атрибут JSON не тащим.
+function _artistContextReleases(){
+  return (Detail.currentArtist && Detail.currentArtist.releases)
+      || (Detail.currentLabel && Detail.currentLabel.releases) || [];
+}
+function _openCompilationById(service, albumId){
+  const r = _artistContextReleases().find(x => String(x.id) === String(albumId)) || {};
+  const hl = (r.highlight || []).map(String);
+  // Подсветку несём только когда есть что подсвечивать: свой заглавный микс —
+  // весь альбом артиста, баннер «у артиста нет своего трека» там был бы ложью.
+  const ctx = (hl.length && (r.is_compilation || r.type === 'compilation' || r.type === 'appears_on'))
+    ? {highlight: hl,
+       artist: (Detail.currentArtist && Detail.currentArtist.artist && Detail.currentArtist.artist.name) || '',
+       creditedAs: r.credited_as || ''}
+    : null;
+  openAlbumPageWithCtx(service, albumId, ctx);
+}
+function openAlbumPageWithCtx(service, albumId, ctx){
+  Detail._openCtx = ctx || null;
+  openAlbumPage(service, albumId);
+}
+
 // ─── Artist page ─────────────────────────────────────────────────────────
 async function openArtistPage(service, artistId){
   Detail._stack = [];          // root navigation — clear history
@@ -781,7 +823,21 @@ function renderArtistPage(){
           : ''}
     </div>`;
 
-  const grid = _discoGridHTML(filtered, artist.name || '');
+  // Компляции/участие — отдельной секцией: у них ДРУГОЙ альбом-артист, и валить
+  // их в общий ряд со «своими» релизами значит снова подписать их артистом
+  // дискографии (та же ошибка, что жаловался владелец).
+  const isComp = r => r.type === 'compilation' || r.group === 'compilation'
+                    || r.type === 'appears_on';
+  let grid;
+  if (filter === 'all' && filtered.some(isComp) && filtered.some(r => !isComp(r))) {
+    const own = filtered.filter(r => !isComp(r));
+    const comps = filtered.filter(isComp);
+    grid = _discoGridHTML(own, artist.name || '')
+         + `<div style="font-family:var(--display);font-size:13px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.6px;margin:22px 0 10px">${t('ck.comp_section')}</div>`
+         + _discoGridHTML(comps, artist.name || '');
+  } else {
+    grid = _discoGridHTML(filtered, artist.name || '');
+  }
 
   const bc = document.getElementById('detail-breadcrumb');
   if(bc) bc.textContent = artist.name || t('card.artist');
@@ -795,22 +851,30 @@ function _discoGridHTML(list, ownerName){
   return (list || []).length === 0
     ? `<div style="text-align:center;padding:60px 0;color:var(--muted)">${t('ck.cat_empty')}</div>`
     : `<div class="card-grid">
-        ${list.map(r => `
+        ${(list || []).map(r => {
+          const comp = r.is_compilation || r.type === 'compilation' || r.type === 'appears_on';
+          // Настоящий альбом-артист компилы, а не артист дискографии.
+          const shownArtist = comp ? (r.album_artist || ownerName || '') : (r.album_artist || ownerName || '');
+          const alias = comp && r.credited_as ? ti('ck.as_alias', {name: esc(r.credited_as)}) : '';
+          const typeBadge = comp ? t('rl.comp_badge') : (r.type || '?');
+          return `
           <div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden;transition:border-color .15s" onmouseover="this.style.borderColor='var(--red)'" onmouseout="this.style.borderColor='var(--border)'">
             ${r.cover ? `<img src="${escapeHtml(r.cover)}" data-lightbox style="width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in" loading="lazy" onerror="coverFail(this)"/>` : `<div style="width:100%;aspect-ratio:1;background:rgba(255,255,255,.05);display:flex;align-items:center;justify-content:center;font-size:26px">♪</div>`}
             <div style="padding:8px 10px">
               <div style="font-size:12px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.title)}">${esc(r.title)}</div>
+              ${comp ? `<div style="font-size:10px;color:var(--muted2);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(shownArtist)}">${esc(shownArtist)}${alias?` <span style="color:var(--muted)">· ${alias}</span>`:''}</div>`:''}
               <div style="font-size:10px;color:var(--muted);margin-top:3px;display:flex;justify-content:space-between;gap:4px;margin-bottom:${r.label?'2px':'7px'}">
                 <span>${escapeHtml(r.year||'')}</span>
-                <span style="text-transform:uppercase;letter-spacing:.4px;background:rgba(255,255,255,.06);padding:1px 5px;border-radius:3px;font-size:9px">${escapeHtml(r.type||'?')}</span>
+                <span style="text-transform:uppercase;letter-spacing:.4px;background:${comp?'rgba(250,45,85,.16)':'rgba(255,255,255,.06)'};color:${comp?'var(--red)':'var(--muted)'};padding:1px 5px;border-radius:3px;font-size:9px">${escapeHtml(typeBadge)}</span>
               </div>
               ${r.label ? `<div style="font-size:10px;color:var(--muted);margin-top:2px;margin-bottom:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.label)}">${esc(r.label)}</div>` : ''}
               <div style="display:flex;gap:5px">
-                <button onclick="artistReleaseDownload('${escJ(r.service)}','${esc(r.id)}','${escJ(r.title)}','${escJ(ownerName || r.artist || '')}')" style="flex:1;padding:5px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)">⬇</button>
-                <button onclick="openAlbumPage('${escJ(r.service)}','${esc(r.id)}')" style="padding:5px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('btn.tracks')}">≡</button>
+                <button onclick="artistReleaseDownload('${escJ(r.service)}','${esc(r.id)}','${escJ(r.title)}','${escJ(shownArtist || r.artist || '')}')" style="flex:1;padding:5px 0;background:var(--red);color:#fff;border:none;border-radius:6px;font-size:10px;font-weight:700;cursor:pointer;font-family:var(--font)" title="${t('btn.download_album')}">⬇</button>
+                ${comp ? `<button onclick="_openCompilationById('${escJ(r.service)}','${esc(r.id)}')" style="padding:5px 8px;background:var(--surface2);color:var(--red);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('ck.dl_only_tracks')}">♪</button>`:''}
+                <button onclick="${comp ? `_openCompilationById('${escJ(r.service)}','${esc(r.id)}')` : `openAlbumPage('${escJ(r.service)}','${esc(r.id)}')`}" style="padding:5px 10px;background:var(--surface2);color:var(--muted);border:1px solid var(--border);border-radius:6px;font-size:10px;font-weight:600;cursor:pointer;font-family:var(--font)" title="${t('btn.tracks')}">≡</button>
               </div>
             </div>
-          </div>`).join('')}
+          </div>`; }).join('')}
       </div>`;
 }
 
@@ -917,7 +981,9 @@ async function openAlbumPage(service, albumId){
     const r = await fetch(`/api/album/${service}/${encodeURIComponent(albumId)}`);
     const d = await r.json();
     if(d.error){ _detailError(_engineError(d)); return; }
-    Detail.currentAlbum  = {service, id: albumId, album: d.album||{}, tracks: d.tracks||[]};
+    Detail.currentAlbum  = {service, id: albumId, album: d.album||{}, tracks: d.tracks||[],
+                            _ctx: Detail._openCtx || null};
+    Detail._openCtx = null;
     Detail.currentArtist = null;
     Detail.currentLabel  = null;
     renderAlbumPage();
@@ -989,6 +1055,15 @@ function renderAlbumPage(){
   const _emptyMsg = service === 'apple'
     ? t('ck.apple_no_tracks')
     : t('ck.tl_unavail_dl');
+  // Компilation opened from a discography: banner naming whose tracks are marked.
+  const _hl = (Detail.currentAlbum._ctx && Detail.currentAlbum._ctx.highlight) || [];
+  const _ctxArt = Detail.currentAlbum._ctx || {};
+  const _compBanner = _ctxArt.artist ? `
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;padding:8px 12px;background:rgba(250,45,85,.08);border:1px solid rgba(250,45,85,.3);border-radius:9px;font-size:12px;color:var(--text)">
+      <span style="font-weight:700;color:var(--red);text-transform:uppercase;letter-spacing:.5px;font-size:10px">${t('rl.comp_badge')}</span>
+      <span style="color:var(--muted)">${esc(_ctxArt.creditedAs ? ti('ck.as_alias',{name:_ctxArt.creditedAs}) : _ctxArt.artist)}</span>
+      <span style="color:var(--muted);flex:1;min-width:160px">${_hl.length ? ti('ck.tracks_here',{n:_hl.length}) : ti('ck.tracks_here_none',{name:_ctxArt.artist})}</span>
+    </div>` : '';
   // Per-track selection toolbar (checkboxes + select-all / per-disc / clear all).
   const _discsSet = [...new Set(tracks.map(t => t.disc || 1))].sort((a,b)=>(+a)-(+b));
   const _selBtnCss = 'padding:5px 11px;background:var(--surface);color:var(--muted);border:1px solid var(--border);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)';
@@ -1025,11 +1100,33 @@ function renderAlbumPage(){
           </div>`).join('')}
       </div>`;
 
-  document.getElementById('detail-content').innerHTML = header + tracksList;
+  document.getElementById('detail-content').innerHTML = header + _compBanner + tracksList;
+  _applyCompilationHighlight();
   // Re-mark the currently-playing track (pause glyph + row highlight) — the rows
   // are freshly built, so without this a card reopened mid-playback shows no
   // indication of what's playing. Safe no-op when nothing is playing.
   try { if (typeof _syncAlbumPlayBtns === 'function') _syncAlbumPlayBtns(); } catch {}
+}
+
+// Подсветка дорожек этого артиста на открытой компиле: отмечаем галками,
+// красим строку и доводим первую до глаза — «открыть из дискографии → весь
+// релиз с выделенным треком» вместо «показать один трек».
+function _applyCompilationHighlight(){
+  const ctx = Detail.currentAlbum && Detail.currentAlbum._ctx;
+  if (!ctx || !ctx.highlight || !ctx.highlight.length) return;
+  const want = new Set(ctx.highlight.map(String));
+  let first = null;
+  document.querySelectorAll('[id^="alb-row-"]').forEach(row => {
+    const tid = row.id.replace('alb-row-', '');
+    if (!want.has(tid)) return;
+    row.style.background = 'rgba(250,45,85,.12)';
+    row.style.boxShadow = 'inset 3px 0 0 var(--red)';
+    const cb = row.querySelector('.alb-trk-cb');
+    if (cb && !cb.disabled) { cb.checked = true; }
+    if (!first) first = row;
+  });
+  try { if (typeof _albumUpdateSelCount === 'function') _albumUpdateSelCount(); } catch {}
+  if (first) { try { first.scrollIntoView({block:'center', behavior:'smooth'}); } catch {} }
 }
 
 // Update play buttons in the open album page to reflect current playback state.
