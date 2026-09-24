@@ -1258,6 +1258,12 @@ _pairing_routes.install(app, _ctx)
 _upcoming_routes.install(app, _ctx)
 _featurefm_routes.install(app, _ctx)
 _accounts_routes.install(app, _ctx)
+# Свои ключи (24.09.2026, docs/OWN_KEY_RELAY.md): /relay/* — wm.wol.moe-
+# совместимый API на хозяйских учётках; ключевая авторизация внутри самого
+# роута (публичный префикс "/relay/"), админка /api/relay/admin/* — под обычным
+# сессионным замком. По умолчанию выключено (relay-enabled).
+from ripster.routes import relay as _relay_routes
+_relay_routes.install(app, _ctx)
 # Кнопка «Открыть внешний плеер» (трекер #37): OS-окно с панелью из ЛЮБОЙ
 # вкладки — фокус живого окна, просьба лаунчеру или standalone-процесс.
 from ripster.routes import player_window as _player_window_routes
