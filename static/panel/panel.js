@@ -507,7 +507,21 @@ async function loadConfig() {
     S.quality = c['player-stream-quality'] || 'mp3';
     S.engine = c.engine || '?';
     S.lossless = c.quality || '?';
+    S.svcColors = c['service-colors'] || {};
   } catch (e) { /* конфиг не критичен: панель живёт и без него */ }
+}
+
+/* Цвет сервиса — тот же, что у ПК (SVC_BRAND в static/js/app.js) с теми же
+   переопределениями из настроек: полоса трека «из какого сервиса тянется»
+   должна краситься одинаково в обоих окнах. */
+var SVC_TINT = {
+  apple: '#fc3c44', qobuz: '#1b68d3', tidal: '#00d4b3', deezer: '#a238ff',
+  spotify: '#1db954', soundcloud: '#ff5500', bbc: '#e4003b', yandex: '#ffcc00',
+  beatport: '#01f49c', jiosaavn: '#2bc5b4'
+};
+function svcTint(sv) {
+  sv = String(sv || '').toLowerCase();
+  return (S.svcColors && S.svcColors[sv]) || SVC_TINT[sv] || '#ff3d8b';
 }
 
 /* ── Главная: визуальный язык мобильного Ripster (03_home.png) ────────────── */
@@ -1270,6 +1284,8 @@ function renderPlayer() {
   bindTransport();
   bindSeek();
   bindVolume();
+  var sk = document.getElementById('p-seek');
+  if (sk) sk.style.setProperty('--svc', svcTint(it.service));
   syncTime();
 }
 
@@ -1412,6 +1428,7 @@ function renderMini() {
   }
   m.classList.add('on');
   var c = clock();
+  m.style.setProperty('--svc', svcTint(it.service));
   document.getElementById('mini-cover').src = it.cover || '';
   var mt = document.getElementById('mini-title');
   mt.innerHTML = (it.live ? '<span class="live">LIVE</span> ' : '') + esc(it.title || '');

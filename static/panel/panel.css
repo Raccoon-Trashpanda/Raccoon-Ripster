@@ -338,14 +338,24 @@ body:not(.rpwin) .phone {
   vertical-align: 1px; }
 #mini-title .live { vertical-align: 2px; }
 
-.seek { padding: 16px 0 6px; flex: none; cursor: pointer; touch-action: none; user-select: none; }
+/* Фирменная полоса трека, как в ПК (владелец 25.09): широкий прямоугольник,
+   кэш — мягкая полоса на всю высоту, сыгранное — в цвете сервиса-источника
+   (--svc ставит renderPlayer), позиция — светящаяся «палочка». Тянуть можно
+   прямо по полосе: пальцем и мышью (bindSeek). */
+.seek { padding: 16px 0 6px; flex: none; cursor: pointer; touch-action: none; user-select: none; --svc: var(--pink); }
 .seek:hover { cursor: col-resize; }
-.seekrail { position: relative; height: 6px; border-radius: var(--r-pill); background: rgba(255,255,255,.12); transition: height var(--dur-press); }
-.seek:hover .seekrail, .seek.drag .seekrail { height: 12px; }
-.seekbuf { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: var(--r-pill); background: rgba(255,255,255,.09); }
-.seekfill { position: absolute; inset: 0 auto 0 0; width: 0; border-radius: var(--r-pill); background: linear-gradient(90deg, var(--pink-lo), var(--pink)); }
-.seekknob { position: absolute; top: 50%; left: 0; width: 14px; height: 14px; margin: -7px 0 0 -7px; border-radius: 50%; background: #fff; opacity: 0; transition: opacity var(--dur-press); }
-.seek:hover .seekknob, .seek.drag .seekknob { opacity: 1; }
+.seekrail { position: relative; height: 34px; border-radius: 8px; overflow: hidden;
+            background: rgba(255,255,255,.06); border: var(--hair) solid rgba(255,255,255,.08);
+            transition: box-shadow var(--dur-press); }
+.seek:hover .seekrail, .seek.drag .seekrail { box-shadow: 0 0 0 1px color-mix(in srgb, var(--svc) 45%, transparent); }
+.seekbuf { position: absolute; inset: 0 auto 0 0; width: 0; background: rgba(255,255,255,.12); transition: width .4s linear; }
+.seekfill { position: absolute; inset: 0 auto 0 0; width: 0;
+            background: linear-gradient(90deg, color-mix(in srgb, var(--svc) 18%, transparent), color-mix(in srgb, var(--svc) 42%, transparent)); }
+.seekfill::after { content: ""; position: absolute; right: 0; top: 0; bottom: 0; width: 3px;
+                   transform: translateX(50%); border-radius: 3px; background: var(--svc);
+                   box-shadow: 0 0 10px 1px var(--svc); }
+.seek.drag .seekfill::after { width: 4px; }
+.seekknob { display: none; }
 .seektimes { display: flex; justify-content: space-between; margin-top: 6px; font: 11px/1 var(--mono); color: var(--t3); }
 
 .transport { display: flex; align-items: center; justify-content: center; gap: 10px; margin-top: 14px; flex: none; }
@@ -392,7 +402,8 @@ body:not(.rpwin) .phone {
   backdrop-filter: blur(8px);
 }
 .miniplayer.on { display: block; }
-.miniprog { height: 3px; width: 0; background: var(--pink); transition: width .25s linear; }
+.miniprog { height: 3px; width: 0; background: var(--svc, var(--pink)); transition: width .25s linear;
+            box-shadow: 0 0 6px var(--svc, var(--pink)); }
 .minirow { display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 7px; }
 .minicover { width: 40px; height: 40px; border-radius: 9px; object-fit: cover; background: var(--raised); flex: none; }
 .minitext { flex: 1; min-width: 0; }
