@@ -335,6 +335,11 @@ function onHost(d) {
     if (RELAY) rpAck();
     return;
   }
+  if (d.k === 'viz') {
+    B.viz = d.b || null; B.vizAt = Date.now();
+    vizKick();
+    return;
+  }
   if (d.k === 'queue') {
     B.queue = d.items || []; B.stamp = d.stamp || '';
     S.queue = B.queue.map(hostToItem);
@@ -1452,9 +1457,79 @@ function renderMini() {
   var mpv = document.getElementById('mini-prev'), mnx = document.getElementById('mini-next');
   if (mpv) { mpv.title = t('m.p.prev'); mpv.onclick = function (ev) { ev.stopPropagation(); T.prev(); }; }
   if (mnx) { mnx.title = t('m.p.next'); mnx.onclick = function (ev) { ev.stopPropagation(); T.next(); }; }
-  m.onclick = function () { openPlayer(); renderPlayer(); };
+  m.onclick = function () {
+    if (_miniSeekDragged) { _miniSeekDragged = false; return; }   // это была перемотка
+    openPlayer(); renderPlayer();
+  };
+  bindMiniSeek(m);
   m.title = t('m.mini.open');
   renderHomeNow();                             // «играет сейчас» на главной — живое
+}
+
+/* ── Перемотка прямо в мини-плеере (владелец 25.09) ──────────────────────
+   Верхняя половина плитки — та самая тающая полоса: нажал и тянешь — трек
+   перематывается; отпустил — переход. Нижняя половина (кнопки, текст) —
+   как раньше: тап открывает плеер. */
+var _miniSeekDragged = false;
+function bindMiniSeek(m) {
+  if (m._seekBound) return;
+  m._seekBound = true;
+  var drag = false;
+  function frac(ev) { var r = m.getBoundingClientRect(); return Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)); }
+  m.addEventListener('pointerdown', function (ev) {
+    if (ev.button != null && ev.button !== 0) return;
+    if (ev.target.closest && ev.target.closest('button')) return;
+    var r = m.getBoundingClientRect();
+    if (ev.clientY - r.top > r.height * 0.5) return;           // низ плитки — не перемотка
+    if (!(clock().dur > 0)) return;
+    drag = true; _miniSeekDragged = false;
+    try { m.setPointerCapture(ev.pointerId); } catch (e) {}
+    m.classList.add('seeking');
+    var mp = document.getElementById('mini-prog'); if (mp) mp.style.width = (frac(ev) * 100) + '%';
+  });
+  m.addEventListener('pointermove', function (ev) {
+    if (!drag) return;
+    _miniSeekDragged = true;
+    var mp = document.getElementById('mini-prog'); if (mp) mp.style.width = (frac(ev) * 100) + '%';
+  });
+  m.addEventListener('pointerup', function (ev) {
+    if (!drag) return;
+    drag = false; m.classList.remove('seeking');
+    _miniSeekDragged = true;                                    // и короткий тап сверху — тоже перемотка
+    T.seekTo(frac(ev));
+  });
+  m.addEventListener('pointercancel', function () { drag = false; m.classList.remove('seeking'); });
+}
+
+/* ── «Прыгалка» внизу мини-плеера: спектр от ПК (k:'viz'), цвет сервиса ── */
+var _vizRaf = 0, _vizLvl = null;
+function vizKick() { if (!_vizRaf) _vizRaf = requestAnimationFrame(vizFrame); }
+function vizFrame() {
+  _vizRaf = 0;
+  var cv = document.getElementById('mini-viz'), mini = document.getElementById('mini');
+  if (!cv || !mini || !mini.classList.contains('on')) return;
+  var fresh = B.live && B.viz && (Date.now() - (B.vizAt || 0) < 400);
+  var w = cv.clientWidth, h = cv.clientHeight, dpr = window.devicePixelRatio || 1;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+  var g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+  var src = fresh ? B.viz : null, n = 32;
+  if (!_vizLvl) _vizLvl = new Array(n).fill(0);
+  var alive = false;
+  for (var i = 0; i < n; i++) {
+    var target = src ? (src[i] || 0) / 255 : 0;
+    _vizLvl[i] += (target - _vizLvl[i]) * (target > _vizLvl[i] ? 0.55 : 0.18);   // быстро вверх, плавно вниз
+    if (_vizLvl[i] > 0.01) alive = true;
+  }
+  var col = getComputedStyle(mini).getPropertyValue('--svc').trim() || '#ff3d8b';
+  g.fillStyle = col; g.shadowColor = col; g.shadowBlur = 6;
+  var gap = 2, bw = (w - gap * (n - 1)) / n;
+  for (var j = 0; j < n; j++) {
+    var bh = Math.max(1, _vizLvl[j] * h);
+    g.globalAlpha = 0.7 + 0.3 * _vizLvl[j];
+    g.fillRect(j * (bw + gap), h - bh, bw, bh);
+  }
+  g.globalAlpha = 1;
+  if (fresh || alive) _vizRaf = requestAnimationFrame(vizFrame);
 }
 
 function renderQueueSheets() {

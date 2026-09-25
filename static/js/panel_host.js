@@ -104,9 +104,35 @@ function rpAdoptFromPanel(via) {
 
 function rpPanelStartTick() {
   if (!RP.tick) RP.tick = setInterval(rpPanelPush, 400);
+  if (!RP.vizTick) RP.vizTick = setInterval(rpVizPush, 85);
 }
 function rpPanelStopTick() {
   if (RP.tick) { clearInterval(RP.tick); RP.tick = null; }
+  if (RP.vizTick) { clearInterval(RP.vizTick); RP.vizTick = null; }
+}
+
+/* Спектр для «прыгалки» мини-плеера панели (владелец 25.09): тот же
+   анализатор, что у ПК-визуализатора (_WA.analyser, после эквалайзера), 32
+   полосы ~12 раз/с — только пока играет и панель открыта. Анализатора нет
+   (звук идёт мимо Web Audio) — не шлём ничего, и панель полос не рисует:
+   выдуманная анимация врала бы, что мы слышим звук. */
+function rpVizPush() {
+  if (!RP.open || !RP.ready) return;
+  try {
+    if (typeof _WA === 'undefined' || !_WA.analyser) return;
+    if (typeof ripsterIsPaused === 'function' && ripsterIsPaused()) return;
+    var n = _WA.analyser.frequencyBinCount;
+    var data = RP.vizBuf && RP.vizBuf.length === n ? RP.vizBuf : (RP.vizBuf = new Uint8Array(n));
+    _WA.analyser.getByteFrequencyData(data);
+    var bands = 32, out = new Array(bands), usable = Math.floor(n * 0.8);
+    for (var b = 0; b < bands; b++) {
+      var lo = Math.floor(b * usable / bands), hi = Math.max(lo + 1, Math.floor((b + 1) * usable / bands));
+      var mx = 0;
+      for (var i = lo; i < hi; i++) if (data[i] > mx) mx = data[i];
+      out[b] = mx;
+    }
+    rpPost({ rp: 1, k: 'viz', b: out });
+  } catch (e) {}
 }
 
 function rpPanelOpen(mode) {
