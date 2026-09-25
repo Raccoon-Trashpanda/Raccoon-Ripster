@@ -328,6 +328,51 @@ def _preorder_plan(task: dict, info: dict) -> None:
         print(f"[preorder] schedule failed: {_pwe}", flush=True)
 
 
+async def _preorder_gate(task: dict) -> bool:
+    """Шлюз ПЕРЕД движком: релиз ещё не вышел — запускать нечего.
+
+    Прогон по невышедшему предзаказу давал 404, тост и ⛔ владельцу там,
+    где детект уже всё знал (25.09, Polygonia 6807207334). Задача уходит в
+    план preorder_waits (переживает перезапуск), а её карточка остаётся в
+    очереди в честном состоянии «ожидает релиза» (статус scheduled — как у
+    отложенных эфиров BBC: процесс очереди такие карточки ждёт, движок в
+    них не тыкает). Возвращает True — further run_task не нужен.
+    go_now — исключение: у одной живой учётки релиз УЖЕ вышел, ждём нечего."""
+    info = _preorder_of(task)
+    if not info or info.get("go_now"):
+        return False
+    tid = task.get("id", "")
+    _preorder_plan(task, info)
+    if not task.get("_preorder_wait"):
+        # План не заведён (потолок «релиз отодвигали» / нет URL) — вешать
+        # карточку на вечное ожидание нельзя: пусть движок честно пройдёт
+        # свой путь со своей ошибкой и уведомлением.
+        return False
+    if task.get("status") == "queued":
+        # QUEUED→SCHEDULED — узаконенное ребро (task_state): карточка ждёт
+        # релиза, движок в неё не тыкал и не тыкает.
+        _try_advance_task(task, TaskStatus.SCHEDULED)
+    task["progress"] = 0
+    try:
+        from ripster import preorder as _pom
+        await _broadcast(_i18n.log_event(
+            "console.awaiting_release", level="info", task_id=tid,
+            title=str((task.get("meta") or {}).get("title") or ""),
+            date=_pom.human_date(info.get("release_date") or ""),
+            when=str(info.get("release_utc") or ""),
+            cc=info.get("cc") or "?"))
+    except Exception:                                            # noqa: BLE001
+        pass
+    task.setdefault("log", []).append(_i18n.tr(
+        "console.awaiting_release", title="", date="",
+        when=str(info.get("release_utc") or ""), cc=info.get("cc") or "?"))
+    await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+    print(f"[preorder] задача {str(tid)[:8]} не запускалась: ждём релиз "
+          f"{info.get('release_utc')} UTC (витрина {info.get('cc') or '?'})",
+          flush=True)
+    return True
+
+
 # ── Итог загрузки → матрица доступности ─────────────────────────────────────────
 # Опрос витрины отвечает только «есть ли в каталоге». Скачали мы или нет — знает
 # ОДНА попытка загрузки, и до сих пор этот ответ никуда не записывался: карточка
@@ -3617,6 +3662,20 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     print(f"[salvage] failed: {_e}", flush=True)
 
                 if not salvaged:
+                    if _po_e:
+                        # Движок всё же сорвался ДО релиза (меты ещё не было на
+                        # стартовом шлюзе). Ни файлов, ни пользы — не писать
+                        # ошибку, тост и ⛔: план уже заведён выше, карточка
+                        # переходит в «ожидает релиза» (как на шлюзе).
+                        if not task.get("_preorder_wait"):
+                            _preorder_plan(task, _po_e)
+                        if task.get("_preorder_wait"):
+                            _try_advance_task(task, TaskStatus.SCHEDULED)
+                            task["progress"] = 0
+                            task["_in_retry"] = True   # ни истории, ни страховки
+                            await _broadcast({"type": "queue_update",
+                                              "queue": _queue_snapshot()})
+                            return
                     task["error"] = msg
                     # Причина отказа нужна и при ПОЛНОМ провале, а не только при
                     # частичной загрузке. 14.08.2026 два Beatport-релиза упали с
@@ -4245,6 +4304,12 @@ async def run_task(task: dict) -> None:
     url    = task.get("url", "")
     qid    = task.get("quality", _config.get("quality", "alac"))
     svc, engine = _sanity_route(task, svc, engine, url)
+
+    # Предзаказ: до момента выхода движок не запускаем вовсе (ни 404, ни
+    # тоста, ни ⛔) — задача встаёт в план и ждёт релиза карточкой
+    # «ожидает релиза».
+    if await _preorder_gate(task):
+        return
 
     _advance_task(task, TaskStatus.RUNNING)
     task["progress"]    = 0

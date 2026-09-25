@@ -216,14 +216,33 @@ def build_task(row: dict) -> dict:
 
 
 async def fire(row: dict) -> bool:
-    """Наступило время (или go_now) — план становится задачей в очереди."""
-    task = build_task(row)
+    """Наступило время (или go_now) — план становится задачей в очереди.
+
+    Если исходная карточка всё ещё стоит в очереди в «ожидает релиза»
+    (её туда поставил стартовый шлюз раннера), снимаем её, а не заводим
+    дубль: гость/владелец видит ту же плитку, а не две на один релиз."""
+    task = None
+    src = _find_task(row.get("from_task") or "")
+    if src is not None and src.get("status") == "scheduled":
+        task = src
+        for _k in ("_preorder", "_preorder_wait", "_awaits_release",
+                   "_partial", "_partial_reason", "error"):
+            task.pop(_k, None)
+        (task.get("meta") or {}).pop("_awaits_release", None)
+        task["status"]   = "queued"
+        task["progress"] = 0
+        task["log"]      = []
+    if task is None:
+        task = build_task(row)
+        _queue.append(task)
+    elif row.get("slot") not in (None, "") and row.get("service") == "apple":
+        # Тот же пин слота, что ставит build_task: момент-то с витрины учётки.
+        task["_force_slot"] = row["slot"]
     row["status"] = "fired"
     row["task_id"] = task["id"]
     row["fired_utc"] = _iso(utcnow())
     row["refire"] = int(row.get("refire") or 0) + 1
     save()
-    _queue.append(task)
     if _broadcast and _queue_snapshot:
         await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
     if _process_queue and _qs:

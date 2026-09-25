@@ -12,7 +12,12 @@
   • Deezer — album/{id}: release_date (+ available_products у треков, если поле
              в ответе есть).
   • Apple  — releaseDate; на каталожном пути ещё isPreRelease /
-             preReleaseReleaseDate.
+             preReleaseReleaseDate. Когда метаданные принесли ПОЛНЫЙ штамп
+             releaseDate той витрины, где альбом лежит (fetch_meta снимает
+             его и для чужой учётки дописывает витрину учётки), планируем по
+             нему — полуночь страны учётки это догадка, и промазать ей можно
+             на полдня (25.09 «Polygonia»: ждали 04:15 по CA, где альбома нет,
+             вышел 07:00 в RU).
 
 Правило: предзаказ = момент доступности (точное поле движка или полночь СТРАНЫ
 УЧЁТКИ по дате релиза) ещё не наступил. Полночь считается в часовом поясе
@@ -255,6 +260,26 @@ def _ts(raw) -> float:
         return 0.0
 
 
+def _parse_utc_ts(raw) -> "_dt.datetime | None":
+    """«2026-09-25T07:00:00Z» (или с числовым смещением) → наивный UTC.
+
+    Только полный штамп с часовым поясом — дата без времени это не offer
+    start, а полдня витрины, её расшифровывает прежний путь (local_midnight).
+    """
+    s = str(raw or "").strip()
+    if len(s) < 20:
+        return None
+    if s.endswith(("Z", "z")):
+        s = s[:-1] + "+00:00"
+    try:
+        d = _dt.datetime.fromisoformat(s)
+    except ValueError:
+        return None
+    if d.tzinfo is None:
+        return None
+    return d.astimezone(_dt.timezone.utc).replace(tzinfo=None, microsecond=0)
+
+
 def detect(task: dict, cfg: dict, now: "_dt.datetime | None" = None) -> "dict | None":
     """Инфо о предзаказе по задаче или None (релиз вышел / не поняли).
 
@@ -295,6 +320,38 @@ def detect(task: dict, cfg: dict, now: "_dt.datetime | None" = None) -> "dict | 
             return None
 
     day = _parse_date(meta.get("date") or meta.get("releaseDate"))
+    if svc == "apple":
+        # Каталог Apple говорит момент выхода полным штампом ПО ТОЙ ВИТРИНЕ,
+        # где релиз лежит (offer start, а не «полуночь страны учётки на глаз»):
+        # 25.09 «Polygonia — Early Hours» вышел 07:00 UTC в RU/NZ/AU/JP, а
+        # планировщик считал от полуночи CA — витрины, где альбома нет вовсе,
+        # и поднял задачу на 04:15. Берём реальный момент; дата без времени
+        # (старая мета) остаётся на прежнем пути ниже.
+        if meta.get("isPreRelease"):
+            # У предзаказа releaseDate может быть в прошлом (instant-grat
+            # сингл) — верим дате открытия; точного штампа нет → прежний путь.
+            exact_raw = meta.get("preReleaseReleaseDateTime")
+        else:
+            exact_raw = meta.get("releaseDateTime")
+        when = _parse_utc_ts(exact_raw)
+        if when is not None:
+            if when <= now:
+                # Настоящий offer start уже прошёл — это НЕ предзаказ,
+                # а обычный заход (ну или авария витрины — движок скажет).
+                return None
+            if when - now > _MAX_AHEAD:
+                return None
+            cc = str(meta.get("release_cc") or meta.get("storefront") or "").upper()
+            # Слот пиним только когда витрина момента — витрина живой учётки:
+            # иначе задачу ведёт лестница (другая витрина / публичный wrapper —
+            # по политике владельца), а не пин на заведомо пустой CA.
+            slot = next((c.get("slot") for c in account_candidates(svc, cfg)
+                         if str(c.get("cc") or "").upper() == cc), None)
+            return {"service": svc, "cc": cc, "slot": slot,
+                    "release_date": when.date().isoformat(),
+                    "release_utc": (when + RELEASE_GRACE).isoformat(
+                        timespec="seconds"),
+                    "exact": True, "go_now": False}
     if svc == "apple" and meta.get("isPreRelease"):
         # Каталог сказал «предзаказ» — дата открытия важнее releaseDate:
         # у instant-grat сингла releaseDate уже в прошлом.

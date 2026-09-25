@@ -259,6 +259,52 @@ async def _itunes_lookup(api_id: str, sf: str) -> Optional[dict]:
     return results[0] if results else None
 
 
+def _release_is_future(raw: str) -> bool:
+    """Штамп releaseDate ещё в будущем (кандидат на предзаказ)."""
+    try:
+        import datetime as _dt
+        from ripster.preorder import _parse_utc_ts
+        when = _parse_utc_ts(raw)
+        return when is not None and when > _dt.datetime.utcnow()
+    except Exception:                                       # noqa: BLE001
+        return False
+
+
+async def _probe_account_storefronts(meta: dict, api_id: str, sf: str) -> None:
+    """Предзаказ: карточка снята с витрины ССЫЛКИ, а качать будет учётка.
+
+    iTunes lookup — публичный и отвечает по стране: если альбом лежит на
+    витрине живой учётки, берём ЕЁ настоящий offer start (и слот, чтобы
+    план не пинил заведомо пустую витрину). Не лежит нигде из своих —
+    оставляем момент той витрины, где карточка есть: он честный, а слот не
+    пиним — на выходе поведёт лестница (другая витрина / публичный wrapper
+    по политике владельца). Никаких догадок от полуночи отсутствующих стран.
+    """
+    try:
+        from ripster import preorder as _po
+        cands = [c for c in (_po.account_candidates("apple", _cfg) or [])
+                 if str(c.get("cc") or "").lower() not in ("", (sf or "").lower())]
+    except Exception:                                       # noqa: BLE001
+        return
+    for c in cands[:3]:
+        cc = str(c.get("cc") or "").lower()
+        try:
+            results = await _itunes_lookup_raw(api_id, cc)
+        except Exception:                                   # noqa: BLE001
+            continue
+        for r in results or []:
+            if r.get("wrapperType") != "collection":
+                continue
+            rd = r.get("releaseDate") or ""
+            if not rd:
+                continue
+            meta["releaseDateTime"] = rd
+            meta["release_cc"] = cc.upper()
+            if c.get("slot") is not None:
+                meta["release_slot"] = c["slot"]
+            return
+
+
 def _tracks_from_itunes(results: list) -> list:
     """Треклист альбома из того же ответа iTunes, что и карточка."""
     out = []
@@ -305,7 +351,7 @@ async def fetch_meta(url: str) -> Optional[dict]:
         tc       = 1 if is_track else (item.get("trackCount") or 0)
         _tl      = [] if is_track else (_tracks_from_itunes(results)
                                         or await _catalog_album_tracks(sf, api_id))
-        return {
+        meta = {
             "id":          str(api_id),
             "type":        "songs" if is_track else "albums",
             "albumType":   item.get("collectionType", ""),
@@ -316,6 +362,10 @@ async def fetch_meta(url: str) -> Optional[dict]:
             # Полная дата — preorder.detect: у предзаказа releaseDate в будущем,
             # а «год» для плана «докачать после полуночи учётки» слишком груб.
             "date":        (item.get("releaseDate") or "")[:10],
+            # Полный штамп — настоящий offer start ИМЕННО этой витрины:
+            # полуночь «страны учётки» по дате — догадка на полсуток (25.09,
+            # Polygonia: ждали 04:15 по CA, где альбома нет; вышел 07:00 в RU).
+            "releaseDateTime": item.get("releaseDate") or "",
             "genre":       item.get("primaryGenreName", ""),
             "trackNumber": item.get("trackNumber"),
             "totalTracks": 1 if is_track else item.get("trackCount"),
@@ -338,6 +388,11 @@ async def fetch_meta(url: str) -> Optional[dict]:
             "tracksComplete": bool(_tl) or is_track,
             "service":     "apple",
         }
+        if not is_track and _release_is_future(meta["releaseDateTime"]):
+            # Предзаказ: витрина ссылки ≠ витрина учётки — спросить аккаунта,
+            # где он реально лежит (1–3 публичных lookup, не каталог с токеном).
+            await _probe_account_storefronts(meta, api_id, sf)
+        return meta
 
     # ── Fallback: Apple Music Catalog API (requires bearer) ───────────────────
     print("[meta:apple] iTunes lookup empty — trying Catalog API…", flush=True)
@@ -380,7 +435,7 @@ async def fetch_meta(url: str) -> Optional[dict]:
     # parent album's trackCount (same one-vs-many trap as the iTunes path above).
     _single_tc = 1 if api_type in ("songs", "music-videos") else a.get("trackCount")
 
-    return {
+    meta = {
         "id":          item.get("id", ""),
         "type":        item.get("type", ""),
         "albumType":   a.get("albumType", ""),
@@ -392,6 +447,8 @@ async def fetch_meta(url: str) -> Optional[dict]:
         # Каталог Apple честно говорит «это предзаказ» и когда его открыть.
         "isPreRelease": bool(a.get("isPreRelease")),
         "preReleaseReleaseDate": (a.get("preReleaseReleaseDate") or "")[:10],
+        "preReleaseReleaseDateTime": a.get("preReleaseReleaseDate") or "",
+        "releaseDateTime": a.get("releaseDate") or "",
         "genre":       (a.get("genreNames") or [""])[0],
         "trackNumber": a.get("trackNumber"),
         "totalTracks": _single_tc,
@@ -412,6 +469,11 @@ async def fetch_meta(url: str) -> Optional[dict]:
         "trackCount":  _single_tc,
         "service":     "apple",
     }
+    if (api_type == "albums"
+            and _release_is_future(meta["preReleaseReleaseDateTime"]
+                                   or meta["releaseDateTime"])):
+        await _probe_account_storefronts(meta, api_id, sf)
+    return meta
 
 
 async def content_id(url: str) -> str:

@@ -60,8 +60,15 @@ _TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
     # проставляла статус ПРЯМЫМ присваиванием — ровно тем обходом, который этот
     # модуль и заведён запрещать. За сутки 04.09.2026 так «терялись» две задачи,
     # и человек получал «Задача завершилась без результата» вместо причины.
-    TaskStatus.QUEUED:    {TaskStatus.RUNNING, TaskStatus.ERROR, TaskStatus.CANCELLED},
-    TaskStatus.RUNNING:   {TaskStatus.DONE, TaskStatus.ERROR, TaskStatus.CANCELLED, TaskStatus.QUEUED},
+    # QUEUED→SCHEDULED: стартовый шлюз предзаказа (25.09) — релиз ещё не вышел,
+    # движок не запускался, карточка переходит в «ожидает релиза» и ждёт план.
+    TaskStatus.QUEUED:    {TaskStatus.RUNNING, TaskStatus.ERROR,
+                           TaskStatus.CANCELLED, TaskStatus.SCHEDULED},
+    # RUNNING→SCHEDULED: движок сорвался на предзаказе, которого меты не
+    # видели на стартовом шлюзе (25.09) — ошибка не пишется, карточка
+    # догоняет план и переходит в «ожидает релиза».
+    TaskStatus.RUNNING:   {TaskStatus.DONE, TaskStatus.ERROR, TaskStatus.CANCELLED,
+                           TaskStatus.QUEUED, TaskStatus.SCHEDULED},
     # Terminal states — no further transitions. A task that finished is
     # finished; requeue means *creating a new task*, not mutating this one.
     TaskStatus.DONE:      set(),

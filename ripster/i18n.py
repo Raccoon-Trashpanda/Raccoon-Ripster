@@ -123,6 +123,7 @@ FALLBACK: dict[str, str] = {
     "console.autoretry_partial": "⟳ Авто-повтор (частичная загрузка) — та же плитка",
     # ── предзаказ (24.09.2026, NORTHERN EXPOSURE) ─────────────────────────────
     "console.partial_preorder": "🕝 Предзаказ: релиз выходит {date} (в витрине учётки, страна {cc}). Сейчас доступно {got} из {expected} — остальные докачаются автоматически после выхода.",
+    "console.awaiting_release": "🕝 Ожидает релиза: «{title}» выходит {date} в {when} UTC (витрина {cc}) — движок не запускался, задача снимется с плана сама.",
     "preorder.notify_done":     "✅ Предзаказ докачан после релиза: {artist} — {title} ({got}/{expected})",
     "preorder.notify_partial":  "⚠ Догрузка предзаказа после релиза прошла частично: {artist} — {title} ({got}/{expected})",
     "preorder.notify_error":    "✗ Догрузка предзаказа после релиза не удалась: {artist} — {title}: {err}",
