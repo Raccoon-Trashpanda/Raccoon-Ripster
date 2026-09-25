@@ -717,13 +717,14 @@ function updateQueueItem(task, el) {
   // Metadata enrichment — title / artist / cover appear once they arrive.
   if(m.title || m.artist){
     const titleEl = el.querySelector('.qi-title');
-    if(titleEl) titleEl.textContent = m.title || _titleFromUrl(task.url);
+    if(titleEl) titleEl.textContent = (m.artist && m.title) ? `${m.artist} — ${m.title}`
+                                    : (m.title || _titleFromUrl(task.url));
     const tcInfo  = tc > 1 ? ti('q.n_tracks',{n:tc}) : (tc === 1 ? t('q.one_track') : '');
     const durInfo = (m.duration && ['soundcloud','bbc'].includes(m.service)) ? _scDur(m.duration) : '';
-    const line = [m.artist || '—', m.year, m.label, _typeLabel(m), tcInfo, durInfo].filter(Boolean).join(' · ');
+    const line = [(m.title ? '' : (m.artist || '—')), m.year, m.label, _typeLabel(m), tcInfo, durInfo].filter(Boolean).join(' · ');
     let artistEl = el.querySelector('.qi-artist');
-    if(artistEl) artistEl.textContent = '— ' + line;
-    else if(titleEl && line){ const s=document.createElement('span'); s.className='qi-artist'; s.textContent='— '+line; titleEl.after(s); }
+    if(artistEl) artistEl.textContent = line ? '· ' + line : '';
+    else if(titleEl && line){ const s=document.createElement('span'); s.className='qi-artist'; s.textContent='· '+line; titleEl.after(s); }
     const artEl = el.querySelector('.qi-art');
     if(artEl && m.artworkUrl && !artEl.querySelector('img'))
       artEl.innerHTML = `<img src="${esc(m.artworkUrl)}" data-cover data-lightbox onload="this.classList.add('loaded')" style="cursor:zoom-in" loading="lazy"/>`;

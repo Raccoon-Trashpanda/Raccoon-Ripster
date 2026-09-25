@@ -603,8 +603,11 @@ function buildQueueItem(task) {
   const hasMeta    = m && (m.title || m.artist);
   const typeLabel  = _typeLabel(m);
   const durInfo    = (m && m.duration && ['soundcloud','bbc'].includes(m.service)) ? _scDur(m.duration) : '';
+  // «Исполнитель — Название» (владелец 25.09).
+  const _qiHead = (m?.artist && m?.title) ? `${m.artist} — ${m.title}`
+                : (m?.title || _titleFromUrl(task.url));
   const artistLine = hasMeta
-    ? [m.artist || '—', m.year, m.label, typeLabel, trackInfo, durInfo].filter(Boolean).join(' · ')
+    ? [(m.title ? '' : (m.artist || '—')), m.year, m.label, typeLabel, trackInfo, durInfo].filter(Boolean).join(' · ')
     : (m?.meta_error ? `⚠ ${m.meta_error}` : (m?.enriched ? '' : t('q.meta_loading')));
   const logLines   = (task.log || []).slice(-20);
   const logHtml    = logLines.map(l => {
@@ -637,8 +640,8 @@ function buildQueueItem(task) {
     <div class="qi-art">${m?.artworkUrl?`<img src="${esc(_qiCoverThumb(m.artworkUrl))}" data-cover data-lightbox data-lightbox-src="${esc(m.artworkUrl)}" onload="this.classList.add('loaded')" style="cursor:zoom-in" loading="lazy"/>`:'🎵'}</div>
     <div class="qi-body">
       <div class="qi-l1">
-        <span class="qi-title">${esc(m?.title || _titleFromUrl(task.url))}</span>
-        ${artistLine?`<span class="qi-artist">— ${esc(artistLine)}</span>`:''}
+        <span class="qi-title">${esc(_qiHead)}</span>
+        ${artistLine?`<span class="qi-artist">· ${esc(artistLine)}</span>`:''}
       </div>
       <div class="qi-l2">
         <span class="qi-badge" style="background:${q.color}22;color:${q.color}">${esc(q.label)}</span>
