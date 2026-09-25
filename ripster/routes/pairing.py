@@ -1259,6 +1259,26 @@ async def pair_fetch_file(task_id: str, request: Request):
 # «как есть» — понимание того, ЧТО радар отслеживает, важнее, чем красивая
 # витрина. Тап по «последнему релизу» ставит его в очередь телефона.
 
+def _drop_owner_rejected_upcoming(items: list) -> list:
+    """Грядущее на телефоне — те же слова хозяина, что и в вебе: «не мой
+    артист», сказанный по карточке, не имеет права приезжать анонсом.
+
+    Молчание или сбой двери список не режут: дешевле показать анонс лишний раз,
+    чем потерять весь экран из-за исключения в фильтре.
+    """
+    try:
+        from ripster import artist_identity as _ident
+        return [u for u in items
+                if not _ident.owner_hide(
+                    {"artist": getattr(u, "artist", "") or "",
+                     "title": getattr(u, "title", "") or "",
+                     "label": getattr(u, "label", "") or "",
+                     "genres": list(getattr(u, "genres", None) or [])})[0]]
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[pair] грядущее: слово владельца не применено — {e}", flush=True)
+        return list(items)
+
+
 @router.get("/api/pair/upcoming")
 async def pair_upcoming(request: Request):
     """Радар ГРЯДУЩЕГО для телефона.
@@ -1282,6 +1302,7 @@ async def pair_upcoming(request: Request):
         return (0, u.release_date) if u.release_date else (1, "")
 
     items.sort(key=_order)
+    items = _drop_owner_rejected_upcoming(items)
     return {"items": [{
         "artist":      u.artist,
         "title":       u.title,
@@ -1374,12 +1395,13 @@ async def pair_radar(request: Request):
         return seg
 
     items = []
+    from ripster import artist_identity as _ident
     for e in wl:
         name = (e.get("name") or "").strip()
         if not name:
             continue
         lru = _last_release_url(e)
-        items.append({
+        item = {
             "name": name,
             "service": e.get("service", ""),
             "artist_id": e.get("artist_id", ""),
@@ -1403,7 +1425,23 @@ async def pair_radar(request: Request):
             # карточки, а слежимого имени — в чип «с участием».
             "alb_artist": str(e.get("last_release_alb_artist") or ""),
             "release_id": _release_id(lru),
-        })
+        }
+        # Слово хозяина на телефоне стоит ровно столько же, сколько в вебе:
+        # «это не мой артист», сказанное по карточке, убирает её и отсюда, а
+        # не только из радарной ленты (жалоба 25.09.2026).
+        try:
+            hidden, why = _ident.owner_hide(
+                {"artist": item["alb_artist"] or name, "title": item["latest_title"],
+                 "service": item["service"], "artist_id": item["artist_id"],
+                 "label": str(e.get("last_release_label") or ""), "url": lru}, e)
+        except Exception as x:                                       # noqa: BLE001
+            print(f"[pair] радар: слово владельца не применено — {x}", flush=True)
+            hidden = why = ""
+        if hidden:
+            print(f"[pair] '{item['latest_title']}' ({name}) скрыто: {why}",
+                  flush=True)
+            continue
+        items.append(item)
 
     # Spotify — «первичка» релиз-радара у владельца, но живёт НЕ в вотчлисте, а в
     # своём per-artist складе (spotify.py `_sp_artist_state`). Подмешиваем его
@@ -1423,6 +1461,8 @@ async def pair_radar(request: Request):
             url = rel.get("url") or ""
             if not art or not url:
                 continue
+            if _ident.owner_hide(rel)[0]:
+                continue          # «не мой» по этому имени — и на телефоне не видно
             date = str(rel.get("date") or "")
             cur = by_artist.get(art)
             if cur is None or date > cur["_d"]:

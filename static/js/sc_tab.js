@@ -124,7 +124,11 @@ async function installBeatportModule() {
 // Cache: avoid re-fetching every time the user switches to the Releases tab
 const _relCache = { data: null, ts: 0, key: '' };
 const _REL_CACHE_TTL = 10 * 60 * 1000; // 10 min in-memory TTL
-const _REL_LS_KEY    = 'ripster_rel_v2';
+// v3: карточка, отвергнутая словом владельца, обязана исчезать из ленты не
+// только с экрана, но и из браузерного снимка — иначе после перезагрузки она
+// возвращалась («нажал „это не мой артист“, а оно приколочено гвоздями»,
+// 25.09.2026). Старый снимок с такими карточками внутри выбрасываем один раз.
+const _REL_LS_KEY    = 'ripster_rel_v3';
 const _REL_SEEN_KEY  = 'ripster_rel_seen';
 const _REL_FAV_KEY   = 'ripster_rel_favs';
 const _REL_PREF_KEY  = 'ripster_rel_prefs';
@@ -1364,6 +1368,10 @@ function _radarMerge(name, list, err) {
     added.push(rel);
   }
   _radarScan.found += added.length;
+  // Что источник отдал СЕЙЧАС — единственный честный ответ на вопрос «чего в
+  // ленте больше нет». Без этой записи прунинг в `_radarDone` нечем сверять.
+  _radarScan.keys = _radarScan.keys || {};
+  _radarScan.keys[name] = {ok: !err, set: new Set(fresh.map(_relDedupKey))};
   _radarScan.timeline.push({src: name, t: Math.round(Date.now() - _radarScan.started), got: added.length});
   for (const rel of added) {
     const u = _relUID(rel);
@@ -1419,6 +1427,31 @@ function _radarMaybeShowEmpty() {
   empty.style.display = '';
 }
 
+// Сервер — начальство над снимком: что источник этого обхода отдал без ошибки,
+// то и есть лента. Карточка, которую дверь личности больше не выпускает
+// («хозяин сказал: не мой»), обязана выпасть из кэша и из localStorage, а не
+// переживать перечитывание: иначе слово владельца доходило только после
+// принудительной перезагрузки вкладами.
+function _radarPrune(scan) {
+  if (!scan || scan.aborted || !Array.isArray(_relCache.data) || !_relCache.data.length) return;
+  // Сверять можно только с тем же самым запросом: сменились окно или набор
+  // источников — короткая выдача означает новый срез, а не цензуру.
+  if (scan.prevKey !== scan.key) return;
+  const belongs = (name, r) => name === 'labels'
+    ? !!r.via_label
+    : (!r.via_label && (r.service || '') === name);
+  let gone = 0;
+  for (const [name, res] of Object.entries(scan.keys || {})) {
+    if (!res || !res.ok) continue;                 // источник молчал/ошибся — не трогаем
+    _relCache.data = _relCache.data.filter(r => {
+      if (!belongs(name, r) || res.set.has(_relDedupKey(r))) return true;
+      gone++;
+      return false;
+    });
+  }
+  if (gone) { _relCache._uidx = null; _relCache._uidxLen = -1; }
+}
+
 function _radarDone() {
   const scan = _radarScan;
   if (!scan || scan.finished) return;
@@ -1426,6 +1459,7 @@ function _radarDone() {
   clearTimeout(_radarFlushTimer); _radarFlushTimer = null;
   _radarPend = []; _radarPendSeen.clear();
   if (_radarHoverDepth > 0) _radarHoverDepth = 0;
+  _radarPrune(scan);
   _relCache.ts  = Date.now();
   _relCache.key = scan.key;
   _relSaveLS(_relCache.data, scan.key);
@@ -1506,7 +1540,8 @@ async function _radarLoadReleases(force = false) {
     return;
   }
 
-  _radarScan = {id: Symbol('radar'), key: _relCacheKey(), total: reqs.length, done: 0,
+  _radarScan = {id: Symbol('radar'), key: _relCacheKey(), prevKey: _relCache.key || '',
+                total: reqs.length, done: 0,
                 srcTotal: reqs.length, srcDone: 0, found: 0, errors: [], timeline: [],
                 started: Date.now(), finished: false, aborted: false};
   const scan = _radarScan;

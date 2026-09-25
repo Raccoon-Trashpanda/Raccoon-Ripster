@@ -211,7 +211,7 @@ async def _durable_merge(source: str, fresh: list, days: int) -> list:
     return out
 
 
-def _identity_filter(source: str, rels: list) -> list:
+def _identity_filter(source: str, rels: list, save=True) -> list:
     """Самоизлечение при ЧТЕНИИ: склад не трогается, а в ленту не выходит то,
     чью принадлежность нельзя подтвердить.
 
@@ -232,9 +232,13 @@ def _identity_filter(source: str, rels: list) -> list:
     обязана стоять и на кросс-сервисных лентах Deezer/Qobuz/Tidal, а не только
     на радарном складе — иначе жалоба «не тот Соломон» переживает любую правку
     здесь. `source` остался в сигнатуре для вызывающего кода складов.
+
+    `save=False` — для чтения кэша: отметку «скрыто» там ставить некуда и
+    незачем тереть вишлист на каждом открытии вкладки.
     """
     return _ident.feed_filter(rels, _s.get("watchlist") or [],
-                              _s.get("base_dir"), _s.get("save_watchlist"))
+                              _s.get("base_dir"),
+                              _s.get("save_watchlist") if save else None)
 
 
 async def _anchor_evidence(rels: list) -> None:
@@ -521,6 +525,25 @@ def _cutoff(days: int) -> str:
     return (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
 
 
+def _refilter(key: str, ts: float, payload):
+    """Слово владельца, сказанное ПОСЛЕ того как снимок лёг в кэш, обязано
+    подействовать на этом же снимке.
+
+    Кэш радара переживает перезапуск и отдаётся «свежим» ещё 15 минут, поэтому
+    без этого шага нажатие «это не мой артист» выглядело бы несделанным ровно
+    в том окне, когда владелец и смотрит на ленту. Пересчитываем только когда
+    реестр отзывов действительно трогали позже снимка: иначе каждое открытие
+    вкладки платило бы за полный обход двери личности.
+    """
+    if not isinstance(payload, dict):
+        return payload
+    rels = payload.get("releases")
+    if not isinstance(rels, list) or not rels or not _feedback.touched_after(ts):
+        return payload
+    out = _identity_filter(key.split("|", 1)[0], rels, save=False)
+    return {**payload, "releases": out}
+
+
 def _serve_or_refresh(key: str, builder):
     """Fresh → return it. Stale → return the stale copy NOW and refresh behind
     the request. Nothing cached → the caller has to wait; there is nothing to
@@ -530,7 +553,7 @@ def _serve_or_refresh(key: str, builder):
         return None
     ts, payload = hit
     if (time.time() - ts) < _CACHE_TTL:
-        return payload
+        return _refilter(key, ts, payload)
     if key not in _refreshing:
         _refreshing.add(key)
 
@@ -543,7 +566,7 @@ def _serve_or_refresh(key: str, builder):
                 _refreshing.discard(key)
 
         asyncio.create_task(_bg())
-    return {**payload, "stale": True}
+    return _refilter(key, ts, {**payload, "stale": True})
 
 
 def _store(key: str, payload: dict) -> dict:

@@ -59,6 +59,27 @@ def _save_state(base: Path, st: dict) -> None:
         print(f"[preorders] state save: {e}", flush=True)
 
 
+def _drop_owner_rejected(recs: list) -> list:
+    """Убрать из дайджеста то, о чём хозяин уже сказал «это не мой артист».
+
+    Слово владельца — про личность, а не про одну карточку: сообщение в
+    Telegram об однофамильце, отвергнутом на витрине, выглядит как «меня не
+    слышат». Молчит реестр — молчим и мы: список возвращается как был.
+    """
+    try:
+        from ripster import artist_identity as _ident
+        return [r for r in recs
+                if not _ident.owner_hide({
+                    "artist": str(r.get("artist") or ""),
+                    "title": str(r.get("title") or ""),
+                    "label": str(r.get("label") or ""),
+                    "service": str(r.get("service") or ""),
+                    "genres": list(r.get("genres") or [])})[0]]
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[preorders] слово владельца не применено: {e}", flush=True)
+        return list(recs)
+
+
 def names(watchlist: list) -> list:
     """Имена подписок: лейблы первыми — у них предзаказы и есть главный сигнал."""
     labels = [str(e.get("name") or "").strip() for e in watchlist or []
@@ -115,6 +136,9 @@ async def pass_once(base_dir, watchlist: list, notify: bool = True) -> dict:
     # сообщаем именно по этому подмножеству: пересказывать вчерашний анонс —
     # спам, а счётчик `added` без самих записей не даёт, О ЧЁМ сообщить.
     fresh = [r for r in records if _up.identity(r) not in before_keys]
+    # Отдельная лента — отдельное слово: анонс в Telegram об артисте, которого
+    # хозяин уже назвал чужим, Arrival-сообщением не оправдывается (25.09.2026).
+    fresh = _drop_owner_rejected(fresh)
 
     # Кто из новых артистов выпускается на этом лейбле — сигнал «свой» для
     # будущих анонсов (ранжирует `upcoming_taste`).

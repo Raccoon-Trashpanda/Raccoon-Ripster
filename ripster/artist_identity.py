@@ -403,6 +403,15 @@ def _home_families(anchor: dict) -> set:
     return out
 
 
+def _label_rejected(artist: str, label: str) -> bool:
+    """Отвергнут ли лейбл словом хозяина по этому имени (реестр молчит — False)."""
+    try:
+        from . import owner_feedback
+        return bool(owner_feedback.label_rejected(artist, label))
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
 def _feedback_gate(entry: dict, rel: dict) -> tuple:
     """Слово владельца («это не мой артист» / «это мой») против этой карточки.
 
@@ -413,8 +422,11 @@ def _feedback_gate(entry: dict, rel: dict) -> tuple:
     одним id живут двое), иначе один тап выгнал бы владельца из его же
     подписки.
 
-    ("show"|"hide"|"", причина). Молчит, если файла отзыва нет: нет
-    доказательства — нет и цензуры.
+    ("show"|"hide"|"", причина, мягкое_ли_это_обобщение). Молчит, если файла
+    отзыва нет: нет доказательства — нет и цензуры. Мягким (`True`) бывает
+    обобщение по СВОЕЙ витрине, подтверждённое повтором: его пересиливает
+    положительная подпись (такая работа лежит в чистом каталоге владельца),
+    жёсткое слово не пересиливает ничего.
     """
     from . import owner_anchor
     try:
@@ -437,13 +449,14 @@ def _feedback_gate(entry: dict, rel: dict) -> tuple:
         if top:
             own.add(f"{str((entry or {}).get('service') or 'apple')}|{top}")
             own.add(top)
-        dec, why = owner_feedback.gate(rel, str((entry or {}).get("name") or ""),
-                                       own_ids=own)
+        d = owner_feedback.decide(
+            rel, str((entry or {}).get("name") or ""), own_ids=own)
     except Exception:                                          # noqa: BLE001
-        return "", ""
+        return "", "", False
+    dec, why = d["dec"], d["why"]
     if dec:
         owner_anchor.note("feedback_" + dec)
-    return dec, why
+    return dec, why, bool(d.get("soft")) if dec == "hide" else False
 
 
 def _feedback_for_card(rel: dict) -> tuple:
@@ -459,6 +472,66 @@ def _feedback_for_card(rel: dict) -> tuple:
         return owner_feedback.gate(rel, name) if name else ("", "")
     except Exception:                                          # noqa: BLE001
         return "", ""
+
+
+def owner_hide(rel: dict, entry: Optional[dict] = None) -> tuple[bool, str]:
+    """Только СЛОВО хозяина, без якоря и профиля: прятать ли карточку.
+
+    Нужна тем дверям, которые показывают не ленту находок, а подписку
+    (мобильный радар) или сообщают о находке (уведомления бота, дайджест
+    предзаказов): там нет смысла повторать всю цензуру личности, но слово
+    «это не мой артист» обязано весить ровно столько же, сколько в вебе, —
+    иначе человек скажет «я же нажимал», глядя в телефон.
+
+    Мягкое обобщение (по id, который подписка носит как свой) уступает
+    подтверждённой подписи: та же ветка, чью работу зовёт профиль подписки,
+    остаётся на месте.
+    """
+    if entry is None:
+        dec, why = _feedback_for_card(rel)
+        return dec == "hide", (why if dec == "hide" else "")
+    dec, why, soft = _feedback_gate(entry, rel)
+    if dec != "hide":
+        return False, ""
+    if soft and _attested_by_profile(entry, rel):
+        return False, ""
+    return True, why
+
+
+def _attested_by_profile(entry: dict, rel: dict) -> bool:
+    """Лежит ли эта работа в подтверждённом каталоге подписки (её профиль).
+
+    Ровно та проверка, которая в `home_show` переводит мягкое слово хозяина
+    обратно в «показывать»; вынесена, чтобы мобильный радар и уведомления
+    судили тем же, а не догадывались заново.
+
+    Совпадение с лейблом, который хозяин этим же словом и отверг, «своим» не
+    считается: профиль склеенной страницы набит обоими кластерами.
+    """
+    prof = identity_of(entry).get("profile") or {}
+    t = tkey(rel.get("title", "") or rel.get("name", ""))
+    if t and t in {tkey(x) for x in (prof.get("hidden_titles") or ())}:
+        return False                    # то же слово хозяина — против этого же
+    if t and t in {tkey(x) for x in (prof.get("titles") or ())}:
+        return True
+    artist = str(entry.get("name") or "")
+    raw_lbl = norm(str(rel.get("label") or ""))
+    lbl = label_key(raw_lbl, artist)
+    stored = set(prof.get("labels") or [])
+    if lbl and (lbl in stored or raw_lbl in stored) \
+            and not _label_rejected(artist, raw_lbl):
+        return True
+    return bool({norm(str(x)) for x in owner_genres(rel)}
+                & set(prof.get("genres") or []))
+
+
+def owner_genres(rel: dict) -> list:
+    """Жанры карточки тем же срезом, что и у правила якоря."""
+    try:
+        from . import owner_anchor
+        return list(owner_anchor.genres_of(rel) or [])
+    except Exception:                                          # noqa: BLE001
+        return list(rel.get("genres") or rel.get("genre") or [])
 
 
 def anchor_show(entry: dict, rel: dict, anchor: Optional[dict] = None) -> tuple:
@@ -545,6 +618,8 @@ def home_show(entry: dict, rel: dict, anchor=_NO_ANCHOR) -> tuple[bool, str]:
          не обсуждается и не перекрывается ни авто-правилом, ни профилем;
       2. слово владельца об этой карточке или о том же id/лейбле
          (`owner_feedback.gate`) — прямое утверждение, сильнее любого вывода;
+         обобщение по СВОЕЙ витрине, подтверждённое повтором, — мягкое: его
+         пересиливает положительная подпись якоря или профиля;
       3. якорь владельца (правило v5, `anchor_show`) — единственный признак,
          который НЕ лепится из однофамильцев;
       4. профиль подписки: работу, известную чистой витрине, её лейбл, её жанр;
@@ -566,47 +641,55 @@ def home_show(entry: dict, rel: dict, anchor=_NO_ANCHOR) -> tuple[bool, str]:
     if t and t in hidden:
         return False, "cluster not attested by any clean catalog"
     # Слово владельца об ЭТОЙ карточке (или о том же id/лейбле) — выше якоря.
-    dec, why = _feedback_gate(entry, rel)
+    dec, why, soft = _feedback_gate(entry, rel)
     if dec == "show":
         return True, why
-    if dec == "hide":
+    if dec == "hide" and not soft:
         return False, why
+    # Мягкое слово (`soft`) — обобщение по витрине, которую подписка носит как
+    # свою: хозяйские доказательства ещё могут доказать, что под этим id живёт
+    # и настоящий артист. Дальше идут якорь и профиль, и каждый их «показывать»
+    # перевешивает; молчание правил мягкому слову не противник — карточка
+    # прячется по нему в конце.
+    home = (True, why + " · поверх подтверждения витрины")
     if anchor is _NO_ANCHOR:
         anchor = _anchor_of(entry)
     if anchor:
-        dec, why = anchor_show(entry, rel, anchor)
+        dec, why2 = anchor_show(entry, rel, anchor)
         if dec == "show":
             owner_anchor.note("anchor_show")
-            return True, why
+            return True, (why2 if not soft else home[1])
         if dec == "hide":
             owner_anchor.note("anchor_hide")
-            return False, why
+            return False, (why2 if not soft else why)
         # Якорь есть, но против карточки он не высказался: «не тронуто» обязан
         # быть отличим от «проверено и принято».
         owner_anchor.note("anchor_unknown")
     else:
         owner_anchor.note("no_anchor")
     if not (titles or hidden):
-        return True, ""                       # судить нечем — не трогаем
+        return (False, why) if soft else (True, "")   # судить нечем — не трогаем
     if t and t in titles:
-        return True, "discography"
+        return True, (home[1] if soft else "discography")
     raw_lbl = norm(str(rel.get("label") or ""))
     lbl = label_key(raw_lbl, artist)
     stored = set(prof.get("labels") or [])
     # Профили, собранные до нормализации, держат лейблы строкой из каталога —
     # сравниваем обе формы, пока такие подписки не перепривязались.
-    if lbl and (lbl in stored or raw_lbl in stored):
-        return True, "label"
+    if lbl and (lbl in stored or raw_lbl in stored) \
+            and not _label_rejected(artist, raw_lbl):
+        return True, (home[1] if soft else "label")
     g = {norm(str(x)) for x in owner_anchor.genres_of(rel)}
     if g & set(prof.get("genres") or []):
-        return True, "genre"
+        return True, (home[1] if soft else "genre")
     if not prof.get("merged"):
-        return True, ""          # единичный промах на несклеенной странице — не цензура
+        # единичный промах на несклеенной странице — не цензура
+        return (False, why) if soft else (True, "")
     # Склеенная страница и релиз, не похожий ни на одно подтверждённое множество:
     # судим только по лейблу карточки — чужой кластер опознан именно им.
     if lbl and lbl not in stored and raw_lbl not in stored:
-        return False, "label absent from the confirmed catalogs"
-    return True, ""
+        return False, (why if soft else "label absent from the confirmed catalogs")
+    return (False, why) if soft else (True, "")
 
 
 def _name_entries(rel: dict, entries: list) -> list:
@@ -649,20 +732,20 @@ def anchor_gate(entry: dict, rel: dict) -> tuple[bool, str]:
         return True, "владелец вернул вручную"
     if t and t in {tkey(x) for x in (prof.get("hidden_titles") or ())}:
         return False, "cluster not attested by any clean catalog"
-    dec, why = _feedback_gate(entry, rel)
+    dec, why, soft = _feedback_gate(entry, rel)
     if dec == "show":
         return True, why
-    if dec == "hide":
+    if dec == "hide" and not soft:
         return False, why
-    dec, why = anchor_show(entry, rel)
+    dec, why2 = anchor_show(entry, rel)
     if dec == "show":
         owner_anchor.note("anchor_show")
-        return True, why
+        return True, (why2 if not soft else why2 + " · поверх подтверждения витрины")
     if dec == "hide":
         owner_anchor.note("anchor_hide")
-        return False, why
+        return False, (why2 if not soft else why)
     owner_anchor.note("anchor_unknown")
-    return True, ""
+    return (False, why) if soft else (True, "")
 
 
 def stitch_shows(rel: dict, entries: list) -> bool:

@@ -1293,6 +1293,11 @@ async def _check_soundcloud_targets(items: list, broadcast, save, cfg, queue, sn
             if prev is None:
                 save(items)
                 continue
+            _hid, _why = _ident.owner_hide(latest, entry)
+            if _hid:
+                print(f"[watchlist] soundcloud {permalink}: '{latest.get('title')}' "
+                      f"скрыто — {_why}", flush=True)
+                continue
             new_found += 1
             save(items)
             await broadcast({"type": "watchlist_new_release",
@@ -1382,6 +1387,11 @@ async def _check_label_targets(items, broadcast, save, cfg, queue, snapshot) -> 
             if not fresh:
                 continue
             entry["last_release_date"] = newest
+            # Слово хозяина по имени исполнителя: подписка здесь на ЛЕЙБЛ, а не
+            # на человека, и судить надо тем, что карточка сама о себе говорит.
+            fresh = [r for r in fresh if not _ident.owner_hide(r)[0]]
+            if not fresh:
+                continue
             entry["last_release"] = fresh[0].get("title", "")
             entry["last_release_title"] = fresh[0].get("title", "")
             found += len(fresh)
@@ -1724,6 +1734,15 @@ async def _check_early_targets(targets: list, broadcast, save, cfg, queue,
                     if not title or _seen_has(entry, title):
                         continue
                     _seen_add(entry, title)
+                    _hid, _why = _ident.owner_hide(r, entry)
+                    if _hid:
+                        # Слово хозяина («это не мой артист») — и анонса, и
+                        # качания: телефон и Telegram показывают то же, что и
+                        # радар, иначе человек жмёт «не мой» и всё равно
+                        # получает чужой релиз в библиотеку.
+                        print(f"[watchlist] '{title}' ({nm}) скрыто: {_why}",
+                              flush=True)
+                        continue
                     found += 1
                     pull = _auto_pull(entry, r)
                     await broadcast({"type": "watchlist_new_release",

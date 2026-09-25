@@ -111,6 +111,19 @@ def invalidate() -> None:
     _MEM["data"] = None
 
 
+def touched_after(ts: float) -> bool:
+    """Сказано ли что-то в реестре позже момента `ts` (секунды).
+
+    Нужен тем, кто держит у себя снимок ленты: перечитывать дверь личности на
+    каждое открытие вкладки дорого, а проигнорировать свежее слово владельца —
+    значит показать ему «нажатие не подействовало».
+    """
+    try:
+        return store_file().stat().st_mtime > float(ts or 0)
+    except (OSError, TypeError, ValueError):
+        return False
+
+
 # ── Форма одной записи ────────────────────────────────────────────────────────
 
 def _tkey(title: str) -> str:
@@ -213,19 +226,91 @@ def _sid_of(service: str, artist_id: str) -> str:
     return f"{service or ''}|{artist_id or ''}"
 
 
-def gate(rel: dict, artist: str, own_ids=()) -> tuple[str, str]:
-    """Слово владельца против этой карточки: ("show"|"hide"|"", почему).
+def label_of(rec: dict) -> str:
+    """Лейбл записи в той форме, в какой его хранит реестр (`label_key`)."""
+    return str((rec or {}).get("label") or "")
+
+
+def _spread_backed(slot: dict, sid: str, aid: str, proven: set) -> bool:
+    """Достаточно ли слов, чтобы по этому id прятать ВСЕ релизы витрины.
+
+    Одно «не мой» по id, который подписка носит как СВОЙ, — ещё не приговор
+    ветке: на склеенной странице под одним id живут двое, и 24.09 именно так
+    законный альбом уехал из ленты. Приговором становятся два независимых
+    подтверждения:
+
+      • либо по ЭТОМУ ЖЕ (витрина, id) сказано «не мой» дважды — человек
+        отверг не одну карточку, а ветку целиком;
+      • либо имя уже уличено в подмене по лейблу (`proven`: один и тот же
+        лейбл отвергнут на РАЗНЫХ витринах) и этот id среди записей с тем
+        лейблом.
+    """
+    neg = slot.get("negative") or []
+    if sum(1 for r in neg if r.get("artist_id")
+           and _sid_of(str(r.get("service") or ""),
+                       str(r.get("artist_id"))) == sid) >= 2:
+        return True
+    if not (proven and aid):
+        return False
+    return any(aid == str(r.get("artist_id") or "")
+               and label_of(r) in proven for r in neg)
+
+
+def _proven_labels(slot: dict) -> set:
+    """Лейблы-крышки: отвергнуты на РАЗНЫХ витринах.
+
+    Одна карточка на одном импринте — ещё не доказательство: у артиста может
+    быть два релиза на одном лейбле, и тап по ошибке спрятал бы половину
+    каталога. Две разные витрины с тем же лейблом — это уже не однофамилец, а
+    чужая подборка, собранная под нашим именем (Solomon Grey / «Spaceman
+    Recordings», 25.09: Qobuz ×4, Spotify ×2, Apple ×1).
+    """
+    by_lbl: dict[str, set] = {}
+    for r in slot.get("negative") or []:
+        k = label_of(r)
+        if k:
+            by_lbl.setdefault(k, set()).add(str(r.get("service") or ""))
+    return {k for k, svc in by_lbl.items() if len({s for s in svc if s}) >= 2}
+
+
+def label_rejected(artist: str, label: str) -> bool:
+    """Отвергнут ли этот лейбл словом хозяина по этому имени.
+
+    Нужен тем, кто проверяет «а не своё ли это»: профиль склеенной страницы
+    носит в своих лейблах и настоящую витрину, и крышку однофамильца («Spaceman
+    Recordings», 25.09) — считать совпадение с ним доказательством «своего»
+    нельзя, иначе слово владельца пересиливает то, против чего его сказали.
+    """
+    slot = for_artist(artist)
+    if not slot or not str(label or "").strip():
+        return False
+    from .artist_identity import label_key                # поздно: иначе цикл
+    k = label_key(str(label), artist)
+    if not k:
+        return False
+    if k in _proven_labels(slot):
+        return True
+    return any(str(r.get("label") or "") == k for r in (slot.get("negative") or []))
+
+
+def decide(rel: dict, artist: str, own_ids=()) -> dict:
+    """Слово владельца против этой карточки: {"dec", "why", "soft"}.
 
     "" — владелец по ней ничего не говорил: дальше решают якорь и профиль.
     Порядок обязателен: сначала точное слово об ЭТОЙ карточке (любой стороны),
     потом обобщённое «это мой», и только потом обобщённое «не мой» — прячущее
     правило не должно красть то, что человек уже вернул себе.
+
+    `soft: True` — обобщение по id, который подписка носит как СВОЙ: такое слово
+    сильнее автоматических правил, но обязано уступить ПОДТВЕРЖДЁННОЙ подписи —
+    той же ветке, чью работу зовёт чистый каталог владельца. Жёсткое слово
+    (`soft: False`) перекрывает всё: ни якорь, ни профиль к нему не применяются.
     """
     from . import owner_anchor
 
     slot = for_artist(artist)
     if not slot:
-        return "", ""
+        return {"dec": "", "why": "", "soft": False}
     rel = rel or {}
     title = str(rel.get("title") or rel.get("name") or "")
     key = _tkey(title)
@@ -237,42 +322,65 @@ def gate(rel: dict, artist: str, own_ids=()) -> tuple[str, str]:
     # сервисом — сверять их по одному формату значило бы прятать своё.
     own_pairs = {o for o in own if "|" in o}
     own_bare = {o.split("|")[-1] for o in own}
+    own_sid = bool(sid) and (sid in own_pairs or aid in own_bare)
     lbl = norm(str(rel.get("label") or ""))
     fams = owner_anchor.families_of(rel)
     marker = owner_anchor.title_marker(title)
     pos, neg = slot.get("positive") or [], slot.get("negative") or []
+    proven = _proven_labels(slot)
 
     for recs, dec, word in ((pos, "show", "это мой"), (neg, "hide", "не мой")):
         if key and any(r.get("key") == key for r in recs):
-            return dec, f"хозяин сказал: «{word}» об этом релизе"
+            return {"dec": dec, "why": f"хозяин сказал: «{word}» об этом релизе",
+                    "soft": False}
     # Обобщение «это мой» раньше обобщения «не мой»: вернуть человеку его
     # подписку важнее, чем догадаться спрятать ещё что-то.
     for r in pos:
         if sid and r.get("artist_id") and _sid_of(r.get("service"),
                                                   r.get("artist_id")) == sid:
-            return "show", (f"хозяин сказал «это мой» релизам артиста "
-                            f"{r.get('service')}:{r.get('artist_id')}")
+            return {"dec": "show", "soft": False,
+                    "why": (f"хозяин сказал «это мой» релизам артиста "
+                            f"{r.get('service')}:{r.get('artist_id')}")}
         if lbl and r.get("label") and norm(r["label"]) == lbl:
-            return "show", f"хозяин сказал «это мой» лейблу {r.get('label_raw')}"
+            return {"dec": "show", "soft": False,
+                    "why": f"хозяин сказал «это мой» лейблу {r.get('label_raw')}"}
     for r in neg:
-        # Чужой id обобщать нельзя: под ним подписка носит СВОЮ карточку
-        # (склеенная страница), а голый id — тем более: он живёт на нескольких
-        # витринах. 24.09 на фикстуре Solomon Grey одно «не мой» по испанскому
-        # госпелу прятало и законный альбом именно по этой ветке.
         if sid and r.get("artist_id") and _sid_of(r.get("service"),
-                                                  r.get("artist_id")) == sid \
-                and sid not in own_pairs and aid not in own_bare:
-            return "hide", (f"хозяин сказал: «не мой» артист "
-                            f"{r.get('service')}:{r.get('artist_id')}")
+                                                  r.get("artist_id")) == sid:
+            # Чужой id прячется по первому слову. Свой — только по подтверждённому
+            # (повтор по этой же ветке или уличённый лейбл), и то МЯГКО: под этим
+            # id склеенная страница носит и настоящего хозяина.
+            if own_sid and not _spread_backed(slot, sid, aid, proven):
+                continue
+            return {"dec": "hide", "soft": own_sid,
+                    "why": (f"хозяин сказал: «не мой» артист "
+                            f"{r.get('service')}:{r.get('artist_id')}")}
         if lbl and r.get("label") and norm(r["label"]) == lbl:
-            return "hide", (f"хозяин сказал: «не мой» лейблу {r.get('label_raw')}")
+            return {"dec": "hide", "soft": False,
+                    "why": f"хозяин сказал: «не мой» лейблу {r.get('label_raw')}"}
+        if lbl and lbl in proven:
+            # Та же крышка, но подписанная формой, которой нет в записи
+            # («Spaceman» против «Spaceman Recordings»): уличённый лейбл есть
+            # у имени — прячем и её.
+            return {"dec": "hide", "soft": False,
+                    "why": f"хозяин сказал: «не мой» лейблу {rel.get('label')}"}
         if marker and r.get("marker") == marker and (
                 not fams or not r.get("families")
                 or fams & set(r["families"])):
-            return "hide", (f"хозяин сказал: «не мой» релизам с «{marker}» "
-                            f"у этого артиста")
-    return "", ""
+            return {"dec": "hide", "soft": False,
+                    "why": (f"хозяин сказал: «не мой» релизам с «{marker}» "
+                            f"у этого артиста")}
+    return {"dec": "", "why": "", "soft": False}
 
+
+def gate(rel: dict, artist: str, own_ids=()) -> tuple[str, str]:
+    """Слово владельца по карточке: ("show"|"hide"|"", почему).
+
+    Значение `soft` из `decide` здесь теряется: этот срез нужен тем, кто не
+    различает жёсткое слово и обобщение по своей витрине.
+    """
+    d = decide(rel, artist, own_ids)
+    return d["dec"], d["why"]
 
 # ── Отчёт и переносимость ─────────────────────────────────────────────────────
 

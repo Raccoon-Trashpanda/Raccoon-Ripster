@@ -95,6 +95,19 @@ function nmaDropCard(uid) {
   }
   const card = document.querySelector('.rel-card[data-uid="' + (window.CSS && CSS.escape ? CSS.escape(uid) : uid) + '"]');
   if (card) card.remove();
+  // Лента живёт не в сетке, а в снимке `_relCache` (и в localStorage поверх
+  // перезагрузки). Убрать узел и оставить карточку в данных — значит вернуть
+  // её первым же перерисовыванием фильтра: именно так «не мой» выглядело
+  // нажатием вхолостую (жалоба 25.09.2026).
+  if (typeof _relCache !== 'undefined' && Array.isArray(_relCache.data)) {
+    const before = _relCache.data.length;
+    _relCache.data = _relCache.data.filter(r => _relUID(r) !== uid);
+    if (_relCache.data.length !== before) {
+      _relCache._uidx = null; _relCache._uidxLen = -1;
+      if (typeof _relSaveLS === 'function') _relSaveLS(_relCache.data, _relCache.key);
+      if (typeof _applyRelFilter === 'function') _applyRelFilter(false);
+    }
+  }
 }
 
 // ── Экран «Скрытые» ──────────────────────────────────────────────────────────
