@@ -457,7 +457,8 @@ def _preview_put(station_id: str, tracks: list) -> None:
     covers, services = [], []
     for t in tracks:
         c = (t.get("cover") or "").strip()
-        if c and c not in covers and len(covers) < 4:
+        # 12, не 4: карточка-«ковёр» (25.09) — мозаика с живой сменой клеток.
+        if c and c not in covers and len(covers) < 12:
             covers.append(c)
         sv = (t.get("service") or "").strip()
         if sv and sv not in services:

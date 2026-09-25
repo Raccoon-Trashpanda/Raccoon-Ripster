@@ -81,13 +81,13 @@ function stRender() {
       (d.artists || []).map(a => {
         // Показываем ОБА счётчика раздельно. Слушал и скачал — разные следы:
         // скачанное и не тронутое говорит о вкусе меньше, чем то, что играется.
-        const bits = [];
-        if (a.plays) bits.push(`♪ ${a.plays}`);
-        if (a.downloads) bits.push(`↓ ${a.downloads}`);
+        // Владелец 25.09: «♪ 106 ↓ 1» на чипе — непонятные значки. Цифры
+        // остаются, но словами и в подсказке, а не шифром на самой кнопке.
+        const tip = t('st.play_artist') + ' — ' +
+          t('st.chip_counts').replace('{0}', a.plays || 0).replace('{1}', a.downloads || 0);
         return `<button class="st-chip" style="background:${stGradient(a.name, .30, .16)}"
-                        onclick="stPlayArtist(${escJ2(a.name)})" title="${esc(t('st.play_artist'))}">
+                        onclick="stPlayArtist(${escJ2(a.name)})" title="${esc(tip)}">
                   <span class="st-chip-name">${esc(a.name)}</span>
-                  <span class="st-chip-num">${bits.join('  ')}</span>
                 </button>`;
       }).join('')
     ));
@@ -97,14 +97,13 @@ function stRender() {
   if ((d.genres || []).length) {
     const rows = (d.genres || []).map(g => g.station
       ? `<button class="st-chip" style="background:${stGradient(g.genre, .30, .16)}"
-                 onclick="stPlay(${escJ2(g.station)})">
+                 onclick="stPlay(${escJ2(g.station)})"
+                 title="${esc(t('st.chip_plays').replace('{0}', g.plays || 0))}">
            <span class="st-chip-name">${esc(g.genre)}</span>
-           <span class="st-chip-num">♪ ${g.plays}</span>
          </button>`
       // Без плитки — не кнопка. Кнопка, которая никуда не ведёт, это враньё.
       : `<span class="st-chip st-chip-dead" title="${esc(t('st.no_station_for'))}">
            <span class="st-chip-name">${esc(g.genre)}</span>
-           <span class="st-chip-num">♪ ${g.plays}</span>
          </span>`).join('');
     const note = d.genres_unknown
       ? `<div class="st-note">${esc(t('st.genres_unknown').replace('{0}', d.genres_unknown))}</div>`
@@ -126,7 +125,7 @@ function stRender() {
         `<div class="st-row">
            <div class="st-row-main">
              <div class="st-row-t">${esc(r.title || '')}</div>
-             <div class="st-row-a">${esc(r.artist || '')}${r.service ? ' · ' + esc(r.service) : ''}${r.times > 1 ? ' · ♪ ' + r.times : ''}</div>
+             <div class="st-row-a">${esc(r.artist || '')}${r.service ? ' · ' + esc(r.service) : ''}${r.times > 1 ? ' · ' + esc(t('st.chip_plays').replace('{0}', r.times)) : ''}</div>
            </div>
            <button class="st-mini" onclick="stPlayArtist(${escJ2(r.artist || '')})">${esc(t('st.station_of'))}</button>
          </div>`).join('') + `</div>`
@@ -149,6 +148,7 @@ function stRender() {
   box.innerHTML = parts.join('');
   stRenderKnobs();
   stWarmPreviews();
+  stRugStart();
 }
 
 /**
@@ -160,30 +160,84 @@ function stRender() {
  * нет — и на их месте честно остаётся градиент, а не заглушка, притворяющаяся
  * музыкой.
  */
+/* «Ковёр» (владелец 25.09): вся карточка — кнопка «играть», по центру большая
+   ▶, под ней мозаика обложек станции, которая медленно плывёт, сама меняет
+   клетки и откликается на мышь. Клеток всегда ST_RUG_CELLS: обложек меньше —
+   повторяем по кругу; нет вовсе — честный градиент без картинок. */
+const ST_RUG_CELLS = 8;
+
 function stTileHtml(s) {
-  const covers = (s.covers || []).slice(0, 2);
+  const covers = (s.covers || []).filter(Boolean);
   const grad = stGradient(s.id, .9, .55);
-  // Обложка — <img>, а не фон: только у картинки есть `onerror`, и без него
-  // не загрузившаяся обложка оставляла на плитке пустую половину (видно на
-  // снимке 07.09.2026 у Techno и Drum & Bass — часть ссылок отдаёт 404).
-  // Не пришла — прячем картинку, и под ней остаётся градиент плитки.
-  const art = covers.length
-    ? `<span class="st-tile-art" style="background:${grad}">${covers.map(u =>
-         `<img src="${esc(u)}" alt="" loading="lazy" onerror="this.style.display='none'">`
-       ).join('')}</span>`
-    : `<span class="st-tile-art" style="background:${grad}"></span>`;
+  // Обложка — <img>, а не фон: только у картинки есть `onerror` (часть ссылок
+  // отдаёт 404, снимок 07.09.2026). Не пришла — прячем, остаётся градиент.
+  const cells = covers.length
+    ? Array.from({ length: ST_RUG_CELLS }, (_, i) =>
+        `<img src="${esc(covers[i % covers.length])}" alt="" loading="lazy" decoding="async"
+              onerror="this.style.visibility='hidden'">`).join('')
+    : '';
   const sub = (s.services || []).length
     ? (s.services || []).slice(0, 3).join(' · ')
     : t('st.tile_no_preview');
   const cnt = s.tracks ? `${s.tracks} · ` : '';
-  return `<button class="st-tile" data-st="${esc(s.id)}" onclick="stPlay(${escJ2(s.id)})">
-    ${art}
+  const phase = (stHash(s.id) % 9) * -1.7;      // ковры не плывут в ногу
+  return `<button class="st-tile st-rugcard" data-st="${esc(s.id)}" onclick="stPlay(${escJ2(s.id)})"
+                  title="${esc(t('st.tile_play').replace('{0}', s.title))}"
+                  aria-label="${esc(t('st.tile_play').replace('{0}', s.title))}"
+                  onpointermove="stRugTilt(event,this)" onpointerleave="stRugTilt(null,this)">
+    <span class="st-rug" style="background:${grad}">
+      <span class="st-rug-grid" style="animation-delay:${phase}s">${cells}</span>
+    </span>
+    <span class="st-rug-shade"></span>
+    <span class="st-bigplay" style="background:${stGradient(s.id, 1, .8)}">&#9654;</span>
     <span class="st-tile-body">
       <span class="st-tile-name">${esc(s.title)}</span>
       <span class="st-tile-sub">${esc(cnt + sub)}</span>
     </span>
-    <span class="st-tile-play" style="background:${stGradient(s.id, 1, .8)}">&#9654;</span>
   </button>`;
+}
+
+/** Отклик на мышь: ковёр чуть смещается за курсором. */
+function stRugTilt(ev, el) {
+  if (!el) return;
+  if (!ev) { el.style.removeProperty('--mx'); el.style.removeProperty('--my'); return; }
+  const r = el.getBoundingClientRect();
+  el.style.setProperty('--mx', (((ev.clientX - r.left) / r.width) - .5).toFixed(3));
+  el.style.setProperty('--my', (((ev.clientY - r.top) / r.height) - .5).toFixed(3));
+}
+
+/* Живая смена клеток: раз в пару секунд у одной видимой карточки одна клетка
+   плавно меняет обложку на другую из той же станции. Вкладка скрыта или
+   человек просил меньше движения — стоим. */
+let _stRugTimer = null;
+function stRugStart() {
+  if (_stRugTimer) return;
+  if (window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  _stRugTimer = setInterval(() => {
+    const view = document.getElementById('view-stations');
+    if (!view || !view.classList.contains('active') || document.hidden || !_stHome) return;
+    const cards = Array.from(view.querySelectorAll('.st-rugcard')).filter(c => {
+      const r = c.getBoundingClientRect();
+      return r.bottom > 0 && r.top < innerHeight;
+    });
+    if (!cards.length) return;
+    const card = cards[Math.floor(Math.random() * cards.length)];
+    const st = (_stHome.tiles || []).find(x => x.id === card.dataset.st);
+    const covers = ((st && st.covers) || []).filter(Boolean);
+    if (covers.length < 2) return;
+    const imgs = card.querySelectorAll('.st-rug-grid img');
+    if (!imgs.length) return;
+    const img = imgs[Math.floor(Math.random() * imgs.length)];
+    const next = covers[Math.floor(Math.random() * covers.length)];
+    if (img.getAttribute('src') === next) return;
+    img.classList.add('swap');
+    setTimeout(() => {
+      img.style.visibility = '';
+      img.src = next;
+      img.onload = () => img.classList.remove('swap');
+      setTimeout(() => img.classList.remove('swap'), 900);
+    }, 450);
+  }, 1600);
 }
 
 /**
@@ -590,8 +644,11 @@ function stKnobNote(key) {
 function stRenderKnobs() {
   const box = document.getElementById('st-knobs');
   if (!box) return;
-  box.innerHTML = ST_KNOBS.map(g => {
-    const dead = stKnobDead(g.key);
+  // Владелец 25.09: зачёркнутые «Настроение»/«Язык» с «Не работает» — мусор
+  // сверху экрана. Мёртвая ручка (ни одно значение не действует) не
+  // рисуется совсем; оживёт на сервере — появится сама.
+  box.innerHTML = ST_KNOBS.filter(g => !stKnobDead(g.key)).map(g => {
+    const dead = false;
     const chips = g.values.map(v => {
       const value = v[0], on = _stKnobs[g.key] === value;
       const noop = !dead && stKnobEffect(g.key, value) === 'no-op';

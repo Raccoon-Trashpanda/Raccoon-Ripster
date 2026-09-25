@@ -2725,11 +2725,18 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
    (см. .dlorb-glow) — нужен вертикальный запас, чтобы ореол читался вокруг круга,
    а не упирался в верх/низ дока. Схлопывание в 0 при пустом доке не тронуто. */
 .dlorb-dock:has(.dlorb){height:132px}
+/* Узкое боковое поле (dlorb.js, META_STACK_BELOW): класс ставит сам dlorb.js,
+   и тогда текст метаданных идёт полноширинной строкой НАД кругами — круги и
+   счётчик «+N» уезжают на нижнюю половину дока, док вырастает. Без этого в
+   панели 210px оставалось 56px на текст, и заголовок читаться не мог (25.09). */
+.dlorb-dock.dlmeta-stack:has(.dlorb){height:158px}
+.dlmeta-stack .dlorb,
+.dlmeta-stack .dlorb-more{top:calc(50% + 26px)}
 .dlorb{
   position:absolute;left:0;top:50%;
   width:56px;height:56px;
   transform:translate3d(-92px,-50%,0);
-  transition:transform .62s cubic-bezier(.22,.85,.3,1), opacity .34s ease;
+  transition:transform .62s cubic-bezier(.22,.85,.3,1), top .62s cubic-bezier(.22,.85,.3,1), opacity .34s ease;
   will-change:transform;
   opacity:0;
 }
@@ -2813,7 +2820,7 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   position:absolute;left:0;top:50%;
   transform:translate3d(-76px,-50%,0);
   font-family:var(--display);font-size:9.5px;font-weight:800;
-  color:var(--muted);opacity:0;transition:transform .62s cubic-bezier(.22,.85,.3,1),opacity .3s ease;
+  color:var(--muted);opacity:0;transition:transform .62s cubic-bezier(.22,.85,.3,1),top .62s cubic-bezier(.22,.85,.3,1),opacity .3s ease;
 }
 .dlorb-more.is-in{opacity:1}
 
@@ -3084,6 +3091,46 @@ body.guest-mode #guest-banner { display:flex; align-items:center; gap:10px; }
   display:flex; align-items:center; justify-content:center;
   font-size:10px; color:#fff; padding-left:2px;
   box-shadow:0 2px 8px -2px rgba(0,0,0,.6);
+}
+
+/* ── «Ковёр» станции (25.09): карточка целиком — «играть» ─────────────────── */
+.st-rugcard { width:214px; height:236px; padding:0; border-radius:18px;
+              isolation:isolate; --mx:0; --my:0; }
+.st-rugcard:hover { transform:translateY(-3px) scale(1.015);
+                    box-shadow:0 18px 36px -14px rgba(0,0,0,.75); }
+.st-rug { position:absolute; inset:0; overflow:hidden; z-index:0; }
+.st-rug-grid {
+  position:absolute; left:-18%; top:-18%; width:136%; height:136%;
+  display:grid; grid-template-columns:repeat(4,1fr); grid-template-rows:repeat(2,1fr); gap:3px;
+  transform:translate(calc(var(--mx) * -14px), calc(var(--my) * -14px)) rotate(-6deg);
+  transition:transform .35s ease-out;
+  animation:stRugDrift 26s ease-in-out infinite alternate;
+}
+.st-rug-grid > img { width:100%; height:100%; object-fit:cover; display:block;
+                     border-radius:6px; transition:opacity .45s ease, filter .45s ease; }
+.st-rug-grid > img.swap { opacity:0; filter:blur(4px); }
+@keyframes stRugDrift {
+  from { translate:-6% -3%; }
+  to   { translate:6% 3%; }
+}
+.st-rugcard:hover .st-rug-grid { animation-duration:9s; }
+.st-rug-shade { position:absolute; inset:0; z-index:1; pointer-events:none;
+  background:linear-gradient(180deg, rgba(0,0,0,.05) 0%, rgba(0,0,0,.15) 45%, rgba(0,0,0,.82) 100%); }
+.st-bigplay {
+  position:absolute; z-index:2; left:50%; top:42%; width:64px; height:64px; border-radius:50%;
+  translate:-50% -50%; display:flex; align-items:center; justify-content:center;
+  font-size:24px; color:#fff; padding-left:5px;
+  box-shadow:0 10px 26px -6px rgba(0,0,0,.75), 0 0 0 4px rgba(255,255,255,.14);
+  transition:transform .18s ease, box-shadow .18s ease;
+}
+.st-rugcard:hover .st-bigplay { transform:scale(1.13);
+  box-shadow:0 14px 30px -6px rgba(0,0,0,.8), 0 0 0 6px rgba(255,255,255,.22); }
+.st-rugcard:active .st-bigplay { transform:scale(.95); }
+.st-rugcard .st-tile-body { position:absolute; z-index:2; left:0; right:0; bottom:0; padding:0 14px 13px; }
+.st-rugcard .st-tile-name { font-size:16px; text-shadow:0 1px 6px rgba(0,0,0,.7); }
+.st-rugcard .st-tile-sub { color:rgba(255,255,255,.72); }
+@media (prefers-reduced-motion: reduce) {
+  .st-rug-grid { animation:none; transition:none; }
 }
 
 /* Чип артиста/жанра — тот же язык цвета, но приглушённый: он подпись с
