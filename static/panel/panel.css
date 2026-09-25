@@ -138,6 +138,15 @@ body:not(.rpwin) .phone {
 }
 .sect-sub { margin-bottom: 12px; color: var(--t3); font-size: var(--label); }
 
+/* Ряды-карусели листаются мышью, как пальцем (поведение — в dragrows.js,
+   здесь только вид). data-mxrow помечает ряды, добавленные позже: хелпер
+   делегирует с document, поэтому JS-а для нового ряда делать не надо.
+   Выделение текста и нативный перенос картинок гасятся: иначе протяжка ряда
+   тянет за собой рамку выделения и drag&drop обложки. */
+.gtiles, .bbcrow, [data-mxrow] { cursor: grab; user-select: none; -webkit-user-select: none; }
+.gtiles img, .bbcrow img, [data-mxrow] img { -webkit-user-drag: none; }
+.mxDragging { cursor: grabbing; user-select: none; }
+
 .gtiles {
   display: flex; gap: 12px; overflow-x: auto; padding: 2px 0 10px; scrollbar-width: none;
   margin: 0 calc(-1 * var(--gutter)); padding-left: var(--gutter); padding-right: var(--gutter);
@@ -548,6 +557,15 @@ html.standalone.diag .dipline { display: block; }
 .rt-day { font: var(--w-quiet) var(--caption)/1 var(--mono); color: var(--t3); }
 .rt-soon { font: var(--w-quiet) var(--caption)/1.2 var(--mono); color: var(--warn); text-align: right; max-width: 88px; }
 .rt-go { color: var(--t4); font-size: 20px; }
+.rt-play {
+  display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%;
+  background: var(--pink); color: #fff; font-size: 13px; padding-left: 2px;
+  cursor: pointer; transition: transform var(--dur-press) ease, opacity var(--dur-press) ease;
+}
+.rt-play:hover { transform: scale(1.08); }
+.rt-play:active { transform: scale(.94); }
+.rt-play.busy { opacity: .5; pointer-events: none; animation: rtPlayPulse 1s ease-in-out infinite; }
+@keyframes rtPlayPulse { 50% { opacity: .25; } }
 
 .rt-more {
   width: 100%; padding: 12px; margin: 4px 0 8px; border-radius: var(--r-card);

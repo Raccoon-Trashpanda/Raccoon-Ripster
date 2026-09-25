@@ -316,6 +316,12 @@ function prTileHtml(rel, ahead) {
     '<span class="rt-side">' +
       (ahead ? '<b class="rt-soon">' + esc(ti('m.radar.will', { date: prDateShort(d) })) + '</b>'
              : '<b class="rt-day">' + esc(prDateShort(d)) + '</b>') +
+      /* ▶ прямо на плитке (владелец 25.09: «не вижу кнопок плей на карточках»).
+         Плитка сама <button> — вложенная кнопка невалидна, поэтому span-роль. */
+      (!ahead && rel.service !== 'bbc'
+        ? '<span class="rt-play" role="button" tabindex="0" data-play="1" title="' + esc(t('m.radar.play')) +
+          '" aria-label="' + esc(t('m.radar.play')) + '">▶</span>'
+        : '') +
       '<i class="rt-go">›</i>' +
     '</span>' +
   '</button>';
@@ -398,7 +404,21 @@ function prFollowsHtml() {
 function prOnClick(ev) {
   var tile = ev.target && ev.target.closest ? ev.target.closest('.rtile') : null;
   if (!tile) return;
+  var play = ev.target.closest('.rt-play');
+  if (play) {
+    ev.stopPropagation(); ev.preventDefault();
+    var rel = PR.byUid[tile.getAttribute('data-uid')];
+    if (rel && !play.classList.contains('busy')) prTilePlay(rel, play);
+    return;
+  }
   prOpen(tile.getAttribute('data-uid'));
+}
+
+/* ▶ с плитки — тот же prPlay, что в карточке. Разворот релиза сам отвечает,
+   есть ли что играть (для Spotify/Apple — копия по ISRC); нет — честный тост. */
+async function prTilePlay(rel, el) {
+  el.classList.add('busy');
+  try { await prPlay(rel, null); } finally { el.classList.remove('busy'); }
 }
 
 /* ── Карточка релиза: четыре действия, и только для того, что ВЫШЛО ────────── */
@@ -410,7 +430,11 @@ function prOpen(uid) {
   body.dataset.uid = uid;
   body.innerHTML = prCardHtml(rel, true);
   prBindCard(body, rel);
-  if (prNeedMatrix(rel) && !PR.avail[uid]) prCheck(rel, body);
+  /* Сетевую ошибку не держим: при повторном открытии карточки спрашиваем снова
+     (25.09: запрос упал на перезапуске сервера, и «недоступно» жило в карточке
+     до ручного «Повторить»). */
+  var av = PR.avail[uid];
+  if (prNeedMatrix(rel) && (!av || av.net)) prCheck(rel, body);
 }
 
 /* Матрица нужна каталожным релизам. У BBC и SoundCloud витрин «где скачать»
@@ -486,6 +510,14 @@ function prAvailHtml(rel, m) {
   return '<div class="rc-avail">' + parts.join('') + src + '</div>';
 }
 
+/* Сетевой сбой — запрос физически не дошёл до сервера (перезапуск, обрыв).
+   Формулировка браузера («Failed to fetch») сырая и англоязычная: её нельзя
+   показывать человеку, и её нельзя считать окончательным ответом. */
+function prIsNetErr(e) {
+  var m = String((e && (e.message || e)) || '').toLowerCase();
+  return /failed to fetch|networkerror|network request failed|load failed|err_network|econn|connection refused/.test(m);
+}
+
 async function prCheck(rel, body) {
   var uid = rel._uid;
   if (PR.availPend[uid]) { await PR.availPend[uid]; return; }
@@ -493,34 +525,37 @@ async function prCheck(rel, body) {
     var q = 'url=' + encodeURIComponent(rel.url || '') +
             '&title=' + encodeURIComponent(rel.title || '') +
             '&artist=' + encodeURIComponent(rel.artist || '');
-    try {
-      var d = await api('/api/availability?' + q);
-      if (!d || d.ok === false) { PR.avail[uid] = { error: (d && (d.error || d.error_key)) || t('m.radar.nowhere') }; return; }
-      var svcs = d.services || {};
-      var groups = { ready: [], wait: [], region: [], rights: [], token: [], noid: [] };
-      Object.keys(svcs).forEach(function (s) {
-        var v = svcs[s] || {};
-        if (v.available) groups.ready.push(s);
-        else if (v.reason === 'region_locked') groups.region.push(s);
-        else if (v.reason === 'no_entitlement') groups.rights.push(s);
-        else if (v.reason === 'no_token') groups.token.push(s);
-        else if (v.reason === 'no_identifier') groups.noid.push(s);
-        else groups.wait.push(s);
-      });
-      var urls = {};
-      groups.ready.forEach(function (s) { if (svcs[s].url) urls[s] = svcs[s].url; });
-      PR.avail[uid] = {
-        groups: groups, urls: urls, out: groups.ready.length > 0,
-        recommended: d.recommended || (groups.ready[0] || '')
-      };
-    } catch (e) {
-      PR.avail[uid] = { error: String(e && e.message || e) };
-    } finally {
-      delete PR.availPend[uid];
+    for (var attempt = 0; attempt < 2; attempt++) {
+      if (attempt) await new Promise(function (r) { setTimeout(r, 2500); });
+      try {
+        var d = await api('/api/availability?' + q);
+        if (!d || d.ok === false) { PR.avail[uid] = { error: (d && (d.error || d.error_key)) || t('m.radar.nowhere') }; return; }
+        var svcs = d.services || {};
+        var groups = { ready: [], wait: [], region: [], rights: [], token: [], noid: [] };
+        Object.keys(svcs).forEach(function (s) {
+          var v = svcs[s] || {};
+          if (v.available) groups.ready.push(s);
+          else if (v.reason === 'region_locked') groups.region.push(s);
+          else if (v.reason === 'no_entitlement') groups.rights.push(s);
+          else if (v.reason === 'no_token') groups.token.push(s);
+          else if (v.reason === 'no_identifier') groups.noid.push(s);
+          else groups.wait.push(s);
+        });
+        var urls = {};
+        groups.ready.forEach(function (s) { if (svcs[s].url) urls[s] = svcs[s].url; });
+        PR.avail[uid] = {
+          groups: groups, urls: urls, out: groups.ready.length > 0,
+          recommended: d.recommended || (groups.ready[0] || '')
+        };
+        return;
+      } catch (e) {
+        if (!prIsNetErr(e)) { PR.avail[uid] = { error: String(e && e.message || e) }; return; }
+      }
     }
+    PR.avail[uid] = { error: t('m.err.net'), net: true };
   })();
   PR.availPend[uid] = p;
-  await p;
+  try { await p; } finally { delete PR.availPend[uid]; }
   if (PR.opened === rel && body && body.dataset.uid === uid) {
     body.innerHTML = prCardHtml(rel, false);
     prBindCard(body, rel);
