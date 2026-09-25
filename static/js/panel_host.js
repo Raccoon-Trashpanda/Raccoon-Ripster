@@ -370,6 +370,16 @@ function rpState() {
     else paused = el ? !!el.paused : true;
   } catch (e) {}
   try { if (el) { vol = el.muted ? 0 : el.volume; muted = !!el.muted; } } catch (e) {}
+  /* Кэш — сколько секунд уже загружено, тем же правилом, что ПК-полоса
+     (_updateBuffered): <audio>.buffered; нативный и бесшовный режимы держат
+     трек целиком. Без этого поля пристёгнутая панель кэш не рисовала вовсе
+     (владелец 25.09: «цвет норм, но не вижу кэш»). */
+  var buf = null;
+  try {
+    if (eng === 'native') buf = dur;
+    else if (typeof _waEnabled === 'function' && _waEnabled() && typeof _WA !== 'undefined' && _WA.curBuffer) buf = dur;
+    else if (el && el.buffered && el.buffered.length) buf = el.buffered.end(el.buffered.length - 1);
+  } catch (e) {}
   return {
     rp: 1, k: 'state', seq: ++RP.seq, engine: eng,
     have: !!item, idx: idx, qlen: q.length,
@@ -379,7 +389,7 @@ function rpState() {
       label: item.label || '', duration: Number(item.duration) || 0,
       hires: !!item.hires, local: !!item.local, live: !!item.live
     } : null,
-    pos: pos, dur: dur, paused: paused, volume: vol, muted: muted,
+    pos: pos, dur: dur, buf: buf, paused: paused, volume: vol, muted: muted,
     queue: rpQueueStamp(q, idx)
   };
 }

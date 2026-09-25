@@ -292,7 +292,7 @@ function curItem() {
 function clock() {
   if (B.live && B.state) {
     var s = B.state;
-    return { pos: s.pos || 0, dur: s.dur || 0, paused: !!s.paused,
+    return { pos: s.pos || 0, dur: s.dur || 0, paused: !!s.paused, buf: s.buf,
              vol: (s.volume == null ? vol() : s.volume), have: !!s.have, engine: s.engine };
   }
   var a = T.el;
@@ -1353,7 +1353,10 @@ function syncTime() {
               seek.setAttribute('aria-valuenow', String(Math.round(cur))); }
   var buf = document.getElementById('p-buf');
   var a = T.el;
-  if (buf && !B.live && a.buffered.length) {
+  if (buf && B.live) {
+    // кэш плеера ПК приходит в снимке моста (panel_host.js rpState → buf)
+    buf.style.width = (c.buf != null && dur) ? Math.min(100, c.buf / dur * 100) + '%' : '0%';
+  } else if (buf && a.buffered.length) {
     try { buf.style.width = (a.buffered.end(a.buffered.length - 1) / (dur || 1) * 100) + '%'; } catch (e) {}
   }
   var mp = document.getElementById('mini-prog');
