@@ -431,8 +431,10 @@ def put(store: dict, records: list) -> int:
 # ── Эвристика: на что подписаться, чего мы ещё не слушаем ────────────────────
 
 def suggest(records: list, watched_ids: set, watched_names: set,
-            profile_genres: list, min_genre_hits: int = 1) -> list:
-    """Грядущие релизы артистов, которых в вотчлисте НЕТ, но жанр совпал.
+            profile_genres: list, min_genre_hits: int = 1,
+            watched_labels: set | None = None) -> list:
+    """Грядущие релизы артистов, которых в вотчлисте НЕТ, но жанр совпал
+    ИЛИ релиз выходит на наблюдаемом лейбле.
 
     Возвращает ПРЕДЛОЖЕНИЯ, а не подписки. Автоподписка по совпадению жанра —
     это действие по догадке: жанр в каталогах размечен грубо, и «techno» у
@@ -441,18 +443,34 @@ def suggest(records: list, watched_ids: set, watched_names: set,
 
     Кто хочет автоматизма — включает его отдельным ключом и знает, на что
     подписался: у каждого предложения написано, ПОЧЕМУ оно предложено.
+
+    `watched_labels` — нормализованные имена наблюдаемых лейблов. Предзаказ на
+    таком лейбле — сигнал СИЛЬНЕЕ жанрового совпадения: человек уже сказал, за
+    чем следит (кейс 24.09: Oscar Mulero — «Between Two Worlds. SEMANTICA 199»,
+    владелец подписан на Semantica Records, артиста в вотчлисте нет).
     """
     want = {str(g).lower() for g in (profile_genres or []) if g}
+    labels_w = set(watched_labels or ())
     out = []
     for r in records or []:
         aid = str(r.get("artist_id") or "")
         nm = _norm(r.get("artist"))
         if (aid and aid in watched_ids) or (nm and nm in watched_names):
             continue
+        on_watched_label = bool(_norm(r.get("label")) and
+                                _norm(r.get("label")) in labels_w)
         genres = [str(g).lower() for g in (r.get("genres") or []) if g]
         hits = [g for g in genres if g in want]
-        if len(hits) < min_genre_hits:
+        if not on_watched_label and len(hits) < min_genre_hits:
             continue
-        out.append({**r, "why": {"genres": hits, "matched": len(hits)}})
-    out.sort(key=lambda x: (-x["why"]["matched"], x.get("date", "")))
+        why = {"genres": hits, "matched": len(hits)}
+        if on_watched_label:
+            # форма `why` без этой причины не меняется (контракт теста);
+            # лейбл-причина добавляется отдельным ключом
+            why["watched_label"] = str(r.get("label") or "")
+        out.append({**r, "why": why})
+    # Лейбл в наблюдении — впереди любого жанрового совпадения; внутри одной
+    # причины — по числу совпавших жанров, затем по близости даты.
+    out.sort(key=lambda x: (0 if x["why"].get("watched_label") else 1,
+                            -x["why"]["matched"], x.get("date", "")))
     return out

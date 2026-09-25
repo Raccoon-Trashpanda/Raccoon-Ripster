@@ -133,8 +133,8 @@ async def run(config: dict) -> None:
                 # NOT delivered yet → keep until the safety ceiling so a slow /
                 # queued bot delivery is never eaten mid-send. (Web-guest tasks
                 # have no ack either; they download well within the ceiling.)
-                if now - entry.get("ts", 0) < _UNDELIVERED_CEILING:
-                    continue
+                # 25.09.2026: недоставленное (личные загрузки владельца в ПК) не удаляется никогда.
+                continue
             raw = entry.get("dir", "")
             if not raw:
                 removed.append(tid)

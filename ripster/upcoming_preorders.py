@@ -70,6 +70,7 @@ def _record(card: dict, *, src: str, label_hint: str = "") -> dict | None:
         src=src, src_url=card.get("url") or "", date_raw=raw, ident=ident,
         title=card.get("title") or "", artist=card.get("artist") or "",
         cover=card.get("cover") or "", url=card.get("url") or "",
+        service=src,
         label=card.get("label") or label_hint or "",
         upc=card.get("upc") or "", type="album",
         preorder=bool(card.get("preorder")),

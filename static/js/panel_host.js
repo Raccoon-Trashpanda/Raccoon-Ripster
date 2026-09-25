@@ -358,12 +358,16 @@ function rpState() {
   try { if (typeof _stevLen === 'function' && item && eng !== 'bbc') dur = _stevLen(item); } catch (e) {}
   if (eng === 'bbc' && item) { dur = item.duration || dur; }
   try {
-    if (eng === 'native' && typeof _NA !== 'undefined') { pos = _NA.cur; dur = _NA.dur || dur; paused = !!_NA.paused; }
+    if (eng === 'native' && typeof _NA !== 'undefined') { pos = _NA.cur; dur = _NA.dur || dur; }
     else {
       if (typeof _stevPos === 'function' && eng !== 'bbc') pos = _stevPos();
       if (pos == null && el && isFinite(el.currentTime)) pos = el.currentTime;
-      paused = el ? !!el.paused : true;
     }
+    /* Пауза берётся из ЕДИНОГО источника (ripsterIsPaused): в бесшовном режиме
+       звук идёт из AudioContext, а pp-audio стоит на паузе — наивное
+       `el.paused` давало бы панели «▶» при играющем треке. */
+    if (typeof ripsterIsPaused === 'function') paused = ripsterIsPaused();
+    else paused = el ? !!el.paused : true;
   } catch (e) {}
   try { if (el) { vol = el.muted ? 0 : el.volume; muted = !!el.muted; } } catch (e) {}
   return {
@@ -452,14 +456,24 @@ function rpHostWsOpen() {
    интерфейс (BBC/нативный/gapless/<audio>/спаренный телефон). elect-сигнал. */
 function rpIsPlaying() {
   try {
+    /* Тот же единый источник, что у кнопки: в gapless pp-audio «на паузе», и
+       старый `el.paused` врал выборам хоста — играющая вкладка не считалась
+       играющей, окно не переключалось на неё. */
+    if (typeof ripsterIsPaused === 'function') {
+      if (ripsterIsPaused()) return false;
+    } else {
+      var e0 = rpEngine();
+      if (e0 === 'native' && typeof _NA !== 'undefined') return !!_NA.active && !_NA.paused;
+      if (e0 === 'bbc') { var b0 = document.getElementById('bbc-audio'); return !!(b0 && !b0.paused); }
+      var el0 = rpAudioEl();
+      if (!el0 || el0.paused) return false;
+    }
     var eng = rpEngine();
-    if (eng === 'native' && typeof _NA !== 'undefined') return !!_NA.active && !_NA.paused;
-    if (eng === 'bbc') { var b = document.getElementById('bbc-audio'); return !!(b && !b.paused); }
+    if (eng === 'native' || eng === 'bbc' || eng === 'gapless') return true;
     var el = rpAudioEl();
-    if (!el || el.paused) return false;
     var have = false;
     try { have = !!(typeof Preview !== 'undefined' && Preview.queue && Preview.queue[Preview.idx | 0]); } catch (e) {}
-    return have || !!(el.currentSrc || el.src);
+    return have || !!(el && (el.currentSrc || el.src));
   } catch (e) { return false; }
 }
 

@@ -68,6 +68,29 @@ function _stevLen(item) {
   return null;
 }
 
+/* Единственный источник правды «пауза ли сейчас». Читает состояние ТОГО движка,
+   который реально издаёт звук, а не `pp-audio`: в бесшовном (Web Audio) режиме
+   <audio> стоит на месте — звук идёт из AudioContext.BufferSource, — и наивное
+   `pp-audio.paused` врёт «пауза» при играющем миксе. Из-за этого и кнопка
+   внешнего плеера, и плитка «сейчас играет» показывали ▶ при звучащем треке
+   (25.09.2026, Dusky). Порядок движков — тот же, что у rpEngine(). */
+function ripsterIsPaused() {
+  try {
+    if (typeof Preview !== 'undefined' && Preview.mode === 'bbc') {
+      var b = document.getElementById('bbc-audio');
+      return b ? !!b.paused : true;
+    }
+    if (typeof _NA !== 'undefined' && _NA.active) return !!_NA.paused;
+    if (typeof _waEnabled === 'function' && _waEnabled() &&
+        typeof _WA !== 'undefined' && _WA && _WA.curSource) {
+      return _WA.ctx ? _WA.ctx.state === 'suspended' : true;
+    }
+    if (typeof Preview !== 'undefined' && Preview._fpsEl) return !!Preview._fpsEl.paused;
+    var a = document.getElementById('pp-audio');
+    return a ? !!a.paused : true;
+  } catch (e) { return true; }
+}
+
 function _stevMeta(item) {
   return { service: (item && item.service) || '', service_id: String((item && item.id) || ''),
            artist: (item && item.artist) || '', title: (item && item.title) || '' };
@@ -3392,10 +3415,11 @@ function fpSyncFromState() {
   const bbc  = (typeof _bbcFpItem === 'function') && Preview.mode === 'bbc';
   const item = bbc ? _bbcFpItem() : (Preview.queue[Preview.idx] || {});
   fpSyncMeta(item);
-  // Restore play/pause icon from audio state
-  const audio = document.getElementById(bbc ? 'bbc-audio' : 'pp-audio');
+  // Restore play/pause icon from the engine that is REALLY making sound:
+  // pp-audio is idle in gapless mode, so reading it here drew ▶ over a playing
+  // mix (same source of truth as the external player).
   const playEl = document.getElementById('fp-play');
-  if (audio && playEl) playEl.textContent = audio.paused ? '▶' : '⏸';
+  if (playEl) playEl.textContent = ripsterIsPaused() ? '▶' : '⏸';
 }
 function fpSyncMeta(item) {
   const art    = document.getElementById('fp-art');
