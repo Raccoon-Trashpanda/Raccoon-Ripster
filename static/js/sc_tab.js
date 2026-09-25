@@ -162,6 +162,25 @@ function _relIsFav(rel) {
   return _relFavs.some(f => _relUID(f) === u);
 }
 
+// Артист на строке карточки: у миксов/сборников — автор релиза, а не тот,
+// через кого мы его нашли. `_apple_mix_item` кладёт его в `alb_artist`;
+// `artist` — слежимый участник, он нужен идентификационным проверкам и
+// ссылке на страницу артиста, но витрине он показывать микс не указ.
+function relHeadArtist(r) { return (r && (r.alb_artist || r.artist)) || ''; }
+// Все слежимые участники микса/сборника. Складские записи старше поля
+// `featured` — на них один участник, тот, чья подписка принесла релиз.
+function relFeaturedArtists(r) {
+  if (!r) return [];
+  let f = (r.featured || []).filter(Boolean);
+  if (!f.length && r.alb_artist && r.artist && r.artist !== r.alb_artist) f = [r.artist];
+  return f;
+}
+// Поиск «по артисту» обязан находить микс по любому участнику: в строку
+// зашивания входят и автор релиза, и все слежимые имена.
+function relArtistHay(r) {
+  return [r.artist, r.alb_artist, (r.featured || []).join(' ')].filter(Boolean).join(' ').toLowerCase();
+}
+
 function _relSavePrefs() {
   _relSaveJSON(_REL_PREF_KEY, {
     days:    document.getElementById('rel-days')?.value,
@@ -489,7 +508,7 @@ function _relGroupSecs(list, keyOf) {
 function _relSecHtml(sec) {
   const isDate = _relGroupMode === 'date';
   const cards = sec.items.map(r => renderReleaseCard(r,
-    ` data-gkey="${esc(sec.gkey)}" data-letter="${esc(isDate ? _relLetter(r.artist) : sec.gkey)}"`)).join('');
+    ` data-gkey="${esc(sec.gkey)}" data-letter="${esc(isDate ? _relLetter(relHeadArtist(r)) : sec.gkey)}"`)).join('');
   const title = isDate ? _relDateLabel(sec.gkey)
                        : (sec.gkey === '#' ? t('rl.alpha_other') : sec.gkey);
   return `<section class="rel-sec ${isDate ? 'rel-sec-date' : 'rel-sec-letter'}" data-gkey="${esc(sec.gkey)}">`
@@ -505,7 +524,7 @@ function _renderRelGroups(list) {
   return _relGroupSecs(list, r => r.date || '');
 }
 function _renderRelAlpha(list, byTitle) {
-  return _relGroupSecs(list, r => _relLetter(byTitle ? r.title : r.artist));
+  return _relGroupSecs(list, r => _relLetter(byTitle ? r.title : relHeadArtist(r)));
 }
 
 // Полоса-оглавление строится по ВСЕМУ отфильтрованному списку, а не по
@@ -515,7 +534,7 @@ function _renderRelAlpha(list, byTitle) {
 function _relAlphaIndexHtml(data, byTitle) {
   const order = [], at = new Set();
   for (const r of data) {
-    const L = _relLetter(byTitle ? r.title : r.artist);
+    const L = _relLetter(byTitle ? r.title : relHeadArtist(r));
     if (!at.has(L)) { at.add(L); order.push(L); }
   }
   if (order.length < 2) return '';
@@ -538,7 +557,7 @@ function _relAlphaIndexHtml(data, byTitle) {
 // свежий день, где эта буква есть.
 function _relJumpLetter(letter) {
   const byTitle = (_relGroupMode === 'title');
-  const idx = _relFilteredData.findIndex(r => _relLetter(byTitle ? r.title : r.artist) === letter);
+  const idx = _relFilteredData.findIndex(r => _relLetter(byTitle ? r.title : relHeadArtist(r)) === letter);
   if (idx < 0) return;
   if (idx >= _relShowing) {
     _relShowing = Math.ceil((idx + 1) / _REL_PAGE_SIZE) * _REL_PAGE_SIZE;
@@ -680,7 +699,7 @@ function _applyRelFilterCore(resetPage) {
            : (_relCache.data || []).slice();
 
   const q = (document.getElementById('rel-search')?.value || '').toLowerCase().trim();
-  if (q) data = data.filter(r => (r.title||'').toLowerCase().includes(q) || (r.artist||'').toLowerCase().includes(q));
+  if (q) data = data.filter(r => (r.title||'').toLowerCase().includes(q) || relArtistHay(r).includes(q));
   if (_relView === 'new')  data = data.filter(_relIsNew);
   if (_relView === 'labels') data = data.filter(_relIsLabelRel);
   if (_relTypeOff.size)    data = data.filter(r => !_relTypeOff.has(r.type || 'album'));
@@ -690,13 +709,15 @@ function _applyRelFilterCore(resetPage) {
   // Внутри одного дня лента упорядочена по алфавиту артиста: липкая метка
   // обещает «16 дек · B», и буквы должны идти по порядку, а не как попали.
   // Без этого tie-break'а второй уровень («внутри дня — буквы») был бы враньём.
-  const byArtistThen = (a, b) => (a.artist || '').localeCompare(b.artist || '');
+  // Берётся автор строки карточки (`relHeadArtist`), иначе микс «obli presents…»
+  // стоял бы под буквой F — по Four Tet, которого на карточке не видно.
+  const byArtistThen = (a, b) => relHeadArtist(a).localeCompare(relHeadArtist(b));
   switch (sort) {
     case 'date_asc':    data.sort((a,b) => (a.date||'').localeCompare(b.date||'') || byArtistThen(a,b)); break;
     case 'tracks_desc': data.sort((a,b) => (b.tracks||0) - (a.tracks||0)); break;
     case 'tracks_asc':  data.sort((a,b) => (a.tracks||0) - (b.tracks||0)); break;
-    case 'artist_asc':  data.sort((a,b) => (a.artist||'').localeCompare(b.artist||'')); break;
-    case 'artist_desc': data.sort((a,b) => (b.artist||'').localeCompare(a.artist||'')); break;
+    case 'artist_asc':  data.sort((a,b) => relHeadArtist(a).localeCompare(relHeadArtist(b))); break;
+    case 'artist_desc': data.sort((a,b) => relHeadArtist(b).localeCompare(relHeadArtist(a))); break;
     case 'title_asc':   data.sort((a,b) => (a.title||'').localeCompare(b.title||'')); break;
     default:            data.sort((a,b) => (b.date||'').localeCompare(a.date||'') || byArtistThen(a,b));
   }
@@ -1139,13 +1160,13 @@ function _radarPasses(item) {
   if (_relTypeOff.size && _relTypeOff.has(item.type || 'album')) return false;
   if (_relSrcOff.size && _relSrcOff.has(_relSrcOf(item))) return false;
   const q = (document.getElementById('rel-search')?.value || '').toLowerCase().trim();
-  if (q && !((item.title||'').toLowerCase().includes(q) || (item.artist||'').toLowerCase().includes(q))) return false;
+  if (q && !((item.title||'').toLowerCase().includes(q) || relArtistHay(item).includes(q))) return false;
   return true;
 }
 
 function _radarGroupKey(item) {
   if (_relGroupMode === 'date')   return item.date || '';
-  if (_relGroupMode === 'artist') return _relLetter(item.artist);
+  if (_relGroupMode === 'artist') return _relLetter(relHeadArtist(item));
   if (_relGroupMode === 'title')  return _relLetter(item.title);
   return '';
 }
@@ -1165,7 +1186,7 @@ function _radarAppendDom(items, mode) {
   const cardHtml = it => {
     const gkey = _radarGroupKey(it);
     const attrs = grouped
-      ? ` data-gkey="${esc(gkey)}" data-letter="${esc(isDate ? _relLetter(it.artist) : gkey)}"` : '';
+      ? ` data-gkey="${esc(gkey)}" data-letter="${esc(isDate ? _relLetter(relHeadArtist(it)) : gkey)}"` : '';
     return renderReleaseCard(it, attrs);
   };
   const holder = document.createElement('div');
@@ -1607,6 +1628,21 @@ async function _relScDownload(btn, url, title, artist, cover, duration) {
 function renderReleaseCard(rel, attrs) {
   if (rel && (rel.service === 'bbc' || rel.service === 'soundcloud')) return _relMixCard(rel, attrs);
   const dt = rel.date ? new Date(rel.date + 'T00:00:00').toLocaleDateString(_dateLoc(), {day:'numeric',month:'short',year:'numeric'}) : '';
+  // Заголовок карточки — релиз; артистом строкой — ЕГО автор, а не слежимый
+  // участник, через которого микс приехал в ленту (претензия 24.09.2026:
+  // «obli presents: Earth Day 2026» показывался как Four Tet).
+  const head = relHeadArtist(rel);
+  const feat = relFeaturedArtists(rel);
+  const featCsv = feat.join(', ');
+  const isWatched = !rel.alb_artist || rel.alb_artist === rel.artist;
+  // Микс/сборник из каталога открывается тапом как ЦЕЛЫЙ релиз с подсветкой
+  // треков всех слежимых участников — та же машина страницы альбома, что и
+  // «открыть из дискографии» (Detail._openCtx → _applyCompilationHighlight).
+  const canOpen = rel.id && ['apple','spotify','deezer','qobuz','tidal'].indexOf(rel.service) >= 0
+    && (feat.length || (rel.alb_artist && rel.alb_artist !== rel.artist));
+  const openFn = canOpen
+    ? `relOpenRelease('${esc(rel.service)}','${escJ(rel.id)}','${escJ(featCsv)}')`
+    : `playRelease('${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')`;
   const svcColors = {spotify:'#1db954', qobuz:'#1870f5', tidal:'#00d4b3', apple:'var(--red)', deezer:'#a238ff'};
   const svcClr  = svcColors[rel.service] || 'var(--muted)';
   const typeMap = {album:'ALBUM', single:'SINGLE', ep:'EP', compilation:t('rl.comp_badge'), mix:t('rl.mix_badge'), appears_on:t('rl.appears_badge'), live:'LIVE'};
@@ -1659,11 +1695,12 @@ function renderReleaseCard(rel, attrs) {
       ${isLive ? `<div style="position:absolute;bottom:6px;right:6px" title="${t('rl.live_title')}"><span class="rel-live-badge"><span class="rel-live-dot"></span>${t('rl.live_badge')}</span></div>` : ''}
     </div>
     <div style="padding:8px 10px">
-      <div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" title="${esc(rel.title)} — ${t('rl.listen')}"
-        onclick="playRelease('${esc(rel.service)}','${escJ(rel.url)}','${escJ(rel.title)}','${escJ(rel.artist)}','${escJ(rel.cover||'')}')"
+      <div style="font-size:12px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer" title="${esc(rel.title)} — ${t(canOpen ? 'rl.open_release' : 'rl.listen')}"
+        onclick="${openFn}"
         onmouseover="this.style.color='var(--red)'" onmouseout="this.style.color='var(--text)'">${esc(rel.title)}${hiresBadge}</div>
-      <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap${rel.artist_id ? ';cursor:pointer' : ''}" title="${esc(rel.artist)}"
-        ${rel.artist_id ? `onclick="event.stopPropagation();openArtistPage('${esc(rel.service)}','${escJ(rel.artist_id)}')" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"` : ''}>${esc(rel.artist)}</div>
+      <div style="font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap${(rel.artist_id && isWatched) ? ';cursor:pointer' : ''}" title="${esc(head)}"
+        ${(rel.artist_id && isWatched) ? `onclick="event.stopPropagation();openArtistPage('${esc(rel.service)}','${escJ(rel.artist_id)}')" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'"` : ''}>${esc(head)}</div>
+      ${feat.length ? `<div style="font-size:10px;color:var(--muted2);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(featCsv)}">✨ ${esc(t('rl.featured'))}: ${esc(featCsv)}</div>` : ''}
       ${rel.label ? `<div style="font-size:10px;color:${rel.via_label ? 'var(--green)' : 'var(--muted)'};margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:${rel.via_label ? '1' : '.7'};cursor:pointer" title="${esc(rel.label)} — ${t('lbl.open_page')}"
         onclick="event.stopPropagation();openLabelPage('${escJ(rel.label)}')"
         onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">${rel.via_label ? '🏷 ' : ''}${esc(rel.label)}</div>` : ''}
@@ -1694,6 +1731,15 @@ function renderReleaseCard(rel, attrs) {
       </div>
     </div>
   </div>`;
+}
+
+// Открыть микс/сборник из ленты радара: страница релиза целиком, строки
+// слежимых участников подсвечены по ИМЕНАМ треков (у карточки радара нет
+// id дорожек — `_applyCompilationHighlight`.matchит по ctx.artists).
+function relOpenRelease(service, albumId, namesCsv) {
+  if (typeof openAlbumPageWithCtx !== 'function' || !albumId) return;
+  const artists = (namesCsv || '').split(',').map(function (s) { return s.trim(); }).filter(Boolean);
+  openAlbumPageWithCtx(service, albumId, {artist: namesCsv || '', artists: artists});
 }
 
 async function downloadRelease(btn, service, url, title, artist) {

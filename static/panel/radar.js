@@ -282,12 +282,25 @@ function prCover(url, px) {
   return u;
 }
 
+/* Строка артиста: у миксов/сборников — автор релиза (`alb_artist`), а не
+   слежимый участник, через которого релиз приехал; участники — отдельной
+   строкой «с участием» (претензия владельца 24.09.2026). Те же правила, что
+   на десктопе (sc_tab.js: relHeadArtist/relFeaturedArtists) — держать в согласии. */
+function prHead(r) { return String((r && (r.alb_artist || r.artist)) || ''); }
+function prFeat(r) {
+  if (!r) return [];
+  var f = (r.featured || []).filter(Boolean);
+  if (!f.length && r.alb_artist && r.artist && r.artist !== r.alb_artist) f = [String(r.artist)];
+  return f;
+}
+
 function prTileHtml(rel, ahead) {
   var svc = String(rel.service || '').toUpperCase();
   var d = prDayOf(rel);
   var type = rel.type ? String(rel.type).toUpperCase() : '';
   var meta = [type, rel.tracks ? tn('m.search.ntracks', rel.tracks) : '', rel.label || '']
     .filter(Boolean).join(' · ');
+  var feat = prFeat(rel);
   return '<button type="button" class="rtile' + (ahead ? ' ahead' : '') + '" data-uid="' + esc(rel._uid) + '">' +
     '<span class="rt-art">' +
       (rel.cover ? '<img src="' + esc(prCover(rel.cover, 200)) + '" alt="" loading="lazy" decoding="async">' : '<i class="rt-noart">♪</i>') +
@@ -295,7 +308,9 @@ function prTileHtml(rel, ahead) {
     '</span>' +
     '<span class="rt-body">' +
       '<span class="rt-t">' + esc(rel.title || '—') + '</span>' +
-      '<span class="rt-a">' + esc(rel.artist || '') + '</span>' +
+      '<span class="rt-a">' + esc(prHead(rel)) + '</span>' +
+      (feat.length ? '<span class="rt-a" style="opacity:.75" title="' + esc(feat.join(', ')) + '">✨ ' +
+        esc(ti('m.radar.featured', { list: feat.join(', ') })) + '</span>' : '') +
       '<span class="rt-m">' + esc(meta) + '</span>' +
     '</span>' +
     '<span class="rt-side">' +
@@ -427,7 +442,9 @@ function prCardHtml(rel, pending) {
     '<div class="rcard">' +
       (rel.cover ? '<img class="rc-cover" src="' + esc(prCover(rel.cover, 300)) + '" alt="">' : '<div class="rc-cover rc-noart">♪</div>') +
       '<div class="rc-info"><div class="rc-t">' + esc(rel.title || '—') + '</div>' +
-        '<div class="rc-a">' + esc(rel.artist || '') + '</div>' +
+        '<div class="rc-a">' + esc(prHead(rel)) + '</div>' +
+        (prFeat(rel).length ? '<div class="rc-a" style="opacity:.75">✨ ' +
+          esc(ti('m.radar.featured', { list: prFeat(rel).join(', ') })) + '</div>' : '') +
         '<div class="rc-m">' + esc([String(rel.service || '').toUpperCase(), rel.type ? String(rel.type).toUpperCase() : '',
                                     prDateShort(d)].filter(Boolean).join(' · ')) + '</div>' +
         (rel.label ? '<div class="rc-l">' + esc(rel.label) + '</div>' : '') +

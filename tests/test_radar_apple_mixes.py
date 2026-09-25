@@ -12,7 +12,8 @@ import sys
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from ripster.routes.radar import _apple_mix_item, _apple_mix_verdict  # noqa: E402
+from ripster.routes.radar import (_apple_mix_item, _apple_mix_verdict,  # noqa: E402
+                                  _merge_mix_duplicates)
 
 MIN = 60_000
 
@@ -75,3 +76,36 @@ def test_item_id_is_the_collection_not_the_track_url():
                         {"name": "Mat Zo", "artist_id": "2"}, "title:«dj mix»")
     assert a["id"] == b["id"] == "1799556655"
     assert "?i=" not in a["url"] and a["url"].endswith("1799556655")
+
+
+def test_obli_record_one_card_with_all_featured():
+    """Запись владельца 24.09.2026: «obli presents: Earth Day 2026 (DJ Mix)».
+
+    Тот же микс найден через треки Four Tet и HNNY. До правки в ленту
+    выходила карточка с первым нашедшим слежимым артистом НА МЕСТЕ АВТОРА
+    релиза, второй участник терялся. Теперь: одна карточка, настоящий
+    автор — в `alb_artist` (витрина строит им строку артиста), все
+    слежимые участники — в `featured`. `artist` остаётся якорем: на нём
+    держатся проверки принадлежности из artist_identity.
+    """
+    alb = {"id": "1891503615", "name": "obli presents: Earth Day 2026 (DJ Mix)",
+           "artist": "obli", "date": "2026-04-22", "cover": "", "track_count": 30,
+           "url": "https://music.apple.com/us/album/obli-presents-earth-day-2026/"
+                  "1891503615?i=1891503616"}
+    four = _apple_mix_item(alb, {"name": "Four Tet", "artist_id": "35888604"},
+                           'title:«dj mix»')
+    hnny = _apple_mix_item({**alb, "url": alb["url"].replace("616", "700")},
+                           {"name": "HNNY", "artist_id": "9999999"},
+                           'title:«dj mix»')
+    uniq = _merge_mix_duplicates([four, hnny])
+    assert len(uniq) == 1, "одна пластинка — одна карточка"
+    rec = uniq[0]
+    assert rec["title"] == "obli presents: Earth Day 2026 (DJ Mix)"
+    assert rec["alb_artist"] == "obli"
+    assert rec["artist"] == "Four Tet"
+    assert rec["featured"] == ["Four Tet", "HNNY"]
+    # Одиночный микс тоже получает featured — иначе чип «с участием»
+    # исчезал бы там, где он честно есть.
+    solo = _merge_mix_duplicates([_apple_mix_item(alb, {"name": "HNNY",
+                                                        "artist_id": "9"}, "x")])
+    assert solo[0]["featured"] == ["HNNY"]

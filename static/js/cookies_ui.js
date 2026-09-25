@@ -969,7 +969,7 @@ function renderAlbumPage(){
     <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px;padding:8px 12px;background:rgba(250,45,85,.08);border:1px solid rgba(250,45,85,.3);border-radius:9px;font-size:12px;color:var(--text)">
       <span style="font-weight:700;color:var(--red);text-transform:uppercase;letter-spacing:.5px;font-size:10px">${t('rl.comp_badge')}</span>
       <span style="color:var(--muted)">${esc(_ctxArt.creditedAs ? ti('ck.as_alias',{name:_ctxArt.creditedAs}) : _ctxArt.artist)}</span>
-      <span style="color:var(--muted);flex:1;min-width:160px">${_hl.length ? ti('ck.tracks_here',{n:_hl.length}) : ti('ck.tracks_here_none',{name:_ctxArt.artist})}</span>
+      <span style="color:var(--muted);flex:1;min-width:160px" id="comp-hl-count">${_hl.length ? ti('ck.tracks_here',{n:_hl.length}) : ti('ck.tracks_here_none',{name:_ctxArt.artist})}</span>
     </div>` : '';
   // Per-track selection toolbar (checkboxes + select-all / per-disc / clear all).
   const _discsSet = [...new Set(tracks.map(t => t.disc || 1))].sort((a,b)=>(+a)-(+b));
@@ -998,7 +998,7 @@ function renderAlbumPage(){
       </div>`
     : _selToolbar + `<div style="background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden">
         ${tracks.map((t, i) => `
-          <div id="alb-row-${t.id}" style="display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid var(--border);${i===tracks.length-1?'border-bottom:none':''}" onmouseover="this.style.background='rgba(255,255,255,.03)'" onmouseout="this.style.background=''">
+          <div id="alb-row-${t.id}" data-trk-artist="${esc(t.artist||'')}" style="display:flex;align-items:center;gap:12px;padding:9px 14px;border-bottom:1px solid var(--border);${i===tracks.length-1?'border-bottom:none':''}" onmouseover="this.style.background='rgba(255,255,255,.03)'" onmouseout="this.style.background=''">
             <input type="checkbox" class="alb-trk-cb" data-disc="${t.disc||1}" data-url="${esc(t.url||'')}" ${t.url?'':'disabled'} onchange="_albumUpdateSelCount()" style="width:auto;margin:0;padding:0;background:none;border:none;flex-shrink:0;cursor:pointer" title="${_TT.sel}"/>
             <div style="width:26px;text-align:center;color:var(--muted);font-size:11px;font-family:var(--mono);flex-shrink:0">${t.track_no||i+1}</div>
             ${canStream
@@ -1026,18 +1026,27 @@ function renderAlbumPage(){
 // релиз с выделенным треком» вместо «показать один трек».
 function _applyCompilationHighlight(){
   const ctx = Detail.currentAlbum && Detail.currentAlbum._ctx;
-  if (!ctx || !ctx.highlight || !ctx.highlight.length) return;
-  const want = new Set(ctx.highlight.map(String));
-  let first = null;
+  if (!ctx) return;
+  const want = new Set((ctx.highlight || []).map(String));
+  // Радарный микс приносит только ИМЕНА участников — id дорожек он не знает;
+  // строка хранит автора трека в data-trk-artist, совпадение по нему.
+  const names = new Set((ctx.artists || []).map(function (s) { return String(s).toLowerCase().trim(); }).filter(Boolean));
+  if (!want.size && !names.size) return;
+  let first = null, matched = 0;
   document.querySelectorAll('[id^="alb-row-"]').forEach(row => {
     const tid = row.id.replace('alb-row-', '');
-    if (!want.has(tid)) return;
+    const byName = names.size && names.has((row.getAttribute('data-trk-artist') || '').toLowerCase().trim());
+    if (!want.has(tid) && !byName) return;
+    matched++;
     row.style.background = 'rgba(250,45,85,.12)';
     row.style.boxShadow = 'inset 3px 0 0 var(--red)';
     const cb = row.querySelector('.alb-trk-cb');
     if (cb && !cb.disabled) { cb.checked = true; }
     if (!first) first = row;
   });
+  // Баннер посчитан по id; если сработала подсветка по именам — честно правим счётчик.
+  const cnt = document.getElementById('comp-hl-count');
+  if (cnt && matched && !want.size) cnt.textContent = ti('ck.tracks_here', {n: matched});
   try { if (typeof _albumUpdateSelCount === 'function') _albumUpdateSelCount(); } catch {}
   if (first) { try { first.scrollIntoView({block:'center', behavior:'smooth'}); } catch {} }
 }

@@ -848,6 +848,8 @@ async def releases_upcoming_suggest(days: int = Query(120, ge=1, le=400)):
     wl = _s.get("watchlist") or []
     watched_ids = {str(e.get("artist_id")) for e in wl if e.get("artist_id")}
     watched_names = {_up._norm(e.get("name")) for e in wl if e.get("name")}
+    watched_labels = {_up._norm(e.get("name")) for e in wl
+                      if e.get("kind") == "label" and e.get("name")}
     genres: list = []
     try:
         # Именно build_profile и именно await: функция асинхронная, и мой первый
@@ -858,12 +860,13 @@ async def releases_upcoming_suggest(days: int = Query(120, ge=1, le=400)):
         genres = [g.get("genre") for g in (prof.get("genres") or []) if g.get("genre")]
     except Exception as e:
         print(f"[upcoming] профиль вкуса недоступен: {e}", flush=True)
-    if not genres:
-        # Честный отказ вместо предложений наугад: без профиля «совпало по
-        # жанру» означало бы «совпало ни с чем».
-        return {"ok": True, "suggest": [], "hint": "no_profile"}
-    sug = _up.suggest(base.get("releases") or [], watched_ids, watched_names, genres)
-    return {"ok": True, "suggest": sug, "genres": genres}
+    # Без профиля отказ честен только для ЖАНРОВЫХ предложений: «лейбл в
+    # наблюдении» ничего не догадывается — владелец сам сказал, за чем следит.
+    sug = _up.suggest(base.get("releases") or [], watched_ids, watched_names,
+                      genres, watched_labels=watched_labels)
+    hint = None if genres else "no_profile"
+    return {"ok": True, "suggest": sug, "genres": genres,
+            **({"hint": hint} if hint else {})}
 
 
 # ── SoundCloud ────────────────────────────────────────────────────────────────
@@ -1176,12 +1179,7 @@ async def collect_apple_mixes(client, entries: list, storefront: str = "us",
                 print(f"[radar] apple {name}: {e}", flush=True)
 
     await asyncio.gather(*(_one(e) for e in entries))
-    seen, uniq = set(), []
-    for r in mixes:
-        if r["id"] in seen:
-            continue
-        seen.add(r["id"])
-        uniq.append(r)
+    uniq = _merge_mix_duplicates(mixes)
     uniq.sort(key=lambda x: x["date"], reverse=True)
     return {"mixes": uniq, "rejected": rejected[:200]}
 
@@ -1197,6 +1195,33 @@ def _home_ok(entry: dict, rel: dict) -> bool:
     print(f"[radar] {entry.get('name')}: скрыт «{rel.get('name') or rel.get('title')}»"
           f" — {why}", flush=True)
     return False
+
+
+def _merge_mix_duplicates(mixes: list) -> list:
+    """Один релиз — одна карточка: микс, найденный через нескольких слежимых
+    артистов, не размножается, а участники сливаются в `featured`.
+
+    Претензия владельца (24.09.2026): «obli presents: Earth Day 2026» вышел
+    в ленту под именем Four Tet — и ещё раз под каждым слежимым участником.
+    Карточка остаётся первой найденной (её `artist` — якорь проходов
+    `artist_identity`), все остальные участники записываются в `featured`,
+    а настоящего автора ленты несут в `alb_artist` — оттуда его берёт витрина.
+    """
+    byid, uniq = {}, []
+    for r in mixes:
+        f = r.setdefault("featured", [])
+        nm = str(r.get("artist") or "")
+        if nm and nm not in f:
+            f.append(nm)
+        prev = byid.get(r["id"])
+        if prev is None:
+            byid[r["id"]] = r
+            uniq.append(r)
+            continue
+        for x in f:
+            if x not in prev["featured"]:
+                prev["featured"].append(x)
+    return uniq
 
 
 def _apple_mix_item(a: dict, entry: dict, why: str) -> dict:
