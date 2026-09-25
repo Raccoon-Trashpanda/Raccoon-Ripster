@@ -1720,7 +1720,7 @@ function _relSetQuality(sel) {
   const svc = sel.dataset.svc;
   const keyMap = {
     qobuz: 'qobuz-quality', tidal: 'tidal-quality', deezer: 'deezer-quality',
-    beatport: 'beatport-quality', yandex: 'yandex-quality', amazon: 'amazon-quality',
+    beatport: 'beatport-quality', yandex: 'yandex-quality',
     apple: 'quality',
   };
   const key = keyMap[svc];

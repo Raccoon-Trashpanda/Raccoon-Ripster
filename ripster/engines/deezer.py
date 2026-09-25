@@ -506,8 +506,7 @@ class DeezerEngine(EngineBase):
         # unhandled exception in deemix/deezer-py) so we surface the actual
         # "ExceptionType: message" line rather than whatever a plain
         # substring search happens to land on first while scanning backwards
-        # (see ripster/engines/amazon.py for the concrete bug this class of
-        # check fixes — confirmed live on a guest's failed download).
+        # (a class of bug confirmed live on a guest's failed download).
         from .errors import extract_traceback_summary
         tb = extract_traceback_summary(log_text)
         if tb:

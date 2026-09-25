@@ -1470,11 +1470,6 @@ def check_engine_probe():
             continue
         name = str(s.get("service") or "?")
         err = str(s.get("error") or "")
-        # Сторонний Amazon-враппер лежит сутками — это не наша поломка, и
-        # ронять из-за него общий вердикт нельзя (иначе проверка станет
-        # постоянно красной, и на неё перестанут смотреть).
-        if name == "amazon" and ("amz.dezalty.com" in err or "503" in err):
-            continue
         # 70 символов обрезали объяснение ровно на полуслове — владелец читал
         # «контрольный запрос БЕЗ токенов » и терял вторую половину фразы,
         # ту самую, которая меняет вердикт. Хвост дороже краткости.
@@ -2144,13 +2139,6 @@ def check_disk():
 # log, group failures by service + a coarse cause bucket, and surface the top
 # offenders so the owner (and future me) can spot patterns instead of one-off noise.
 _ERR_BUCKETS = [
-    # Third-party wrapper amz.dezalty.com goes down for days at a time (503 /
-    # Heroku error page). Our probe reports that honestly, but it fires on every
-    # services-status refresh, so a single outage buried 214 of 233 "other"
-    # errors on 2026-07-25 and made the bucket look alarming. Classify it (and
-    # keep it FIRST — the message says "connection"/"503", which the generic
-    # `network` bucket would otherwise swallow). Not our bug, just noise.
-    ("amazon-thirdparty", ("amz.dezalty.com", "[amazon] probe failed")),
     # A task whose engine can't speak its URL's service. The Apple Go tool answers
     # "Failed to get album response" and exits 0, so the failure hid inside the
     # generic `other` bucket (2026-07-27: a Spotify album URL reached
@@ -2641,7 +2629,6 @@ def check_errors_24h():
         cutoff = datetime.now().timestamp() - 24 * 3600
         buckets: dict = {}
         total = 0
-        amz_ext = 0
         _sp_tail_pending = False   # впереди идущий ERROR = отказ трека, ждём его хвост
         for ln in log.read_text(encoding="utf-8", errors="ignore").splitlines()[-8000:]:
             if " ERROR " not in ln:
@@ -2674,14 +2661,6 @@ def check_errors_24h():
             # превратилась бы в шум — а это хуже, чем лишняя строка в `other`.
             if _re.search(r"\bartists?: .+\(\d+\)\s*$", low):
                 continue
-            # Сторонний Amazon-враппер (amz.dezalty.com) лежит сутками — каждый
-            # прогон probe-all пишет одну и ту же ERROR-строку, и за сутки их
-            # набирается 50+. Это НЕ наша поломка (check_engine_probe её уже
-            # игнорирует), но в сводке ошибок она забивала топ и создавала
-            # впечатление шумного прохода. Считаем отдельно, одной строкой.
-            if "[amazon] probe failed" in low and "amz.dezalty.com" in low:
-                amz_ext += 1
-                continue
             # ОДИН отказ трека = одна ошибка, а не две. На недоступный этой
             # учётке трек OrpheusDL печатает сначала «Episode download also
             # failed …: Extended Metadata request failed: Status code 404»
@@ -2705,12 +2684,8 @@ def check_errors_24h():
             total += 1
             tag = next((name for name, keys in _ERR_BUCKETS if any(k in low for k in keys)), "other")
             buckets[tag] = buckets.get(tag, 0) + 1
-        if amz_ext:
-            _report.append(f"ℹ️ Amazon: сторонний {amz_ext}× за сутки «amz.dezalty.com недоступен» "
-                           f"— внешний сервис лежит, не наша поломка (загрузки Amazon стоят, "
-                           f"остальное не затронуто)")
         if not buckets:
-            ok("Ошибок за сутки: 0 — чисто" + (f" (не считая {amz_ext}× внешнего Amazon)" if amz_ext else ""))
+            ok("Ошибок за сутки: 0 — чисто")
             return
         # Заголовок не должен считать НОРМУ поломками. Оба этих бакета заведены
         # именно как «не ошибка»: `lyrics-none` — у трека нет текста (печатается

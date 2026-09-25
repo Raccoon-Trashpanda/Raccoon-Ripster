@@ -1,57 +1,8 @@
-"""Amazon Music (amz CLI) and Yandex Music (ymd) engines — quality lists, log
-classification, and `is_finished` auth/availability paths."""
+"""Yandex Music (ymd) engine — quality lists, log classification, and
+`is_finished` auth/availability paths."""
 import pytest
 
-from ripster.engines.amazon import AmazonEngine
 from ripster.engines.yandex import YandexEngine, _ym_cover
-
-
-# ════════════════════════════ Amazon ════════════════════════════
-@pytest.fixture
-def az():
-    return AmazonEngine()
-
-
-def test_amazon_qualities(az):
-    qs = az.qualities()
-    assert len(qs) == 4
-    assert all(q["engine"] == az.name for q in qs)
-    assert {"Max", "Master", "High", "Atmos_EC-3"} == {q["id"] for q in qs}
-
-
-@pytest.mark.parametrize("line,expected", [
-    ("an error occurred", "error"),
-    ("token expired", "error"),
-    ("downloaded track 1", "success"),
-    ("neutral", "stdout"),
-])
-def test_amazon_classify(az, line, expected):
-    assert az.classify_line(line) == expected
-
-
-@pytest.mark.parametrize("line,expected", [
-    ("50%", (50, 100)),
-    ("3/12", (3, 12)),
-    ("nothing", (1, 2)),
-])
-def test_amazon_parse_progress(az, line, expected):
-    assert az.parse_progress(line, 1, 2) == expected
-
-
-def test_amazon_finished_auth(az):
-    r = az.is_finished("token expired")
-    assert r.success is False and "токен" in r.error.lower()
-
-
-def test_amazon_finished_success(az):
-    r = az.is_finished("downloaded\ncompleted", rc=0)
-    assert r.success is True and r.tracks_ok == 2
-
-
-def test_amazon_finished_error_exit(az):
-    r = az.is_finished("some failure on line", rc=1)
-    assert r.success is False
-
 
 # ════════════════════════════ Yandex ════════════════════════════
 @pytest.fixture

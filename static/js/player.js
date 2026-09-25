@@ -2055,7 +2055,7 @@ function _mixPosGet(key) {
 function _ppArtistSub(item) {
   const SRC = {qobuz:'Qobuz',apple:'Apple Music',deezer:'Deezer',tidal:'Tidal',
     soundcloud:'SoundCloud',spotify:'Spotify',bbc:'BBC',yandex:'Яндекс.Музыка',
-    amazon:'Amazon Music',beatport:'Beatport',jiosaavn:'JioSaavn'};
+    beatport:'Beatport',jiosaavn:'JioSaavn'};
   const src = SRC[item.service] || (item.service ? item.service.charAt(0).toUpperCase()+item.service.slice(1) : '');
   if (item.artist) {
     return item.full ? item.artist + (src ? ' · ' + src : '')

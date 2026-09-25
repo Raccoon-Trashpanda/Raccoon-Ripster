@@ -95,7 +95,6 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "soundcloud-accounts",   # multi-account SoundCloud pool (load-balanced) — list of {token,label}
     "yandex-token", "yandex-quality", "yandex-save-path",
     "yandex-accounts",   # multi-account Yandex pool (load-balanced) — list of {token,label}
-    "amazon-token", "amazon-quality", "amazon-save-path", "amazon-cli-path",
     "releases-services", "releases-days", "releases-types",
     # Кросс-сервисный радар (02.08.2026): источник ищет релизы артистов, за
     # которыми следят в ДРУГИХ сервисах, и вишлист опрашивает ранние витрины.

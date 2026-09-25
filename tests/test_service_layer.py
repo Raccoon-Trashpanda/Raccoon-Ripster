@@ -41,4 +41,3 @@ def test_default_quality_per_service_defaults(cfg):
     assert service_layer.default_quality("qobuz") == "27"
     assert service_layer.default_quality("deezer") == "flac"
     assert service_layer.default_quality("tidal") == "lossless"
-    assert service_layer.default_quality("amazon") == "High"

@@ -5,7 +5,7 @@
 // ======================================================================
 
 // ── Service detection in URL bar ─────────────────────────────────
-const SVC_COLORS = {apple:'#fc3c44',qobuz:'#1b68d3',deezer:'#a238ff',tidal:'#00d4b3',spotify:'#1db954',soundcloud:'#ff5500',beatport:'#a6ce39',yandex:'#ffcc00',amazon:'#25d1da',jiosaavn:'#2bc5b4'};
+const SVC_COLORS = {apple:'#fc3c44',qobuz:'#1b68d3',deezer:'#a238ff',tidal:'#00d4b3',spotify:'#1db954',soundcloud:'#ff5500',beatport:'#a6ce39',yandex:'#ffcc00',jiosaavn:'#2bc5b4'};
 const SVC_LABELS = {
   apple:      '🍎 Apple Music',
   qobuz:      '🎼 Qobuz',
@@ -16,7 +16,6 @@ const SVC_LABELS = {
   beatport:   '🟣 Beatport',
   jiosaavn:   '🇮🇳 JioSaavn',
   yandex:     '🟡 Yandex Music',
-  amazon:     '🅰️ Amazon Music',
 };
 
 // Чистое определение сервиса по ссылке — БЕЗ трогания разметки. Отдельно от
@@ -36,7 +35,6 @@ function svcFromUrl(val) {
   if(val.includes('beatport.com'))         return 'beatport';
   if(val.includes('jiosaavn.com'))         return 'jiosaavn';
   if(val.includes('music.yandex.'))        return 'yandex';
-  if(val.includes('music.amazon.'))        return 'amazon';
   if(val.includes('bbc.co.uk'))            return 'bbc';
   return '';
 }
@@ -195,11 +193,6 @@ function showStab(id, btn) {
     setVal('s-yandex-qual', c['yandex-quality']||'flac');
     setVal('s-yandex-path', c['yandex-save-path']||'');
     try { loadYandexAccounts?.(); } catch {}
-  }
-  if(id==='amazon') {
-    _setSecret('s-amazon-token', c['amazon-token']);
-    setVal('s-amazon-qual', c['amazon-quality']||'High');
-    setVal('s-amazon-path', c['amazon-save-path']||'');
   }
   if(id==='admin') {
     loadAdminLinks();

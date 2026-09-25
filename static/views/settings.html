@@ -14,7 +14,6 @@
           <button class="stab owner-only" data-stab="beatport"   onclick="showStab('beatport',this)"  style="color:#01f49c">Beatport</button>
           <button class="stab svc-tab" data-stab="jiosaavn" onclick="showStab('jiosaavn',this)" style="color:#2bc5b4">🇮🇳 JioSaavn</button>
           <button class="stab svc-tab" data-stab="yandex"   onclick="showStab('yandex',this)" style="color:#ffcc00" data-i18n="st.yandex">Яндекс</button>
-          <button class="stab svc-tab" data-stab="amazon"   onclick="showStab('amazon',this)" style="color:#25d1da">🅰️ Amazon</button>
           <button class="stab" data-stab="digs" onclick="showStab('digs',this)" style="color:#c084a0" data-i18n="st.digs">&#9935; &#1056;&#1072;&#1089;&#1082;&#1086;&#1087;&#1082;&#1080;</button>
           <button class="stab" data-stab="releases"   onclick="showStab('releases',this)" data-i18n="st.releases">Релизы</button>
           <button class="stab" data-stab="about"      onclick="showStab('about',this)" data-i18n="st.about">О сервисе</button>
@@ -1670,48 +1669,6 @@
         </div>
         </div><!-- end stab-deezer -->
 
-        <!-- ══════════ AMAZON MUSIC TAB ══════════ -->
-        <div class="stab-panel" id="stab-amazon">
-        <div class="block mt12">
-          <div class="block-title" style="color:#25d1da">🅰️ Amazon Music</div>
-
-          <div style="background:rgba(37,209,218,.06);border:1px solid rgba(37,209,218,.15);border-radius:9px;padding:10px 12px;margin-bottom:10px">
-            <div style="font-size:11px;font-weight:700;color:#25d1da;margin-bottom:8px" data-i18n="s.amazon_token_title">🔑 Токен Amazon Music</div>
-            <div class="field-group">
-              <label class="lbl">amazon-token</label>
-              <div style="display:flex;gap:5px">
-                <input id="s-amazon-token" type="password" data-i18n-ph="s.amazon_token_ph" placeholder="Вставь токен с amz.dezalty.com/login…"
-                  style="font-family:var(--mono);font-size:11px;flex:1"
-                  oninput="saveSetting('amazon-token',this.value)"/>
-                <button class="btn-ghost btn-sm btn-icon" onclick="const f=document.getElementById('s-amazon-token');f.type=f.type==='password'?'text':'password'" data-i18n-title="s.show_hide" title="Показать/скрыть">👁</button>
-              </div>
-            </div>
-            <div data-i18n-html="s.amazon_hint" style="font-size:10px;color:var(--muted);margin-top:6px;line-height:1.5">
-              Получи токен на <code>amz.dezalty.com/login</code> → «Get Auth Tokens».<br>
-              Требуется Amazon Music Unlimited для HD/Ultra HD. Движок: CLI <code>amz</code> (pip install amazon-music).
-            </div>
-            <div style="display:flex;gap:8px;margin-top:10px;align-items:center;flex-wrap:wrap">
-              <button class="btn-sm" onclick="saveSetting('amazon-token',document.getElementById('s-amazon-token').value)" data-i18n="s.save_btn" style="padding:6px 12px;background:rgba(37,209,218,.18);color:#25d1da;border:1px solid rgba(37,209,218,.4);border-radius:7px;font-size:11px;font-weight:600;cursor:pointer;font-family:var(--font)">💾 Сохранить</button>
-            </div>
-          </div>
-
-          <div class="settings-grid">
-            <div class="field-group">
-              <label class="lbl" data-i18n="s.qobuz_quality"><span data-i18n="s.def_quality">Качество по умолчанию</span></label>
-              <select id="s-amazon-qual" onchange="saveSetting('amazon-quality',this.value)">
-                <option value="High">HD — FLAC 16/44</option>
-                <option value="Master">Hi-Res — 24/96</option>
-                <option value="Max">Ultra HD — 24/192</option>
-                <option value="Atmos_EC-3">Dolby Atmos</option>
-              </select>
-            </div>
-            <div class="field-group">
-              <label class="lbl" data-i18n="s.save_path">Путь сохранения</label>
-              <input id="s-amazon-path" type="text" placeholder="по умолчанию (общая папка)" data-i18n-ph="s.default_folder_ph" oninput="saveSetting('amazon-save-path',this.value)"/>
-            </div>
-          </div>
-        </div>
-        </div><!-- end stab-amazon -->
 
         <!-- ══════════ BOT TAB (#23 — de-hardwire token/owner/channel) ══════════ -->
 

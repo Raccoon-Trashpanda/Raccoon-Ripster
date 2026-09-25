@@ -268,7 +268,7 @@ def ids_for(url: str, *, cfg: dict | None = None, fresh: bool = False) -> dict:
         web = m.get("webUrl") or ""
         for host, name in (("spotify", "spotify"), ("music.apple", "apple"),
                            ("deezer", "deezer"), ("tidal", "tidal"),
-                           ("music.youtube", "youtube"), ("amazon", "amazon")):
+                           ("music.youtube", "youtube")):
             if host in web and name not in links:
                 links[name] = web
 

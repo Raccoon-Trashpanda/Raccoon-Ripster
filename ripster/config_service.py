@@ -551,6 +551,13 @@ def load_config(config_file: _Path, tokens_dir: _Path) -> dict:
     # Сторож работает отдельным процессом и правит файл; если бы мы просто
     # читали файл, всё бы сходилось — но сохранение пишет config.yaml целиком
     # из памяти, и раз в сутки мёртвый ARL возвращался (см. retired_credentials).
+    # Мёртвые ключи (аудит 25.09.2026): Amazon-движок
+    # выпилен 25.09.2026 — источник токенов amz.dezalty.com отозван. Старый
+    # config.yaml не должен ронять загрузку: ключи молча уходят при чтении,
+    # файл не трогаем, при ближайшем сохранении их уже не будет.
+    for _k in [k for k in merged if str(k).startswith("amazon-")]:
+        merged.pop(_k)
+
     try:
         from . import retired_credentials as _retired
         for _n in _retired.strip_from_config(merged):

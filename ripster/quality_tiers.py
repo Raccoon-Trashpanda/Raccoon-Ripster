@@ -16,7 +16,7 @@ Herlop» и принял это за баг. Бага не было: Go+ пок�
   • неизвестный тариф → ``None`` («не определено»), а не самая смелая догадка;
   • маппится только то, что подтверждено ответом сервиса или текстом движка;
   • флаг, выставленный «по умолчанию», а не измеренный, не участвует
-    (см. ветку amazon — проба пишет lossless=True без проверки Unlimited).
+    (так проба amazon писала lossless=True без проверки Unlimited).
 
 Форма ceiling: ``{"codec": "AAC", "kbps": 256}`` — lossy;
 ``{"codec": "FLAC", "bits": 24, "khz": 192}`` — hi-res;
@@ -118,10 +118,6 @@ def _yandex(tier: str, flags: dict) -> dict | None:
     return None
 
 
-def _amazon(tier: str, flags: dict) -> dict | None:
-    return None   # проба пишет lossless=True без проверки Unlimited — не верим
-
-
 _HANDLERS = {
     "soundcloud": _soundcloud,
     "tidal":      _tidal,
@@ -130,7 +126,6 @@ _HANDLERS = {
     "apple":      _apple,
     "spotify":    _spotify,
     "yandex":     _yandex,
-    "amazon":     _amazon,
 }
 
 

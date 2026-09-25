@@ -203,7 +203,6 @@ function detectSvcFromUrl(url) {
   if(url.includes('beatport.com'))     return 'beatport';
   if(url.includes('jiosaavn.com'))     return 'jiosaavn';
   if(url.includes('music.yandex.'))    return 'yandex';
-  if(url.includes('music.amazon.'))    return 'amazon';
   return null;
 }
 

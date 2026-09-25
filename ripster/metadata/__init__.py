@@ -120,12 +120,6 @@ async def fetch_meta_any(url: str, service: str = "") -> Optional[dict]:
         meta = await fetch_meta_bbc(url)
     elif svc == "jiosaavn":
         meta = await fetch_meta_jiosaavn(url)
-    elif svc == "amazon":
-        # Amazon Music serves a JS-only SPA shell (no OpenGraph/SEO tags) and has
-        # no anonymous catalog API, so there's no progress-card metadata source.
-        # The card fills from the downloaded file tags on success (amz writes a
-        # tagged FLAC + cover). Return None → stays sparse during download only.
-        return None
     elif svc == "orpheus_spotify":
         return None   # no metadata API — return None so enrich_meta merges instead of overwrites
 

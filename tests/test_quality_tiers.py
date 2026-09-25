@@ -48,11 +48,6 @@ def test_unknown_tier_has_no_ceiling_not_a_brave_guess():
     assert qt.ceiling("no-such-service", "Premium") is None
 
 
-def test_amazon_lossless_flag_is_not_trusted():
-    """Проба Amazon пишет lossless=True БЕЗ проверки Unlimited — не верим."""
-    assert qt.ceiling("amazon", "", {"lossless": True}) is None
-
-
 def test_tidal_quality_and_names():
     assert qt.ceiling("tidal", "PREMIUM") == {"kbps": 320}
     # кодек у 320-го слоя разный у разных клиентов — не додумываем,

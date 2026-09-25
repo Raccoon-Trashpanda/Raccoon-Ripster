@@ -63,85 +63,6 @@ async def _probe_yandex(overlay: dict | None = None) -> dict:
         return {"ok": False, "error": f"{type(e).__name__}: {e}"}
 
 
-async def _probe_amazon(overlay: dict | None = None) -> dict:
-    """Amazon Music: download goes through the `amz` CLI with a saved token.
-
-    Previously this only checked "is a token string present" + "is the `amz`
-    package importable" — it never actually asked Amazon whether the token
-    still works. That made the Setup/services status page show a green
-    checkmark for a long-expired token, so guests would pick Amazon, try to
-    download, and fail — misleading everyone (found 2026-07-22). Now makes a
-    real, cheap `GET /account` call (`amz.api.API.get_account_info`) and
-    treats an expired/invalid/banned token as a genuine failure, same as the
-    Apple decrypt-path health check."""
-    token = (_view(overlay).get("amazon-token") or "").strip()
-    if not token:
-        return {"ok": False, "error_key": "pr.amz_no_token", "error": "Токен не задан — Settings → 🅰️ Amazon (amz.dezalty.com/login)."}
-    from fastapi.concurrency import run_in_threadpool
-
-    def _do():
-        import os, importlib.util
-        override = (_cfg.get("amazon-cli-path") or "").strip()
-        if override:
-            # An explicit override is a real exe path → check the file.
-            ok_exe, detail = os.path.isfile(override), os.path.basename(override)
-        else:
-            # Default: _amz_exe() runs `python -c "from amz.cli import main"`, i.e.
-            # an argv LIST, not a file path (the old os.path.isfile(list) blew up
-            # with "path should be str… not list"). The real requirement is that
-            # the `amz` (amazon-music) package is importable.
-            ok_exe, detail = (importlib.util.find_spec("amz") is not None), "amz module"
-        if not ok_exe:
-            return {"ok": False,
-                    "error_key": "pr.amz_no_cli", "error": "CLI `amz` не найден — pip install amazon-music "
-                             "(или задай amazon-cli-path)."}
-
-        # Real token check — cheap single GET, same client the actual downloader uses.
-        try:
-            from amz.api import API as _AmzAPI
-            from amz.errors import InvalidAccessToken, UserBanned, RateLimitExceeded, ApiConnectionError
-            api_url = (_cfg.get("amazon-api-url") or "https://amz.dezalty.com").strip()
-            info = _AmzAPI(api_url, token).get_account_info()
-        except InvalidAccessToken:
-            return {"ok": False, "error_key": "pr.amz_expired", "error": "Токен Amazon протух — обнови в Settings → 🅰️ Amazon "
-                                          "(amz.dezalty.com/login)."}
-        except UserBanned:
-            return {"ok": False, "error_key": "pr.amz_banned", "error": "Amazon-аккаунт заблокирован/забанен — токен не поможет, нужен другой."}
-        except RateLimitExceeded:
-            # A real, transient rate-limit (429) — the account/token themselves are
-            # fine, just throttled right now. Don't flip the whole service red.
-            return {"ok": True, "user": {
-                "login": "token ✓", "lossless": True, "hq": True,
-                "note_key": "pr.amz_429", "note": "Токен задан, но проверка сейчас rate-limited (429) — не про токен.",
-            }}
-        except ApiConnectionError as e:
-            # amz.fetch() raises this for BOTH real network drops AND a bad HTTP
-            # response from amz.dezalty.com (5xx / non-JSON) — either way the
-            # third-party wrapper itself is down/unreachable right now, which
-            # means a real download will fail too regardless of token validity.
-            # Reporting this as green (as the old presence-only check did) was
-            # exactly what misled everyone into trying and failing — say so
-            # honestly instead (found 2026-07-22, amz.dezalty.com was returning
-            # a Heroku "Application Error" page at the time).
-            return {"ok": False, "error_key": "pr.amz_down", "error_args": {"e": str(e)}, "error": f"amz.dezalty.com сейчас недоступен ({e}) — "
-                                          f"не проблема токена, сторонний сервис лежит, попробуй позже."}
-        except Exception as e:
-            return {"ok": False, "error_key": "pr.amz_check_fail", "error_args": {"e": f"{type(e).__name__}: {e}"}, "error": f"Не удалось проверить токен: {type(e).__name__}: {e}"}
-
-        return {"ok": True, "user": {
-            "login":    (info.get("email") or info.get("username") or "token ✓"),
-            "lossless": True,         # Master/HD при наличии Unlimited
-            "hq":       True,
-            "note_key": "pr.amz_ok", "note_args": {"detail": detail},
-            "note":     f"Токен проверен вживую, CLI: {detail} ✓",
-        }}
-
-    try:
-        return await run_in_threadpool(_do)
-    except Exception as e:
-        return {"ok": False, "error": f"{type(e).__name__}: {e}"}
-
-
 async def _probe_bbc(overlay: dict | None = None) -> dict:
     """BBC Sounds — ключей не требует вовсе, и раньше проба на него отвечала
     `400 Unsupported service: bbc`. Отсутствие учётных данных это НЕ ошибка
@@ -200,7 +121,6 @@ async def accounts_survey(fresh: int = 0):
         "apple_wrapper": (),
         "beatport":   ("beatport-username",),
         "yandex":     ("yandex-token",),
-        "amazon":     ("amazon-cookies",),
         "bbc":        (),          # без учётных данных
     }
 
@@ -297,7 +217,6 @@ def _probes() -> dict:
         "apple_wrapper": _probe_apple_wrapper,
         "beatport":   _probe_beatport,
         "yandex":     _probe_yandex,
-        "amazon":     _probe_amazon,
         "bbc":        _probe_bbc,
     }
 
@@ -1457,7 +1376,6 @@ async def import_token(service: str, body: dict):
 # входы разом, слишком легко нажимается по ошибке, а восстановление стоит часов.
 _LOGOUT_KEYS: dict[str, tuple[str, ...]] = {
     "yandex":     ("yandex-token",),
-    "amazon":     ("amazon-token",),
     "deezer":     ("deezer-arl",),
     "soundcloud": ("soundcloud-oauth-token",),
     "tidal":      ("tidal-token", "tidal-token-expiry", "tidal-user-id"),

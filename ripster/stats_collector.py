@@ -218,7 +218,7 @@ _SERVICE_LABELS = {
     "apple": "Apple Music", "deezer": "Deezer", "qobuz": "Qobuz",
     "tidal": "Tidal", "spotify": "Spotify", "soundcloud": "SoundCloud",
     "beatport": "Beatport", "bbc": "BBC", "jiosaavn": "JioSaavn",
-    "yandex": "Yandex Music", "amazon": "Amazon Music",
+    "yandex": "Yandex Music",
 }
 
 
