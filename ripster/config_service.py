@@ -7,7 +7,7 @@ every existing .get() / [] / in / update() call continues to work unchanged.
 
 New code can use typed @property accessors instead of magic strings:
     cfg.qobuz_auth_token   → str   (no scattered default="")
-    cfg.amd_parallel       → int
+    cfg.amd_instance_url   → str
     cfg.embed_cover        → bool
 
 save_config in app.py must dump cfg._data (not cfg itself) to avoid

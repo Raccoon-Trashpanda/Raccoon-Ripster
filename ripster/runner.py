@@ -129,8 +129,8 @@ _MAX_PATIENT_RETRIES = 15   # ~28 min of patient retrying through an overload bl
 # — it just makes the tile "hang" for many minutes while the user keeps re-queuing
 # the same release. Fail FAST (one honest retry) with a clear message that names the
 # real cause (public server down → use local ALAC / try later), so the owner does
-# NOT keep pulling the same Hi-Res release. Checked BEFORE _RE_PATIENT
-# (both can mention wm.wol.moe).
+# NOT keep pulling the same Hi-Res release. Checked BEFORE _RE_DECRYPT_DOWN /
+# _RE_PATIENT (all three can mention wm.wol.moe).
 # 08.08.2026: этот список НЕ ловил самую частую форму отказа. Публичный враппер
 # чаще всего не «недоступен», а отвечает штатно и говорит, что живых инстансов у
 # него нет: `WrapperManagerException: no healthy and ready instances`. Ни одного
@@ -146,6 +146,23 @@ _RE_WRAPPER_DEAD = _re.compile(
     _re.I,
 )
 _MAX_DEAD_RETRIES = 1   # one quick re-check, then stop with clear guidance
+
+# Decrypt gRPC CORE down on the public wrapper (decrypt_init AioRpcError /
+# StatusCode.UNAVAILABLE / "DECRYPT STREAM DOWN"). Движок `amd` выпилена, но
+# эти строки живые: публичный враппер отвечает штатно и пересылает текст своей
+# серверной ошибки через `res.error = f"Публичный wrapper: {st['msg']}"`
+# (engines/wrapper_lite.py), а healthcheck следит за "decrypt stream" именно
+# на этом пути. Это НЕ «враппер занят» — декрипт-ядро перегружено/мертво и за
+# полчаса молотья не healed (наблюдено: 15×120s = 35 мин, всё UNAVAILABLE).
+# Несколько честных попыток — и стоп с ясной подсказкой (локальный docker-враппер
+# / позже / не Hi-Res). Проверяется ДО _RE_PATIENT: строка декрипта содержит
+# "wm.wol.moe", что иначе выдало бы 15 повторов (кросс-ревью 25.09, medium).
+_RE_DECRYPT_DOWN = _re.compile(
+    r'DECRYPT\s+STREAM\s+DOWN|AMD_WRAPPER_DECRYPT_ERROR|ошибку\s+декрипт|'
+    r'decrypt_init|AioRpcError|decrypt.*UNAVAILABLE|внутренн.*ошибку\s+декрипт',
+    _re.I,
+)
+_MAX_DECRYPT_RETRIES = 2   # ~3 min, then stop — decrypt core won't self-heal now
 
 # Apple: «каталог не отдал альбом» — НЕ один диагноз, а целое семейство, и
 # правило «не повторять» верно лишь для ОДНОГО его члена. Строка в _RE_NO_RETRY
@@ -3509,6 +3526,8 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # patient wrapper-busy class, else the normal small cap.
             if _RE_WRAPPER_DEAD.search(msg):
                 max_r = _MAX_DEAD_RETRIES
+            elif _RE_DECRYPT_DOWN.search(msg):
+                max_r = _MAX_DECRYPT_RETRIES
             elif _RE_PATIENT.search(msg):
                 max_r = _MAX_PATIENT_RETRIES
             else:
