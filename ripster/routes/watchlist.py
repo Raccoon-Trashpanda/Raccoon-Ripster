@@ -1861,11 +1861,13 @@ async def _check_watchlist_pass():
                 if release_url and release_url != prev and _seen_has(entry, release_name):
                     entry["last_release"] = release_url
                     entry["last_release_title"] = release_name
+                    entry["last_release_alb_artist"] = str(latest.get("artist") or "")
                     save(items)
                     continue
                 if release_url and release_url != prev:
                     entry["last_release"] = release_url
                     entry["last_release_title"] = release_name
+                    entry["last_release_alb_artist"] = str(latest.get("artist") or "")
                     if isinstance(entry.get("seen"), list):
                         _seen_add(entry, release_name)
                     # First ever check just records a baseline: otherwise adding

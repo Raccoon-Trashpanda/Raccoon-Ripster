@@ -1352,11 +1352,33 @@ async def pair_radar(request: Request):
                     return part.replace("-", " ").strip().title()
         return ""
 
+    def _release_id(url: str) -> str:
+        # Идентификатор релиза из ссылки — то, по чему телефон схлопывает
+        # карточки ОДНОГО микса от нескольких слежимых артистов в одну.
+        # Apple: …/album/<slug>/<id>?i=<track>; Spotify/Deezer/Qobuz/Tidal:
+        # …/album/<id> или /album/<id>/. Берём последний не-слаг сегмент-число
+        # либо хвостовой id после «/album/».
+        if not url:
+            return ""
+        path = url.split("?")[0].rstrip("/")
+        seg = path.split("/")[-1]
+        if seg.isdigit():
+            return seg
+        low = url.lower()
+        for marker in ("/album/", "/track/", "/playlist/"):
+            i = low.find(marker)
+            if i >= 0:
+                tail = path[i + len(marker):].split("/")[0]
+                if tail:
+                    return tail
+        return seg
+
     items = []
     for e in wl:
         name = (e.get("name") or "").strip()
         if not name:
             continue
+        lru = _last_release_url(e)
         items.append({
             "name": name,
             "service": e.get("service", ""),
@@ -1370,11 +1392,17 @@ async def pair_radar(request: Request):
             # именем `latest_url` — и телефон пытался открыть название как ссылку:
             # резолв не удавался, играло «что нашлось» (жалоба 04.09.2026 —
             # карточка Etherwood включала чужой релиз). Отдаём по факту.
-            "latest_url": _last_release_url(e),
+            "latest_url": lru,
             "latest_title": _last_release_title(e),
             "cover_url": e.get("last_release_cover") or e.get("cover") or "",
             "auto": bool(e.get("auto_download")),
             "seen_count": len(e.get("seen") or []),
+            # Автор релиза (не тот, кого мы слежим): у миксов/сборников это
+            # куратор, а не участник. Пусто — ПК не записал (старые находки
+            # до правки 24.09.2026). Телефон строит по нему главную строку
+            # карточки, а слежимого имени — в чип «с участием».
+            "alb_artist": str(e.get("last_release_alb_artist") or ""),
+            "release_id": _release_id(lru),
         })
 
     # Spotify — «первичка» релиз-радара у владельца, но живёт НЕ в вотчлисте, а в
@@ -1406,6 +1434,11 @@ async def pair_radar(request: Request):
                     "latest_title": str(rel.get("title") or ""),
                     "cover_url": rel.get("cover") or "",
                     "auto": False, "seen_count": 0, "_d": date,
+                    # Автор релиза и его id: без них телефон не отличил бы
+                    # куратора микса от участника и не схлопнул бы один микс,
+                    # пришедший от двух слежимых артистов, в одну карточку.
+                    "alb_artist": str(rel.get("alb_artist") or ""),
+                    "release_id": _release_id(url),
                 }
         have = {(i["name"], i["service"]) for i in items}
         for v in by_artist.values():
