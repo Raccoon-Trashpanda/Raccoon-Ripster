@@ -149,13 +149,6 @@ const STEP_DEFS_GAMDL = [
   { key: 'mp4decrypt',  label: 'mp4decrypt',  icon: '🔓' },
   { key: 'ffmpeg',      label: 'FFmpeg',      icon: '🎞' },
 ];
-const STEP_DEFS_AMD = [
-  { key: 'go',         label: 'AMD clone',  icon: '📦' },
-  { key: 'downloader', label: 'AMD deps',   icon: '🔧' },
-  { key: 'MP4Box',     label: 'MP4Box',     icon: '🎬' },
-  { key: 'mp4decrypt', label: 'mp4decrypt', icon: '🔓' },
-  { key: 'ffmpeg',     label: 'FFmpeg',     icon: '🎞' },
-];
 let STEP_DEFS = STEP_DEFS_ZHAAREY;
 const stepState = { go:'idle', downloader:'idle', MP4Box:'idle', mp4decrypt:'idle', ffmpeg:'idle' };
 let toolsState = {};
@@ -300,7 +293,6 @@ function handleMessage(msg) {
       // kills the rest of `init` processing, so the whole UI comes up half-dead
       // for a reason that looks nothing like the real cause.
       if(S.config['engine']==='gamdl' && typeof checkCookies === 'function')   setTimeout(checkCookies, 1200);
-      if(S.config['engine']==='amd'   && typeof checkAMDStatus === 'function') setTimeout(checkAMDStatus, 800);
       // Init quality selector for current service
       updateQualitySelector('apple');
       _refreshSearchSvcSelect();
@@ -534,11 +526,6 @@ function handleMessage(msg) {
       _bbcDlDone(msg.pid, msg.title);
       break;
     }
-    case 'amd_ready': {
-      if(typeof checkAMDStatus === 'function') checkAMDStatus();
-      toast(t('t.amd_ready'),'var(--green)');
-      break;
-    }
     case 'gamdl_deps_fixed': {
       const btn2 = document.getElementById('fix-deps-btn');
       if(btn2){ btn2.disabled=false; btn2.textContent='🔧 Fix gamdl deps (protobuf)'; btn2.style.display='none'; }
@@ -647,14 +634,6 @@ function handleMessage(msg) {
       toast(t('t.wrapper_up'),'var(--green)');
       checkWrapperStatus();
       break;
-    case 'amd_wrapper_not_ready': {
-      const _inst = msg.instance || 'wm.wol.moe';
-      toast('⚠ '+ti('t.wrapper_not_ready',{inst:_inst}), 'var(--orange)');
-      // Refresh the status widget if visible
-      const _wmEl = document.getElementById('amd-wm-status');
-      if(_wmEl && _wmEl.style.display !== 'none') checkAMDWrapperStatus();
-      break;
-    }
     case 'orpheus_authed': {
       loadOrpheusStatus();
       const authUser = msg.username ? ` (${msg.username})` : '';
@@ -1173,7 +1152,7 @@ function _svcLabel(svc){ return {apple:'Apple Music',qobuz:'Qobuz',deezer:'Deeze
 const SVC_BRAND = {
   apple:'#fc3c44', qobuz:'#1b68d3', tidal:'#00d4b3', deezer:'#a238ff',
   spotify:'#1db954', soundcloud:'#ff5500', bbc:'#e4003b', yandex:'#ffcc00',
-  lucida:'#ff7a33', orpheus:'#1db954', amd:'#fc3c44', gamdl:'#fc3c44',
+  lucida:'#ff7a33', orpheus:'#1db954', gamdl:'#fc3c44',
   zhaarey:'#fc3c44', beatport:'#01f49c', jiosaavn:'#2bc5b4', wrapper:'#af52de',
   watchlist:'#ffd60a', release:'#1db954', guest:'#c084a0',
   stats:'#3ecfaa', tunnel:'#6a6a8a', ngrok:'#6a6a8a',
@@ -1358,9 +1337,8 @@ function applyConfig() {
     setVal('s-autodel', _ad);
     const _adv = document.getElementById('s-autodel-val');
     if(_adv) _adv.textContent = (_ad === 0 ? t('gp.off') : _ad + ' ' + t('gp.min')); }
-  { const _ap = +(c['amd-parallel'] || 2);
-    setVal('s-amd-parallel', _ap); }
   setVal('s-amd-wm-key', c['amd-wm-api-key']||'');
+  setVal('s-amd-instance', c['amd-instance-url']||'');
   setChk('s-apple-parallel', c['apple-parallel-tracks']);
   setChk('s-quality-subfolders', c['quality-subfolders']);
   setVal('s-transcode-format', c['transcode-format'] || (c['transcode-flac'] ? 'flac' : c['transcode-mp3'] ? 'mp3' : ''));
@@ -2033,39 +2011,25 @@ function toggleGamdlAuth(useWrapper) {
 
 function updateEngineUI(engine) {
   const isGamdl = engine === 'gamdl';
-  const isAMD   = engine === 'amd';
   const isZhaar = engine === 'zhaarey';
   // Switch step track defs
   if(typeof renderChecklist === 'function') renderChecklist();
   // Topbar buttons
   const zh  = document.getElementById('eng-zh');
   const gm  = document.getElementById('eng-gm');
-  const amd = document.getElementById('eng-amd');
   const _b = 'flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;transition:all .15s;font-family:var(--display);';
   if(zh)  zh.style.cssText  = _b + (isZhaar ? 'background:var(--red);color:#fff'   : 'background:transparent;color:var(--muted)');
   if(gm)  gm.style.cssText  = _b + (isGamdl ? 'background:var(--blue);color:#fff'  : 'background:transparent;color:var(--muted)');
-  if(amd) amd.style.cssText = _b + (isAMD   ? 'background:var(--green);color:#fff' : 'background:transparent;color:var(--muted)');
   // Settings blocks
   const zhB = document.getElementById('zhaarey-settings-block');
   const gmB = document.getElementById('gamdl-settings-block');
-  const amB = document.getElementById('amd-settings-block');
   if(zhB) zhB.style.display = isZhaar ? '' : 'none';
   if(gmB) gmB.style.display = isGamdl ? '' : 'none';
-  if(amB) amB.style.display = isAMD   ? '' : 'none';
-  // checkAMDStatus() was previously only ever called in response to the
-  // 'amd_ready' WS event (fired right after a fresh install completes THIS
-  // session) — so on every normal page load the block just showed the
-  // hardcoded "Not installed" placeholder from settings.html, forever,
-  // regardless of the real /api/amd/status. Check for real whenever the
-  // block becomes visible instead.
-  if(isAMD && typeof checkAMDStatus === 'function') checkAMDStatus();
   // Unified cover/tag option sections
   const coverGamdl = document.getElementById('cover-gamdl-opts');
   const tagsGamdl  = document.getElementById('tags-gamdl-opts');
-  const tagsAmd    = document.getElementById('tags-amd-opts');
   if(coverGamdl) coverGamdl.style.display = isGamdl ? '' : 'none';
   if(tagsGamdl)  tagsGamdl.style.display  = isGamdl ? '' : 'none';
-  if(tagsAmd)    tagsAmd.style.display     = isAMD   ? '' : 'none';
   // Tokens blocks
   const bearerB  = document.getElementById('bearer-token-block');
   const cookiesB = document.getElementById('cookies-token-block');
@@ -2080,7 +2044,7 @@ function updateEngineUI(engine) {
   // Apple-wrapper preference (local/public/auto) is always active — it is the
   // single source of truth for which Apple lossless wrapper is used, regardless
   // of the engine button. (Earlier it was greyed on non-zhaarey engines, which
-  // wrongly blocked choosing "local" while on AMD.)
+  // wrongly blocked choosing "local".)
   const _awHint=document.getElementById('aw-disabled-hint');
   if(_awHint) _awHint.style.display='none';
 }
@@ -2105,10 +2069,9 @@ async function switchEngine(engine) {
   updateEngineUI(engine);
   renderQualityGrid();
   updateQualitySelector('apple');
-  const _msgs = {zhaarey:'🔵 zhaarey engine', gamdl:'🐍 gamdl engine', amd:'✨ '+t('t.amd_v2_msg')};
-  const _clrs = {zhaarey:'var(--blue)', gamdl:'var(--blue)', amd:'var(--green)'};
+  const _msgs = {zhaarey:'🔵 zhaarey engine', gamdl:'🐍 gamdl engine'};
+  const _clrs = {zhaarey:'var(--blue)', gamdl:'var(--blue)'};
   toast(_msgs[engine]||engine, _clrs[engine]||'var(--text)');
-  if(engine === 'amd') checkAMDWrapperStatus();
 }
 
 // cookies.txt upload UI → moved to its own module file (see index.html).

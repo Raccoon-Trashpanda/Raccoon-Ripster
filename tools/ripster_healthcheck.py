@@ -725,7 +725,7 @@ def check_gamdl_cookies():
     elif st == "no_subscription":
         warn(f"gamdl: {v['reason']} — повторный экспорт ТЕХ ЖЕ куки не поможет. "
              f"Нужны куки аккаунта С подпиской либо продлить текущий. Загрузки "
-             f"через wrapper (zhaarey/AMD) это не затрагивает")
+             f"через wrapper (zhaarey/lite) это не затрагивает")
     elif st == "expired":
         warn(f"gamdl: {v['reason']} — экспортируй cookies.txt заново из браузера "
              f"с активной подпиской")

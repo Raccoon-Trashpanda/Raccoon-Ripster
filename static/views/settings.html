@@ -424,7 +424,7 @@
             <div class="toggle-info"><div class="toggle-label" data-i18n="s.save_cover">Save cover.jpg to folder</div><div class="toggle-sub" data-i18n="s.save_cover_sub">Saves artwork image alongside music files</div></div>
             <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-savecover" onchange="saveSetting('save-cover-to-folder',this.checked)"><div class="toggle-slider"></div></label>
           </div>
-          <!-- zhaarey / AMD -->
+          <!-- zhaarey -->
           <div class="settings-row mt8" id="cover-std-opts">
             <div class="field-group flex1">
               <label class="lbl" data-i18n="s.cover_size">Cover size</label>
@@ -515,24 +515,6 @@
             </div>
           </div>
 
-          <!-- AMD-specific lyrics -->
-          <div id="tags-amd-opts" style="display:none">
-            <div class="divider mt10"></div>
-            <div style="font-size:10px;color:var(--green);font-weight:600;margin:6px 0 4px">AMD</div>
-            <div class="settings-row">
-              <div class="field-group flex1">
-                <label class="lbl"><span data-i18n="s.lrc_fmt">Формат лирики</span></label>
-                <select id="s-amd-lrc" onchange="saveSetting('amd-lyrics-format',this.value)">
-                  <option value="lrc">LRC</option><option value="ttml">TTML</option>
-                </select>
-              </div>
-            </div>
-            <div class="toggle-row mt4">
-              <div class="toggle-info"><div class="toggle-label"><span data-i18n="s.save_lrc">Сохранять лирику</span></div></div>
-              <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-amd-savelrc"
-                onchange="saveSetting('amd-save-lyrics',this.checked)"><div class="toggle-slider"></div></label>
-            </div>
-          </div>
         </div>
 
         <!-- ═══ Service colors ═══ -->
@@ -692,15 +674,10 @@
               style="flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);transition:all .15s;background:transparent;color:var(--muted)">
               gamdl
             </button>
-            <button id="eng-amd" onclick="switchEngine('amd')"
-              style="flex:1;padding:7px 10px;font-size:11px;font-weight:700;border:none;cursor:pointer;border-radius:7px;font-family:var(--display);transition:all .15s;background:transparent;color:var(--muted)">
-              AMD v2
-            </button>
           </div>
           <div style="margin-top:8px;font-size:11px;color:var(--muted);line-height:1.6" data-i18n-html="as.eng_desc">
             <b style="color:var(--text)">zhaarey</b> — Go, Docker wrapper + Apple ID &nbsp;·&nbsp;
-            <b style="color:var(--text)">gamdl</b> — Python, cookies.txt &nbsp;·&nbsp;
-            <b style="color:var(--text)">AMD v2</b> — Python, ALAC/Atmos без Apple ID
+            <b style="color:var(--text)">gamdl</b> — Python, cookies.txt
           </div>
 
           <!-- Wrapper preference for lossless. The "Локальный" (own-premium-Apple-ID
@@ -732,6 +709,26 @@
             <span id="aw-public-status-text"></span>
             <a href="#" id="aw-public-recheck" onclick="refreshPublicWrapperStatus(true);return false"
                style="color:var(--blue);text-decoration:none;white-space:nowrap" data-i18n="s.pubw_recheck">Проверить снова</a>
+          </div>
+          <!-- АДРЕС И КЛЮЧ ПУБЛИЧНОГО WRAPPER'А. Ключи живые (`amd-instance-url`,
+               `amd-wm-api-key`): чужой сервер спрашивает их при каждой закачке.
+               С 25.09.2026 они здесь — раньше ютились в секции кнопки движка
+               `amd`, а та выпилена вместе с движком. -->
+          <div class="field-group" style="margin-top:8px">
+            <label class="lbl" data-i18n-html="as.amd_public">Wrapper-Manager <span style="color:var(--green);font-size:9px">● ПУБЛИЧНЫЙ — бесплатно, без Apple ID</span></label>
+            <div style="display:flex;gap:5px">
+              <input id="s-amd-instance" placeholder="wm.wol.moe"
+                oninput="saveSetting('amd-instance-url',this.value)"
+                style="flex:1;font-family:var(--mono);font-size:11px"/>
+              <button onclick="setVal('s-amd-instance','wm.wol.moe');saveSetting('amd-instance-url','wm.wol.moe')" ''' + BTN + '''>wm.wol.moe</button>
+              <button onclick="setVal('s-amd-instance','wm1.wol.moe');saveSetting('amd-instance-url','wm1.wol.moe')" ''' + BTN + '''>wm1.wol.moe</button>
+            </div>
+          </div>
+          <div class="field-group">
+            <label class="lbl" data-i18n-html="as.amd_wm_key">API-ключ wm.wol.moe</label>
+            <input id="s-amd-wm-key" type="password" placeholder="••••••••" data-i18n-ph="as.amd_wm_key_ph"
+              oninput="saveSetting('amd-wm-api-key',this.value)"
+              style="width:100%;box-sizing:border-box;font-family:var(--mono);font-size:11px"/>
           </div>
           <!-- РЕЖИМЫ ПУБЛИЧНОГО WRAPPER'А (выбор владельца, 24.09.2026).
                Тумблер «включить/выключить» оказался беднее реальности: враппер
@@ -775,7 +772,7 @@
             ⚙️ «Локальный» требует <b>Docker Desktop</b>. Не установлен? Поставь с <a href="https://www.docker.com/products/docker-desktop/" target="_blank" style="color:var(--orange)">docker.com</a> или переключись на «Публичный» — он работает без Docker, но зависит от чужого сервиса (статус ниже).
           </div>
           <div id="aw-disabled-hint" data-i18n-html="s.wrapper_disabled_hint" style="display:none;margin-top:6px;font-size:11px;color:var(--orange);line-height:1.5">
-            Доступно только для движка <b>zhaarey</b>. AMD v2 — это всегда публичный wrapper, gamdl — cookies.
+            Доступно только для движка <b>zhaarey</b>. gamdl — cookies.
           </div>
           <script>
           // Highlight-only (no save) — used by applyConfig() on load so reflecting
@@ -1358,82 +1355,6 @@
           </div>
         </div><!-- end gamdl-settings-block -->
 
-        <!-- ══ AMD Engine Settings ══ -->
-        <div class="block mt12" id="amd-settings-block" style="display:none">
-          <div class="block-title" style="display:flex;align-items:center;gap:8px">
-            🎵 AppleMusicDecrypt v2
-            <span style="font-size:9px;background:rgba(62,207,170,.15);color:var(--green);padding:2px 7px;border-radius:10px;font-weight:700" data-i18n="as.amd_badge">ALAC · ATMOS · БЕЗ APPLE ID</span>
-          </div>
-
-          <!-- Status -->
-          <div id="amd-status-block" style="background:rgba(128,128,128,.10);border:1px solid var(--border);border-radius:9px;padding:10px 13px;margin-bottom:10px">
-            <div style="display:flex;align-items:center;gap:8px">
-              <span id="amd-status-dot" style="font-size:14px">⏳</span>
-              <span id="amd-status-text" style="font-size:12px;color:var(--muted)" data-i18n="as.not_installed">Не установлен</span>
-              <button onclick="installAMD()" id="amd-install-btn"
-                style="margin-left:auto;background:rgba(62,207,170,.18);border:1px solid rgba(62,207,170,.3);border-radius:7px;padding:4px 12px;font-size:10px;font-weight:700;color:var(--green);cursor:pointer;font-family:var(--font)" data-i18n="as.install">
-                ⬇ Установить
-              </button>
-            </div>
-            <div style="font-size:10px;color:var(--muted);margin-top:4px" data-i18n-html="as.amd_install_hint">
-              Клонирует <code style="color:var(--text)">WorldObservationLog/AppleMusicDecrypt</code> v2 и устанавливает зависимости (~2 мин)
-            </div>
-          </div>
-
-          <!-- Instance URL -->
-          <div class="field-group">
-            <label class="lbl" data-i18n-html="as.amd_public">Wrapper-Manager <span style="color:var(--green);font-size:9px">● ПУБЛИЧНЫЙ — бесплатно, без Apple ID</span></label>
-            <div style="display:flex;gap:5px">
-              <input id="s-amd-instance" placeholder="wm.wol.moe"
-                oninput="saveSetting('amd-instance-url',this.value)"
-                style="flex:1;font-family:var(--mono);font-size:11px"/>
-              <button onclick="setVal('s-amd-instance','wm.wol.moe');saveSetting('amd-instance-url','wm.wol.moe')"
-                style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--mono)">wm.wol.moe</button>
-              <button onclick="setVal('s-amd-instance','wm1.wol.moe');saveSetting('amd-instance-url','wm1.wol.moe')"
-                style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--mono)">wm1.wol.moe</button>
-              <button onclick="checkAMDWrapperStatus()" data-i18n-title="s.check_status" title="Проверить статус"
-                style="background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:3px 8px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--mono)">⟳</button>
-            </div>
-          </div>
-
-          <!-- wm.wol.moe API key (с 10.09.2026 обязателен; секрет, гостям маскируется) -->
-          <div class="field-group">
-            <label class="lbl" data-i18n-html="as.amd_wm_key">API-ключ wm.wol.moe</label>
-            <input id="s-amd-wm-key" type="password" placeholder="••••••••" data-i18n-ph="as.amd_wm_key_ph"
-              oninput="saveSetting('amd-wm-api-key',this.value)"
-              style="width:100%;box-sizing:border-box;font-family:var(--mono);font-size:11px"/>
-          </div>
-
-          <!-- Wrapper-manager live status -->
-          <div id="amd-wm-status" style="display:none;margin-top:6px;border-radius:8px;padding:9px 12px;font-size:11px;line-height:1.6">
-            <div style="display:flex;align-items:center;gap:7px;flex-wrap:wrap">
-              <span id="amd-wm-dot" style="font-size:13px">●</span>
-              <span id="amd-wm-text" style="font-weight:600"></span>
-              <span id="amd-wm-clients" style="color:var(--muted);font-size:10px"></span>
-            </div>
-            <div id="amd-wm-regions" style="color:var(--muted);font-size:10px;margin-top:3px"></div>
-          </div>
-
-          <div class="settings-row mt8">
-            <div class="field-group flex1">
-              <label class="lbl" data-i18n="as.amd_parallel">Параллельных треков в релизе (публичный враппер)</label>
-              <input id="s-amd-parallel" type="number" min="1" max="16" placeholder="8"
-                oninput="saveSetting('amd-parallel',parseInt(this.value))"/>
-              <div style="font-size:10px;color:var(--muted);margin-top:3px" data-i18n="as.amd_parallel_hint">
-                Сколько треков ОДНОГО релиза враппер тянет одновременно (parallelNum). Все идут в одну папку альбома, без дублей.
-                8–16 = максимум скорости; слишком высоко → Apple/враппер могут ограничить. Это НЕ «параллельные загрузки» из Общих (то — сколько РЕЛИЗОВ разом).
-              </div>
-            </div>
-          </div>
-          <div class="toggle-row mt4">
-            <div class="toggle-info">
-              <div class="toggle-label" data-i18n="as.amd_fallback">Fallback на AAC</div>
-              <div class="toggle-sub" data-i18n="as.amd_fallback_sub">Если ALAC недоступен — скачать AAC</div>
-            </div>
-            <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-amd-alt"
-              onchange="saveSetting('amd-codec-alt',this.checked)"><div class="toggle-slider"></div></label>
-          </div>
-        </div>
 
         <div class="block mt12 coll" style="background:rgba(0,0,0,.3)">
             <div class="block-title">🐳 Docker Wrapper<span class="help-q" onclick="event.stopPropagation();showHelpPop(this,'s.help.docker_session')" role="button" tabindex="0">?</span></div>

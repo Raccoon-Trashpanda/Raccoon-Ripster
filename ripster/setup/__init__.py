@@ -334,7 +334,7 @@ async def download_file(url: str, dest: Path, label: str = "") -> bool:
 
     def _blocking_dl():
         opener = urllib.request.build_opener()
-        opener.addheaders = [("User-Agent", "Mozilla/5.0 amd-downloader")]
+        opener.addheaders = [("User-Agent", "Mozilla/5.0 ripster-setup")]
         with opener.open(url) as resp, open(dest, "wb") as out_f:
             total_size = int(resp.headers.get("Content-Length", 0))
             block, count = 8192, 0
@@ -366,7 +366,7 @@ async def download_file_no_ssl(url: str, dest: Path, label: str = "") -> bool:
 
     def _blocking():
         opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
-        opener.addheaders = [("User-Agent", "Mozilla/5.0 amd-downloader")]
+        opener.addheaders = [("User-Agent", "Mozilla/5.0 ripster-setup")]
         with opener.open(url, timeout=30) as r, open(dest, "wb") as f:
             total    = int(r.headers.get("content-length", 0))
             done     = 0
@@ -477,7 +477,7 @@ async def install_gpac_windows() -> None:
 async def install_mp4decrypt_windows() -> None:
     """Download Bento4 SDK and extract the FULL CLI toolset into tools/.
 
-    AMD's mp4.py extract_song shells out to BOTH `mp4decrypt` AND `mp4extract`
+    `mp4extract` (Bento4) — тот же набор, что нужен Apple-путям при ремуксе
     (ALAC: `mp4extract …/alac …`). Extracting only mp4decrypt.exe (the old
     behaviour) left mp4extract.exe missing → every ALAC track died at the decrypt
     step with a cryptic `[WinError 2]` in EVERY region. Grab all bin/*.exe."""
@@ -531,7 +531,7 @@ async def install_mp4decrypt_windows() -> None:
 
 async def install_ffmpeg_windows() -> None:
     """Download a portable FFmpeg (Gyan 'essentials' build) and drop ffmpeg.exe +
-    ffprobe.exe into tools/. CRITICAL for the AMD/gamdl Apple engines: AMD shells
+    ffprobe.exe into tools/. CRITICAL for the gamdl Apple engine: shells out
     out to a bare `ffmpeg` to remux the decrypted track and reads the output
     WITHOUT checking the return code — so on a machine with no ffmpeg it 'decrypts'
     but never writes a file ('downloaded 0'). No admin needed (plain zip extract)."""
@@ -872,7 +872,7 @@ async def _ensure_wvd_venv() -> bool:
     """Provision the ISOLATED pywidevine runtime venv (tools/wvdvenv) used by the
     SoundCloud-DRM runner + the device.wvd validator. Kept OUT of the shared bundled
     python on purpose: pywidevine needs protobuf>=6.33, but OrpheusDL pins it down to
-    3.15.8 in the shared env (which also breaks AMD). Isolating pywidevine is the only
+    3.15.8 in the shared env (which also breaks the Apple paths). Isolating pywidevine is the only
     robust fix. The runner only imports pywidevine + httpx + mutagen.
     See the ripster-dependency-versions skill."""
     venv = _base_dir / "tools" / "wvdvenv"
@@ -1008,7 +1008,7 @@ async def clone_downloader() -> bool:
         await ilog("✓ main.go already present — skipping clone", "success")
         return True
     await ilog("📥 Cloning zhaarey/apple-music-downloader…")
-    tmp_dir = _base_dir / "_amd_clone"
+    tmp_dir = _base_dir / "_zhaarey_clone"
     rc, _   = await irun([git, "clone", "--depth=1",
                            "https://github.com/zhaarey/apple-music-downloader.git",
                            str(tmp_dir)])
@@ -1062,35 +1062,13 @@ async def _run_full_setup_inner() -> None:
     await ilog(f"   App dir  : {_base_dir}", "info")
     await ilog("", "info")
 
-    engine = _cfg.get("engine", "amd")
+    engine = _cfg.get("engine", "zhaarey")
     await ilog(f"   Engine   : {engine}", "info")
     await ilog("", "info")
 
     tools = await check_tools()
     if _broadcast:
         await _broadcast({"type": "tools_status", "tools": tools})
-
-    # ── AMD engine: clone AppleMusicDecrypt + install its deps (the DEFAULT,
-    # public Apple path — no Apple ID, no Docker). Done here so the single
-    # "Auto-install everything" button makes the default engine actually work.
-    # Previously AMD lived ONLY in a separate /api/setup/amd call, so a fresh
-    # user's first Apple download died with "AppleMusicDecrypt не установлен"
-    # (no tester had a working Apple download — they only ran Setup, not a DL).
-    if engine == "amd":
-        from ripster import amd as _amd
-        await istep("amd", "running")
-        await ilog("┌─ AMD      : AppleMusicDecrypt (public Apple wrapper, no Apple ID)", "info")
-        await ensure_git()                       # clone needs git on a clean PC
-        if await _amd.clone_amd() and await _amd.install_amd_deps():
-            await ilog("│  ✓ AppleMusicDecrypt ready", "success")
-            await istep("amd", "done")
-            if _broadcast:
-                await _broadcast({"type": "amd_ready"})
-        else:
-            await ilog("│  ✗ AppleMusicDecrypt setup failed — see log above", "error")
-            await istep("amd", "error")
-        await ilog("└" + "─" * 42, "info")
-        await ilog("", "info")
 
     # ── Step 1: Go / gamdl ───────────────────────────────────────────────────
     await istep("go", "running")
@@ -1120,9 +1098,6 @@ async def _run_full_setup_inner() -> None:
             await istep("go", "error")
         await ilog("└" + "─" * 42, "info")
         await ilog("", "info")
-    elif engine == "amd":
-        await ilog("┌─ Step 1/5 : Go runtime — not needed for amd engine", "success")
-        await istep("go", "skip")
     elif not tools["go"]["found"]:
         await ilog("┌─ Step 1/5 : Installing Go runtime", "info")
         if _is_windows:
@@ -1144,10 +1119,7 @@ async def _run_full_setup_inner() -> None:
 
     # ── Step 2: Downloader source ────────────────────────────────────────────
     await istep("downloader", "running")
-    if engine == "amd":
-        await ilog("┌─ Step 2/5 : Go downloader — not needed for amd engine", "success")
-        await istep("downloader", "skip")
-    elif not tools["downloader"]["found"]:
+    if not tools["downloader"]["found"]:
         await ilog("┌─ Step 2/5 : Cloning apple-music-downloader", "info")
         ok = await clone_downloader()
         await istep("downloader", "done" if ok else "error")
@@ -1194,10 +1166,10 @@ async def _run_full_setup_inner() -> None:
     await ilog("└" + "─" * 42, "info")
     await ilog("", "info")
 
-    # ── Step 5: FFmpeg (AMD/gamdl remux — without it Apple "decrypts 0 files") ─
+    # ── Step 5: FFmpeg (Apple-ремукс — без него Apple «декриптит 0 файлов») ───
     await istep("ffmpeg", "running")
     if not tool_path("ffmpeg"):
-        await ilog("┌─ Step 5/5 : Installing FFmpeg (Apple/AMD remux)", "info")
+        await ilog("┌─ Step 5/5 : Installing FFmpeg (Apple remux)", "info")
         if _is_windows:
             await install_ffmpeg_windows()
         else:

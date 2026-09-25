@@ -2629,7 +2629,7 @@ async def _deezer_convert_match(sp_type: str, isrc: str, upc: str,
 async def api_convert_spotify(body: dict):
     sp_url  = body.get("url", "").strip()
     target  = body.get("target", _cfg.get("engine", "apple"))
-    service = "apple" if ("apple" in target or target == "amd") else target
+    service = "apple" if "apple" in target else target
 
     if "spotify.com" not in sp_url:
         return {"ok": False, "error": "Not a Spotify URL"}

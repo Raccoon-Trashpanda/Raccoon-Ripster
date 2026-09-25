@@ -290,7 +290,6 @@ def _engine_info() -> dict:
         info["details"]["apple_engine"]    = _cfg.get("engine", "zhaarey")
         info["details"]["spotify_engine"]  = _cfg.get("spotify-engine", "zotify")
         info["details"]["beatport_engine"] = "orpheus_beatport"
-        info["details"]["amd_dir"]         = _cfg.get("amd-dir", "")
         info["details"]["amd_instance"]    = _cfg.get("amd-instance-url", "")
         info["details"]["zhaarey_wrapper"] = _cfg.get("gamdl-use-wrapper", False)
         info["details"]["zhaarey_wrapper_url"] = _cfg.get("gamdl-wrapper-account-url", "")
@@ -460,9 +459,9 @@ async def admin_diagnostics(request: Request):
 _PINNED_PKGS = {
     # Hard-pinned — version-locked, break the build/runtime on change.
     "streamrip",      # ==2.0.5 — 2.1.0 has Tidal-client regressions (see VERSIONS.md)
-    "protobuf",       # ==6.33.4 — runtime>=gencode for orpheus(6.33)+AMD(6.31)+pywidevine
-    "grpcio-tools",   # paired with protobuf / AMD gencode
-    "grpcio",
+    "protobuf",       # ==6.33.4 — runtime>=gencode for orpheus(6.33)+pywidevine
+    "grpcio-tools",   # paired with protobuf; нужен лишь на случай добычи
+    "grpcio",         # gencode — живых gRPC-клиентов в проекте не осталось
     "construct",      # ==2.8.8 — pinned for WVD/pywidevine
     # DRM / downloader core — version-sensitive (decrypt, tag-parse, stream-parse).
     "pywidevine", "mutagen", "deemix", "deezer-py", "yt-dlp",
@@ -515,7 +514,7 @@ async def deps_list(request: Request):
     рабочей кнопкой «всё равно обновить». А обновление именно этих пакетов и
     ломает сборку целиком: у них взаимоисключающие требования (pymp4 держит
     construct==2.8.8, keydive хочет >=2.10.70; OrpheusDL тянет protobuf 3.15.8,
-    что ниже нужного AMD и pywidevine). Один клик — и не работает ничего, причём
+    что ниже нужного pywidevine и Orpheus). Один клик — и не работает ничего, причём
     выясняется это не сразу.
 
     Поэтому список теперь только из безопасного, а про остальные честно

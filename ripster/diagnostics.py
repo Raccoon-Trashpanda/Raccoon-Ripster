@@ -122,7 +122,6 @@ def _environment(base_dir: Path, version: str) -> str:
                       ("ffmpeg",         "tools/ffmpeg/bin/ffmpeg.exe"),
                       ("OrpheusDL",      "orpheus/orpheus.py"),
                       ("auth helper",    "orpheus/_auth_helper.py"),
-                      ("AMD",            "AppleMusicDecrypt/main.py"),
                       ("device.wvd",     "tools/widevine/device.wvd")):
         lines.append(f"{name:<14} {'есть' if (base_dir / rel).exists() else 'НЕТ'}")
     return "\n".join(lines)

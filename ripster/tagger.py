@@ -578,7 +578,7 @@ def rename_from_tags(directory: Path, template: str,
 
         # Redundant re-download guard: if the desired name already exists on disk
         # and that file is byte-identical to this one, this file is a duplicate
-        # (AMD region-rotation / auto-retry re-fetches a track whose final name no
+        # (region-rotation / auto-retry re-fetches a track whose final name no
         # longer matches its own songNameFormat, so it can't skip it). Drop the
         # redundant copy instead of stamping out a "_2" twin — otherwise every
         # retry doubles the release.

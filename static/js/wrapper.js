@@ -26,7 +26,6 @@ async function checkWrapperStatus() {
 function updateWrapperUI(running, dockerOk, dockerMsg, hasSession) {
   const banner   = document.getElementById('wrapper-banner');
   const okBanner = document.getElementById('wrapper-ok-banner');
-  const isAMDEngine  = (S.config?.engine || '') === 'amd';
 
   // Docker status note in banner
   const dockerStat = document.getElementById('wb-docker-status');
@@ -54,9 +53,7 @@ function updateWrapperUI(running, dockerOk, dockerMsg, hasSession) {
   const cmdEl = document.getElementById('wrapper-cmd-text');
   if(cmdEl) cmdEl.textContent = `docker run -v ./rootfs/data:/app/rootfs/data -p ${decP}:10020 -p ${m3uP}:20020 -e args="${S.config['wrapper-apple-id']&&S.config['wrapper-password']?`-L ${S.config['wrapper-apple-id']}:*** -H 0.0.0.0`:'-H 0.0.0.0'}" ghcr.io/itouakirai/wrapper:x86`;
 
-  // Banner: show when offline + not dismissed — but never when AMD is selected
-  // (AMD uses its own public wrapper, local Docker is irrelevant)
-  const shouldShow = !running && !_wrapperDismissed && !isAMDEngine;
+  const shouldShow = !running && !_wrapperDismissed;
   if(banner) {
     banner.style.display = shouldShow ? '' : 'none';
     // Auto-expand detail section if Apple ID not yet configured

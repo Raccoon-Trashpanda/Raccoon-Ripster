@@ -1065,7 +1065,7 @@ async def run_loop(cfg: dict, get_items, tick: float = _TICK,
 # on 2026-09-19 the Qobuz primary measured NZ while the Qobuz/Deezer pools had
 # no NZ entry at all.
 #
-# Apple: the public AMD wrapper already rotates regions with `nz` first
+# Apple: the public wrapper (lite) already rotates regions with `nz` first
 # (apple_router `amd-region-preference`). It counts ONLY when the owner chose
 # `apple-wrapper: public` by hand — the public wrapper is never picked for them
 # (feedback_apple_public_wrapper_manual_only). The local wrapper fetches in the

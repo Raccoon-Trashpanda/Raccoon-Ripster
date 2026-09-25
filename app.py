@@ -28,8 +28,8 @@ if os.path.isdir(_BUNDLED_SP):
 #   • <python>\Scripts — pip console-scripts (deemix, rip/streamrip, gamdl). Without
 #     this shutil.which("deemix"/"rip") → None → download dies "[WinError 2]".
 #   • <app>\tools — Setup-installed binaries (ffmpeg, mp4decrypt, N_m3u8DL-RE …).
-#     AMD shells out to bare `ffmpeg`; missing it means AMD "decrypts" but writes
-#     no file. Putting tools/ on PATH lets amd_runner's shutil.which("ffmpeg") find it.
+#     Apple-движки зовут bare `ffmpeg`; без него задача "дешифрует", но файл
+#     не пишет. tools/ на PATH — чтобы shutil.which("ffmpeg") его нашёл.
 for _pdir in (os.path.join(os.path.dirname(sys.executable), "Scripts"),
               os.path.join(_APPDIR, "tools"),
               os.path.join(_APPDIR, "tools", "node")):       # portable Node for SoundCloud/Lucida
@@ -158,11 +158,11 @@ if str(_SCRIPT_DIR) not in sys.path:
 # ── Protobuf runtime guard — kills the recurring "wrapper doesn't download" bug ──
 # Protobuf's rule is: runtime version must be >= the gencode version of every
 # loaded _pb2 module. We load modules from several generators:
-#   • AMD/public-wrapper stubs — gencode 6.31.x
 #   • OrpheusDL desktop_api / extendedmetadata — gencode 6.33.4
 #   • pywidevine — needs >= 6.33
-# So the correct floor is 6.33.4 (covers ALL three; 6.33.4 runtime happily loads
-# the 6.31 AMD stubs). The OLD guard force-pinned 6.31.1, which broke orpheus's
+# So the correct floor is 6.33.4. Движок `amd` со своими 6.31-стабами выпилен
+# 25.09.2026 (gRPC-транспорт wm.wol.moe снят 02.09.2026). The OLD guard
+# force-pinned 6.31.1, which broke orpheus's
 # 6.33 gencode (VersionError on lyrics/metadata) AND silently reverted every
 # manual bump on each restart. We now only repair when protobuf is BELOW the
 # floor (e.g. a stray `pip install` dragged it down), never downgrade. Read the
@@ -189,7 +189,7 @@ def _ensure_protobuf_runtime() -> None:
         return
     if _ver_tuple(ver) >= _ver_tuple(_PB_FLOOR):
         return
-    print(f"[startup] ⚠ protobuf {ver} < {_PB_FLOOR} — orpheus/AMD/pywidevine need ≥{_PB_FLOOR}; auto-repairing…",
+    print(f"[startup] ⚠ protobuf {ver} < {_PB_FLOOR} — orpheus/pywidevine need ≥{_PB_FLOOR}; auto-repairing…",
           flush=True)
     try:
         import subprocess
@@ -333,7 +333,7 @@ def save_pending_queue():
 # ── Quality helper ─────────────────────────────────────────────────────────────
 def get_qualities() -> list:
     e = config.get("engine", "zhaarey")
-    if e in ("amd", "gamdl", "zhaarey", "lite"):
+    if e in ("gamdl", "zhaarey", "lite"):
         try:
             return get_engine(e).qualities()
         except KeyError:
@@ -419,7 +419,7 @@ _LOG_HISTORY: "_collections.deque[tuple[float, str, str]]" = _collections.deque(
 _SVC_RE = _re.compile(r'^\s*\[([a-z][a-z0-9:_-]+)\]', _re.IGNORECASE)
 _KNOWN_SERVICES = (
     "apple", "qobuz", "tidal", "deezer", "spotify", "soundcloud",
-    "bbc", "lucida", "orpheus", "amd", "gamdl", "zhaarey", "beatport", "jiosaavn",
+    "bbc", "lucida", "orpheus", "gamdl", "zhaarey", "beatport", "jiosaavn",
     "wrapper", "lite", "watchlist", "release", "guest", "stats", "tunnel",
     "ngrok", "tokens", "startup", "queue", "meta", "isrc", "csrf",
 )
@@ -557,7 +557,7 @@ async def _ws_heartbeat():
 
     The client's health watchdog (static/js/app.js) treats an OPEN socket that
     has been SILENT for >45 s as half-open and force-cycles it. When the app is
-    idle — or stuck in one of AMD's long silent decrypt/tagging windows — no
+    idle — or stuck in a long silent decrypt/tagging window — no
     events flow, so without this the status flaps Connected↔Disconnected every
     ~45 s (and the queue UI churns mid-download). A 20 s ping keeps the
     watchdog's last-message clock fresh on healthy sockets, so it only ever

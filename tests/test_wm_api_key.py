@@ -11,9 +11,10 @@
 * счётчики квоты из /status читаются только целыми числами;
 * кэш пробы сбрасывается при появлении/исчезновении ключа («нет ключа» не
   должно прилипнуть к только что вписанному);
-* маска для гостей и белый список конфиг-райтера;
-* вердикты движка по сигнатурам amd_runner (`AMD_WM_NEED_KEY`/`AMD_WM_QUOTA`)
-  — терминальные, не общие «AMD_FATAL» и не «сервер лёг».
+* маска для гостей и белый список конфиг-райтера.
+
+Терминальные вердикты задачи по 401/429 держит движок `lite` — они покрыты в
+tests/test_public_wrapper_lite.py (`test_public_lite_verdict_text`).
 
 Секретов в тестовых данных нет: вместо ключа — заведомо фейковая строка, и
 тесты отдельно доказывают, что она не утекает в ответы функций.
@@ -21,7 +22,6 @@
 import pytest
 
 from ripster import apple_router as ar
-from ripster.engines.amd import AMDEngine
 from ripster.routes.core import _SECRET_KEYS, _redact_config
 from ripster.security import CONFIG_WRITABLE_PREFIXES
 
@@ -133,20 +133,3 @@ def test_key_is_masked_for_guests():
 def test_key_in_secrets_and_writer_whitelist():
     assert "amd-wm-api-key" in _SECRET_KEYS
     assert "amd-wm-api-key" in CONFIG_WRITABLE_PREFIXES
-
-
-# ── вердикты движка по сигнатурам amd_runner ────────────────────────────────
-
-def test_engine_need_key_is_terminal_and_specific():
-    eng = AMDEngine.__new__(AMDEngine)
-    r = eng.is_finished("WM ERROR: AMD_WM_NEED_KEY: wm.wol.moe требует ключ", rc=1)
-    assert not r.success
-    assert "@wm_auth_bot" in r.error
-    assert "Bento4" not in r.error, "ключевой отказ не должен притворяться Bento4"
-
-
-def test_engine_quota_names_quota():
-    eng = AMDEngine.__new__(AMDEngine)
-    r = eng.is_finished("WM ERROR: AMD_WM_QUOTA: квота исчерпана", rc=1)
-    assert not r.success
-    assert "квота" in r.error.lower()

@@ -643,7 +643,7 @@ async def retry_task(task_id: str, request: Request):
         live["progress"] = 0
         live["log"]      = []
         for k in ("_start_time", "_done_time", "_save_dir", "_retry_count",
-                  "_auto_retry", "_amd_fallback", "_prog_total", "_prog_current"):
+                  "_auto_retry", "_apple_fallback", "_prog_total", "_prog_current"):
             live.pop(k, None)
         if _broadcast:
             await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})

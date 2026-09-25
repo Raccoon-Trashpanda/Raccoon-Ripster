@@ -77,12 +77,14 @@ def test_public_is_never_chosen_automatically(monkeypatch):
     monkeypatch.setattr(ar, "_local_wrapper_ok", lambda cfg: False)
     monkeypatch.setattr(ar, "_cookies_ok", lambda cfg: False)
     for q in ("aac", "alac", "alac-hires", ""):
-        assert ar.route_apple(q, _cfg(**{"apple-wrapper": "auto"}), NZ)["engine"] != "amd"
+        assert ar.route_apple(q, _cfg(**{"apple-wrapper": "auto"}), NZ)["engine"] != "lite"
 
 
 def test_public_still_available_when_explicitly_asked():
+    """Явный выбор владельца («публичный») по-прежнему слышен: публичный враппер
+    говорит на Wrapper-Lite HTTP API, поэтому движок `lite`."""
     r = ar.route_apple("alac", _cfg(**{"apple-wrapper": "public"}), NZ)
-    assert r["engine"] == "amd" and "вручную" in r["note"]
+    assert r["engine"] == "lite" and "вручную" in r["note"]
 
 
 def test_music_video_still_goes_to_gamdl():
@@ -109,12 +111,13 @@ def test_router_has_exactly_one_exit():
     )
 
 
-def test_guard_still_knows_both_prohibitions():
+def test_guard_still_knows_the_cookie_prohibition():
+    """Публичная ветка защищена поведением (`test_public_is_never_chosen_
+    automatically`): в пул пускает только `_public_route`, а `_decide` по имени
+    движка её отличить не может — и локальный, и публичный Lite-сервер это
+    `lite`. Здесь — второй запрет, куки."""
     src_fn = ar._decide
     assert src_fn is not None
-    # Публичный — только вручную.
-    r = src_fn("amd", "alac", pref="auto", local_ok=True, is_video=False)
-    assert r["engine"] == "zhaarey"
     # Куки — не вместо живого локального враппера.
     r = src_fn("gamdl", "aac", pref="auto", local_ok=True, is_video=False)
     assert r["engine"] == "zhaarey"
@@ -126,5 +129,5 @@ def test_guard_still_knows_both_prohibitions():
 def test_guard_says_out_loud_when_it_corrects(capsys):
     """Тихая коррекция сделала бы сторожа украшением: разъехавшуюся ветку
     надо было бы искать глазами."""
-    ar._decide("amd", "alac", pref="auto", local_ok=True, is_video=False)
+    ar._decide("gamdl", "aac", pref="auto", local_ok=True, is_video=False)
     assert "маршрут исправлен" in capsys.readouterr().out

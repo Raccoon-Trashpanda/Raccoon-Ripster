@@ -159,13 +159,8 @@ class ConfigService:
 
     # ── AMD ───────────────────────────────────────────────────────────────────
 
-    amd_dir             = _s("amd-dir",           "")
     amd_instance_url    = _s("amd-instance-url",  "wm.wol.moe")
     amd_instance_secure = _b("amd-instance-secure", True)
-    amd_parallel        = _i("amd-parallel",      8)
-    amd_save_lyrics     = _b("amd-save-lyrics",   True)
-    amd_lyrics_format   = _s("amd-lyrics-format", "lrc")
-    amd_codec_alt       = _b("amd-codec-alt",     True)
 
     # ── gamdl ─────────────────────────────────────────────────────────────────
 
@@ -266,7 +261,7 @@ DEFAULT_CONFIG: dict = {
     "authorization-token": "",
     "storefront": "us",
     "language": "en-US",
-    "engine": "amd",
+    "engine": "zhaarey",
     "quality": "alac",
     # GitHub repo for in-app self-update (Setup tab → check/apply update).
     "ripster-repo": "Raccoon-Trashpanda/Raccoon-Ripster",
@@ -274,7 +269,6 @@ DEFAULT_CONFIG: dict = {
     # token-less). Ships empty in the distributable; owner sets it locally.
     "ripster-repo-token": "",
     # ── AMD v2 (AppleMusicDecrypt) ───────────────────────────────────────────
-    "amd-dir":           "",
     "amd-instance-url":  "wm.wol.moe",
     # wm.wol.moe с 10.09.2026 требует API-ключ (@wm_auth_bot → /newkey). Секрет:
     # пишется штатным конфиг-райтером и полем Настроек, гостям маскируется
@@ -296,10 +290,6 @@ DEFAULT_CONFIG: dict = {
     "amd-daily-cap": 50,
     # Принуждённая витрина для режима «ручной регион»; пусто — берёт живой пул.
     "amd-region-force": "",
-    "amd-parallel":      8,
-    "amd-save-lyrics":   True,
-    "amd-lyrics-format": "lrc",
-    "amd-codec-alt":     True,
     # zhaarey (local wrapper) — parallel track downloads within one album
     "apple-parallel-tracks": False,
     "apple-parallel-count":  4,
@@ -557,6 +547,15 @@ def load_config(config_file: _Path, tokens_dir: _Path) -> dict:
     # файл не трогаем, при ближайшем сохранении их уже не будет.
     for _k in [k for k in merged if str(k).startswith("amazon-")]:
         merged.pop(_k)
+
+    # Движок amd (gRPC на wm.wol.moe) выпилен 25.09.2026: транспорт мёртв
+    # с 02.09. Старый config.yaml/queue_pending.json могут держать engine: amd
+    # и его ключи — молча приводим к живому значению, не падаем.
+    if str(merged.get("engine", "")).strip().lower() == "amd":
+        merged["engine"] = "zhaarey"
+    for _k in ("amd-dir", "amd-parallel", "amd-save-lyrics",
+               "amd-lyrics-format", "amd-codec-alt"):
+        merged.pop(_k, None)
 
     try:
         from . import retired_credentials as _retired

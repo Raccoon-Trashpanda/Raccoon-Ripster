@@ -17,9 +17,8 @@ Why this exists:
 
 Not implemented (yet):
   * Resource limits (memory/CPU). Needs platform-specific code.
-  * stdin-based communication (AMD's prompt_toolkit REPL).
-    That lives in ``run_task_amd`` and stays there for now — once we have
-    a second reason to pipe stdin, unify them.
+  * stdin-based communication (REPL-style engines). No caller today — the
+    only one that piped stdin was the `amd` runner, removed 25.09.2026.
 """
 from __future__ import annotations
 
@@ -169,7 +168,8 @@ class ProcessRunner:
         # (C:\Users\Юлия\...\Temp on a Russian profile) → every Apple track dies with
         # "[Errno 2] No such file ...". Point all engine children at a guaranteed-ASCII,
         # space-free temp dir when the inherited one is non-ASCII (ASCII profiles are
-        # left untouched). Mirrors amd_runner's own redirect, so gamdl is covered too.
+        # left untouched). Same redirect the old standalone AMD runner did,
+        # so gamdl is covered too.
         try:
             import tempfile as _tf
             _cur = _tf.gettempdir()

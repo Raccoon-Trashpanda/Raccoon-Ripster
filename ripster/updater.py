@@ -303,7 +303,7 @@ def _restore_snapshot(base_dir: Path, snap) -> bool:
 # (config.yaml, tokens/, *.wvd) and user data (downloads/) are NEVER in this list,
 # so an update can't clobber them. A path absent from the release is skipped, not
 # deleted — a partial archive can't strip the install.
-_OVERLAY_PATHS = ("ripster", "static", "app.py", "amd_runner.py",
+_OVERLAY_PATHS = ("ripster", "static", "app.py",
                   "sc_widevine_runner.py", "requirements.txt", "main.go", "README.md",
                   # SoundCloud/Lucida CLI wrapper — small CODE, not a heavy dep (the
                   # heavy parts, lucida-src/build + node_modules, are built locally and

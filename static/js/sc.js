@@ -31,7 +31,7 @@ function _scDrmPreferGet() { return window._scDrmPrefer || 'ctr'; }
 // Status chips carry their own tinted background + border (not a bare text
 // colour on a hardcoded rgba(0,0,0,.25) box) so they stay readable on BOTH
 // themes — a fixed dark box washed out the mint-green "OK" text on light
-// theme (green-on-muted-tan ≈ unreadable). Same pattern as the AMD-wrapper
+// theme (green-on-muted-tan ≈ unreadable). Same pattern as the wrapper
 // status widget in cookies_ui.js.
 const _SC_CHIP = {
   muted: { c: 'var(--muted)', bg: 'rgba(128,128,128,.10)', bd: 'var(--border)' },

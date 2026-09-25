@@ -14,10 +14,6 @@
 // what didn't. Shared tools (ffmpeg / Bento4 / Node) are their own rows. Every
 // install streams to the Setup console.
 const SETUP_COMPONENTS = [
-  // ── Apple Music ───────────────────────────────────────────────────────────
-  { key:'apple', icon:'🍎', label:'Apple Music (AMD v2)', tag:true, color:'#fc3c44', def:true,
-    desc:'',   // текст только в i18n: setup.apple.desc
-    endpoint:'/api/setup/component/apple', status:'apple' },
   { key:'ffmpeg', icon:'🎞️', label:'ffmpeg', tag:true, color:'#fc8a44', def:true,
     desc:'',   // текст только в i18n: setup.ffmpeg.desc
     endpoint:'/api/setup/component/ffmpeg', status:'ffmpeg' },
@@ -63,7 +59,6 @@ async function fetchSetupStatuses() {
         st.ffmpeg     = !!(t && t.ffmpeg     && t.ffmpeg.found);
         st.mp4decrypt = !!(t && t.mp4decrypt && t.mp4decrypt.found);
   } catch {}
-  try { const a = await api('GET','/api/amd/status'); st.apple = !!(a && a.cloned); } catch {}
   try { const s = await api('GET','/api/soundcloud/status');
         st.soundcloud = !!(s && s.installed);
         st.node       = !!(s && s.node_ok);

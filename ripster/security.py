@@ -20,7 +20,7 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "radio-autostart",      # продолжать очередь самой
     "nudges-",              # подсказки в простое
     "webview-hw-accel", "webview-browser-args",   # ускорение окна
-    "apple-local-only-strict",                     # запрет AMD-подхвата при local-only
+    "apple-local-only-strict",                     # запрет публичного подхвата при local-only
     "upcoming-",            # лента грядущих релизов: включение и её настройки.
                             # Без этой строки переключатель молча ничего не делает —
                             # ровно тот класс, что уже ловили самопроверкой 02.08.
@@ -39,10 +39,8 @@ CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
     "gamdl-nm3u8dlre-path", "gamdl-ffmpeg-path",   # found unsaveable in the 2026-07-22 settings audit
     "authorization-token",   # Apple bearer — found unsaveable via REST in the 2026-07-22 audit
                               # (only ever landed via the WS token_update path in practice)
-    "amd-dir", "amd-instance-url", "amd-instance-secure",
+    "amd-instance-url", "amd-instance-secure",
     "amd-wm-api-key",   # ключ wm.wol.moe (с 10.09.2026 обязателен) — секрет, маску см. routes/core
-    "amd-parallel", "amd-save-lyrics", "amd-lyrics-format",
-    "amd-codec-alt",
     # Публичный враппер wm.wol.moe: суточный потолок запросов и принуждённая
     # витрина. Без этих строк поле в Настройках сохранялось бы «успешно» и молча
     # не действовало.
@@ -194,7 +192,7 @@ GUEST_BLOCKED_WS_TYPES: frozenset[str] = frozenset({
     "remote_stopped", "tunnel_status",
     # Apple wrapper infra — Docker logs / fixed ports / owner Apple-session state.
     "wrapper_built", "wrapper_log", "wrapper_login_failed",
-    "wrapper_started", "wrapper_status", "pool_update", "amd_ready",
+    "wrapper_started", "wrapper_status", "pool_update",
     # Setup tab — install logs can leak filesystem paths / tool versions.
     "install_log", "install_step", "setup_done", "tools_status",
     "gamdl_deps_fixed", "soundcloud_installed", "widevine_minted",

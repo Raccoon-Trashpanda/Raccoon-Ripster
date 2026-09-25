@@ -28,16 +28,16 @@ from __future__ import annotations
 FALLBACK: dict[str, str] = {
     # ── добавлено 19.09.2026: ключи, которые код логирует, а FALLBACK не знал —
     # в server-лог уходил сырой ключ (напр. console.bbc_bad_pid) ──
-    "console.amd_config_written": "📄 config.toml записан в {dir} (кодек {codec})",
-    "console.amd_not_installed": "✗ AppleMusicDecrypt не установлен. Открой Setup → Auto-install",
-    "console.amd_pool_recovered": "✅ Публичный wrapper-manager снова отдаёт треки — снова участвует в маршрутизации",
-    "console.amd_runner_missing": "✗ amd_runner.py не найден — переустанови AMD через Настройки",
-    "console.amd_wm_checking": "🌐 Проверяю wrapper-manager: {instance}…",
-    "console.amd_wm_down": "✗ Wrapper-manager недоступен: {err}",
-    "console.amd_wm_need_key": "✗ wm.wol.moe требует ключ — получи в @wm_auth_bot и впиши в Настройки → Apple → API-ключ wm.wol.moe",
-    "console.amd_wm_quota": "✗ Квота wm.wol.moe на сегодня исчерпана — повторим завтра, частыми попытками квоту не вернуть",
-    "console.amd_wm_not_ready": "⚠ Wrapper-manager «{instance}» не готов (клиентов: {clients}, регионов: {regions}) — продолжаю",
-    "console.amd_wm_ready": "✓ Wrapper-manager готов — регионы: {regions}",
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
     "console.bbc_api_fail": "✗ BBC: API программ ответил {code} для {pid}",
     "console.bbc_bad_pid": "✗ BBC: не удалось разобрать идентификатор из ссылки: {url}",
     "console.bbc_ms_fail": "✗ BBC: MediaSelector ответил {code} для {vpid}",
@@ -146,12 +146,12 @@ FALLBACK: dict[str, str] = {
     # НЕ мёртвая сессия; перелогин и смена ссылки не помогают. {signed_in}/{allowed} —
     # названия витрин из диалога Apple, {signed_cc}/{allowed_cc} — их коды.
     "console.wrapper_store_mismatch": "✗ Apple: ключ не выдан, потому что аккаунт wrapper'а не в своей стране. Вход в витрину «{signed_in}» ({signed_cc}), а покупать этому аккаунту разрешено только в «{allowed}» ({allowed_cc}). Это настройка страны самой учётной записи Apple — перелогин и смена ссылки не помогут; нужен аккаунт той страны, где оформлена подписка, либо смена страны в Apple ID.",
-    "console.drm_retry_amd":    "⚡ -1002: DRM — автоматически повторяю через AMD v2…",
-    "console.amd_alac_fallback": "⚡ AMD: ALAC недоступен — автоматически пробую zhaarey {quality}…",
+    "console.drm_retry_public":"⚡ -1002: DRM — автоматически повторяю через публичный wrapper…",
+    "console.apple_aac_fallback":"⚡ Apple: ALAC недоступен — автоматически пробую zhaarey {quality}…",
     "console.orpheus_retry":    "⟳ OrpheusDL: новые настройки — автоматический повтор…",
     # ── AMD engine (amd.py) ───────────────────────────────────────────────────
-    "console.amd_segments":     "⬦ AMD: {n} сегм. [{elapsed}]",
-    "console.amd_instance_hint": "  💡 Убедись что instance = wm.wol.moe",
+    
+    
     # ── лестница витрин Apple: ступень не вышла ───────────────────────────────
     "console.sf_rung_failed":   "─── витрина '{cc}' тоже не дала релиз → иду дальше по своим слотам ───",
     "console.slot_rung_failed": "─── слот {slot} ({cc}) не дал релиз ───",
@@ -176,7 +176,7 @@ FALLBACK: dict[str, str] = {
     # ── имена служб в обходе учёток (уходит в бот) ────────────────────────────
     "svc.apple":                "Apple · веб-токены",
     "svc.apple_wrapper":        "Apple · слоты враппера",
-    "console.amd_no_instances": "⚠ Публичный wrapper-manager: сейчас нет ни одного живого инстанса в пуле (не наша поломка, сторонний сервис) — временно исключён из роутинга",
+    
 }
 
 

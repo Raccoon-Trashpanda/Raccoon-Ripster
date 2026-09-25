@@ -166,7 +166,6 @@ function showStab(id, btn) {
     const radio = document.querySelector(`input[name="wrapper-mode"][value="${wm}"]`);
     if(radio) radio.checked = true;
     _applyWrapperModeUI(wm, null);
-    if((c['engine']||'zhaarey')==='amd') checkAMDWrapperStatus();
     refreshAppleAuthStatus();
     loadWrapperSessionStatus();
     if(c['media-user-token'] && c['authorization-token']) testAuth('apple');

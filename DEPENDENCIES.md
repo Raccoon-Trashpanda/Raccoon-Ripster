@@ -8,7 +8,7 @@
 
 ## Принцип
 1. **В git/инсталлятор едет только лёгкое ядро** — Python-исходники (`ripster/`,
-   `app.py`, `amd_runner.py`), статика UI, шаблоны конфигов, `requirements.txt`
+   `app.py`), статика UI, шаблоны конфигов, `requirements.txt`
    (pinned pip-зависимости). Это ставится мгновенно и работает.
 2. **Тяжёлое НЕ бандлится** — бинари, Go-сборки, движки-клоны, Node-сборки, CDM.
    Их Ripster тянет **по требованию** через `ripster/setup/`.
@@ -24,10 +24,9 @@
 - `clone_downloader()` + `go_mod_download()` — клон+сборка Go Apple-движка.
 - `check_tools()` — инвентарь зависимостей (источник истины, см. ниже).
 - `find_go()`, `tool_path()`, `check_docker_installed()`, `run_full_setup()`.
-`ripster/routes/setup.py` — эндпоинты Setup-вкладки: `run_setup`, `run_amd_setup`,
+`ripster/routes/setup.py` — эндпоинты Setup-вкладки: `run_setup`,
 wrapper (start/build/pull/2fa/relogin), `orpheus_login_*`, `soundcloud_install`,
 `beatport_install`, `fix_gamdl_deps`, `get_install_log`, `restart_app`.
-+ `amd_runner.py` сам авто-ищет ffmpeg (winget/`C:\112\deps`) — см. память ripster-amd-naming-bug.
 
 ## Инвентарь зависимостей (из `check_tools()` + бинари)
 | Зависимость | Вес | Для чего | Как тянется | В git? |

@@ -1,11 +1,9 @@
 """
-Setup, tools, wrapper and AMD management routes.
+Setup, tools and wrapper management routes.
 
   GET  /api/tools               — check installed tools
   POST /api/setup               — run full auto-installer
-  POST /api/setup/amd           — clone + install AMD v2
-  GET  /api/amd/status          — AMD clone status
-  GET  /api/amd/wrapper-status  — gRPC wrapper-manager status
+  GET  /api/amd/wrapper-status  — публичный wrapper-manager (lite-API) статус
   GET  /api/wrapper-status      — Docker wrapper health
   POST /api/wrapper/start       — start wrapper container
   POST /api/wrapper/stop        — stop wrapper container
@@ -244,17 +242,7 @@ async def _run_setup_component(key: str) -> dict:
     # из его собственных строк, а не из чужих, оставшихся выше по прогону.
     log_mark = len(_setup.install_log)
     try:
-        if key == "apple":
-            # Apple Music engine (AMD v2): clone AppleMusicDecrypt + its Python deps.
-            # It needs ffmpeg + Bento4 to actually decrypt — those are separate rows.
-            await _setup.istep("amd", "running")
-            await _setup.ensure_git()
-            ok = await _amd.clone_amd() and await _amd.install_amd_deps()
-            await _setup.istep("amd", "done" if ok else "error")
-            if _broadcast:
-                await _broadcast({"type": "amd_ready"})
-            done = ok
-        elif key == "ffmpeg":
+        if key == "ffmpeg":
             await _setup.install_ffmpeg_windows()
             done = bool(_setup.tool_path("ffmpeg"))
         elif key == "mp4decrypt":
@@ -377,33 +365,7 @@ async def run_setup():
     return {"ok": True, "msg": "Setup started — watch Setup tab"}
 
 
-@router.post("/api/setup/amd")
-async def run_amd_setup():
-    async def _do():
-        _setup.install_log.clear()
-        await _setup.ilog("── AppleMusicDecrypt v2 Setup ──────────", "info")
-        if await _amd.clone_amd():
-            if await _amd.install_amd_deps():
-                await _setup.ilog("✅ AMD готов! Нажми AMD в топбаре.", "success")
-                if _broadcast:
-                    await _broadcast({"type": "amd_ready"})
-            else:
-                await _setup.ilog("✗ Ошибка установки зависимостей", "error")
-        else:
-            await _setup.ilog("✗ Ошибка клонирования AMD", "error")
-        if _broadcast:
-            await _broadcast({"type": "setup_done", "missing": [], "need_restart": False})
-    asyncio.create_task(_do())
-    return {"ok": True}
-
-
-# ── AMD ───────────────────────────────────────────────────────────────────────
-
-@router.get("/api/amd/status")
-async def amd_status_ep():
-    amd_dir = _amd.get_amd_dir()
-    return {"cloned": (amd_dir / "main.py").exists(), "path": str(amd_dir)}
-
+# ── Публичный wrapper ─────────────────────────────────────────────────────────
 
 @router.get("/api/amd/wrapper-status")
 async def amd_wrapper_status_ep():
@@ -411,8 +373,8 @@ async def amd_wrapper_status_ep():
 
     `working` / `refusing` (сервер жив, но нас не обслуживает: 401 без
     API-ключа, пустой пул, непривычный ответ) / `unreachable` / `not_configured`.
-    Раньше здесь дергали только gRPC `Status()`, а wm.wol.moe перешёл на HTTP и
-    закрылся ключом — то есть ответ всегда был «ошибка», и из него нельзя было
+    Транспорт — Wrapper-Lite HTTP API (прежний gRPC-клиент снят 02.09.2026);
+    wm.wol.moe перешёл на HTTP и закрылся ключом — и из старого ответа нельзя было
     сказать владельцу главное: сломано НЕ у нас, сервис просит ключ.
     Рядом кладём и защёлку движка (`down`, `next_probe_in`, `fail_streak`) —
     это память о РЕАЛЬНЫХ проваленных задачах, чего один дешёвый запрос не знает.
@@ -2159,8 +2121,8 @@ async def _install_orpheus_component() -> bool:
         await _setup.ilog(f"⚠ orpheus/core.py config-corridor patch skipped: {_e}", "warn")
 
     # Isolate OrpheusDL in its OWN venv: its requirements pin protobuf==3.15.8,
-    # which — installed into the shared bundled python — breaks AMD (Apple) and
-    # pywidevine (both need protobuf>=6.33). The engines run orpheus under this
+    # which — installed into the shared bundled python — breaks the Apple paths
+    # and pywidevine (both need protobuf>=6.33). The engines run orpheus under this
     # venv's python (_orpheus_python). See the ripster-dependency-versions skill.
     pip_py = await _ensure_orpheus_venv() or sys.executable
     if pip_py != sys.executable:
@@ -2308,8 +2270,8 @@ async def fix_gamdl_deps():
         # порядок — `Const(2, Int8ub)`, но чинить чужой пакет мы не будем.
         # Сам pywidevine пин не объявляет: 2.8.8 приезжает транзитивно от pymp4.
         #
-        # Цена промаха несоразмерна: AMD импортирует pywidevine в
-        # `src/legacy/decrypt.py` на уровне модуля, поэтому кривой construct
+        # Цена промаха несоразмерна: pywidevine импортируется на уровне модуля
+        # всеми Apple-путями (gamdl, локальный враппер), поэтому кривой construct
         # убивает ВСЕ загрузки Apple на этапе BOOT — до единого сетевого запроса.
         # Именно так 22.08 человек получил три одинаковых трейсбека подряд.
         #

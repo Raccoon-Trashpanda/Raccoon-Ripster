@@ -1626,7 +1626,7 @@ function renderReleaseCard(rel, attrs) {
           <option value="${esc(resolveQuality(rel.service))}">${esc(resolveQuality(rel.service))}</option>
         </select>`;
   // Lyrics only wire up where an engine actually fetches them: Apple
-  // (zhaarey/amd, embed-lrc/save-lrc-file) and Deezer (deemix's own
+  // (zhaarey, embed-lrc/save-lrc-file) and Deezer (deemix's own
   // lyrics/syncedLyrics). Qobuz/Tidal (streamrip) have no real lyrics-fetch
   // path yet — no point showing a checkbox that silently does nothing.
   const _lyricsSvcs = {apple: true, deezer: true};

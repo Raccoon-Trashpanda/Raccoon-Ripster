@@ -767,7 +767,7 @@ async def api_engine_get():
 @router.post("/api/engine")
 async def api_engine_set(body: dict):
     eng = body.get("engine", "zhaarey")
-    if eng not in ("zhaarey", "gamdl", "amd"):
+    if eng not in ("zhaarey", "gamdl"):
         raise HTTPException(400, "Unknown engine")
     _cfg["engine"] = eng
     if _save_cfg:

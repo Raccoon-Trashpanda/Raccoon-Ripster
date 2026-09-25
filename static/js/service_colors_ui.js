@@ -212,7 +212,7 @@ function showUrlServiceModal(url, quality, detectedSvc) {
   if(existing) existing.remove();
 
   const SVC_INFO = {
-    apple:    {label:'Apple Music', color:'#fc3c44', engines:['AMD v2','gamdl','zhaarey']},
+    apple:    {label:'Apple Music', color:'#fc3c44', engines:['gamdl','zhaarey']},
     qobuz:    {label:'Qobuz',       color:'#1b68d3', engines:['Qobuz API']},
     deezer:   {label:'Deezer',      color:'#a238ff', engines:['Deezer ARL']},
     tidal:    {label:'Tidal',       color:'#00d4b3', engines:['Tidal API']},

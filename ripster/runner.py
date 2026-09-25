@@ -116,7 +116,7 @@ _RETRY_BACKOFF    = [15, 45, 120]   # seconds before each retry attempt
 _RE_PATIENT = _re.compile(
     # NOTE: do NOT match a bare "0 треков" here — that also matches Qobuz's
     # no-account failure, which is permanent and must NOT be patient-retried (it
-    # spun the tile for ~28 min). The AMD/wrapper "0 треков" cases still match via
+    # spun the tile for ~28 min). The wrapper "0 треков" cases still match via
     # wm.wol.moe / "не вернул device" / ready=false below.
     r'wm\.wol\.moe|wrapper-manager unreachable|ready=false|не\s+ready|'
     r'не\s+вернул device|wrapper\s+не\s+ready|no\s+device',
@@ -124,27 +124,13 @@ _RE_PATIENT = _re.compile(
 )
 _MAX_PATIENT_RETRIES = 15   # ~28 min of patient retrying through an overload blip
 
-# Decrypt gRPC CORE down (decrypt_init AioRpcError / StatusCode.UNAVAILABLE /
-# "DECRYPT STREAM DOWN"). This is NOT the same as "wrapper busy" — the public
-# wrapper's decrypt core itself is overloaded/dead and does NOT recover by
-# hammering it for half an hour (observed: 15×120s = 35 min, all UNAVAILABLE).
-# Give it a FEW honest tries, then stop with clear guidance (raise a LOCAL
-# docker wrapper / try later / non-Hi-Res). Matched BEFORE _RE_PATIENT (the
-# decrypt message also contains "wm.wol.moe", which would otherwise grant 15).
-_RE_DECRYPT_DOWN = _re.compile(
-    r'DECRYPT\s+STREAM\s+DOWN|AMD_WRAPPER_DECRYPT_ERROR|ошибку\s+декрипт|'
-    r'decrypt_init|AioRpcError|decrypt.*UNAVAILABLE|внутренн.*ошибку\s+декрипт',
-    _re.I,
-)
-_MAX_DECRYPT_RETRIES = 2   # ~3 min, then stop — decrypt core won't self-heal now
-
 # Public wrapper is DEAD/UNREACHABLE (not merely busy): wm.wol.moe not resolving/
 # refusing/timing out its manager API. Retrying a server that is DOWN is pure waste
 # — it just makes the tile "hang" for many minutes while the user keeps re-queuing
 # the same release. Fail FAST (one honest retry) with a clear message that names the
 # real cause (public server down → use local ALAC / try later), so the owner does
-# NOT keep pulling the same Hi-Res release. Checked BEFORE _RE_DECRYPT_DOWN /
-# _RE_PATIENT (all three can mention wm.wol.moe).
+# NOT keep pulling the same Hi-Res release. Checked BEFORE _RE_PATIENT
+# (both can mention wm.wol.moe).
 # 08.08.2026: этот список НЕ ловил самую частую форму отказа. Публичный враппер
 # чаще всего не «недоступен», а отвечает штатно и говорит, что живых инстансов у
 # него нет: `WrapperManagerException: no healthy and ready instances`. Ни одного
@@ -367,7 +353,7 @@ async def _record_availability(task: dict, outcome: str) -> None:
 # falls back to the aggregate reason. Formats handled now:
 #   • deemix (Deezer):      "[track_<id>_<br>] <Artist - Title> :: <reason>"
 #   • SoundCloud runner:    "[N/M] Failed: <Title> - <reason>"
-# (Apple zhaarey/amd/gamdl + streamrip to be added as their formats are sampled.)
+# (Apple zhaarey/gamdl + streamrip to be added as their formats are sampled.)
 _FAILED_TRACK_RE = [
     _re.compile(r"\[track_\d+_\d+\]\s*(?P<track>.+?)\s*::\s*(?P<reason>[^\r\n]*"
                 r"(?:not found|desired bitrate|no alternative|unavailable|"
@@ -640,12 +626,13 @@ async def _log(text: str, level: str = "info", task_id: str = "") -> None:
     await _broadcast(msg)
 
 
-class _NeedAMDFallback(Exception):
-    """Raised by _run_engine_task when gamdl/zhaarey hits -1002 and AMD is available."""
+class _NeedAppleFallback(Exception):
+    """Raised by _run_engine_task when gamdl/zhaarey hits -1002 / Invalid CKC:
+    хендофф в лестницу своих витрин/аккаунтов и (по политике) на публичный wrapper."""
 
 
 class _NeedZhaareyFallback(Exception):
-    """AMD failed to get lossless content (codec unavailable) → retry with zhaarey AAC."""
+    """Лосси не прошло (codec unavailable) → retry with zhaarey AAC."""
     def __init__(self, quality: str = "aac"):
         self.quality = quality
 
@@ -653,16 +640,6 @@ class _NeedZhaareyFallback(Exception):
 class _NeedRetry(Exception):
     """Raised to signal a one-shot automatic retry (e.g. OrpheusDL new-settings)."""
 
-
-# AMD per-track codec failure patterns (trigger zhaarey fallback)
-_RE_AMD_CODEC_ERR = _re.compile(
-    r'Lossless audio does not exist'
-    r'|lossless.*unavailable'
-    r'|no.*lossless.*stream',
-    _re.I,
-)
-# AMD wrapper-quality IDs — only these trigger zhaarey fallback (AAC won't)
-_AMD_WRAPPER_QUALS = frozenset({"alac", "atmos", "ac3", "aac-binaural", "aac-downmix"})
 
 # gamdl не смог разобрать манифест на лосси-пути (без wrapper'а). Признак именно
 # СТРУКТУРНЫЙ, а не «ошибка вообще»: у выбранного варианта в манифесте Apple нет
@@ -787,12 +764,12 @@ def _transcode_dir_to_mp3(save_dir: str, bitrate: str = "320k") -> int:
 
 # ── Multi-disc → per-disc subfolders (universal, all services) ────────────────
 _DISC_AUDIO_EXTS = {".m4a", ".mp3", ".flac", ".ogg", ".opus", ".aac", ".wav", ".aiff", ".alac"}
-_RE_DISC_PREFIX  = _re.compile(r"^(\d+)-\d+")   # AMD names tracks "1-01 Title"
+_RE_DISC_PREFIX  = _re.compile(r"^(\d+)-\d+")   # AMD-именование треков "1-01 Title"
 
 
 def _disc_number(f: "Path") -> int:
     """Best-effort disc number for a track: tag first (mutagen, format-agnostic
-    via easy=True → 'discnumber' like '1' / '1/2'), then the AMD filename prefix
+    via easy=True → 'discnumber' like '1' / '1/2'), then the AMD-style filename prefix
     'N-NN', else disc 1."""
     try:
         from mutagen import File as _MF
@@ -812,7 +789,7 @@ def _disc_number(f: "Path") -> int:
 
 def _organize_discs(save_dir: str) -> int:
     """If a release spans multiple discs, move each track into a `CD N/` subfolder
-    — universally, for every service. Reads the disc number from tags (or the AMD
+    — universally, for every service. Reads the disc number from tags (or the AMD-style
     'N-NN' filename prefix). Operates ONLY on audio sitting directly in the album
     root: if an engine (deemix/streamrip) already split into CD/Disc subfolders,
     the root has no loose audio → this is a no-op (no double-nesting). A matching
@@ -1205,10 +1182,6 @@ async def _reuse_completed_download(task: dict, tid: str, dup: dict) -> None:
         print(f"[manifest] reuse record failed: {_e}", flush=True)
 
 
-# ── AMD runner ───────────────────────────────────────────────────────────────
-
-
-
 # ── Tag → Filename post-processor ───────────────────────────────────────────
 
 _RENAME_TEMPLATE = "{tracknumber:02d}. {artist} - {title}"
@@ -1327,7 +1300,7 @@ async def _sc_drm_fallback(orig_task: dict) -> None:
                 from ripster.routes.queue import _make_task as _mk, _queue, _queue_snapshot
                 from ripster.service_config import get_save_path as _gsp
                 qual = {"deezer":"flac","qobuz":"7","apple":"alac"}[svc]
-                engine = {"deezer":"deezer","qobuz":"qobuz","apple":"amd"}[svc]
+                engine = {"deezer":"deezer","qobuz":"qobuz","apple":"lite"}[svc]
                 t = _mk(url, qual, engine, svc, "sc_fallback",
                         session_id=orig_task.get("session_id", ""))
                 t["meta"] = {"title": match.get("title") or src["title"],
@@ -1883,96 +1856,6 @@ def _apply_cover_to_folder(task: dict, tid: str) -> None:
         print(f"[cover] failed for task {tid}: {e}", flush=True)
 
 
-# ── AMD pre-flight ───────────────────────────────────────────────────────────
-
-async def _amd_preflight(task: dict, quality: str) -> bool:
-    """Verify AMD install, patch headless mode, write config.toml, check wrapper-manager.
-    Returns False if task should abort (status already set to ERROR)."""
-    tid = task.get("id", "")
-    amd_dir = _amd_mod.get_amd_dir()
-    if not (amd_dir / "main.py").exists():
-        await _log_key("console.amd_not_installed", "error", tid)
-        _try_advance_task(task, TaskStatus.ERROR)
-        return False
-
-    runner_script = _BASE_DIR / "amd_runner.py"
-    if not runner_script.exists():
-        await _log_key("console.amd_runner_missing", "error", tid)
-        _try_advance_task(task, TaskStatus.ERROR)
-        return False
-
-    # ── Bento4 turnkey: ALAC/AAC decrypt shells out to mp4extract + mp4decrypt.
-    # A fresh install never has them (the installer ships none) → every track dies
-    # at the "Decrypting song…" step with a cryptic [WinError 2], in every region.
-    # Auto-install the FULL Bento4 toolset ONCE here so a clean user can rip ALAC
-    # without ever knowing about the Setup → Bento4 button. Search the dirs
-    # amd_runner adds to PATH (<base>/tools, AMD dir) plus the live PATH.
-    import shutil as _shutil
-    _b4_dirs = [_BASE_DIR / "tools", amd_dir]
-    def _have_bento4() -> bool:
-        for _t in ("mp4decrypt", "mp4extract"):
-            if any((d / f"{_t}.exe").exists() for d in _b4_dirs) or _shutil.which(_t):
-                continue
-            return False
-        return True
-    if not _have_bento4():
-        await _log_key("console.bento4_installing", "info", tid)
-        try:
-            from ripster.setup import install_mp4decrypt_windows as _install_b4
-            await _install_b4()
-        except Exception as _be:
-            await _log_key("console.bento4_failed", "warn", tid, err=str(_be))
-        if not _have_bento4():
-            await _log_key("console.bento4_manual", "error", tid)
-            _try_advance_task(task, TaskStatus.ERROR)
-            return False
-        await _log_key("console.bento4_ok", "success", tid)
-
-    from ripster.engines.amd import _CODEC_MAP as _AMD_CODEC_MAP
-    codec = _AMD_CODEC_MAP.get(quality, "alac")
-    await _amd_mod.patch_amd_for_headless(amd_dir)
-    _amd_mod.write_amd_config(amd_dir, codec=codec, lyrics_override=task.get("lyrics"))
-    await _broadcast(_i18n.log_event("console.amd_config_written", level="info",
-                                     dir=str(amd_dir), codec=codec, task_id=tid))
-
-    instance = _config.get("amd-instance-url", "wm.wol.moe")
-    secure   = _config.get("amd-instance-secure", True)
-    await _broadcast(_i18n.log_event("console.amd_wm_checking", level="info",
-                                     instance=instance, task_id=tid))
-    # Сначала дешёвый HTTP /status с ключом (apple_router.probe): он умеем
-    # различать «нужен ключ», «квота исчерпана» и «сервер лежит», чего gRPC
-    # Status() не скажет — тот на все отказе даст безликое unreachable.
-    # 429 здесь терминален и без повторов: дневную квоты повторами не вернуть.
-    from ripster import apple_router as _ar_probe
-    _probe = await asyncio.to_thread(_ar_probe.public_wrapper_probe, dict(_config))
-    if _probe.get("reason") == "api_key":
-        await _log_key("console.amd_wm_need_key", "error", tid)
-        _try_advance_task(task, TaskStatus.ERROR)
-        return False
-    if _probe.get("reason") == "quota":
-        await _log_key("console.amd_wm_quota", "error", tid)
-        _try_advance_task(task, TaskStatus.ERROR)
-        return False
-    wm = await _amd_mod.amd_wrapper_status(instance, secure)
-    if wm.get("error"):
-        await _broadcast(_i18n.log_event("console.amd_wm_down", level="error",
-                                         err=str(wm["error"]), task_id=tid))
-        _try_advance_task(task, TaskStatus.ERROR)
-        return False
-    if not wm.get("ready"):
-        await _broadcast(_i18n.log_event(
-            "console.amd_wm_not_ready", level="warn", instance=instance,
-            clients=wm.get("client_count", 0),
-            regions=len(wm.get("regions", [])), task_id=tid))
-    else:
-        regions_str = ", ".join(wm.get("regions", []))
-        await _broadcast(_i18n.log_event("console.amd_wm_ready", level="success",
-                                         regions=regions_str, task_id=tid))
-
-    await _log(f"▶ AMD v2 [{codec.upper()}] — {task.get('url', '')}", "info", tid)
-    return True
-
-
 async def _soundcloud_preflight(task: dict) -> bool:
     """Turnkey SoundCloud — auto-provision Node 20 + the built Lucida engine.
 
@@ -2110,7 +1993,7 @@ async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
     return hls
 
 
-# Quality folders produced ONLY by Apple's Go downloaders (zhaarey/AMD). These are
+# Quality folders produced ONLY by Apple's Go downloaders (zhaarey/gamdl). These are
 # unambiguous — no other service emits them — so a bare-root copy can be re-homed
 # under apple/ without guessing the source service. (AAC 256 is intentionally NOT
 # here: SoundCloud-hq and Tidal-high also map to it.)
@@ -2149,7 +2032,7 @@ def _reclaim_bare_apple(config: dict) -> list[str]:
     """Safety net: re-home Apple-exclusive quality folders that landed at the bare
     downloads root into ``<base>/apple/<quality>/<artist>/<album>``.
 
-    zhaarey/AMD write ``<base>/<quality>/…`` and the runner normally relocates each
+    zhaarey/gamdl write ``<base>/<quality>/…`` and the runner normally relocates each
     task's dir immediately — but when the engine log didn't yield a parseable
     output dir (``extract_save_dir`` → None) the per-task relocate never ran and the
     release was orphaned at the root (on disk but invisible to the manifest/bot =
@@ -2225,7 +2108,7 @@ def _filter_engine_files(audio: list, engine_files) -> list:
 def _relocate_to_service_folder(save_dir: str, service: str, quality: str, config: dict) -> str:
     """Keep the downloads tree consistent: every release should live under
     ``<base>/<service>/<quality>/…``. Most engines already do (the runner shadows
-    their save-path keys), but Apple's Go downloaders (zhaarey/AMD) write
+    their save-path keys), but Apple's Go downloaders (zhaarey/gamdl) write
     ``<base>/<quality>/<artist>/<album>`` directly, skipping the ``<service>/``
     segment — which leaves the downloads folder a mix of ``<base>/<service>/<quality>``
     and bare ``<base>/<quality>`` folders. When (and ONLY when) the output landed at
@@ -2317,9 +2200,9 @@ def _attempt_succeeded(task: dict) -> bool:
     22.08.2026, лог владельца, PAINLESS (Deluxe Edition): витрина `us` не дала
     ключ (нет прав), Ripster честно перешёл на свою `ca` — а там альбома нет в
     каталоге («Failed to get album response»). Это не отказ по ключу, значит
-    `_NeedAMDFallback` не поднялся, значит `_retried_sf` остался True — и
+    `_NeedAppleFallback` не поднялся, значит `_retried_sf` остался True — и
     ПРОПУЩЕНЫ обе оставшиеся ступени разом: и другие свои слоты, и спасение
-    через AMD. Наружу вышло «каталог не отдал релиз», то есть жалоба ВТОРОЙ
+    через публичный wrapper. Наружу вышло «каталог не отдал релиз», то есть жалоба ВТОРОЙ
     попытки, поданная как приговор всей задаче.
     """
     return str(task.get("status") or "").lower() == TaskStatus.DONE.value
@@ -2342,34 +2225,6 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         task["log"].append(f"Unknown engine: {engine_name}")
         _add_to_history(task)
         return
-
-    if engine_name == "amd":
-        # AMD writes a config.toml from the global _cfg in ripster.amd — that
-        # path needs to point at the per-quality subfolder. Temporarily shadow
-        # the three Apple sub-keys so write_amd_config sees the right base, then
-        # restore them. (We can't pass a dict view through _amd_preflight without
-        # changing its signature, so this monkey-poke is the minimal patch.)
-        _base = task.get("_base_save_path") or ""
-        _q = (quality or "").lower()
-        _amd_overrides: dict[str, str] = {}
-        if _base:
-            if _q in ("atmos", "binaural", "downmix"):
-                _amd_overrides = {"atmos-save-folder": _base, "atmos-path": _base}
-            elif _q.startswith("aac"):
-                _amd_overrides = {"aac-save-folder": _base, "aac-path": _base}
-            else:
-                _amd_overrides = {"alac-save-folder": _base}
-        _saved = {k: _config.get(k) for k in _amd_overrides}
-        _config.update(_amd_overrides)
-        try:
-            ok = await _amd_preflight(task, quality)
-        finally:
-            for k, v in _saved.items():
-                if v is None: _config.pop(k, None)
-                else:         _config[k] = v
-        if not ok:
-            _add_to_history(task)
-            return
 
     if engine_name == "soundcloud":
         if not await _soundcloud_preflight(task):
@@ -2736,12 +2591,10 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         from ripster.process_runner import ProcessRunner
         from ripster.engines.base import EventKind
         # SC and big-mix providers can pipe-stream + ffmpeg-transcode silently
-        # for many minutes; default 300 s would kill long mixes. AMD/Qobuz often
-        # have their own silent windows during tagging. SC handles its own
+        # for many minutes; default 300 s would kill long mixes. Qobuz often
+        # Qobuz has its own silent windows during tagging. SC handles its own
         # heartbeats in runner.mjs but we still leave headroom for slow CDNs.
-        if engine_name == "amd":
-            line_timeout = 600.0    # long silent mp4decrypt/tagging windows
-        elif engine_name == "qobuz":
+        if engine_name == "qobuz":
             # streamrip renders a rich/tqdm progress bar via \r (NO \n) for the whole
             # duration of a track transfer — same as OrpheusDL below. readline() blocks
             # on a newline, so the runner sees ZERO output while a big file downloads.
@@ -2777,21 +2630,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             line_timeout = 1200.0
         else:
             line_timeout = 300.0
-        if engine_name == "amd":
-            # AMD shells out to `mp4extract` (and friends) via `subprocess.run`
-            # without a full path — those Bento4 utilities live next to the AMD
-            # main.py. Prepend the AMD dir to PATH so CreateProcess can find them.
-            _amd_dir_str = str(Path(_amd_mod.get_amd_dir()).resolve())
-            extra_env = {
-                "PYTHONPATH":               _amd_dir_str,
-                "PYTHONIOENCODING":         "utf-8",
-                "PYTHONLEGACYWINDOWSSTDIO": "0",
-                "PATH":                     _amd_dir_str + os.pathsep + os.environ.get("PATH", ""),
-                # Ключ wm.wol.moe — окружением, не argv (argv попадает в логи
-                # процессов) и не config.toml (пишут руки пользователя).
-                "AMD_WM_API_KEY":           str(_config.get("amd-wm-api-key") or ""),
-            }
-        elif engine_name == "orpheus_spotify":
+        if engine_name == "orpheus_spotify":
             extra_env = {"PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python", "PYTHONIOENCODING": "utf-8"}
             # Коридор учётки. Нужны ОБА: CWD даёт слоту свои settings.json и
             # loginstorage.bin (core.py резолвит 'config' относительно CWD), а
@@ -2809,7 +2648,6 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         # пакет `ffmpeg` вместо `ffmpeg-python`, и он ломает импорт OrpheusDL
         # (11.08.2026, 12 прогонов). _orpheus_python() уже прибит к .venv — это
         # вторая линия: даже системный python не подтянет чужие пакеты.
-        # AMD намеренно НЕ трогаем: его зависимости могут стоять как раз в user-site.
         if engine_name in ("orpheus_beatport", "orpheus_spotify", "tidal", "orpheus_jiosaavn"):
             extra_env["PYTHONNOUSERSITE"] = "1"
         if engine_name == "deezer" and _cfg_view.get("_deezer_cfg_dir"):
@@ -2913,10 +2751,6 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         runner = ProcessRunner(
             cmd=cmd, engine=eng, line_timeout=line_timeout,
             env=extra_env, cwd=(_task_cwd if _task_cwd is not None else eng.working_dir()),
-            # AMD's child (amd_runner.py) is itself an asyncio+gRPC app and exits
-            # early when spawned via asyncio.create_subprocess_exec on Windows.
-            # Run it through a blocking Popen + reader thread instead.
-            use_thread=(engine_name == "amd"),
         )
         _qs.register_runner(tid, runner)
         _qs.proc = None
@@ -2928,7 +2762,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
 
         fatal_hit = False
         _fatal_msg = ""          # вердикт движка, чтобы он не потерялся
-        _fatal_amd_hint = False   # zhaarey FATAL said "переключись на AMD"
+        _fatal_nokey_hint = False # zhaarey FATAL: «нет прав в регионе» (Invalid CKC)
         async for ev in runner.run():
             if ev.kind is EventKind.FATAL:
                 task["log"].append(ev.message)
@@ -2936,15 +2770,14 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 await _broadcast({"type": "log", "msg": f"✗ {ev.message}", "level": "error", "task_id": tid})
                 if ev.message.startswith("ORPHEUS_NOT_AUTHED"):
                     await _broadcast({"type": "orpheus_not_authed"})
-                elif engine_name == "zhaarey" and (
-                        "Invalid CKC" in ev.message or "AMD" in ev.message):
+                elif engine_name == "zhaarey" and "Invalid CKC" in ev.message:
                     # Хендофф в лестницу витрин/учёток. Раньше ловился ТОЛЬКО по
-                    # слову «AMD» в тексте — 23.09.2026 текст переписали честно
+                    # «Invalid CKC» в тексте — 23.09.2026 текст переписали честно
                     # (без совета про публичный wrapper), слово исчезло, и перебор
                     # своих учёток перестал запускаться вовсе: Hospital30 дважды
                     # умер после одной попытки. Причина — Invalid CKC, по ней и
                     # решаем; формулировка сообщения — не контракт.
-                    _fatal_amd_hint = True
+                    _fatal_nokey_hint = True
                 fatal_hit = True
                 await runner.cancel()
                 break
@@ -2987,20 +2820,20 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         log_text = "\n".join(task.get("log", []))
 
         if fatal_hit:
-            if _fatal_amd_hint and (_amd_mod.get_amd_dir() / "main.py").exists():
-                # Это ХЕНДОФФ в лестницу витрин/слотов/AMD, а НЕ терминальный
+            if _fatal_nokey_hint:
+                # Это ХЕНДОФФ в лестницу витрин/слотов/публичного wrapper, а НЕ терминальный
                 # отказ. Движок честно отдал FATAL (напр. «✗ Apple не выдал ключ
                 # (Invalid CKC), сессия ЖИВА → нет прав в регионе»), а раннер
-                # превращает его в _NeedAMDFallback, чтобы перебрать свои витрины
+                # превращает его в _NeedAppleFallback, чтобы перебрать свои витрины
                 # и учётки. Без метки `_in_retry` finally у `_run_engine_task`
                 # видел бы «running» и на КАЖДОМ таком хендоффе жёг SAFETY NET:
                 # гнал живую задачу в ERROR и клал раннюю запись в историю — из-за
                 # чего сеть безопасности стала НОРМОЙ, а не последним рубежом
                 # (Apple Invalid CKC ×N, 11–17.09.2026). Терминал и историю
-                # гарантирует обработчик _NeedAMDFallback в run_task (см. ниже).
+                # гарантирует обработчик _NeedAppleFallback в run_task (см. ниже).
                 # Тот же идиом уже стоит у _NeedRetry ниже. 18.09.2026.
                 task["_in_retry"] = True
-                raise _NeedAMDFallback()
+                raise _NeedAppleFallback()
             # Вердикт движка ОБЯЗАН дойти до задачи, а не только до консоли.
             #
             # Живой случай 05.09.2026: Apple не выдал ключ (Invalid CKC) при
@@ -3156,21 +2989,6 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                     except Exception:
                         pass
 
-        # AMD lossless-unavailable → auto-fallback to zhaarey AAC.
-        # Trigger when: AMD was used, wrapper quality requested, codec errors present
-        # in the log, not a connection failure, and we haven't already fallen back.
-        if (
-            engine_name == "amd"
-            and quality in _AMD_WRAPPER_QUALS
-            and not task.get("_amd_fallback")
-            and not (result.error or "").startswith("wrapper-manager unreachable")
-            and _RE_AMD_CODEC_ERR.search(log_text)
-        ):
-            # Хендофф на zhaarey — не терминал; finally пропустит SAFETY NET,
-            # финальную запись в историю сделает переигранный прогон. 18.09.2026.
-            task["_in_retry"] = True
-            raise _NeedZhaareyFallback("aac")
-
         # gamdl на ЛОССИ-пути упал разбором манифеста → добираем через wrapper.
         #
         # 15.08.2026, гость: «Gold Chain» в AAC падал у gamdl дважды подряд с
@@ -3187,7 +3005,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         if (
             engine_name == "gamdl"
             and quality not in ("mv",)          # видео умеет только gamdl
-            and not task.get("_amd_fallback")
+            and not task.get("_apple_fallback")
             and result.tracks_ok == 0
             and _RE_GAMDL_MANIFEST_ERR.search(log_text)
         ):
@@ -3263,7 +3081,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 task["_engine_files"] = _ef(log_text) if _ef else None
             except Exception:
                 task["_engine_files"] = None
-            # Apple Go downloaders (zhaarey/AMD) write to a bare <base>/<quality>/
+            # Apple Go downloaders (zhaarey/gamdl) write to a bare <base>/<quality>/
             # root; sweep any stragglers under apple/ so they're never orphaned at
             # the downloads root (orphaned = invisible to the manifest = "downloaded
             # but delivered nothing"). If the engine log gave no dir but the sweep
@@ -3275,7 +3093,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # On the common path save_dir is known and `_relocate_to_service_folder`
             # below moves THIS task's own dir — safe under parallel zhaarey. A blind
             # sweep on every success could grab a concurrent task's in-progress dir.
-            if (not save_dir) and (task.get("service") in ("apple", "")) and engine_name in ("zhaarey", "amd"):
+            if (not save_dir) and (task.get("service") in ("apple", "")) and engine_name == "zhaarey":
                 _reclaimed = _reclaim_bare_apple(_config)
                 if len(_reclaimed) == 1:
                     save_dir = _reclaimed[0]
@@ -3617,7 +3435,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                        and "FairPlay" in (result.error or "")
                        and result.tracks_ok == 0)):
             # Partial failure — reset in-place (same tile, same ID).
-            # AMD/streamrip skip already-downloaded tracks, so a second pass
+            # streamrip/gamdl skip already-downloaded tracks, so a second pass
             # picks up the failed ones without re-downloading the successful ones.
             n_ok  = result.tracks_ok
             n_err = result.tracks_err
@@ -3639,11 +3457,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             if msg.startswith("ORPHEUS_NOT_AUTHED"):
                 await _broadcast({"type": "orpheus_not_authed"})
             elif "-1002" in msg and engine_name in ("gamdl", "zhaarey"):
-                if (_amd_mod.get_amd_dir() / "main.py").exists():
-                    # Хендофф в AMD-фолбэк — не терминал; finally пропустит
-                    # SAFETY NET, судьбу решит обработчик в run_task. 18.09.2026.
-                    task["_in_retry"] = True
-                    raise _NeedAMDFallback()
+                # Хендофф в лестницу/публичный wrapper — не терминал; судьбу
+                # решит обработчик в run_task (он же сверяет политику допуска).
+                # 18.09.2026.
+                task["_in_retry"] = True
+                raise _NeedAppleFallback()
             elif "New settings detected" in msg or "обнаружены новые настройки" in msg:
                 # Задача не завершена — её перезапустит run_task. Без метки finally
                 # ниже видит «running», срабатывает SAFETY NET и в историю ложится
@@ -3691,8 +3509,6 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             # patient wrapper-busy class, else the normal small cap.
             if _RE_WRAPPER_DEAD.search(msg):
                 max_r = _MAX_DEAD_RETRIES
-            elif _RE_DECRYPT_DOWN.search(msg):
-                max_r = _MAX_DECRYPT_RETRIES
             elif _RE_PATIENT.search(msg):
                 max_r = _MAX_PATIENT_RETRIES
             else:
@@ -3727,7 +3543,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 task["log"]          = []
                 task["_retry_count"] = retry_n + 1
                 for _k in ("_start_time", "_done_time", "_save_dir",
-                           "_prog_total", "_prog_current", "_amd_fallback"):
+                           "_prog_total", "_prog_current", "_apple_fallback"):
                     task.pop(_k, None)
                 task["_in_retry"] = True   # tell finally to skip _add_to_history
                 await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
@@ -3877,7 +3693,7 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         else:
             _try_advance_task(task, TaskStatus.CANCELLED)
         raise
-    except _NeedAMDFallback:
+    except _NeedAppleFallback:
         raise
     except _NeedZhaareyFallback:
         raise
@@ -4008,7 +3824,8 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
 # Engines absent from this map are never re-routed (unknown → leave alone).
 _ENGINE_SERVICES: dict[str, frozenset] = {
     "zhaarey":          frozenset({"apple"}),
-    "amd":              frozenset({"apple"}),
+    "lite":             frozenset({"apple"}),   # Wrapper Lite: свой key-сервер
+                                                # или публичный враппер
     "gamdl":            frozenset({"apple"}),
     "qobuz":            frozenset({"qobuz"}),
     "deezer":           frozenset({"deezer"}),
@@ -4021,7 +3838,6 @@ _ENGINE_SERVICES: dict[str, frozenset] = {
     "orpheus_beatport": frozenset({"beatport"}),
     "orpheus_jiosaavn": frozenset({"jiosaavn"}),
     "yandex":           frozenset({"yandex"}),
-    "amazon":           frozenset({"amazon"}),
     "bbc":              frozenset({"bbc"}),
     "bbc_live":         frozenset({"bbc"}),
 }
@@ -4373,8 +4189,11 @@ def _public_fallback_reason(mode: str, task: dict, url: str, config: dict,
 async def _public_wrapper_attempt(task: dict, url: str, qid: str,
                                   reason: str, config: dict) -> bool:
     """Один запасной заход через публичный wrapper. Возвращает True, если
-    скачалось. Никакого смешивания источников внутри альбома: AMD берёт релиз
-    ЦЕЛИКОМ (свои ступени к этому моменту уже ничего не дали)."""
+    скачалось. Никакого смешивания источников внутри альбома: враппер берёт
+    релиз ЦЕЛИКОМ (свои ступени к этому моменту уже ничего не дали).
+
+    Транспорт — Wrapper-Lite HTTP API + Temari; прежний gRPC-клиент wm.wol.moe
+    снят 02.09.2026."""
     region = _public_region_for(config, url)
     task["log"].append(
         f"─── {reason} → один запасной заход через публичный wrapper"
@@ -4388,8 +4207,8 @@ async def _public_wrapper_attempt(task: dict, url: str, qid: str,
     task["progress"] = 0
     await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
     try:
-        await _run_engine_task(task, "amd", url, qid)
-    except (_NeedAMDFallback, _NeedZhaareyFallback):
+        await _run_engine_task(task, "lite", url, qid)
+    except (_NeedAppleFallback, _NeedZhaareyFallback):
         pass
     ok = _attempt_succeeded(task)
     if ok:
@@ -4464,26 +4283,20 @@ async def run_task(task: dict) -> None:
         if task.get("_route_error"):
             raise ValueError(task.pop("_route_error"))
 
-        # zhaarey without wrapper → auto-switch to AMD (skipped in local-only mode)
+        # zhaarey без локального враппера → публичный wrapper (lite-API). Ветка
+        # и так закрыта политикой (`_apple_local_only`), поэтому никакого
+        # «враппер не установлен → просим Docker» больше нет: lite ничего
+        # локально не требует.
         if engine == "zhaarey" and svc in ("apple", "") and not _apple_local_only:
             wrapper_quals = {"alac", "atmos", "binaural", "downmix"}
             if qid in wrapper_quals and not await _amd_mod.check_wrapper_running():
-                amd_dir = _amd_mod.get_amd_dir()
-                if (amd_dir / "main.py").exists():
-                    await _log(
-                        f"⚠ Wrapper не запущен — переключаюсь на AMD (wm.wol.moe) для {qid.upper()}",
-                        "warn",
-                    )
-                    engine = "amd"
-                else:
-                    dec_port = _config.get("decrypt-port", "127.0.0.1:10020")
-                    msg = (
-                        f"⚠ Wrapper не запущен (порт {dec_port}) — ALAC/Atmos требует Docker-враппер.\n"
-                        f"  Перейди в Setup → Запустить враппер  или выбери качество AAC."
-                    )
-                    task["log"].append(msg)
-                    await _broadcast({"type": "log", "msg": msg, "level": "warn"})
-                    await _broadcast({"type": "wrapper_status", "running": False})
+                await _log(
+                    f"⚠ Wrapper не запущен — переключаюсь на публичный "
+                    f"wrapper (wm.wol.moe, lite-API) для {qid.upper()}",
+                    "warn",
+                )
+                engine = "lite"
+                task["_public_route"] = True
 
         # Ключ враппера Apple выдаёт по витрине АККАУНТА, а не по витрине ссылки
         # (факт из переписки авторов wrapper'а; разбор — docs/APPLE_STOREFRONT_-
@@ -4493,7 +4306,7 @@ async def run_task(task: dict) -> None:
         # сразу, до первого запроса ключа: ровно то же действие, что и там, — но
         # без гарантированно провального запроса (лишний CKC жжёт слот сессии).
         # Мутируем ТОЛЬКО `_first_url` (даём ему переписать первый заход), а `url`
-        # остаётся ссылкой витрины: на нём работают фолбэк на публичный AMD и
+        # остаётся ссылкой витрины: на нём работают фолбэк на публичный wrapper и
         # многоаккаунтная лестница ниже, где регион решает уже конкретный слот.
         _first_url = url
         if engine == "zhaarey" and not task.get("_sf_retried"):
@@ -4519,7 +4332,7 @@ async def run_task(task: dict) -> None:
 
         try:
             await _run_engine_task(task, engine, _first_url, qid)
-        except _NeedAMDFallback:
+        except _NeedAppleFallback:
             if not _apple_public_ok:
                 # Local-only: do NOT salvage via the public wrapper. Surface the
                 # local-wrapper DRM/CKC failure as a real error so the owner can
@@ -4601,13 +4414,13 @@ async def run_task(task: dict) -> None:
                                     # иначе следующая отработает «в мёртвую»: её успех
                                     # не сможет вывести задачу из терминальной ошибки.
                                     _revive_task(task, _acct_sf)
-                        except _NeedAMDFallback:
+                        except _NeedAppleFallback:
                             _retried_sf = False      # и своя витрина не дала ключа
                         except Exception:
                             _retried_sf = False
                     # ── ЛЕСТНИЦА СВОИХ АККАУНТОВ ──────────────────────────────────────────────
                     # Перебор был ОДНОСТУПЕНЧАТЫМ: выбирался один слот, его
-                    # отказ проглатывался `except _NeedAMDFallback` ниже, и
+                    # отказ проглатывался `except _NeedAppleFallback` ниже, и
                     # честная ошибка выходила без попытки на остальных
                     # учётках. 22.09.2026 к этому добавилась вторая
                     # немая ступень: перебор требовал, чтобы каталог
@@ -4627,7 +4440,7 @@ async def run_task(task: dict) -> None:
                             # на первом заходе (при повторном `_sf_retried` уже стоит),
                             # и во втором заходе имя оказывалось несвязанным. NameError
                             # ловил широкий `except Exception` ниже, ветка молча
-                            # проваливалась на AMD, и выглядело это как «код не
+                            # проваливалась на публичном wrapper, и выглядело это как «код не
                             # сработал» — хотя он работал и падал.
                             from ripster.apple_router import (local_wrapper_storefront,
                                                               rewrite_storefront_resolved)
@@ -4707,7 +4520,7 @@ async def run_task(task: dict) -> None:
                                 _revive_task(task, _cc)      # ERROR→QUEUED до попытки
                                 try:
                                     await _run_engine_task(task, engine, _u2, qid)
-                                except _NeedAMDFallback:
+                                except _NeedAppleFallback:
                                     task["_ladder"].append(
                                         {"slot": _slot["slot"], "country": _cc,
                                          "outcome": "nokey",
@@ -4765,7 +4578,7 @@ async def run_task(task: dict) -> None:
                                                           if s.get("country")})) or "—",
                                     tried=", ".join(sorted(_tried)) or "—",
                                     task_id=task.get("id", "")))
-                        except _NeedAMDFallback:
+                        except _NeedAppleFallback:
                             _retried_sf = False          # и чужой слот не дал ключа
                         except Exception as _e_slot:
                             # НЕ молча. Именно немой except прятал здесь NameError,
@@ -4799,7 +4612,7 @@ async def run_task(task: dict) -> None:
                         # Перебор реально шёл — значит человек вправе увидеть,
                         # КОГО именно спрашивали и что ответил каждый. Раньше
                         # наружу уходил вердикт движка про ОДНУ сессию («нет прав
-                        # в регионе, возьми релиз через AMD»), и владелец по
+                        # в регионе, возьми релиз через публичный wrapper»), и владелец по
                         # нему делал руками ровно то, что код делать
                         # отказывался. Теперь отчёт — по всем своим учёткам, и
                         # каждая ступень несёт НАСТОЯЩУЮ причину, а не mark.
@@ -4850,25 +4663,27 @@ async def run_task(task: dict) -> None:
                     await _broadcast(_i18n.log_event(
                         _ekey, level="error", task_id=task.get("id", "")))
                     task["log"].append(_i18n.tr(_ekey))
-                    task["log"].append("─── local-only: AMD-фолбэк подавлен ───")
+                    task["log"].append("─── local-only: публичный фолбэк подавлен ───")
                     _try_advance_task(task, TaskStatus.ERROR)
                     # Как и выше: CKC-ступень помечена `_in_retry`, историю
                     # пишет этот финальный обработчик, а не finally. 18.09.2026.
                     if not task.get("error"):
                         task["error"] = _verdict_from_log(task) or (
-                            "Apple: локальный wrapper не выдал ключ; AMD-фолбэк "
-                            "подавлен (публичный wrapper включается вручную).")
+                            "Apple: локальный wrapper не выдал ключ; публичный "
+                            "фолбэк подавлен (публичный wrapper включается вручную).")
                     _add_to_history(task)
             else:
-                await _broadcast(_i18n.log_event("console.drm_retry_amd", level="warn"))
-                task["log"].append("─── AMD auto-fallback ───")
-                await _run_engine_task(task, "amd", url, qid)
+                await _broadcast(_i18n.log_event("console.drm_retry_public", level="warn"))
+                # Публичный враппер — lite-путь.
+                task["log"].append("─── публичный wrapper auto-fallback (lite-API) ───")
+                task["_public_route"] = True
+                await _run_engine_task(task, "lite", url, qid)
         except _NeedZhaareyFallback as _fb:
             _fbq = _fb.quality
-            await _broadcast(_i18n.log_event("console.amd_alac_fallback", level="warn",
+            await _broadcast(_i18n.log_event("console.apple_aac_fallback", level="warn",
                                              quality=_fbq.upper()))
             task["log"].append(f"─── zhaarey {_fbq} auto-fallback ───")
-            task["_amd_fallback"] = True
+            task["_apple_fallback"] = True
             # The failed attempt inside _run_engine_task may already have marked
             # the task ERROR before raising — QUEUED→RUNNING is legal, ERROR→
             # RUNNING is not (task_state.advance raises InvalidTransition, the
@@ -4911,17 +4726,19 @@ def _lock_key(task: dict) -> str | None:
     """Contended-resource key for queue concurrency. Tasks sharing a key run ONE
     at a time; tasks with key None run fully parallel (up to max-parallel).
 
-    The public AMD wrapper (`amd`) is a remote gRPC client — no local port, each
-    process independent — so multiple Apple ALAC/Atmos releases can download at
-    once. Serialized paths: `zhaarey` (local docker wrapper binds fixed ports
+    Serialized paths: `zhaarey` (local docker wrapper binds fixed ports
     10020/20020), `deemix`/Deezer (shared %APPDATA%\\deemix\\.arl) and streamrip
     (shared config.toml) — plus their per-account rate-limits."""
     eng = (task.get("engine") or "").lower()
     svc = (task.get("service") or "").lower()
-    if eng == "amd":
-        return None                      # public wrapper → parallel-safe
     if eng == "zhaarey":
         return "apple-local"             # local wrapper → fixed ports, one at a time
+    if eng == "lite":
+        # TCP-оракул LiteShim — один на процесс и с ОДНИМ key-сервером
+        # (свой контейнер или публичный враппер). Две lite-задачи разных
+        # серверов одновременно рассинхронизировали бы оракул посреди
+        # закачки, поэтому дорожка общая.
+        return "apple-lite"
     if eng == "bbc_live":
         # Живой эфир пишется с одной машины и ловит только то, что звучит
         # СЕЙЧАС: две параллельные записи одного канала дали бы два одинаковых
@@ -5033,11 +4850,11 @@ async def process_queue() -> None:
             # is its OWN lane — Deezer never waits on Apple and vice-versa.
             #   • each keyed lane (deemix/streamrip/zhaarey…) runs ONE at a time
             #     (shared ARL / config.toml / fixed ports / per-account limits);
-            #   • the public AMD wrapper (key=None) is a remote stateless gRPC
-            #     client, so it gets a wide lane of `max(3, max-parallel)`.
+            #   • key=None (не опознанные служба/движок) gets a wide lane of
+            #     `max(3, max-parallel)` — it contends for no known local resource.
             # Different lanes run fully in parallel — there is no single global
             # pool that one service can starve. Floor of 3 per the user's rule.
-            amd_cap = max(3, int(_config.get("max-parallel", 1)))
+            open_cap = max(3, int(_config.get("max-parallel", 1)))
             # Apple-local (zhaarey) was a single lane (one local wrapper, fixed
             # ports). The wrapper pool now gives it `pool_size` concurrent slots —
             # each task acquires its own container. Pool off ⇒ 1 ⇒ original serial.
@@ -5062,13 +4879,13 @@ async def process_queue() -> None:
                         zh_cap = 1
             by_id = {t["id"]: t for t in _queue}
             busy_keys = set()
-            amd_active = 0
+            open_active = 0
             zh_active  = 0
             for atid in active:
                 if atid in by_id:
                     k = _lock_key(by_id[atid])
                     if k is None:
-                        amd_active += 1
+                        open_active += 1
                     elif k == "apple-local":
                         zh_active += 1
                     else:
@@ -5099,9 +4916,9 @@ async def process_queue() -> None:
             for task in _fair_order(pending):
                 k = _lock_key(task)
                 if k is None:
-                    if amd_active >= amd_cap:
-                        continue          # AMD lane full
-                    amd_active += 1
+                    if open_active >= open_cap:
+                        continue          # wide fallback lane full
+                    open_active += 1
                 elif k == "apple-local":
                     if zh_active >= zh_cap:
                         continue          # Apple-local pool full (all wrappers busy)

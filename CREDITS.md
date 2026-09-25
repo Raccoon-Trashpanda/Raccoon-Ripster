@@ -18,7 +18,7 @@ Ripster не написан с нуля. Ниже — всё, на чьей ра
 
 | Сервис | Что это | Как используем |
 |---|---|---|
-| `wm.wol.moe` | wrapper-manager: пул устройств-волонтёров, выдающих ключи | движок `amd` (`ripster/amd.py`, `ripster/engines/amd.py`); включается ТОЛЬКО вручную (`apple-wrapper = public`) |
+| `wm.wol.moe` | wrapper-manager: пул устройств-волонтёров, выдающих ключи | публичный wrapper — ходим через его HTTP Wrapper-Lite API (`ripster/lite.py`, движок `lite`); включается ТОЛЬКО вручную (`apple-wrapper = public`). gRPC-клиент `amd` выпилен 25.09.2026: апстрим снял транспорт 02.09.2026 |
 | `amd.wol.moe` | «Apple Music Web Decrypter» — браузерный клиент к тому же пулу, расшифровка в WASM | код НЕ заимствован; из него взята только форма публичных эндпоинтов (`/status`, `/m3u8`, `/key`, `/license`, `/lyrics`, `/webplayback`) |
 | `amp-api.wol.moe` | прокси каталога Apple (AMP API) без своего токена | изучен 06.09.2026, отвечает в том числе на `filter[upc]`; как запасной источник каталога пока НЕ подключён |
 

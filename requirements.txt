@@ -11,17 +11,15 @@ numpy>=1.26
 # crashes at startup: 'Form data requires "python-multipart" to be installed'.
 python-multipart>=0.0.9
 
-# CRITICAL — do NOT loosen. The AMD/public-wrapper engine ships protobuf-
-# generated _pb2 modules built against the protobuf 6.31.x runtime (grpcio-tools
-# 1.80). Any other protobuf version makes those modules fail to import and the
-# wrapper silently "doesn't download". Several deps (esp. standard pywidevine)
-# try to drag protobuf below 4.x — this hard pin blocks that downgrade.
+# CRITICAL — do NOT loosen. Several deps (esp. standard pywidevine) try to drag
+# protobuf below 4.x — this hard pin blocks that downgrade.
 # 6.33.4: OrpheusDL Spotify desktop_api + pywidevine ship protobuf-6.33 gencode
-# (runtime must be >= gencode). AMD's 6.31 gencode still loads fine on 6.33
-# runtime (newer runtime is allowed), so this satisfies BOTH. Do NOT drop below
-# 6.33 or OrpheusDL/pywidevine fail to import (VersionError).
+# (runtime must be >= gencode). Do NOT drop below 6.33 or OrpheusDL/pywidevine
+# fail to import (VersionError).
+# grpcio выпилен 25.09.2026 вместе с движком `amd`: живых gRPC-клиентов в
+# проекте нет (публичный wrapper — HTTP Wrapper-Lite), ни один модуль `grpc`
+# не импортирует.
 protobuf==6.33.4
-grpcio>=1.78
 
 # Optional: enable Deezer engine (remove if you don't need Deezer)
 deemix>=3.6.6

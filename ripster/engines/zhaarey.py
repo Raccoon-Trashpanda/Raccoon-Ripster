@@ -202,7 +202,7 @@ class ZhaereyEngine(EngineBase):
             yield Event(
                 kind=EventKind.FATAL,
                 message="✗ zhaarey: ошибка загрузки (ALAC без враппера?). "
-                        "Запусти враппер в Setup или переключись на AMD.",
+                        "Запусти враппер в Setup или включи публичный wrapper.",
                 level=LineLevel.ERROR,
             )
             return

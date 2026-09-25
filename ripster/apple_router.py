@@ -6,14 +6,14 @@ path depends on a resource that may or may not be available right now:
   - Video (mv)      : gamdl + cookies + gamdl's bundled Widevine CDM. No wrapper.
   - AAC (lossy)     : gamdl + cookies. No wrapper.
   - ALAC/Atmos/AC3  : a *wrapper* is mandatory (lossless/spatial keys). Either
-        • AMD     → public wrapper-manager (``amd-instance-url``, e.g. wm.wol.moe);
-                    needs NO Docker and NO Apple ID, OR
+        • lite    → public wrapper-manager (``amd-instance-url``, e.g. wm.wol.moe)
+                    over the Wrapper-Lite HTTP API: NO Docker, NO Apple ID, OR
         • zhaarey → local Docker wrapper (``decrypt-port``, default 10020).
 
 ``route_apple()`` probes what is actually reachable (local wrapper TCP port,
 cookies file) and returns the best engine+quality to satisfy the request.
 
-The public wm.wol.moe wrapper (``amd``) is **manual-only**: it is chosen *only*
+The public wm.wol.moe wrapper is **manual-only**: it is chosen *only*
 when the owner has set ``apple-wrapper = "public"`` in Settings. It is never an
 automatic fallback — a foreign-storefront link or a down local wrapper stays on
 the local wrapper, and ``runner.py`` rotates through the owner's other Apple
@@ -69,9 +69,9 @@ def key_request_storefront(url: str, acct_sf: str) -> tuple[str, bool]:
 # A release can be live in one storefront before another (e.g. out in /nz/ days
 # before our /gb/ account). iTunes flags this per region via `isStreamable`. If
 # the link's region can't stream it yet, we find a region that CAN and rewrite
-# the storefront — AMD's public wrapper carries multi-region accounts, so it
-# pulls the pre-release from there. (Verified earlier: a foreign-region URL
-# downloads fine via AMD.)
+# the storefront — публичный пул носит мультирегиональные учётки, поэтому
+# препрелиз он берёт оттуда. (Проверено ранее: иностранная ссылка у
+# публичного враппера скачивается.)
 _REGION_PROBE = ["nz", "au", "us", "ca", "jp", "gb", "de", "fr", "ie", "nl"]
 _AVAIL_CACHE: dict = {}        # apple_id -> (ts, url_or_None)
 _AVAIL_TTL = 1800.0
@@ -187,7 +187,7 @@ async def resolve_available_url(url: str, config: dict):
 def is_apple_music_video(url: str) -> bool:
     """True for an Apple Music *music video* link (``/music-video/…``).
 
-    Video can only be handled by gamdl (zhaarey/amd are audio-only) at the ``mv``
+    Video can only be handled by gamdl (zhaarey/lite are audio-only) at the ``mv``
     quality — ``route_apple`` forces both when it sees such a URL.
     """
     u = (url or "").lower()
@@ -596,10 +596,10 @@ def local_wrapper_healthy() -> bool:
 # behind it has any actual wrapper instance online. Confirmed 2026-07-22: the
 # gRPC channel opens fine, but every real request fails with
 # "WrapperManagerException: no healthy and ready instances available" — a
-# volunteer-hosted pool with zero connected instances at that moment. The AMD
-# engine calls ``mark_public_wrapper_unhealthy()`` on that exact error so the
-# router stops sending traffic into a ~28s guaranteed-fail retry loop until
-# the cooldown expires and it's worth probing again.
+# volunteer-hosted pool with zero connected instances at that moment. Движок
+# `lite` вызывает ``mark_public_wrapper_unhealthy()`` на той же ошибке, и
+# роутер перестаёт слать трафик в гарантированную ~28-секундную петлю ретраев,
+# пока cooldown не истечёт и не будет смысла пробовать снова.
 _public_unhealthy_until: float = 0.0
 
 
@@ -865,7 +865,7 @@ def public_decision(config: dict, url: str = "", task: dict | None = None) -> tu
         return False, mode, ""
     if mode == "on_limit":
         # Публичный подхватывает отказы пейсинга (`apple_pacing_blocked`) —
-        # ниже они не мешают, но и не включают amd заранее.
+        # ниже они не мешают, но и не включают публичный заранее.
         return bool(apple_pacing_blocked(config)), mode, ""
     return True, mode, ""
 
@@ -970,31 +970,28 @@ def _lite_ready(config: dict) -> tuple:
 # дала «gamdl aac error» и «zhaarey alac done».
 #
 # Поэтому решение принимает ветка, а ВЫПУСКАЕТ его только `_decide`. Он знает
-# два запрета и умеет их восстановить:
+# запрет и умеет его восстановить:
 #
-#   • `amd` (публичный wm.wol.moe) — только по явному выбору владельца: режим
-#     `apple-public-mode` (24.09.2026), legacy `apple-wrapper = public`, или
-#     чекбокс конкретной задачи;
 #   • `gamdl` (куки) — только для видео, либо когда локальный wrapper реально
 #     не отвечает И владелец не прибил движок к локальному.
+#
+# Запрет «публичный wrapper — только по выбору владельца» живёт этажом выше:
+# в `_public_route` пускает только `public_decision` (режимы 24.09.2026).
 #
 # Нарушение не молчит: печатается «маршрут исправлен», по строке видно, какая
 # ветка разъехалась. Тихая коррекция превратила бы сторожа в украшение.
 def _decide(engine: str, quality: str, *, pref: str, local_ok: bool,
-            is_video: bool, note: str = "", degraded: bool = False,
-            public_ok: bool | None = None) -> dict:
-    """Проверить решение ветки на два запрета и вернуть маршрут.
+            is_video: bool, note: str = "", degraded: bool = False) -> dict:
+    """Проверить решение ветки на запрет и вернуть маршрут.
 
-    `public_ok` — разрешение публичного враппера от `public_decision` (режимы
-    24.09.2026). Переданной None (все старые вызовы и тесты) считается по
-    прежнему правилу: `pref == "public"`."""
-    if public_ok is None:
-        public_ok = (pref == "public")
+    Запрет «не уезжать на публичный wrapper само по себе» держит не здесь:
+    в пул ходит ТОЛЬКО `_public_route`, а к нему ветки приходят после
+    `public_decision` (режимы 24.09.2026). Отличить публичный `lite` от
+    локального Lite-сервера по имени движка нельзя — они оба `lite`, — поэтому
+    подмена по имени тут только ломала бы выбор владельца
+    (`apple-wrapper: lite`)."""
     fixed = ""
-    if engine == "amd" and not public_ok:
-        fixed = "публичный wrapper выбирается только владельцем (режим off)"
-        engine = "zhaarey"
-    elif engine == "gamdl" and not is_video and (local_ok or pref == "local"):
+    if engine == "gamdl" and not is_video and (local_ok or pref == "local"):
         fixed = ("локальный wrapper доступен" if local_ok
                  else "движок прибит владельцем к локальному врапперу")
         engine = "zhaarey"
@@ -1010,13 +1007,19 @@ _MODE_LABELS = {"only": "режим «только публичный»",
                 "on_region": "режим «резерв по региону»",
                 "on_fail": "режим «резерв при отказе своих»"}
 
+#: Движок публичного враппера: Wrapper-Lite HTTP API (server =
+#: `amd-instance-url`, Bearer = `amd-wm-api-key`, см. `lite.public_target`).
+#: Прежний gRPC-транспорт wm.wol.moe снят 02.09.2026, и вместе с ним выпилено
+#: само имя `amd` — живой путь один.
+PUBLIC_ENGINE = "lite"
+
 
 def _public_route(q: str, config: dict, url: str, url_sf: str, acct_sf: str,
                   foreign: bool, cookies: bool, pref: str, pub_mode: str) -> dict:
     """Ветка публичного wrapper'а: честная заметка, учёт повторных отправок
     (кэш по adamId) и суточный кап. Единственный выход — снова `_decide`."""
     if is_apple_music_video(url):
-        # Движок AMD audio-only: клипы публичный враппер не умеет ни в каком
+        # Публичный враппер audio-only: клипы он не умеет ни в каком
         # режиме — остаётся gamdl с cookies.
         note = "" if cookies else "⚠ нет cookies.txt — видео не скачается"
         if pub_mode in _MODE_LABELS:
@@ -1049,7 +1052,12 @@ def _public_route(q: str, config: dict, url: str, url_sf: str, acct_sf: str,
     want_sf = (url_sf or acct_sf or config.get("storefront") or "us")
     forced = str(config.get("amd-region-force") or "").strip().lower()
     if pub_mode == "manual_region" and forced:
-        note += f" · витрина принуждена '{forced}'"
+        # Lite-API (единственный путь публичного враппера) параметра региона не
+        # знает: `/m3u8?adamId=` отдаёт плейлист из той витрины, где трек есть.
+        # «Ручной регион» умел только прежний gRPC-транспорт — врать, что это
+        # работает здесь, нельзя.
+        note += (f" · ручной регион '{forced}' для lite-эндпоинта не работает "
+                 "— сервер сам берёт витрину с треком")
     elif public_pool_serves(config, want_sf) is False:
         alt = public_pool_pick_region(config, want_sf)
         if alt and config.get("amd-region-rewrite", True) is not False:
@@ -1059,8 +1067,9 @@ def _public_route(q: str, config: dict, url: str, url_sf: str, acct_sf: str,
                      f"(есть, например, '{alt}'), смена региона выключена")
     if foreign:
         note += f" · регион {url_sf}"
-    return _decide("amd", q, pref=pref, local_ok=_local_wrapper_ok(config),
-                   is_video=False, note=note, public_ok=True)
+    note += " · lite-API"
+    return _decide(PUBLIC_ENGINE, q, pref=pref, local_ok=_local_wrapper_ok(config),
+                   is_video=False, note=note)
 
 
 def route_apple(quality: str, config: dict, url: str = "",
@@ -1073,8 +1082,8 @@ def route_apple(quality: str, config: dict, url: str = "",
     REGION RULE: the cookies-based engine (gamdl) can only reach the catalog of
     the *account's* storefront. A foreign-region link is kept on the local
     wrapper (zhaarey) for lossless; if its account can't mint the key, runner.py
-    rotates through the owner's other Apple account slots. The public AMD
-    wrapper is reached only by an explicit owner choice: the mode group
+    rotates through the owner's other Apple account slots. The public wrapper
+    is reached only by an explicit owner choice: the mode group
     `apple-public-mode` (24.09.2026) or the legacy `apple-wrapper = public`
     (= режим `only`), or the per-task checkbox of the download dialog.
     """
@@ -1094,11 +1103,12 @@ def route_apple(quality: str, config: dict, url: str = "",
 
     pref = (config.get("apple-wrapper") or "auto").strip().lower()
     # Режимы публичного враппера (выбор владельца 24.09.2026): можно ли этой
-    # задаче уходить на `amd`, какой режим это разрешил, и чем заблокирован.
+    # задаче уходить на публичный wrapper, какой режим это разрешил и чем
+    # заблокирован.
     pub, pub_mode, pub_block = public_decision(config, url, task)
     _pub_all = pub_mode in ("only", "manual_region") and pub
 
-    # Публичный wm.wol.moe (engine "amd") подключается ТОЛЬКО когда владелец сам
+    # Публичный wm.wol.moe (движок `lite`) подключается ТОЛЬКО когда владелец сам
     # выбрал его в Настройках — legacy `apple-wrapper = public` или режим
     # `apple-public-mode` (24.09.2026), либо чекбокс конкретной задачи. 03.09.2026
     # владелец потребовал прямо: НИКОГДА не переводить задачу на публичный wrapper

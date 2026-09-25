@@ -302,7 +302,7 @@ code is actually *vendored* — is kept in [CREDITS.md](CREDITS.md).
 ### Download engines
 - [zhaarey / apple-music-downloader](https://github.com/zhaarey/apple-music-downloader) — Apple Music in ALAC & Dolby Atmos via a local wrapper *(this project builds on it)*
 - [glomatico / gamdl](https://github.com/glomatico/gamdl) — Apple Music via account cookies — AAC & music videos
-- [WorldObservationLog / AppleMusicDecrypt](https://github.com/WorldObservationLog/AppleMusicDecrypt) — Apple Music ALAC/Atmos via public wrapper — no Apple ID
+- [WorldObservationLog / AppleMusicDecrypt](https://github.com/WorldObservationLog/AppleMusicDecrypt) — Apple Music ALAC/Atmos via the public wrapper pool, called over its Wrapper-Lite HTTP API — no Apple ID
 - [nathom / streamrip](https://github.com/nathom/streamrip) — Qobuz, Tidal, Deezer, SoundCloud — FLAC up to Hi-Res
 - [lucida](https://codeberg.org/lucida/lucida) — SoundCloud streaming & downloads
 - [llistochek / yandex-music-downloader](https://github.com/llistochek/yandex-music-downloader) — Yandex Music FLAC (with Plus)
@@ -340,7 +340,6 @@ code is actually *vendored* — is kept in [CREDITS.md](CREDITS.md).
 [Mutagen](https://github.com/quodlibet/mutagen) ·
 [PyYAML](https://github.com/yaml/pyyaml) ·
 [protobuf](https://github.com/protocolbuffers/protobuf) ·
-[gRPC](https://github.com/grpc/grpc) ·
 [pywebview](https://github.com/r0x0r/pywebview)
 
 ---

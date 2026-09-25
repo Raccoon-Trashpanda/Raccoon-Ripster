@@ -1120,11 +1120,11 @@ var LANG = {
     'pset.eq_bass':'Низкие','pset.eq_mid':'Средние','pset.eq_treble':'Высокие','pset.eq_reset':'↺ Сбросить',
     'pset.viz':'Визуализатор в полноэкранном плеере','pset.viz_sub':'FFT-спектр снизу, цвет = бренд текущего сервиса.',
     // ── Settings: Apple ──
-    'as.amd_parallel':'Параллельных треков в релизе (публичный враппер)',
-    'as.amd_parallel_hint':'Сколько треков ОДНОГО релиза враппер тянет одновременно (parallelNum). Все идут в одну папку альбома, без дублей. 8–16 = максимум скорости; слишком высоко → Apple/враппер могут ограничить. Это НЕ «параллельные загрузки» из Общих (то — сколько РЕЛИЗОВ разом).',
-    'as.amd_fallback':'Fallback на AAC','as.amd_fallback_sub':'Если ALAC недоступен — скачать AAC',
+    
+    
+    
     'as.apple_parallel':'⚡ Параллельные треки (локальный wrapper)','as.apple_parallel_sub':'Качать несколько треков релиза одновременно через пул wrapper-контейнеров — быстрее на длинных альбомах и DJ-миксах. Нужен локальный премиум-wrapper.',
-    'as.amd_badge':'ALAC · ATMOS · БЕЗ APPLE ID','as.not_installed':'Не установлен','as.install':'⬇ Установить',
+    'as.install':'⬇ Установить',
     'as.start_wrapper':'▶ Запустить wrapper','as.relogin':'🔄 Войти заново (2FA)','as.relogin_title':'Принудительная переавторизация — пришлёт 2FA на телефон',
     'as.device_fingerprint':'🔑 Сменить отпечаток устройства','as.device_fingerprint_title':'Назначить этой учётке уникальный device-info (-I) вместо общего заводского. Apple банит аккаунты, входящие враппером под одним отпечатком.',
     'as.fingerprint_confirm':'Смена отпечатка = для Apple НОВОЕ УСТРОЙСТВО. Это может упереться в лимит устройств и потребовать «Войти заново (2FA)». Назначить новый отпечаток этой учётке?',
@@ -1132,7 +1132,7 @@ var LANG = {
     'w.fingerprint_no_account':'Apple ID слота 0 не задан — назначать отпечаток не для кого.',
     'as.save':'💾 Сохранить','as.check':'🔑 Проверить','as.cookies_how_title':'Как получить cookies.txt',
     'as.eng_desc':'<b style="color:var(--text)">zhaarey</b> — Go, Docker wrapper + Apple ID &nbsp;·&nbsp; <b style="color:var(--text)">gamdl</b> — Python, cookies.txt &nbsp;·&nbsp; <b style="color:var(--text)">AMD v2</b> — Python, ALAC/Atmos без Apple ID',
-    'as.amd_install_hint':'Клонирует <code style="color:var(--text)">WorldObservationLog/AppleMusicDecrypt</code> v2 и устанавливает зависимости (~2 мин)',
+    
     'as.amd_public':'Wrapper-Manager <span style="color:var(--green);font-size:9px">● ПУБЛИЧНЫЙ — бесплатно, без Apple ID</span>',
     'as.amd_wm_key':'API-ключ wm.wol.moe <span style="color:var(--orange);font-size:9px">● с 10.09.2026 обязателен — получить: @wm_auth_bot → /newkey</span>',
     'as.amd_wm_key_ph':'API-ключ…',
@@ -1186,20 +1186,20 @@ var LANG = {
     'console.wrapper_local_region_amd':'⚠ Ключ не выдан на ЭТОТ релиз, но сессия wrapper’а жива — значит прав в регионе аккаунта нет, и локальный wrapper его не достанет. Спасаю через AMD (публичный wrapper держит несколько регионов).',
     'console.wrapper_local_region_fail':'✗ Ключ на этот релиз не выдала ни одна своя Apple-учётка (нет прав в его регионе). Публичный wrapper автоматически не подключается — если нужен, включи вручную: Настройки → Apple → Wrapper → «public». Либо возьми ссылку из своей витрины.',
     'console.wrapper_store_mismatch':'✗ Apple: ключ не выдан, потому что аккаунт wrapper\u2019а не в своей стране. Вход в витрину «{signed_in}» ({signed_cc}), а покупать этому аккаунту разрешено только в «{allowed}» ({allowed_cc}). Это настройка страны самой учётной записи Apple — перелогин и смена ссылки не помогут; нужен аккаунт той страны, где оформлена подписка, либо смена страны в Apple ID.',
-    'console.drm_retry_amd':'⚡ -1002: DRM — автоматически повторяю через AMD v2…',
-    'console.amd_alac_fallback':'⚡ AMD: ALAC недоступен — автоматически пробую zhaarey {quality}…',
+    'console.drm_retry_public':'⚡ -1002: DRM — автоматически повторяю через публичный wrapper…',
+    'console.apple_aac_fallback':'⚡ Apple: ALAC недоступен — автоматически пробую zhaarey {quality}…',
     'console.orpheus_retry':'⟳ OrpheusDL: новые настройки — автоматический повтор…',
-    'console.amd_segments':'⬦ AMD: {n} сегм. [{elapsed}]',
-    'console.amd_instance_hint':'  💡 Убедись что instance = wm.wol.moe',
-    'console.amd_pool_recovered':'✅ Публичный wrapper-manager снова отдаёт треки — снова участвует в маршрутизации',
+    
+    
+    
     'console.run_aborted':'⛔ Прогон прерван: {reason}',
-    'console.amd_config_written':'📄 config.toml записан в {dir} (кодек {codec})',
-    'console.amd_wm_checking':'🌐 Проверяю wrapper-manager: {instance}…',
-    'console.amd_wm_down':'✗ Wrapper-manager недоступен: {err}',
-    'console.amd_wm_need_key':'✗ wm.wol.moe требует ключ — получи в @wm_auth_bot и впиши в Настройки → Apple → API-ключ wm.wol.moe',
-    'console.amd_wm_quota':'✗ Квота wm.wol.moe на сегодня исчерпана — повторим завтра, частыми попытками квоту не вернуть',
-    'console.amd_wm_not_ready':'⚠ Wrapper-manager «{instance}» не готов (клиентов: {clients}, регионов: {regions}) — продолжаю',
-    'console.amd_wm_ready':'✓ Wrapper-manager готов — регионы: {regions}',
+    
+    
+    
+    
+    
+    
+    
     'console.amd_patch_incomplete':'  ⚠ Патч src/cmd.py неполный — накладываю заново',
     'console.amd_patch_done':'  ✓ src/cmd.py пропатчен (headless + ожидание фоновых задач)',
     'console.sc_fb_try':'🔁 SoundCloud: пробую найти трек(и) на других сервисах…',
@@ -1229,8 +1229,8 @@ var LANG = {
     'history.public_wrapper':'скачано через публичный враппер ({region})',
     'history.public_wrapper_lite':'скачано через публичный враппер (lite, {region})',
     'history.fb_from':'вместо {origin}',
-    'console.amd_not_installed':'✗ AppleMusicDecrypt не установлен. Открой Setup → Auto-install',
-    'console.amd_runner_missing':'✗ amd_runner.py не найден — переустанови AMD через Настройки',
+    
+    
     'console.bento4_installing':'📦 Bento4 не найден — ставлю автоматически…',
     'console.bento4_failed':'⚠ Авто-установка Bento4 не удалась: {err}',
     'console.bento4_ok':'✓ Bento4 установлен — продолжаю',
@@ -1247,7 +1247,7 @@ var LANG = {
     'console.bbc_ms_fail':'✗ BBC: MediaSelector ответил {code} для {vpid}',
     'console.bbc_no_hls':'✗ BBC: не нашёл HLS-поток для {vpid}',
     'console.bbc_resolve_err':'✗ BBC: ошибка получения потока: {err}',
-    'console.amd_no_instances':'⚠ Публичный wrapper-manager: сейчас нет ни одного живого инстанса в пуле (не наша поломка, сторонний сервис) — временно исключён из роутинга',
+    
     'err.slots_required':'нужен непустой список slots',
     'err.slot_range':'слот {i} вне диапазона 0..{max}',
     'err.cfg_save_unavailable':'сохранение конфига недоступно',
@@ -1370,7 +1370,7 @@ var LANG = {
     't.sp_connected':'Spotify подключён!',
     't.spdc_upd':'sp_dc обновлена!',
     't.apple_tok_upd':'🍎 Apple Music токен обновлён!',
-    't.amd_ready':'✅ AMD v2 готов! Нажми AMD в топбаре',
+    
     't.gamdl_fixed':'✅ gamdl зависимости исправлены!',
     't.gamdl_old':'⚠ Устаревший gamdl — нажми Auto-install',
     't.no_codec':'💡 no codec found — открой 📋 Логи в баннере wrapper',
@@ -1451,7 +1451,7 @@ var LANG = {
     'gp.preload':'Pre-load следующего трека','gp.preload_sub':'Гэп до ~200мс','gp.spin':'Вращение обложки','gp.spin_sub':'CD-эффект на полноэкранном плеере.',
     'gp.mobile_fs':'Авто-полноэкранный на телефоне','gp.mobile_fs_sub':'Тап по плееру → fullscreen.','gp.viz':'Визуализатор','gp.viz_sub':'FFT-спектр на background.',
     'gp.q_note':'Применяется при добавлении трека в очередь. Хозяин системы может ограничить максимальное качество.',
-    't.amd_v2_msg':'AMD v2 — ALAC/Atmos без Apple ID!','w.scanner_dead':'Сканер не отвечает — обнови страницу','w.loading_rel':'Загружаю релизы…',
+    'w.scanner_dead':'Сканер не отвечает — обнови страницу','w.loading_rel':'Загружаю релизы…',
     'bp.installed':'Модуль Beatport установлен','bp.auto_install':'Установить автоматически',
     'rl.all_seen':'Все релизы отмечены просмотренными','rl.undo':'Отменить','rl.no_date':'Без даты','rl.today':'Сегодня','rl.yesterday':'Вчера',
     'rl.new_word':'Новое','rl.fav_word':'Избранное','rl.appears':'Участвует','rl.none_all_seen':'Новых релизов нет — все {n} отмечены просмотренными',
@@ -1632,7 +1632,7 @@ var LANG = {
     'b.cue_err':'Ошибка CUE: ',
     'ck.imported':'cookies.txt импортирован ✓',
     'ck.loaded':'cookies.txt загружен из файла ✓',
-    'ck.inst_amd':'⬇ Устанавливаю AMD v2…',
+    
     'sc.inst_bp':'⬇ Устанавливаю orpheusdl-beatport…',
     'sc.bp_ok':'✓ orpheusdl-beatport установлен',
     'sc.cancel_seen':'Отменено — отметки «просмотрено» восстановлены',
@@ -1713,11 +1713,11 @@ var LANG = {
     's.bp_install':'Установка модуля','s.bp_account':'Аккаунт Beatport',
     's.import_btn':'Импортировать','s.cancel':'Отмена',
     // ── AMD wrapper-manager dynamic statuses (app.js) ──
-    'as.checking':'Проверяю…','as.amd_unavailable':'Недоступен','as.amd_ready':'Готов',
-    'as.amd_working_noready':'Работает (ready=false, но клиенты есть — загрузки возможны)',
-    'as.amd_not_ready_noclients':'Не готов — нет активных клиентов',
-    'as.amd_clients':'{n} клиент(ов)','as.amd_regions':'Регионы: {list}','as.amd_no_accounts':'Аккаунты не залогинены',
-    'as.amd_error':'Ошибка: {msg}',
+    
+    
+    
+    
+    
     'as.token_set':'✓ Токен установлен ({n} симв.)','as.token_not_set':'Не установлен — нажми «Войти через Apple»',
     // ── Settings: About tab ──
     'ab.tagline':'Универсальный загрузчик музыки в высшем качестве',
@@ -2362,7 +2362,7 @@ var LANG = {
     'ad.folder':'Папка','ad.free':'Свободно','ad.disk_used':'Занято','ad.disk_total':'Всего',
     'ad.tasks_total':'Всего задач','ad.state':'Состояние',
     'ad.card_guest':'Гостевой доступ','ad.links_total':'Всего ссылок','ad.links_active':'Активных','ad.sessions':'Сессий',
-    'ad.card_engines':'Движки','ad.reg_count':'Зарегистрировано','ad.list':'Список',
+    'ad.card_engines':'Движки','ad.reg_count':'Зарегистрировано','ad.list':'Список','ad.pubw_instance':'Публичный wrapper',
     'ad.card_tunnel':'Туннель',
     'ad.card_files':'Файлы состояния','ad.age_min':'{n} мин назад','ad.no_file':'— не существует',
     'ad.card_packages':'Версии пакетов','ad.pkg_missing':'НЕ УСТАНОВЛЕН',
@@ -3515,11 +3515,11 @@ var LANG = {
     'pset.eq_bass':'Bass','pset.eq_mid':'Mid','pset.eq_treble':'Treble','pset.eq_reset':'↺ Reset',
     'pset.viz':'Visualiser in full-screen player','pset.viz_sub':'FFT spectrum at the bottom, colour = current service brand.',
     // ── Settings: Apple ──
-    'as.amd_parallel':'Parallel tracks per release (public wrapper)',
-    'as.amd_parallel_hint':'How many tracks of ONE release the wrapper pulls at once (parallelNum). All go into one album folder, no dups. 8–16 = max speed; too high → Apple/wrapper may throttle. This is NOT «Parallel downloads» from General (that = how many RELEASES at once).',
-    'as.amd_fallback':'Fallback to AAC','as.amd_fallback_sub':'If ALAC is unavailable — download AAC',
+    
+    
+    
     'as.apple_parallel':'⚡ Parallel tracks (local wrapper)','as.apple_parallel_sub':'Download several tracks of a release at once, spread across the wrapper-container pool — much faster on long albums and DJ mixes. Requires the local premium wrapper.',
-    'as.amd_badge':'ALAC · ATMOS · NO APPLE ID','as.not_installed':'Not installed','as.install':'⬇ Install',
+    'as.install':'⬇ Install',
     'as.start_wrapper':'▶ Start wrapper','as.relogin':'🔄 Re-login (2FA)','as.relogin_title':'Force re-authentication — sends 2FA to your phone',
     'as.device_fingerprint':'🔑 Change device fingerprint','as.device_fingerprint_title':'Assign this account a unique device-info (-I) instead of the shared factory one. Apple mass-disables wrapper accounts that all sign in with the same fingerprint.',
     'as.fingerprint_confirm':'Changing the fingerprint = a NEW DEVICE for Apple. This may hit the device limit and require "Re-login (2FA)". Assign a new fingerprint to this account?',
@@ -3527,7 +3527,7 @@ var LANG = {
     'w.fingerprint_no_account':'Slot 0 Apple ID is not set — nowhere to assign a fingerprint.',
     'as.save':'💾 Save','as.check':'🔑 Verify','as.cookies_how_title':'How to get cookies.txt',
     'as.eng_desc':'<b style="color:var(--text)">zhaarey</b> — Go, Docker wrapper + Apple ID &nbsp;·&nbsp; <b style="color:var(--text)">gamdl</b> — Python, cookies.txt &nbsp;·&nbsp; <b style="color:var(--text)">AMD v2</b> — Python, ALAC/Atmos without Apple ID',
-    'as.amd_install_hint':'Clones <code style="color:var(--text)">WorldObservationLog/AppleMusicDecrypt</code> v2 and installs dependencies (~2 min)',
+    
     'as.amd_public':'Wrapper-Manager <span style="color:var(--green);font-size:9px">● PUBLIC — free, no Apple ID</span>',
     'as.amd_wm_key':'wm.wol.moe API key <span style="color:var(--orange);font-size:9px">● required since 10.09.2026 — get it: @wm_auth_bot → /newkey</span>',
     'as.amd_wm_key_ph':'API key…',
@@ -3581,20 +3581,20 @@ var LANG = {
     'console.wrapper_local_region_amd':'⚠ No key issued for THIS release, but the wrapper session is alive — the account’s region has no rights to it, so the local wrapper never will. Salvaging via AMD (the public wrapper keeps several regions).',
     'console.wrapper_local_region_fail':'✗ No key for this release from any of your own Apple accounts (none has rights in its region). The public wrapper is not engaged automatically — if you need it, turn it on by hand: Settings → Apple → Wrapper → “public”. Or use a link from your own storefront.',
     'console.wrapper_store_mismatch':'✗ Apple: no key was issued because the wrapper\u2019s account is not in its own country. It signed into the “{signed_in}” store ({signed_cc}), but this account may only buy music from the “{allowed}” store ({allowed_cc}). That is the Apple account\u2019s own country setting — re-logging in or changing the link won\u2019t help; you need an account from the country the subscription is in, or change the Apple ID country.',
-    'console.drm_retry_amd':'⚡ -1002: DRM — automatically retrying via AMD v2…',
-    'console.amd_alac_fallback':'⚡ AMD: ALAC unavailable — automatically trying zhaarey {quality}…',
+    'console.drm_retry_public':'⚡ -1002: DRM — automatically retrying via the public wrapper…',
+    'console.apple_aac_fallback':'⚡ Apple: ALAC unavailable — automatically trying zhaarey {quality}…',
     'console.orpheus_retry':'⟳ OrpheusDL: new settings — automatic retry…',
-    'console.amd_segments':'⬦ AMD: {n} seg. [{elapsed}]',
-    'console.amd_instance_hint':'  💡 Make sure instance = wm.wol.moe',
-    'console.amd_pool_recovered':'✅ Public wrapper-manager is serving tracks again — back in routing',
+    
+    
+    
     'console.run_aborted':'⛔ Run aborted: {reason}',
-    'console.amd_config_written':'📄 config.toml written to {dir} (codec {codec})',
-    'console.amd_wm_checking':'🌐 Checking wrapper-manager: {instance}…',
-    'console.amd_wm_down':'✗ Wrapper-manager unreachable: {err}',
-    'console.amd_wm_need_key':'✗ wm.wol.moe requires a key — get one from @wm_auth_bot and enter it in Settings → Apple → wm.wol.moe API key',
-    'console.amd_wm_quota':'✗ The wm.wol.moe daily quota is exhausted — retry tomorrow; hammering it will not bring it back',
-    'console.amd_wm_not_ready':'⚠ Wrapper-manager “{instance}” not ready (clients: {clients}, regions: {regions}) — continuing',
-    'console.amd_wm_ready':'✓ Wrapper-manager ready — regions: {regions}',
+    
+    
+    
+    
+    
+    
+    
     'console.amd_patch_incomplete':'  ⚠ src/cmd.py patch incomplete — re-patching',
     'console.amd_patch_done':'  ✓ src/cmd.py patched (headless + background_tasks wait)',
     'console.sc_fb_try':'🔁 SoundCloud: looking for the track(s) on other services…',
@@ -3624,8 +3624,8 @@ var LANG = {
     'history.public_wrapper':'downloaded via the public wrapper ({region})',
     'history.public_wrapper_lite':'downloaded via the public wrapper (lite, {region})',
     'history.fb_from':'instead of {origin}',
-    'console.amd_not_installed':'✗ AppleMusicDecrypt is not installed. Open Setup → Auto-install',
-    'console.amd_runner_missing':'✗ amd_runner.py not found — reinstall AMD from Settings',
+    
+    
     'console.bento4_installing':'📦 Bento4 not found — installing automatically…',
     'console.bento4_failed':'⚠ Bento4 auto-install failed: {err}',
     'console.bento4_ok':'✓ Bento4 installed — continuing',
@@ -3642,7 +3642,7 @@ var LANG = {
     'console.bbc_ms_fail':'✗ BBC: MediaSelector returned {code} for {vpid}',
     'console.bbc_no_hls':'✗ BBC: no HLS stream found for {vpid}',
     'console.bbc_resolve_err':'✗ BBC: stream resolve error: {err}',
-    'console.amd_no_instances':'⚠ Public wrapper-manager: no live instances in the pool right now (not our bug, third-party service) — temporarily excluded from routing',
+    
     'err.slots_required':'a non-empty slots list is required',
     'err.slot_range':'slot {i} is outside 0..{max}',
     'err.cfg_save_unavailable':'saving the config is unavailable',
@@ -3766,7 +3766,7 @@ var LANG = {
     't.sp_connected':'Spotify connected!',
     't.spdc_upd':'sp_dc updated!',
     't.apple_tok_upd':'🍎 Apple Music token updated!',
-    't.amd_ready':'✅ AMD v2 ready! Click AMD in the top bar',
+    
     't.gamdl_fixed':'✅ gamdl dependencies fixed!',
     't.gamdl_old':'⚠ Outdated gamdl — click Auto-install',
     't.no_codec':'💡 no codec found — open 📋 Logs in the wrapper banner',
@@ -3847,7 +3847,7 @@ var LANG = {
     'gp.preload':'Pre-load next track','gp.preload_sub':'Gap up to ~200ms','gp.spin':'Cover spin','gp.spin_sub':'CD effect on the fullscreen player.',
     'gp.mobile_fs':'Auto-fullscreen on phone','gp.mobile_fs_sub':'Tap the player → fullscreen.','gp.viz':'Visualizer','gp.viz_sub':'FFT spectrum on the background.',
     'gp.q_note':'Applied when adding a track to the queue. The system owner may cap the maximum quality.',
-    't.amd_v2_msg':'AMD v2 — ALAC/Atmos without an Apple ID!','w.scanner_dead':'Scanner not responding — refresh the page','w.loading_rel':'Loading releases…',
+    'w.scanner_dead':'Scanner not responding — refresh the page','w.loading_rel':'Loading releases…',
     'bp.installed':'Beatport module installed','bp.auto_install':'Install automatically',
     'rl.all_seen':'All releases marked as seen','rl.undo':'Undo','rl.no_date':'No date','rl.today':'Today','rl.yesterday':'Yesterday',
     'rl.new_word':'New','rl.fav_word':'Favorites','rl.appears':'Appears on','rl.none_all_seen':'No new releases — all {n} marked as seen',
@@ -4025,7 +4025,7 @@ var LANG = {
     'b.cue_err':'CUE error: ',
     'ck.imported':'cookies.txt imported ✓',
     'ck.loaded':'cookies.txt loaded from file ✓',
-    'ck.inst_amd':'⬇ Installing AMD v2…',
+    
     'sc.inst_bp':'⬇ Installing orpheusdl-beatport…',
     'sc.bp_ok':'✓ orpheusdl-beatport installed',
     'sc.cancel_seen':'Cancelled — seen marks restored',
@@ -4106,11 +4106,11 @@ var LANG = {
     's.bp_install':'Module installation','s.bp_account':'Beatport account',
     's.import_btn':'Import','s.cancel':'Cancel',
     // ── AMD wrapper-manager dynamic statuses (app.js) ──
-    'as.checking':'Checking…','as.amd_unavailable':'Unavailable','as.amd_ready':'Ready',
-    'as.amd_working_noready':'Working (ready=false, but clients are present — downloads possible)',
-    'as.amd_not_ready_noclients':'Not ready — no active clients',
-    'as.amd_clients':'{n} client(s)','as.amd_regions':'Regions: {list}','as.amd_no_accounts':'No accounts signed in',
-    'as.amd_error':'Error: {msg}',
+    
+    
+    
+    
+    
     'as.token_set':'✓ Token set ({n} chars)','as.token_not_set':'Not set — click «Sign in with Apple»',
     // ── Settings: About tab ──
     'ab.tagline':'Universal music downloader — top quality',
@@ -4694,7 +4694,7 @@ var LANG = {
     'ad.folder':'Folder','ad.free':'Free','ad.disk_used':'Used','ad.disk_total':'Total',
     'ad.tasks_total':'Total tasks','ad.state':'State',
     'ad.card_guest':'Guest access','ad.links_total':'Total links','ad.links_active':'Active','ad.sessions':'Sessions',
-    'ad.card_engines':'Engines','ad.reg_count':'Registered','ad.list':'List',
+    'ad.card_engines':'Engines','ad.reg_count':'Registered','ad.list':'List','ad.pubw_instance':'Public wrapper',
     'ad.card_tunnel':'Tunnel',
     'ad.card_files':'State files','ad.age_min':'{n} min ago','ad.no_file':'— does not exist',
     'ad.card_packages':'Package versions','ad.pkg_missing':'NOT INSTALLED',
@@ -4986,14 +4986,14 @@ var LANG = {
     'pset.eq_bass':'बास','pset.eq_mid':'मिड','pset.eq_treble':'ट्रेबल','pset.eq_reset':'↺ रीसेट',
     'pset.viz':'फुल-स्क्रीन प्लेयर में विज़ुअलाइज़र','pset.viz_sub':'नीचे FFT स्पेक्ट्रम, रंग = वर्तमान सेवा का ब्रांड।',
     // ── Settings: Apple ──
-    'as.amd_parallel':'रिलीज़ में समानांतर ट्रैक (सार्वजनिक रैपर)',
-    'as.amd_parallel_hint':'रैपर एक ही रिलीज़ के कितने ट्रैक एक साथ खींचता है (parallelNum)। सभी एक एल्बम फ़ोल्डर में, बिना डुप्लिकेट। 8–16 = अधिकतम गति; बहुत अधिक → Apple/रैपर सीमित कर सकते हैं। यह «समानांतर डाउनलोड» (सामान्य) नहीं है (वह = कितनी रिलीज़ एक साथ)।',
-    'as.amd_fallback':'AAC पर fallback','as.amd_fallback_sub':'यदि ALAC उपलब्ध नहीं — AAC डाउनलोड करें',
-    'as.amd_badge':'ALAC · ATMOS · बिना APPLE ID','as.not_installed':'स्थापित नहीं','as.install':'⬇ स्थापित करें',
+    
+    
+    
+    'as.install':'⬇ स्थापित करें',
     'as.start_wrapper':'▶ रैपर शुरू करें','as.relogin':'🔄 फिर लॉगिन (2FA)','as.relogin_title':'जबरन पुनः प्रमाणीकरण — फोन पर 2FA भेजेगा',
     'as.save':'💾 सहेजें','as.check':'🔑 जांचें','as.cookies_how_title':'cookies.txt कैसे प्राप्त करें',
     'as.eng_desc':'<b style="color:var(--text)">zhaarey</b> — Go, Docker wrapper + Apple ID &nbsp;·&nbsp; <b style="color:var(--text)">gamdl</b> — Python, cookies.txt &nbsp;·&nbsp; <b style="color:var(--text)">AMD v2</b> — Python, ALAC/Atmos without Apple ID',
-    'as.amd_install_hint':'Clones <code style="color:var(--text)">WorldObservationLog/AppleMusicDecrypt</code> v2 and installs dependencies (~2 min)',
+    
     'as.amd_public':'Wrapper-Manager <span style="color:var(--green);font-size:9px">● PUBLIC — free, no Apple ID</span>',
     'as.wrapper_hint':'<b style="color:var(--text)">▶ Start</b> — uses the saved session, no 2FA needed.<br><b style="color:var(--orange)">🔄 Re-login</b> — only if the session expired and new auth is needed.',
     'as.applepass_hint':'Passed to the container as <code style="color:var(--muted2)">-e args="-L email:password -H 0.0.0.0"</code>.<br>Stored locally in config.yaml. Password hidden in logs (***).',
@@ -5035,12 +5035,12 @@ var LANG = {
     'console.bbc_live_ondemand_fail':'✗ BBC Sounds फ़ॉलबैक कॉपी विफल: {reason}',
     'console.wrapper_local_drm_fail':'✗ लोकल wrapper डिक्रिप्ट नहीं कर सका (DRM/CKC)। सार्वजनिक wrapper अपने-आप चालू नहीं होता — प्रीमियम wrapper को फिर लॉगिन करें।',
     'console.wrapper_local_region_fail':'✗ इस रिलीज़ के लिए आपके किसी भी अपने Apple खाते ने कुंजी नहीं दी (उसके क्षेत्र में अधिकार नहीं)। सार्वजनिक wrapper अपने-आप चालू नहीं होता — ज़रूरत हो तो मैन्युअली चालू करें: Settings → Apple → Wrapper → «public»। या अपने storefront का लिंक लें।',
-    'console.drm_retry_amd':'⚡ -1002: DRM — AMD v2 के माध्यम से स्वतः पुनः प्रयास…',
-    'console.amd_alac_fallback':'⚡ AMD: ALAC अनुपलब्ध — स्वतः zhaarey {quality} आज़मा रहे हैं…',
+    'console.drm_retry_public':'⚡ -1002: DRM — पब्लिक रैपर से स्वतः पुनः प्रयास…',
+    'console.apple_aac_fallback':'⚡ Apple: ALAC अनुपलब्ध — स्वतः zhaarey {quality} आज़मा रहे हैं…',
     'console.orpheus_retry':'⟳ OrpheusDL: नई सेटिंग्स — स्वतः पुनः प्रयास…',
-    'console.amd_segments':'⬦ AMD: {n} सेग. [{elapsed}]',
-    'console.amd_instance_hint':'  💡 सुनिश्चित करें कि instance = wm.wol.moe',
-    'console.amd_no_instances':'⚠ पब्लिक wrapper-manager: पूल में अभी कोई भी लाइव इंस्टेंस नहीं है (हमारी गलती नहीं, थर्ड-पार्टी सर्विस) — रूटिंग से अस्थायी रूप से हटाया गया',
+    
+    
+    
     'err.slots_required':'a non-empty slots list is required',
     'err.slot_range':'slot {i} is outside 0..{max}',
     'err.verdict_required':'verdict is required: interesting or not_it','err.card_unidentified':'card not identified — no identifier',
@@ -5248,14 +5248,14 @@ var LANG = {
     'pset.eq_bass':'低音','pset.eq_mid':'中音','pset.eq_treble':'高音','pset.eq_reset':'↺ リセット',
     'pset.viz':'フルスクリーンプレーヤーのビジュアライザー','pset.viz_sub':'下部にFFTスペクトル、色＝現在のサービスのブランド。',
     // ── Settings: Apple ──
-    'as.amd_parallel':'リリースごとの並列トラック（公開ラッパー）',
-    'as.amd_parallel_hint':'ラッパーが1つのリリースのトラックを同時にいくつ取得するか（parallelNum）。すべて1つのアルバムフォルダに、重複なし。8–16 = 最大速度；高すぎると Apple/ラッパーが制限する場合あり。これは「並列ダウンロード」（一般）とは別です（あちらは同時リリース数）。',
-    'as.amd_fallback':'AAC にフォールバック','as.amd_fallback_sub':'ALAC が利用できない場合 — AAC をダウンロード',
-    'as.amd_badge':'ALAC · ATMOS · APPLE ID 不要','as.not_installed':'未インストール','as.install':'⬇ インストール',
+    
+    
+    
+    'as.install':'⬇ インストール',
     'as.start_wrapper':'▶ ラッパーを起動','as.relogin':'🔄 再ログイン（2FA）','as.relogin_title':'強制再認証 — スマホに2FAを送信',
     'as.save':'💾 保存','as.check':'🔑 確認','as.cookies_how_title':'cookies.txt の取得方法',
     'as.eng_desc':'<b style="color:var(--text)">zhaarey</b> — Go, Docker wrapper + Apple ID &nbsp;·&nbsp; <b style="color:var(--text)">gamdl</b> — Python, cookies.txt &nbsp;·&nbsp; <b style="color:var(--text)">AMD v2</b> — Python, ALAC/Atmos without Apple ID',
-    'as.amd_install_hint':'Clones <code style="color:var(--text)">WorldObservationLog/AppleMusicDecrypt</code> v2 and installs dependencies (~2 min)',
+    
     'as.amd_public':'Wrapper-Manager <span style="color:var(--green);font-size:9px">● PUBLIC — free, no Apple ID</span>',
     'as.wrapper_hint':'<b style="color:var(--text)">▶ Start</b> — uses the saved session, no 2FA needed.<br><b style="color:var(--orange)">🔄 Re-login</b> — only if the session expired and new auth is needed.',
     'as.applepass_hint':'Passed to the container as <code style="color:var(--muted2)">-e args="-L email:password -H 0.0.0.0"</code>.<br>Stored locally in config.yaml. Password hidden in logs (***).',
@@ -5297,12 +5297,12 @@ var LANG = {
     'console.bbc_live_ondemand_fail':'✗ BBC Soundsフォールバックコピーが失敗: {reason}',
     'console.wrapper_local_drm_fail':'✗ ローカルwrapperが復号できませんでした（DRM/CKC）。パブリックwrapperは自動では使われません — プレミアムwrapperに再ログインしてください。',
     'console.wrapper_local_region_fail':'✗ このリリースの鍵は自分のどのAppleアカウントからも発行されませんでした（その地域の権利がありません）。パブリックwrapperは自動では使われません — 必要なら手動で有効化してください：設定 → Apple → Wrapper →「public」。または自分のストアフロントのリンクを使ってください。',
-    'console.drm_retry_amd':'⚡ -1002: DRM — AMD v2 経由で自動再試行中…',
-    'console.amd_alac_fallback':'⚡ AMD: ALAC 利用不可 — 自動的に zhaarey {quality} を試行中…',
+    'console.drm_retry_public':'⚡ -1002: DRM — 公開ラッパーで自動再試行中…',
+    'console.apple_aac_fallback':'⚡ Apple: ALAC 利用不可 — 自動的に zhaarey {quality} を試行中…',
     'console.orpheus_retry':'⟳ OrpheusDL：新しい設定 — 自動再試行…',
-    'console.amd_segments':'⬦ AMD: {n} セグ. [{elapsed}]',
-    'console.amd_instance_hint':'  💡 instance = wm.wol.moe を確認してください',
-    'console.amd_no_instances':'⚠ パブリックwrapper-manager: プールに現在稼働中のインスタンスがありません(こちらの不具合ではなく外部サービスの問題)— 一時的にルーティングから除外されました',
+    
+    
+    
     'err.slots_required':'a non-empty slots list is required',
     'err.slot_range':'slot {i} is outside 0..{max}',
     'err.verdict_required':'verdict is required: interesting or not_it','err.card_unidentified':'card not identified — no identifier',
@@ -5510,14 +5510,14 @@ var LANG = {
     'pset.eq_bass':'低音','pset.eq_mid':'中音','pset.eq_treble':'高音','pset.eq_reset':'↺ 重置',
     'pset.viz':'全屏播放器中的可视化','pset.viz_sub':'底部 FFT 频谱，颜色 = 当前服务品牌。',
     // ── Settings: Apple ──
-    'as.amd_parallel':'每个发行的并行曲目（公共封装器）',
-    'as.amd_parallel_hint':'封装器同时拉取同一发行的多少曲目（parallelNum）。全部放入一个专辑文件夹，无重复。8–16 = 最高速度；过高 → Apple/封装器可能限速。这不是「并行下载」（常规）（那是同时多少个发行）。',
-    'as.amd_fallback':'回退到 AAC','as.amd_fallback_sub':'若 ALAC 不可用 — 下载 AAC',
-    'as.amd_badge':'ALAC · ATMOS · 无需 APPLE ID','as.not_installed':'未安装','as.install':'⬇ 安装',
+    
+    
+    
+    'as.install':'⬇ 安装',
     'as.start_wrapper':'▶ 启动封装器','as.relogin':'🔄 重新登录（2FA）','as.relogin_title':'强制重新认证 — 向手机发送 2FA',
     'as.save':'💾 保存','as.check':'🔑 验证','as.cookies_how_title':'如何获取 cookies.txt',
     'as.eng_desc':'<b style="color:var(--text)">zhaarey</b> — Go, Docker wrapper + Apple ID &nbsp;·&nbsp; <b style="color:var(--text)">gamdl</b> — Python, cookies.txt &nbsp;·&nbsp; <b style="color:var(--text)">AMD v2</b> — Python, ALAC/Atmos without Apple ID',
-    'as.amd_install_hint':'Clones <code style="color:var(--text)">WorldObservationLog/AppleMusicDecrypt</code> v2 and installs dependencies (~2 min)',
+    
     'as.amd_public':'Wrapper-Manager <span style="color:var(--green);font-size:9px">● PUBLIC — free, no Apple ID</span>',
     'as.wrapper_hint':'<b style="color:var(--text)">▶ Start</b> — uses the saved session, no 2FA needed.<br><b style="color:var(--orange)">🔄 Re-login</b> — only if the session expired and new auth is needed.',
     'as.applepass_hint':'Passed to the container as <code style="color:var(--muted2)">-e args="-L email:password -H 0.0.0.0"</code>.<br>Stored locally in config.yaml. Password hidden in logs (***).',
@@ -5559,12 +5559,12 @@ var LANG = {
     'console.bbc_live_ondemand_fail':'✗ BBC Sounds 后备副本失败: {reason}',
     'console.wrapper_local_drm_fail':'✗ 本地wrapper无法解密（DRM/CKC）。公共wrapper不会自动启用 — 请重新登录高级wrapper。',
     'console.wrapper_local_region_fail':'✗ 本次发行未从你自己的任何 Apple 账户获得密钥（该地区无权限）。公共wrapper不会自动启用 — 如需使用请手动开启：设置 → Apple → Wrapper → “public”。或使用你自己商店的链接。',
-    'console.drm_retry_amd':'⚡ -1002: DRM — 正在通过 AMD v2 自动重试…',
-    'console.amd_alac_fallback':'⚡ AMD：ALAC 不可用 — 正在自动尝试 zhaarey {quality}…',
+    'console.drm_retry_public':'⚡ -1002: DRM — 正在通过公开 wrapper 自动重试…',
+    'console.apple_aac_fallback':'⚡ Apple：ALAC 不可用 — 正在自动尝试 zhaarey {quality}…',
     'console.orpheus_retry':'⟳ OrpheusDL：新设置 — 自动重试…',
-    'console.amd_segments':'⬦ AMD：{n} 段 [{elapsed}]',
-    'console.amd_instance_hint':'  💡 请确认 instance = wm.wol.moe',
-    'console.amd_no_instances':'⚠ 公共 wrapper-manager:池中当前没有任何在线实例(不是我们的问题,是第三方服务)— 已临时从路由中排除',
+    
+    
+    
     'err.slots_required':'a non-empty slots list is required',
     'err.slot_range':'slot {i} is outside 0..{max}',
     'err.verdict_required':'verdict is required: interesting or not_it','err.card_unidentified':'card not identified — no identifier',

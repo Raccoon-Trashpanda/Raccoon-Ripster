@@ -8,6 +8,7 @@ Install: auth.install(app, cfg, save_config_fn)
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from datetime import datetime
@@ -1088,7 +1089,7 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
     # every real download dies downstream — exactly what happened 2026-07-22
     # while the local wrapper was stuck on Apple's own device-limit lease
     # error. Check both decrypt paths the router can pick between; either one
-    # being healthy is enough (zhaarey uses the local docker wrapper, AMD
+    # being healthy is enough (zhaarey uses the local docker wrapper, public
     # uses the public wm.wol.moe-style wrapper).
     decrypt_ok, decrypt_note, (why_key, why_args) = await _apple_decrypt_path_ok()
     if not decrypt_ok:
@@ -1137,7 +1138,7 @@ async def _probe_apple(overlay: dict | None = None) -> dict:
 
 async def _apple_decrypt_path_ok() -> tuple[bool, str, tuple[str, dict]]:
     """True if AT LEAST ONE Apple decrypt path (local zhaarey wrapper OR the
-    public AMD wrapper) looks usable right now. Best-effort — any internal
+    public wrapper) looks usable right now. Best-effort — any internal
     error here counts as "can't confirm", not a hard failure of the probe
     itself, so a broken health-check never masks otherwise-working tokens.
 
@@ -1153,18 +1154,14 @@ async def _apple_decrypt_path_ok() -> tuple[bool, str, tuple[str, dict]]:
         return True, "локальный wrapper готов", ("pr.ap_wrap_local", {})
 
     try:
-        from ripster.amd import amd_wrapper_status
-        instance = _cfg.get("amd-instance-url", "wm.wol.moe")
-        secure   = _cfg.get("amd-instance-secure", True)
-        r = await amd_wrapper_status(instance, secure)
+        from ripster import apple_router as _router
+        r = await asyncio.to_thread(_router.public_wrapper_probe, _cfg)
         if r.get("ready"):
             n = r.get("client_count", 0)
-            return True, f"публичный AMD-wrapper готов ({n} клиентов)", ("pr.ap_wrap_pub", {"n": n})
-        if "error" in r:
-            return (False, f"локальный wrapper не отвечает, публичный: {r['error']}",
-                    ("pr.ap_wrap_pub_err", {"e": str(r["error"])}))
-        return (False, "локальный wrapper не отвечает, публичный не готов (0 клиентов/регионов)",
-                ("pr.ap_wrap_none", {}))
+            return True, f"публичный wrapper готов ({n} клиентов)", ("pr.ap_wrap_pub", {"n": n})
+        detail = str(r.get("detail") or r.get("reason") or r.get("state") or "")
+        return (False, f"локальный wrapper не отвечает, публичный: {detail}",
+                ("pr.ap_wrap_pub_err", {"e": detail[:120]}))
     except Exception as e:
         return (False, f"локальный wrapper не отвечает, публичный не проверить: {type(e).__name__}",
                 ("pr.ap_wrap_unknown", {"e": type(e).__name__}))
