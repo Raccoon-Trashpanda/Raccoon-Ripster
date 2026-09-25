@@ -46,9 +46,18 @@ def kid_from_mp4(data: bytes) -> str:
 
 
 def _key_hex(content_key: str) -> str:
-    """contentKey из /key → hex для mp4decrypt. Живой wm.wol.moe отдаёт ключ
-    base64-ом («AAAAA…==», Apple-форма), тестовые ответы — 32 hex; и то, и то
-    одно и то же: 16 байт."""
+    """contentKey из /key → hex для mp4decrypt.
+
+    32 hex (тестовые/исторические ответы) и base64 на голые 16 байт — просто
+    ключ. Живой wm.wol.moe отдаёт «Apple-форму» — persistent key
+    SVFootHillPKey.ckc (playback.cpp get_content_key_impl отдаёт его дословно;
+    доказано 25.09: base64, первые 4 байт 00000001, длина ≠ 16): 4-байтный
+    BE-заголовок версии, затем 16-байтный content key, далее хвост (IV/поля
+    формата) — берём окно после заголовка. Хвост при этом проверяется: голый
+    ключ в Apple-форме — единственный расклад, который mp4decrypt вообще
+    может использовать; если Apple положил перед ключом ещё что-то, proof
+    честно упадёт на декоде, а не отдаст мусор.
+    """
     k = str(content_key or "").strip()
     if len(k) == 32 and all(c in "0123456789abcdef" for c in k.lower()):
         return k.lower()
@@ -56,9 +65,14 @@ def _key_hex(content_key: str) -> str:
         raw = base64.b64decode(k + "=" * (-len(k) % 4), validate=True)
     except Exception:                                       # noqa: BLE001
         raw = b""
-    if len(raw) != 16:
-        raise lite.LiteError("contentKey от lite — ни 32 hex, ни base64 на 16 байт")
-    return raw.hex()
+    if len(raw) == 16:
+        return raw.hex()
+    if len(raw) >= 20 and raw[:4] == b"\x00\x00\x00\x01":
+        return raw[4:20].hex()
+    raise lite.LiteError(
+        "contentKey от lite — ни 32 hex, ни base64 на 16 байт, ни Apple-форма "
+        f"(длина строки {len(k)}, декодировано {len(raw)} байт"
+        + (f", первые 4: {raw[:4].hex()}" if len(raw) >= 4 else "") + ")")
 
 
 def decrypt_fmp4(parts, content_key: str, out_path) -> Path:
