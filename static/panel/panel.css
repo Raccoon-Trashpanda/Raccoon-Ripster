@@ -402,9 +402,25 @@ body:not(.rpwin) .phone {
   backdrop-filter: blur(8px);
 }
 .miniplayer.on { display: block; }
-.miniprog { height: 3px; width: 0; background: var(--svc, var(--pink)); transition: width .25s linear;
-            box-shadow: 0 0 6px var(--svc, var(--pink)); }
-.minirow { display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 7px; }
+/* Полоса трека в плитке (владелец 25.09: «шире вниз и растворялась ближе к
+   середине плитки»): яркая кромка цвета сервиса сверху, заливка тает к
+   середине; кэш — тем же слоем, но нейтральным. Кнопки лежат поверх. */
+.minibuf, .miniprog { position: absolute; left: 0; top: 0; height: 62%; width: 0; pointer-events: none;
+                      transition: width .25s linear; }
+.minibuf { background: linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,0)); }
+.miniprog {
+  background: linear-gradient(180deg,
+    color-mix(in srgb, var(--svc, var(--pink)) 58%, transparent) 0%,
+    color-mix(in srgb, var(--svc, var(--pink)) 20%, transparent) 55%,
+    transparent 100%);
+  border-top: 3px solid var(--svc, var(--pink));
+  box-shadow: 0 -2px 10px color-mix(in srgb, var(--svc, var(--pink)) 60%, transparent);
+}
+.miniprog::after { content: ""; position: absolute; right: -1px; top: -3px; width: 2px; height: 70%;
+                   background: linear-gradient(180deg, var(--svc, var(--pink)), transparent);
+                   box-shadow: 0 0 8px var(--svc, var(--pink)); }
+.minirow { position: relative; z-index: 1; display: flex; align-items: center; gap: 6px; padding: 9px 6px 9px 7px; }
+.minibtn-sm { width: 32px; height: 32px; font-size: 13px; color: var(--t2); }
 .minicover { width: 40px; height: 40px; border-radius: 9px; object-fit: cover; background: var(--raised); flex: none; }
 .minitext { flex: 1; min-width: 0; }
 .miniline1 { font-size: var(--label); font-weight: var(--w-standard); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

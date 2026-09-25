@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Ripster — панель</title>
-<link rel="stylesheet" href="/static/panel/panel.css?v=12">
+<link rel="stylesheet" href="/static/panel/panel.css?v=13">
 <script src="/static/js/i18n.js?v=10199"></script>
 </head>
 <body>
@@ -80,6 +80,7 @@
     <div class="coverstage" id="coverstage"></div>
 
     <div class="miniplayer" id="mini">
+      <div class="minibuf" id="mini-buf"></div>
       <div class="miniprog" id="mini-prog"></div>
       <div class="minirow">
         <img class="minicover" id="mini-cover" alt="">
@@ -87,7 +88,9 @@
           <div class="miniline1" id="mini-title"></div>
           <div class="miniline2" id="mini-artist"></div>
         </div>
+        <button class="minibtn minibtn-sm" id="mini-prev" type="button" data-i18n-title="m.p.prev">&#9198;</button>
         <button class="minibtn" id="mini-play" type="button">&#9654;</button>
+        <button class="minibtn minibtn-sm" id="mini-next" type="button" data-i18n-title="m.p.next">&#9197;</button>
       </div>
     </div>
 
@@ -101,7 +104,7 @@
 
 <script src="/static/panel/i18n.panel.js?v=11"></script>
 <script src="/static/js/dragrows.js?v=1"></script>
-<script src="/static/panel/panel.js?v=15"></script>
+<script src="/static/panel/panel.js?v=16"></script>
 <script src="/static/panel/radar.js?v=6"></script>
 </body>
 </html>

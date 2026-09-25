@@ -1361,6 +1361,15 @@ function syncTime() {
   }
   var mp = document.getElementById('mini-prog');
   if (mp) mp.style.width = pct + '%';
+  var mbuf = document.getElementById('mini-buf');
+  if (mbuf) {
+    var bs = 0;
+    try {
+      if (B.live) bs = c.buf || 0;
+      else if (a.buffered.length) bs = a.buffered.end(a.buffered.length - 1);
+    } catch (e) {}
+    mbuf.style.width = dur ? Math.min(100, bs / dur * 100) + '%' : '0%';
+  }
 }
 
 function bindSeek() {
@@ -1440,6 +1449,9 @@ function renderMini() {
   mb.innerHTML = c.paused ? '&#9654;' : '&#10074;&#10074;';
   mb.title = t(c.paused ? 'm.p.play' : 'm.p.pause');
   mb.onclick = function (ev) { ev.stopPropagation(); T.toggle(); };
+  var mpv = document.getElementById('mini-prev'), mnx = document.getElementById('mini-next');
+  if (mpv) { mpv.title = t('m.p.prev'); mpv.onclick = function (ev) { ev.stopPropagation(); T.prev(); }; }
+  if (mnx) { mnx.title = t('m.p.next'); mnx.onclick = function (ev) { ev.stopPropagation(); T.next(); }; }
   m.onclick = function () { openPlayer(); renderPlayer(); };
   m.title = t('m.mini.open');
   renderHomeNow();                             // «играет сейчас» на главной — живое
