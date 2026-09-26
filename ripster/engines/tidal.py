@@ -589,7 +589,10 @@ _RE_DOWNLOADING = re.compile(r'===\s*Downloading\s+(track|album|playlist|artist)
 _RE_TRACK_FILE  = re.compile(r'Downloading track file|Saving\s*:', re.I)
 _RE_TRACK_DONE  = re.compile(r'===\s*Track\s+\S+\s+downloaded|===\s*Done', re.I)
 _RE_ERROR       = re.compile(r'\berror\b|\bfailed\b|\bexception\b|\bTraceback|Unsupported URL', re.I)
-_RE_SKIP        = re.compile(r'skip|already exist|ignore', re.I)
+# 26.09 (ночной прогон Qwen): голое «ignore» совпадало с безобидным «Ignore this
+# message if it is not an error» → вердикт «успех» при НУЛЕ треков. Пропуск — только
+# явные маркеры уже скачанного.
+_RE_SKIP        = re.compile(r'already exist|\bskipp(?:ing|ed)\b', re.I)
 _RE_PROGRESS    = re.compile(r'\bTrack\s+(\d+)\s*/\s*(\d+)', re.I)
 # OrpheusDL streams a tqdm bar for the DASH segment download, e.g.
 # " 33%|###2      | 21/64 [00:13<02:28, 3.45s/it]". Parse the percent so the
@@ -967,6 +970,14 @@ class TidalEngine(EngineBase):
 
         if rc == 0 and _RE_SKIP.search(log_text):
             return EngineResult(success=True, tracks_ok=0)
+
+        # 403 на ЗАПРОСЕ ПОТОКА — это права/регион, а не мёртвый вход (26.09, ночной
+        # прогон Qwen): ветка сессии ниже ловит любое «403» и слала владельца
+        # перелогиниваться впустую. Проверяем раньше неё.
+        if re.search(r'\b403\b[^\n]*(?:/streams|playbackinfo|manifest)', log_text, re.I):
+            return EngineResult(False, error="Tidal: аккаунту не хватает прав на этот поток "
+                                             "(403 на запросе потока, не на логине) — обычно "
+                                             "регион или качество; уровень ниже или другая учётка.")
 
         if _RE_AUTH_FAIL.search(log_text):
             return EngineResult(

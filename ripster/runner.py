@@ -3137,6 +3137,12 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             _try_advance_task(task, TaskStatus.DONE)
             task["progress"]   = 100
             task["_done_time"] = time.time()
+            # «Оседает» (26.09, ночной прогон Qwen, реальный случай Boards of Canada
+            # 5/18): DONE стоит здесь, а решение «добрать недостающие треки» — ниже,
+            # после переноса и ретега. В этом окне бот видел «готово» и навсегда
+            # закрывал задачу — добранное потом никто не получал. Пока метка стоит,
+            # клиенты видят «идёт» (app.queue_snapshot); снимается после решения.
+            task["_settling"] = True
             # ВНИМАНИЕ: статус DONE ставится ЗДЕСЬ, а файлы кладутся, переносятся,
             # перетегируются, переименовываются и попадают в манифест НИЖЕ. То
             # есть «готово» человек видит раньше, чем результат существует в
@@ -3438,8 +3444,14 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                                  got=_got, expected=_expected, miss=_miss,
                                                  attempt=_pr + 1, max=_MAX_PARTIAL_RETRY))
                 await asyncio.sleep(3)
+                task.pop("_settling", None)
                 task["status"]      = "queued"
                 task["progress"]    = 0
+                # 27.09 (ночной аудит Qwen): журнал прошлой попытки нужен, чтобы назвать
+                # настоящую причину недобора; без него доборка классифицировалась
+                # по пустоте → ложное «сбой постобработки, повтор поможет».
+                task["_prior_log"] = ((task.get("_prior_log") or [])
+                                      + list(task.get("log") or [])[-300:])[-600:]
                 task["log"]         = []
                 task["_auto_retry"] = True   # gate the error/tracks_err retry paths
                 for _k in ("_start_time", "_done_time", "_save_dir",
@@ -3456,7 +3468,9 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 # that some are missing. Classified from the engine log; runner
                 # already knows `_permanent_miss`, this just names it.
                 _reason = ("preorder" if _po
-                           else _classify_partial_reason(log_text, _permanent_miss))
+                           else _classify_partial_reason(
+                               log_text + "\n" + "\n".join(task.get("_prior_log") or []),
+                               _permanent_miss))
                 task["_partial_reason"] = _reason
                 task.setdefault("meta", {})["_partial_reason"] = _reason
                 await _record_availability(task, _reason)
@@ -3505,6 +3519,9 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 await _maybe_auto_mix(task, tid)
             except Exception as _e:
                 print(f"[coder] auto-mix skipped: {_e}", flush=True)
+            # Решение принято, задача окончательна — теперь клиенты видят DONE.
+            if task.pop("_settling", None):
+                await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
         elif (result.tracks_err > 0
               and not task.get("_auto_retry")
               and not (int(result.tracks_ok or 0) > 0 and _preorder_of(task))
@@ -3526,6 +3543,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             await asyncio.sleep(3)
             task["status"]      = "queued"
             task["progress"]    = 0
+            # 27.09 (ночной аудит Qwen): журнал прошлой попытки нужен, чтобы назвать
+            # настоящую причину недобора; без него доборка классифицировалась
+            # по пустоте → ложное «сбой постобработки, повтор поможет».
+            task["_prior_log"] = ((task.get("_prior_log") or [])
+                                  + list(task.get("log") or [])[-300:])[-600:]
             task["log"]         = []
             task["_auto_retry"] = True
             for _k in ("_start_time", "_done_time", "_save_dir",
@@ -3624,6 +3646,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                 # Reset in-place: same tile, same ID, no new queue entry.
                 task["status"]       = "queued"
                 task["progress"]     = 0
+                # 27.09 (ночной аудит Qwen): журнал прошлой попытки нужен, чтобы назвать
+                # настоящую причину недобора; без него доборка классифицировалась
+                # по пустоте → ложное «сбой постобработки, повтор поможет».
+                task["_prior_log"] = ((task.get("_prior_log") or [])
+                                      + list(task.get("log") or [])[-300:])[-600:]
                 task["log"]          = []
                 task["_retry_count"] = retry_n + 1
                 for _k in ("_start_time", "_done_time", "_save_dir",
@@ -3727,6 +3754,11 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                                   f"(причина {_fail_reason})", flush=True)
                             task["status"]   = "queued"
                             task["progress"] = 0
+                            # 27.09 (ночной аудит Qwen): журнал прошлой попытки нужен, чтобы назвать
+                            # настоящую причину недобора; без него доборка классифицировалась
+                            # по пустоте → ложное «сбой постобработки, повтор поможет».
+                            task["_prior_log"] = ((task.get("_prior_log") or [])
+                                                  + list(task.get("log") or [])[-300:])[-600:]
                             task["log"]      = []
                             for _k in ("_start_time", "_done_time", "_save_dir",
                                        "_prog_total", "_prog_current"):
@@ -3808,6 +3840,13 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
             await _broadcast({"type": "orpheus_not_authed"})
         traceback.print_exc()
     finally:
+        # Любой выход (исключение посреди постобработки) — метка «оседает» не
+        # должна навсегда прятать DONE от клиентов.
+        if task.pop("_settling", None):
+            try:
+                await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+            except Exception:
+                pass
         # Release the pool wrapper slot back for the next Apple task (every exit
         # path passes here, including auto-retry re-queue and fallbacks).
         if _pool is not None and _pool_slot is not None:
@@ -4084,6 +4123,11 @@ async def _guard_quality_mismatch(task: dict, audio: list, tid: str) -> bool:
             await asyncio.sleep(3)
             task["status"]   = "queued"
             task["progress"] = 0
+            # 27.09 (ночной аудит Qwen): журнал прошлой попытки нужен, чтобы назвать
+            # настоящую причину недобора; без него доборка классифицировалась
+            # по пустоте → ложное «сбой постобработки, повтор поможет».
+            task["_prior_log"] = ((task.get("_prior_log") or [])
+                                  + list(task.get("log") or [])[-300:])[-600:]
             task["log"]      = []
             for _k in ("_start_time", "_done_time", "_save_dir",
                        "_prog_total", "_prog_current"):
@@ -5092,10 +5136,20 @@ async def process_queue() -> None:
                                        free=f"{_free_gb:.1f}",
                                        floor=f"{_DISK_MIN_FREE_GB:.0f}")
                     pending = []
+            # Регулятор нагрузки (ripster/governor.py, 26.09): общий потолок
+            # одновременных загрузок по живым CPU/RAM. Влияет ТОЛЬКО на старт
+            # новых — идущие не трогаем; None = ещё не мерил, не мешаем.
+            try:
+                from ripster.governor import cap as _gov_cap
+                _gcap = _gov_cap()
+            except Exception:
+                _gcap = None
             # Fair-share: round-robin queued tasks across requesters so one user's
             # bulk batch can't monopolise a shared lane (issue #11). No-op for a
             # single requester; lane caps below are unaffected.
             for task in _fair_order(pending):
+                if _gcap is not None and len(active) >= _gcap:
+                    break                 # потолок регулятора: остальные ждут
                 k = _lock_key(task)
                 if k is None:
                     if open_active >= open_cap:

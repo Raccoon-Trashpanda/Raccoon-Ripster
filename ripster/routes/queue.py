@@ -107,8 +107,9 @@ def _guest_session_id(request: Request) -> str:
 async def get_queue(request: Request):
     sid = _guest_session_id(request)
     if sid:
+        from ripster.task_view import public_task
         return [
-            {k: v for k, v in t.items() if k not in ("log", "session_id")}
+            public_task(t, drop=("log", "session_id"))
             for t in _queue
             if t.get("session_id") == sid
         ]

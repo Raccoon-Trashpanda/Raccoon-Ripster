@@ -427,6 +427,22 @@ def install(app, ctx) -> None:
     _cfg = ctx.config
     _ctx = ctx
     app.include_router(router)
+    # Регулятор нагрузки (26.09): замеры CPU/RAM/диска с запуском сервера —
+    # очередь берёт из него потолок одновременных загрузок, бот — уровень.
+    try:
+        from ripster import governor
+        governor.start(lambda k: (ctx.config or {}).get(k),
+                       str((ctx.config or {}).get("save-path") or "."))
+    except Exception:
+        pass
+
+
+@router.get("/api/admin/governor")
+async def admin_governor(request: Request):
+    """Уровень нагрузки и потолок загрузок (бот: авто-техработы; панель)."""
+    _require_owner(request)
+    from ripster import governor
+    return governor.state()
 
 
 @router.get("/api/admin/diagnostics")

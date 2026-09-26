@@ -318,8 +318,22 @@ def ensure_container(name: str, notify=fixed) -> bool:
     return False
 
 
+def _bot_log_fresh(max_age: float = 120.0) -> bool:
+    """Живой бот каждые ~20 с опрашивает /api/services/status и пишет это в
+    logs/bot.log — свежий лог и есть пульс."""
+    try:
+        return time.time() - (ROOT / "logs" / "bot.log").stat().st_mtime < max_age
+    except OSError:
+        return False
+
+
 def bot_process_count() -> int:
-    return _ps_proc_count(r"bot\.py")
+    """26.09.2026: командная строка бота бывает скрыта от CIM (<hidden>, как у
+    элевированного бэкенда — см. _port_owner), счётчик по ней давал 0 при живом
+    боте, и сторож запускал ВТОРОЙ экземпляр → TelegramConflictError. Поэтому
+    при нуле по командной строке смотрим пульс лога."""
+    n = _ps_proc_count(r"bot\.py")
+    return n if n > 0 else (1 if _bot_log_fresh() else 0)
 
 
 def start_bot_process(notify=fixed):
@@ -338,6 +352,35 @@ def start_bot_process(notify=fixed):
         notify("Бот (bot.py) перезапущен")
         return proc
     return None
+
+
+def _spawn_app_hidden(logf) -> subprocess.Popen:
+    """app.py без консольного окна (26.09). `.venv\\Scripts\\python.exe` — это
+    лаунчер venv: он запускает НАСТОЯЩИЙ python отдельным процессом, и флаг
+    CREATE_NO_WINDOW до него не доходит → открывалось окно (в режиме «Выбрать…»
+    оно ещё и замораживает вывод сервера). Запускаем базовый интерпретатор из
+    pyvenv.cfg напрямую с __PYVENV_LAUNCHER__ — он видит пакеты .venv как свои."""
+    venv_py = ROOT / ".venv" / "Scripts" / "python.exe"
+    base = None
+    try:
+        for ln in (ROOT / ".venv" / "pyvenv.cfg").read_text(encoding="utf-8").splitlines():
+            k, _, v = ln.partition("=")
+            if k.strip().lower() == "home":
+                cand = Path(v.strip()) / "python.exe"
+                if cand.exists():
+                    base = cand
+                break
+    except Exception:
+        base = None
+    env = dict(os.environ)
+    if base is not None:
+        env["__PYVENV_LAUNCHER__"] = str(venv_py)
+        cmd = [str(base), "-u", "app.py"]
+    else:
+        cmd = [str(venv_py), "-u", "app.py"]
+    return subprocess.Popen(cmd, cwd=str(ROOT), env=env, stdin=subprocess.DEVNULL,
+                            stdout=logf, stderr=subprocess.STDOUT,
+                            creationflags=CNW | 0x00000200, close_fds=True)
 
 
 def _heal_app_down() -> bool:
@@ -372,9 +415,7 @@ def _heal_app_down() -> bool:
                 how = "перезапуском Ripster.exe"
             elif py.exists():
                 logf = open(ROOT / "logs" / "app_heal.log", "ab")
-                subprocess.Popen([str(py), "app.py"], cwd=str(ROOT),
-                                 stdout=logf, stderr=subprocess.STDOUT,
-                                 creationflags=CNW | _DETACHED)
+                _spawn_app_hidden(logf)
                 how = "прямым запуском .venv app.py"
             elif old.exists():
                 # Проверенный путь (2026-07-19): чистый перезапуск лаунчера; спавн
@@ -404,9 +445,7 @@ def _heal_app_down() -> bool:
                 subprocess.run(["taskkill", "/F", "/IM", img],
                                capture_output=True, timeout=15, creationflags=CNW)
             logf = open(ROOT / "logs" / "app_heal.log", "ab")
-            subprocess.Popen([str(py), "app.py"], cwd=str(ROOT),
-                             stdout=logf, stderr=subprocess.STDOUT,
-                             creationflags=CNW | _DETACHED)
+            _spawn_app_hidden(logf)
             for _ in range(60):
                 time.sleep(3)
                 if _app_alive(timeout=4):
@@ -1722,6 +1761,98 @@ def check_queue():
         ok(f"Очередь здорова ({len(data)} задач)")
 
 
+# ── «Бот оглох»: процесс жив, но сообщения не забирает (27.09, ночной аудит Q4) ──
+# Проверка процесса видит живой bot.py и молчит, а гости не получают ответов.
+# Снаружи это видно по Telegram: getWebhookInfo.pending_update_count — сколько
+# обновлений ждёт, пока бот их заберёт. Не пустеет и не уменьшается две проверки
+# подряд с разрывом ≥ POLL_STALL_S — бот не опрашивает, перезапускаем.
+POLL_STALL_S = 120
+_POLL_STATE = ROOT / "logs" / "bot_poll_watch.json"
+
+
+def polling_stalled(prev: dict | None, pending: int, now: float) -> bool:
+    """Чистое решение: прошлый замер {pending, ts} и текущий → бот оглох?"""
+    if not prev or pending <= 0:
+        return False
+    try:
+        p_pending, p_ts = int(prev.get("pending", 0)), float(prev.get("ts", 0))
+    except (TypeError, ValueError):
+        return False
+    return p_pending > 0 and pending >= p_pending and now - p_ts >= POLL_STALL_S
+
+
+def _bot_pending_updates() -> int | None:
+    try:
+        c = json.loads((ROOT / "tgbot" / "config.json").read_text(encoding="utf-8-sig"))
+        base = (c.get("local_bot_api") or "https://api.telegram.org").rstrip("/")
+        import urllib.request
+        with urllib.request.urlopen(f"{base}/bot{c['bot_token']}/getWebhookInfo", timeout=10) as r:
+            d = json.loads(r.read().decode("utf-8"))
+        return int((d.get("result") or {}).get("pending_update_count") or 0)
+    except Exception:
+        return None
+
+
+def _bot_pids() -> list[int]:
+    out = []
+    try:
+        import psutil
+        for pr in psutil.process_iter(["pid", "name"]):
+            try:
+                if "python" not in (pr.info["name"] or "").lower():
+                    continue
+                if any(a.endswith("bot.py") for a in pr.cmdline()):
+                    out.append(pr.pid)
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return out
+
+
+def check_bot_polling():
+    pending = _bot_pending_updates()
+    if pending is None:
+        return
+    now = time.time()
+    try:
+        prev = json.loads(_POLL_STATE.read_text(encoding="utf-8"))
+    except Exception:
+        prev = None
+    if not polling_stalled(prev, pending, now):
+        # пусто — забираются; иначе запоминаем ПЕРВОЕ наблюдение хвоста
+        if pending <= 0 or not prev or int(prev.get("pending", 0)) <= 0 or pending < int(prev.get("pending", 0)):
+            try:
+                _POLL_STATE.write_text(json.dumps({"pending": pending, "ts": now}), encoding="utf-8")
+            except Exception:
+                pass
+        if pending > 0:
+            ok(f"Бот: ждут обработки {pending} обновл. — слежу")
+        return
+    warn(f"Бот оглох: {pending} обновлений не забираются ≥ {POLL_STALL_S} с при живом процессе")
+    if NO_FIX:
+        return
+    pids = _bot_pids()
+    if not pids:
+        warn("Процесс бота не виден этой проверке (запущен с правами администратора?) — "
+             "второй экземпляр НЕ запускаю, нужен ручной перезапуск")
+        return
+    try:
+        import psutil
+        for pid in pids:
+            psutil.Process(pid).kill()
+        time.sleep(3)
+    except Exception as e:
+        warn(f"Не смог снять оглохший бот: {str(e)[:60]}")
+        return
+    if start_bot_process():
+        fixed(f"Оглохший бот перезапущен ({pending} обновлений ждали)")
+    try:
+        _POLL_STATE.unlink()
+    except Exception:
+        pass
+
+
 def check_bot():
     if "tg-bot-api" in running_container_names():
         ok("TG Bot API контейнер (tg-bot-api) работает")
@@ -1733,6 +1864,7 @@ def check_bot():
     # bot.py process (реальная проверка по командной строке)
     if bot_process_count() > 0:
         ok("Бот (bot.py) запущен")
+        check_bot_polling()
     else:
         warn("Бот (bot.py) не запущен")
         if not NO_FIX:
@@ -2132,6 +2264,48 @@ def check_disk():
             ok(f"Диск {drive}: {gb:.0f} GB свободно")
     except Exception as e:
         warn(f"Не смог проверить диск: {str(e)[:60]}")
+
+
+def check_installers():
+    """Страж автоустановщиков — РАЗ В НЕДЕЛЮ, а не в каждый прогон (жалоба 25.09.2026).
+
+    Гоняет tools/check_installers.py в быстром режиме (URL/пины/хэши, без реальных
+    установок) и пишет строку владельцу ТОЛЬКО когда что-то сломалось: живой
+    установщик молчит, и это часть условия «перестал переживать»."""
+    st = _state_load()
+    try:
+        last = float(st.get("installers_weekly_last", 0) or 0)
+    except (TypeError, ValueError):
+        last = 0.0
+    if time.time() - last < 7 * 86400:
+        return
+    script = ROOT / "tools" / "check_installers.py"
+    if not script.exists():
+        return
+    env = dict(os.environ, PYTHONIOENCODING="utf-8")
+    try:
+        r = subprocess.run([sys.executable, str(script), "--quiet"],
+                           capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", timeout=300, cwd=str(ROOT),
+                           env=env, **({"creationflags": CNW} if os.name == "nt" else {}))
+    except subprocess.TimeoutExpired:
+        warn("Страж автоустановщиков молчит уже 300с — проверка не завершена")
+        return
+    except Exception as e:
+        warn(f"Не смог прогнать стража автоустановщиков: {str(e)[:80]}")
+        return
+    # Время помечаем и при провале: ритм — недельный, а тревогу владелец
+    # уже получил этой строкой; долбить её каждый прогон не надо.
+    st = _state_load()
+    st["installers_weekly_last"] = time.time()
+    _state_save(st)
+    if r.returncode == 0:
+        return
+    fails = [ln.strip()[:150] for ln in (r.stdout or "").splitlines()
+             if "FAIL" in ln][:5]
+    bad("Страж автоустановщиков: "
+        + (f"{len(fails)} падений — " + "; ".join(fails) if fails
+           else f"Exit {r.returncode} без строк FAIL — прогони python tools/check_installers.py"))
 
 
 # ── Heuristic error study: aggregate & classify recent failures ──────────────
@@ -2857,6 +3031,7 @@ def main():
         check_code_newer_than_app()
         check_retry_storms()
         check_pacing()
+        check_installers()
         check_errors_24h()
     status = "🟢 ВСЁ ЗДОРОВО" if _issues == 0 else f"🟠 НАЙДЕНО ПРОБЛЕМ: {_issues}"
     if _fixes:

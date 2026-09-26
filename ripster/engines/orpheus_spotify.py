@@ -589,8 +589,15 @@ class OrpheusSpotifyEngine(EngineBase):
             # disk and marks the release partial, so the bot sends them + offers ↺.
             return EngineResult(success=True, tracks_ok=max(ok, 0), tracks_err=track_failed)
 
+        # «No modules are installed, quitting» — OrpheusDL запущен в папке без modules/
+        # (коридор учётки собран неполно) и вышел с rc=0. Это НЕ успех: 27.09 так
+        # доборка Mezzanine и проверочный Teardrop стали «✓ Done (0 треков)».
+        if re.search(r'No modules are installed', log_text, re.I):
+            return EngineResult(False, error="OrpheusDL: модули не найдены в рабочей папке "
+                                             "учётки (коридор собран без modules) — повтор "
+                                             "после пересборки коридора")
         if rc == 0 and log_text.strip():
-            skips = len(re.findall(r'skip|already exist', log_text, re.I))
+            skips = len(re.findall(r'already exist|\bskipp(?:ing|ed)\b', log_text, re.I))
             if skips:
                 return EngineResult(success=True, tracks_ok=0, tracks_err=0)
             return EngineResult(success=True)

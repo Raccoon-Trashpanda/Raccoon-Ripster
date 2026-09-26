@@ -23,7 +23,9 @@ blob'а, ни глобального лока больше нет.
 """
 from __future__ import annotations
 
+import os
 import shutil
+import subprocess
 from pathlib import Path
 
 from ripster import account_fallback as _afb
@@ -66,6 +68,51 @@ def read_login(blob) -> str:
         return ""
 
 
+# Общие папки установки OrpheusDL, которые коридор обязан ВИДЕТЬ: OrpheusDL ищет
+# `modules/` относительно рабочей папки. 27.09 (ночной аудит Qwen + живой прогон):
+# коридоры были собраны без них → «No modules are installed, quitting», rc=0, и
+# ЛЮБАЯ задача на учётке ≥1 (в т.ч. доборка) молча умирала «успехом с 0 треков».
+_SHARED_DIRS = ("modules", "extensions", "orpheus", "utils")
+
+
+def _is_link(p: Path) -> bool:
+    try:
+        return p.is_symlink() or bool(os.readlink(str(p)))
+    except (OSError, ValueError, AttributeError):
+        return False
+
+
+def _link_shared_dirs(corridor: Path) -> list[str]:
+    """Junction (Windows) / симлинк каждой общей папки в коридор. ПУСТУЮ настоящую
+    папку на её месте (так их завели 22.09) убираем и ставим связь; непустую не
+    трогаем — там могли лежать чужие данные. Возвращает, что связано сейчас."""
+    src_root = _base_dir() / "orpheus"
+    linked = []
+    for name in _SHARED_DIRS:
+        dst, src = corridor / name, src_root / name
+        if not src.exists():
+            continue
+        if dst.exists() and not _is_link(dst):
+            try:
+                if any(dst.iterdir()):
+                    continue
+                dst.rmdir()
+            except OSError:
+                continue
+        if dst.exists():
+            continue
+        try:
+            if os.name == "nt":
+                subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(src)],
+                               check=True, capture_output=True)
+            else:
+                dst.symlink_to(src, target_is_directory=True)
+            linked.append(name)
+        except Exception as e:                                # noqa: BLE001
+            print(f"[spotify-pool] не смог связать {name} в {corridor.name}: {e}", flush=True)
+    return linked
+
+
 def ensure_corridor(i: int) -> Path:
     """Создать коридор и положить в него общие настройки, если их там нет.
 
@@ -76,6 +123,7 @@ def ensure_corridor(i: int) -> Path:
     """
     cfg = corridor_config(i)
     (cfg / ".librespot_cache").mkdir(parents=True, exist_ok=True)
+    _link_shared_dirs(corridor_dir(i))
     src = main_config_dir() / "settings.json"
     dst = cfg / "settings.json"
     try:

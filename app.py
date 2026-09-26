@@ -678,8 +678,9 @@ def queue_snapshot():
     планировали; там же остаётся честный вердикт «пропущен», если машина
     стояла в её час (см. `bbc_schedule._miss`).
     """
-    return [{k: v for k, v in t.items() if k != "log"}
-            for t in queue if t.get("status") != TaskStatus.SCHEDULED.value]
+    from ripster.task_view import public_task
+    return [public_task(t) for t in queue if t.get("status") != TaskStatus.SCHEDULED.value]
+
 
 
 # ── FastAPI ────────────────────────────────────────────────────────────────────

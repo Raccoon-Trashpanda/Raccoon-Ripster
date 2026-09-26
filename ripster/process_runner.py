@@ -87,6 +87,63 @@ def _smart_decode(raw: bytes) -> str:
     return raw.decode("latin-1")
 
 
+# ── Сторож зависаний по реальной активности (26.09) ───────────────────────────
+# Раньше «завис» = нет строки вывода line_timeout секунд (для OrpheusDL/streamrip —
+# 20 минут: они рисуют прогресс через \r без \n, и строк нет всё время скачивания
+# трека). Живой Tidal 26.09 повис на 7-м треке: сокет замер, ни байта, — и ждал бы
+# 20 минут. Теперь пока строки нет, раз в IO_POLL_S сравниваем счётчики ввода-вывода
+# процесса и его детей (в Windows сюда входит и сеть): растут — качает, ждём; стоят
+# IO_STALL_S — это зависание. line_timeout остаётся страховкой (×3) от процесса,
+# который бесконечно что-то пишет, но ничего не выводит.
+IO_POLL_S = 30.0
+IO_STALL_S = 240.0
+
+
+def _tree_io(pid) -> int | None:
+    """Сумма байтов ввода-вывода процесса и всех его потомков; None — не узнать."""
+    if not pid:
+        return None          # psutil.Process(None) — это НАШ процесс, не мерить его
+    try:
+        import psutil
+        root = psutil.Process(pid)
+        total = 0
+        for pr in [root] + root.children(recursive=True):
+            try:
+                c = pr.io_counters()
+                total += c.read_bytes + c.write_bytes + getattr(c, "other_bytes", 0)
+            except Exception:
+                pass
+        return total
+    except Exception:
+        return None
+
+
+async def _await_line(get, pid, line_timeout: float):
+    """Дождаться следующей строки. Возвращает строку/сентинел или None — зависание.
+    get — фабрика корутины чтения (readline / q.get)."""
+    import time as _t
+    start = _t.monotonic()
+    last_io, last_change = _tree_io(pid), _t.monotonic()
+    while True:
+        try:
+            return await asyncio.wait_for(get(), timeout=min(IO_POLL_S, line_timeout))
+        except asyncio.TimeoutError:
+            pass
+        now = _t.monotonic()
+        io = _tree_io(pid)
+        if io is None:                                   # не можем мерить — прежнее правило
+            if now - start >= line_timeout:
+                return None
+            continue
+        if io != last_io:
+            last_io, last_change = io, now
+        if now - last_change >= min(IO_STALL_S, line_timeout):
+            return None                                  # ни строк, ни байтов — висит
+        # Байты идут — прогон жив, сколько бы он ни молчал в выводе: двухчасовой
+        # микс BBC пишет файл без единой строки (27.09, ночной прогон Qwen: прежняя
+        # страховка ×3 снимала такой живой прогон через час).
+
+
 @dataclass
 class RunResult:
     """Summary of a completed run.
@@ -253,16 +310,13 @@ class ProcessRunner:
             while True:
                 if self._cancelled:
                     break
-                try:
-                    raw = await asyncio.wait_for(
-                        self._proc.stdout.readline(),
-                        timeout=self.line_timeout,
-                    )
-                except asyncio.TimeoutError:
+                raw = await _await_line(self._proc.stdout.readline, getattr(self._proc, "pid", None),
+                                        self.line_timeout)
+                if raw is None:
                     timed_out = True
                     yield Event(
                         kind=EventKind.LINE,
-                        message=f"⚠ Нет вывода {int(self.line_timeout)} секунд — процесс завис?",
+                        message="⚠ Нет вывода и нет активности сети/диска — процесс завис, снимаю (очередь повторит)",
                         level=LineLevel.WARN,
                     )
                     break
@@ -369,12 +423,11 @@ class ProcessRunner:
             while True:
                 if self._cancelled:
                     break
-                try:
-                    raw = await asyncio.wait_for(q.get(), timeout=self.line_timeout)
-                except asyncio.TimeoutError:
+                raw = await _await_line(q.get, getattr(self._popen, "pid", None), self.line_timeout)
+                if raw is None:
                     timed_out = True
                     yield Event(kind=EventKind.LINE,
-                                message=f"⚠ Нет вывода {int(self.line_timeout)} секунд — процесс завис?",
+                                message="⚠ Нет вывода и нет активности сети/диска — процесс завис, снимаю (очередь повторит)",
                                 level=LineLevel.WARN)
                     break
                 if raw is _SENTINEL:
