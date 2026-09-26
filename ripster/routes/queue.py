@@ -239,6 +239,27 @@ async def add_to_queue(body: dict, request: Request):
             if not gm.check_rate(sid):
                 gm.log_activity(sid, {"event": "add_blocked", "reason": "rate_limit", "url": url, "service": svc})
                 raise HTTPException(429, imsg("err.rate_limited", "Слишком много запросов, подожди минуту"))
+            # Недельный бесплатный кап нового пользователя: 7 альбомов + 7 треков
+            # на ЛЮБЫЕ сервисы. Считаем ещё и in-flight (queued/running) того же
+            # вида — иначе пачкой добавлений можно проскочить лимит до 'done'.
+            # Старые ссылки (без weekly) и активная поддержка → check_weekly=True.
+            from ripster.guest_manager import classify_release
+            _kind = classify_release(svc, url)
+            _winflight = sum(
+                1 for _t in _queue
+                if _t.get("session_id") == sid
+                and _t.get("status") in ("queued", "running")
+                and classify_release(_t.get("service") or "", _t.get("url", "")) == _kind)
+            if not gm.check_weekly(sid, _kind, _winflight):
+                gm.log_activity(sid, {"event": "add_blocked", "reason": "weekly_" + _kind,
+                                      "url": url, "service": svc})
+                if _kind == "album":
+                    raise HTTPException(429, imsg("err.weekly_albums",
+                        "Недельный лимит исчерпан: 7 альбомов. Обновится в течение недели "
+                        "или поддержи бота — лимит снимется.", limit=7))
+                raise HTTPException(429, imsg("err.weekly_tracks",
+                    "Недельный лимит исчерпан: 7 треков. Обновится в течение недели "
+                    "или поддержи бота — лимит снимется.", limit=7))
             gm.record_rate(sid)
         except HTTPException:
             raise

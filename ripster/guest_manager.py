@@ -9,6 +9,7 @@ import json
 import re
 import secrets
 import time
+import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -22,6 +23,46 @@ MAX_LINKS   = 10
 LINK_TTL_S  = 365 * 24 * 3600   # 1 year — revoke manually when needed
 RATE_WINDOW = 60                  # seconds
 RATE_MAX    = 5                   # max queue-add calls per RATE_WINDOW per session
+
+# ── Weekly free-tier caps (per link/token) ──────────────────────────────────
+# Владелец: каждый НОВЫЙ пользователь бесплатно получает 7 альбомов + 7 треков
+# в неделю на ЛЮБЫЕ сервисы. Старые ссылки (без поля "weekly") не трогаем.
+# Активная поддержка (link["support"]["until"] в будущем) снимает лимит.
+WEEKLY_WINDOW_S       = 7 * 24 * 3600   # скользящее окно 7 суток
+WEEKLY_ALBUMS_DEFAULT = 7
+WEEKLY_TRACKS_DEFAULT = 7
+
+
+def classify_release(service: str, url: str) -> str:
+    """Классифицировать ссылку как 'track' (один трек) или 'album' (альбом,
+    плейлист, артист, чарт — всё многотрековое). Дефолт для неизвестного —
+    'album', НАРОЧНО: так плейлист/сборник нельзя выдать за один трек и обойти
+    трековый лимит (см. требование владельца «чтобы не обошли»)."""
+    svc = (service or "").lower()
+    u = (url or "").lower()
+    try:
+        parsed = urllib.parse.urlparse(url)
+        parts = [p for p in parsed.path.split("/") if p]
+        qs = urllib.parse.parse_qs(parsed.query)
+    except Exception:
+        parts, qs = [], {}
+    if svc == "apple" or "music.apple.com" in u:
+        if qs.get("i") or "/song/" in u or "/music-video/" in u:
+            return "track"
+        return "album"
+    if svc in ("deezer", "qobuz", "tidal", "spotify", "beatport") or any(
+        d in u for d in ("deezer.com", "qobuz.com", "tidal.com", "spotify.com", "beatport.com")
+    ):
+        return "track" if "/track/" in u else "album"
+    if svc == "jiosaavn" or "jiosaavn.com" in u:
+        return "track" if "/song/" in u else "album"
+    if svc == "soundcloud" or "soundcloud.com" in u:
+        # /sets/ = плейлист, голый профиль (1 сегмент) = артист → ведро album;
+        # /user/track-slug (≥2 сегмента, без sets) = одиночный трек.
+        if "sets" in parts:
+            return "album"
+        return "track" if len(parts) >= 2 else "album"
+    return "album"   # неизвестный сервис — считаем дорогим ведром
 
 # Only these token keys may be stored/updated by guests.
 _ALLOWED_GUEST_TOKEN_KEYS = {
@@ -188,6 +229,14 @@ class GuestManager:
                 "used":       0,
                 "started_at": now.isoformat(),
             },
+            # Бесплатный недельный кап нового пользователя (старые ссылки его не
+            # имеют → check_weekly их пропускает). Активная поддержка снимает.
+            "weekly": {
+                "albums": WEEKLY_ALBUMS_DEFAULT,
+                "tracks": WEEKLY_TRACKS_DEFAULT,
+            },
+            "weekly_log":   [],           # [{"ts": epoch, "kind": "album"|"track"}]
+            "support":      {"until": 0},  # epoch; >now = поддержка активна
             "token_mode":   token_mode,   # "owner" | "guest"
             "guest_tokens": {k: "" for k in _ALLOWED_GUEST_TOKEN_KEYS},
             "activity":     [],
@@ -308,6 +357,85 @@ class GuestManager:
         if q.get("type") == "count":
             q["used"] = q.get("used", 0) + 1
         self._save()
+
+    # ── Weekly free-tier caps (albums / tracks per 7 days) ──────────────────────
+
+    def support_active(self, link: dict) -> bool:
+        """True, если у ссылки оплачена поддержка и срок ещё не истёк."""
+        try:
+            return float((link.get("support") or {}).get("until", 0) or 0) > time.time()
+        except Exception:
+            return False
+
+    def _prune_weekly(self, link: dict) -> None:
+        cutoff = time.time() - WEEKLY_WINDOW_S
+        wl = link.get("weekly_log")
+        if isinstance(wl, list):
+            link["weekly_log"] = [e for e in wl
+                                  if isinstance(e, dict) and float(e.get("ts", 0) or 0) >= cutoff]
+
+    def weekly_status(self, session_id: str) -> Optional[dict]:
+        """Остаток недельного лимита или None, если правило к ссылке не применяется
+        (старый пользователь без поля weekly, либо активная поддержка)."""
+        link = self.get_session(session_id)
+        if not link:
+            return None
+        wk = link.get("weekly")
+        if not wk or self.support_active(link):
+            return None
+        self._prune_weekly(link)
+        used = {"album": 0, "track": 0}
+        for e in link.get("weekly_log", []):
+            k = e.get("kind")
+            if k in used:
+                used[k] += 1
+        la = int(wk.get("albums", 0) or 0)
+        lt = int(wk.get("tracks", 0) or 0)
+        return {"albums_used": used["album"], "albums_limit": la,
+                "tracks_used": used["track"], "tracks_limit": lt}
+
+    def check_weekly(self, session_id: str, kind: str, inflight: int = 0) -> bool:
+        """True, если ссылке можно скачать ещё одну единицу вида kind
+        ('album'|'track') на этой неделе. Учитывает уже начатые (in-flight)
+        задачи того же вида, чтобы нельзя было накидать пачку до завершения."""
+        link = self.get_session(session_id)
+        if not link:
+            return False
+        wk = link.get("weekly")
+        if not wk or self.support_active(link):
+            return True                        # старый пользователь / поддержка
+        limit = int(wk.get("albums" if kind == "album" else "tracks", 0) or 0)
+        if limit <= 0:
+            return True
+        self._prune_weekly(link)
+        used = sum(1 for e in link.get("weekly_log", []) if e.get("kind") == kind)
+        return (used + max(0, int(inflight))) < limit
+
+    def record_weekly(self, session_id: str, kind: str) -> None:
+        """Отметить завершённую загрузку в недельном журнале (только для ссылок
+        с полем weekly). Вызывается на 'done'."""
+        if kind not in ("album", "track"):
+            return
+        link = self.get_session(session_id)
+        if not link or not link.get("weekly"):
+            return
+        self._prune_weekly(link)
+        link.setdefault("weekly_log", []).append({"ts": time.time(), "kind": kind})
+        self._save()
+
+    def grant_support(self, token: str, add_seconds: float) -> bool:
+        """Продлить поддержку ссылки на add_seconds (месяц/полгода/год). Снимает
+        недельный кап, пока срок активен. Продление складывается от МАКС(сейчас,
+        текущего срока) — остаток не сгорает при досрочной доплате. Оплата
+        (перевод/Stars) подключается отдельно и вызывает этот метод."""
+        link = self._links.get(token)
+        if not link:
+            return False
+        cur = float((link.get("support") or {}).get("until", 0) or 0)
+        base = max(time.time(), cur)
+        link["support"] = {"until": base + max(0.0, float(add_seconds))}
+        self._save()
+        return True
 
     # ── Rate limiting ─────────────────────────────────────────────────────────
 

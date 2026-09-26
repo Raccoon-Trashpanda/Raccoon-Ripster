@@ -1038,7 +1038,10 @@ def _add_to_history(task: dict) -> None:
     if qd and status == "done":
         entry["quality_downgraded"] = qd
         entry["quality_wanted"] = str(task.get("quality_wanted") or "")
-        entry["quality_note_key"] = "history.qd_downgraded"
+        # Причина бывает разная: lossless-страж говорит «ни одна витрина не
+        # отдала выше», SoundCloud — «этот трек сервис отдаёт только так».
+        entry["quality_note_key"] = str(task.get("quality_note_key_override")
+                                        or "history.qd_downgraded")
     # Файл пришёл не из своей учётки — человек вправе это видеть в истории
     # (выбор 24.09.2026): region+ключ перевода, как у строки отказа выше.
     _pub_region = str(task.get("_public_wrapper") or "") if status == "done" else ""
@@ -1141,6 +1144,14 @@ def _add_to_history(task: dict) -> None:
             # download is a new task object → _quota_consumed unset → charged once.
             if entry["status"] == "done" and not task.get("_quota_consumed"):
                 gm.consume_quota(sid)
+                # Недельный кап (7 альбомов + 7 треков) — записываем завершённую
+                # единицу в журнал ссылки. Вид определяем по URL, чтобы плейлист
+                # не проскочил как трек. Метод сам пропустит старые ссылки.
+                try:
+                    from ripster.guest_manager import classify_release
+                    gm.record_weekly(sid, classify_release(entry.get("service", ""), entry.get("url", "")))
+                except Exception:
+                    pass
                 task["_quota_consumed"] = True
     except Exception:
         pass
@@ -2589,17 +2600,20 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
         # engines take the token as a plain CLI arg (no shared file at all), so
         # a slot is just "which token to substitute", no config-dir isolation
         # or subprocess env override needed.
-        if engine_name == "soundcloud":
+        # `sc_widevine` — тот же SoundCloud, только DRM-ветка: без подмены токена
+        # она получала primary-учётку, listing которой вообще не знает транскод
+        # aac_256k, — и часовик ложился в папку «AAC 256» с 160 кбит/с (25.09).
+        if engine_name in ("soundcloud", "sc_widevine"):
             try:
                 from ripster import soundcloud_pool as _scp
                 _sc_pool = _scp.get_pool(_config)
                 if _sc_pool is not None:
                     from ripster import account_fallback as _afb
                     _sc_acq = await asyncio.to_thread(
-                        _sc_pool.acquire, tuple(_afb.tried_slots(task, "soundcloud")))
+                        _sc_pool.acquire, tuple(_afb.tried_slots(task, engine_name)))
                     if _sc_acq:
                         _sc_slot, _sc_token = _sc_acq
-                        _afb.mark_tried(task, "soundcloud", _sc_slot)
+                        _afb.mark_tried(task, engine_name, _sc_slot)
                         _cfg_view["soundcloud-oauth-token"] = _sc_token
                         task["log"].append(f"🟠 soundcloud-pool: slot {_sc_slot}")
                         try:
@@ -3305,6 +3319,12 @@ async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str)
                         except Exception as _re_e:
                             import traceback as _tb
                             print(f"[qobuz-retag] FAILED: {_re_e}\n{_tb.format_exc()[:500]}", flush=True)
+                    # SoundCloud: папка и метка качества — по ЗАМЕРУ файла, а не
+                    # по запрошенному пресету (25.09: «AAC 256» крыла 160 кбит/с).
+                    # Двигаем до манифеста, чтобы record() записал настоящий путь.
+                    _mv = await _sc_relabel_to_actual(task, d, tid)
+                    if _mv:
+                        d = _mv
                     # Манифест = СПИСОК ЭТОЙ ЗАДАЧИ, а не россыпь папки качества:
                     # сингл, скачанный до фикса раскладки deemix, лежит в
                     # `<service>/<quality>/` среди чужих файлов, и слепой glob
@@ -4091,6 +4111,84 @@ async def _guard_quality_mismatch(task: dict, audio: list, tid: str) -> bool:
     except Exception as e:                                    # noqa: BLE001
         print(f"[quality-guard] skipped: {e}", flush=True)
     return False
+
+
+_SC_Q_PROMISE_KBPS = {"hq": 256}   # единственное качество SC, которое что-то обещает
+
+
+async def _sc_relabel_to_actual(task: dict, d: Path, tid: str) -> "Path | None":
+    """SoundCloud: папку и метку качества выбирает ФАЙЛ, а не запрос.
+
+    «AAC 256» у SC — не обещание, а потолок тарифа: сервис даёт 256 только
+    когда у трека есть aac_256k И учётка Go+. 25.09.2026 часовик Anjunadeep
+    612 лежал в папке «AAC 256» с 160 кбит/с, и молчание было двойным: ни
+    строки в истории, ни метки на карточке. Здесь, ПОСЛЕ движка и ДО манифеста,
+    спрашиваем ffprobe: факт != имя папки — релиз переезжает в папку по замеру,
+    а task["quality"] переписывается на измеренное (история, манифест и карточки
+    читают его — дальше везде правда). Если же обещанное было ВЫШЕ фактического,
+    это громкая строка истории и карточки с ЧЕСТНОЙ причиной: не «не дожали»,
+    а «SoundCloud отдаёт этот трек только так» (страж lossless к таким кейсам
+    не ходит: тут lossy → lossy, и понижать нечем — потолок есть потолок).
+    Не измерили — не гадаем: ни переезда, ни метки.
+    """
+    try:
+        if str(task.get("service") or "").lower() != "soundcloud":
+            return None
+        from ripster import sc_transcoding as _sct
+        from ripster.integrity_verify import probe_codec
+        from ripster.routes.download import _find_audio_files as _faf
+        from ripster.service_config import _quality_folder_name
+        files = _faf(d)
+        if not files:
+            return None
+        info = await asyncio.to_thread(probe_codec, files[0])
+        fq = _sct.folder_quality(info.get("codec") or "", info.get("bit_rate") or "")
+        if not fq:
+            return None
+        got_lbl = _quality_folder_name("soundcloud", fq)
+        qid = str(task.get("quality") or "")
+        want_lbl = _quality_folder_name("soundcloud", qid) or qid
+        promised = _SC_Q_PROMISE_KBPS.get(qid)
+        try:
+            actual_kbps = int(info.get("bit_rate") or 0) // 1000
+        except (TypeError, ValueError):
+            actual_kbps = 0
+        # ── переезд: <base>/soundcloud/<запрошенное>/<релиз> → по замеру ──
+        sd = Path(task.get("_save_dir") or str(d)).resolve()
+        base = Path(_config.get("save-path") or "downloads").resolve()
+        svc_root = base / "soundcloud"
+        moved = None
+        if sd.parent.parent == svc_root and sd.is_dir() and sd.parent.name != got_lbl:
+            import shutil
+            dest = svc_root / got_lbl / sd.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                _merge_dir(sd, dest)
+                try:
+                    sd.rmdir()
+                except OSError:
+                    pass
+            else:
+                shutil.move(str(sd), str(dest))
+            moved = dest
+            task["_save_dir"] = str(dest)
+            try:
+                from ripster.task_marker import write_marker as _wm
+                _wm(dest, tid, task)
+            except Exception:
+                pass
+            print(f"[sc-relabel] {sd.parent.name} → {got_lbl}: {dest.name}", flush=True)
+        task["quality"] = fq            # дальше всё (история/манифест/карта) — по факту
+        if promised and actual_kbps and promised > actual_kbps:
+            task["quality_downgraded"] = got_lbl
+            task["quality_wanted"] = want_lbl
+            task["quality_note_key_override"] = "history.sc_qd_downgraded"
+            await _log_key("console.sc_qd_downgraded", "warn", tid,
+                           got=got_lbl, want=want_lbl)
+        return moved
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[sc-relabel] skipped: {e}", flush=True)
+        return None
 
 
 async def _qd_refresh_credentials(task: dict) -> None:
