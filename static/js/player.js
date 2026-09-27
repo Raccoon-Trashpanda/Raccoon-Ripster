@@ -2627,6 +2627,13 @@ function _proxyAudioUrl(url) {
       const b64 = btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
       return `/api/proxy?u=${b64}&svc=apple&mime=${encodeURIComponent('audio/mp4')}`;
     }
+    // 27.09: превью Qobuz (предрелизы, 30 с) шли напрямую с их CDN — звук есть,
+    // а шкала уровня мёртвая: браузер не отдаёт Web Audio чужой звук без CORS.
+    // Сервер эти хосты уже пропускает (streaming.py: .qobuz.com, .akamaized.net).
+    if (/(^|\.)qobuz\.com$|(^|\.)akamaized\.net$/.test(h)) {
+      const b64 = btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+      return `/api/proxy?u=${b64}&svc=qobuz&mime=${encodeURIComponent('audio/mpeg')}`;
+    }
   } catch (_) {}
   return url;
 }
