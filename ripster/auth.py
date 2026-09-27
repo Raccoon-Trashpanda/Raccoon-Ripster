@@ -88,6 +88,28 @@ _GUEST_POST_PREFIX = ("/api/queue/retry/",)
 _GUEST_ANY_PREFIX  = ("/api/guest/", "/api/bbc/", "/api/stream/", "/api/proxy",
                       "/api/sc_key", "/api/sc_license", "/api/sc_m3u8",
                       "/api/sc_fps_cert", "/api/sc_fps_license", "/api/sc_fps_log")
+# /api/queue/{id} — one task. A guest may read only its tracklist (the same data
+# as the queue card he already sees); cancelling a task is NOT guest-side — the ✕
+# button is marked owner-only in the markup (owner decision 27.09).
+_QUEUE_PREFIX = "/api/queue/"
+# Single-segment names under /api/queue/ that can never be a task id (they are
+# owner handles living on POST routes). Without them /api/queue/clear/tracks
+# would look like a task path.
+_QUEUE_RESERVED = frozenset({"add", "move", "hold", "clear",
+                             "start", "pause", "stop", "batch"})
+
+
+def _guest_task_path(path: str, suffix: str = "") -> bool:
+    """Shape «/api/queue/{id}[suffix]» with EXACTLY one id segment. Nothing else
+    a path can be called, so the allowlist does not widen outward."""
+    if not path.startswith(_QUEUE_PREFIX):
+        return False
+    rest = path[len(_QUEUE_PREFIX):]
+    if suffix:
+        if not rest.endswith(suffix):
+            return False
+        rest = rest[:-len(suffix)]
+    return bool(rest) and "/" not in rest and rest not in _QUEUE_RESERVED
 
 
 def _guest_allowed(path: str, method: str) -> bool:
@@ -96,7 +118,11 @@ def _guest_allowed(path: str, method: str) -> bool:
         return True
     m = (method or "GET").upper()
     if m in ("GET", "HEAD"):
-        return path in _GUEST_GET_EXACT or any(path.startswith(p) for p in _GUEST_GET_PREFIX)
+        # the task's tracklist — data of the same card the guest already sees in
+        # the queue; the route itself rejects someone else's id
+        return (path in _GUEST_GET_EXACT
+                or any(path.startswith(p) for p in _GUEST_GET_PREFIX)
+                or _guest_task_path(path, "/tracks"))
     if m == "POST":
         return path in _GUEST_POST_EXACT or any(path.startswith(p) for p in _GUEST_POST_PREFIX)
     return False
