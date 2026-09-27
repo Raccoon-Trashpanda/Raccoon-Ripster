@@ -475,9 +475,21 @@ def install(app, config: dict, save_config: Callable[[dict], None]) -> None:
         # сверка подписи и срока. Нужен он там, где кука физически не доезжает
         # (Telegram WebView), а правила CSRF/Origin для изменяющих запросов
         # остаются общими — прослойка проходит их ДО этого места.
-        if verify_bearer(bearer_from_request(request), OWNER_BEARER_SCOPE):
+        _bearer = bearer_from_request(request)
+        if verify_bearer(_bearer, OWNER_BEARER_SCOPE):
             request.state.is_owner = True
             return await call_next(request)
+        # Просроченный хозяйский bearer панели — это 401 «переподпишись», а НЕ
+        # проход в гостевую ветку. В WebView Telegram у владельца может лежать
+        # гостевая кука (открывал гостевую ссылку во встроенном браузере), и
+        # через час после открытия панели «Очередь/Туннель/Бот» и вкладка
+        # «Гости» получали 403 «Guest access…» — панель же переподписывается
+        # только на 401 (владелец 27.09). Только наша область: device-токены
+        # нативного клиента сюда не относятся.
+        if _bearer.startswith(OWNER_BEARER_SCOPE + ".") and (
+                path.startswith("/api/") or path == "/ws"):
+            return JSONResponse({"error": "unauthorized", "detail": "bearer expired"},
+                                status_code=401)
 
         # Check guest session — guests are deny-by-default: only an explicit
         # allowlist of paths is reachable, everything else returns 403.
