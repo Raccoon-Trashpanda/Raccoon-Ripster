@@ -101,7 +101,11 @@ def _parse_apple(url: str):
     parts  = [p for p in parsed.path.split("/") if p]
     sf     = parts[0] if parts else "us"
     type_  = parts[1] if len(parts) > 1 else "album"
-    id_    = next((p for p in reversed(parts) if p.isdigit()), None) or (parts[-1] if parts else "")
+    # Запасное «последний сегмент» имеет смысл только когда сегментов больше двух:
+    # на обрезанном '/us/album' (и на '/us' вовсе) в id уезжало служебное слово —
+    # вызов Apple-lookup с id='album' безобиден, но контракт был неверный.
+    id_    = next((p for p in reversed(parts) if p.isdigit()), None) or (
+        parts[-1] if len(parts) > 2 else "")
     return sf, type_, id_
 
 
