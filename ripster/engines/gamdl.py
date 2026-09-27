@@ -125,7 +125,11 @@ class GamdlEngine(EngineBase):
         is_mv = quality == "mv"
         if is_mv:
             _ensure_mv_audio_fallback()
-        _COOKIES_OK = {"mv", "aac", "aac-legacy", "ask"}
+        # Binaural и downmix — тот же lossy AAC 256 (в каталоге выше они помечены
+        # "req":"cookies"), ключи к ним берёт L3 по кукам. Держать их на
+        # публичном wrapper-сервере, который «часто лежит», значит терять задачи
+        # не по вине Apple.
+        _COOKIES_OK = {"mv", "aac", "aac-legacy", "aac-binaural", "aac-downmix", "ask"}
         cookies = (config.get("gamdl-cookies-path") or "").strip() or str(base_dir / "cookies.txt")
         # Запоминаем на движке: `is_finished` конфига не получает, а объяснить
         # отказ без пути к файлу куки нельзя (см. `_no_sub_reason`).

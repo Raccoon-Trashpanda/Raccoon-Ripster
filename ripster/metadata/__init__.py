@@ -533,7 +533,10 @@ async def fetch_meta_beatport(url: str) -> Optional[dict]:
             d = None
 
     def _artists(o: dict) -> str:
-        return ", ".join(a.get("name", "") for a in (o.get("artists") or []) if a.get("name"))
+        # Имя из одного пробела — истина для `if a.get("name")`, и к карточке
+        # прилипает «M, » с висячей запятой. Пробельное имя пустое по смыслу.
+        return ", ".join(n for a in (o.get("artists") or [])
+                         if (n := str(a.get("name") or "").strip()))
 
     def _img(o: dict) -> str:
         uri = (o.get("image") or {}).get("uri", "") if isinstance(o.get("image"), dict) else ""        # Beatport encodes the size in the path (…/image_size/500x500/…). The

@@ -58,8 +58,17 @@ def _psq_xml(s: str) -> str:
 
 
 def _xml_esc(s: str) -> str:
-    return (str(s or "").replace("&", "&amp;").replace("<", "&lt;")
-            .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))[:120]
+    """Экранируем ДЛЯ XML, поэтому режем ДО экранирования: если отсечь по
+    хвосту сущности, в тосте остаётся `&qu`, `$x.LoadXml()` бросает уже внутри
+    powershell — а Popen к этому моменту отработал, и владелец не получает
+    ничего и не знает почему. Плюс не рассечь эмодзи пополам: осиротевший
+    верхний суррогат падает ещё раньше, на `encode("utf-16-le")`, который вне
+    try. Режем по 120 СИМВОЛАМ исходного текста, это и есть потолок длины."""
+    raw = str(s or "")[:120]
+    if raw and 0xD800 <= ord(raw[-1]) <= 0xDBFF:
+        raw = raw[:-1]
+    return (raw.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;").replace("'", "&apos;"))
 
 
 def _cover_file(url: str) -> str:
@@ -150,7 +159,7 @@ _TOAST_I18N = {
     "ru": {
         "dl_ok":       "✅ Загрузка готова",
         "dl_err":      "✗ Ошибка загрузки",
-        "dl_tracks":   "{title} · {n} трек.",
+        "dl_tracks":   "{title} · {n} {plural}.",
         "rel_new":     "🎉 Новый релиз!",
         "rel_comp":    "🎉 Новый сборник!",
         "rel_pre":     "🕝 Предзаказ!",
@@ -172,9 +181,30 @@ _TOAST_I18N = {
 }
 
 
+# Русская форма числа согласуется с самим числом; в английском одна, поэтому
+# таблицы форм живут только для ru. Тост видит владелец каждый день — «12
+# трек.» там читается как ошибка программы, а не опечатка.
+_PLURAL_RU = {"dl_tracks": ("трек", "трека", "треков")}
+
+
+def _rus_plural(n, forms: tuple) -> str:
+    try:
+        n = abs(int(n))
+    except (TypeError, ValueError):
+        return forms[2]
+    if n % 10 == 1 and n % 100 != 11:
+        return forms[0]
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return forms[1]
+    return forms[2]
+
+
 def _tt(lang: str, key: str, **kw) -> str:
-    table = _TOAST_I18N.get((lang or "en").split("-")[0].lower()) or _TOAST_I18N["en"]
+    base = (lang or "en").split("-")[0].lower()
+    table = _TOAST_I18N.get(base) or _TOAST_I18N["en"]
     tmpl = table.get(key) or _TOAST_I18N["en"][key]
+    if base == "ru" and key in _PLURAL_RU:
+        kw["plural"] = _rus_plural(kw.get("n"), _PLURAL_RU[key])
     return tmpl.format(**kw) if kw else tmpl
 
 
