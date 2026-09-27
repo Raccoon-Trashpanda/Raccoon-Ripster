@@ -111,7 +111,11 @@ def known_names(force: bool = False) -> frozenset:
     names: list[str] = []
     names += _from_spotify()
     names += _from_json_list(_BASE / "watchlist.json", ("artist", "name", "artist_name"))
-    names += _from_json_list(_BASE / "download_history.json", ("artist", "artist_name"))
+    # Файл загрузок называется history.json (пишет его runner._add_to_history,
+    # читает тем же путём ripster/digs.py:42). download_history.json не создаёт
+    # никто: четвертый обещанный источник молчал, и уже скачанного артиста
+    # «Раскопки» продолжали подавать как находку.
+    names += _from_json_list(_BASE / "history.json", ("artist", "artist_name"))
     names += _from_favorites()
 
     out = frozenset(n for n in (_norm(x) for x in names if x) if n)

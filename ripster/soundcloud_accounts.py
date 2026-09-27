@@ -35,6 +35,14 @@ _LABEL = {
     "soundcloud-go-plus": "Go+",
     "soundcloud-go": "Go",
 }
+# Метка панели обязана следовать за вердиктом «платный/нет», иначе один и тот же
+# аккаунт показан «Free», пока движок выбирает ему платный канал (и наоборот:
+# серверное ИМЯ «Go+» без id и без флага ранга не даёт, а панель обещает платок).
+# Пустая метка сюда не входит: незнакомый платный id специально остаётся своим
+# сырым именем («mystery»), чтобы его было видно и разобрано, а не спрятано за
+# «Go+».
+_FREE_LABELS   = {"free", "free-tier", "trial", "free-v01"}
+_PAID_LABELS   = {"go", "go+", "pro", "premium"}
 
 
 def _key(token: str) -> str:
@@ -78,6 +86,10 @@ def _read_plan(u: dict) -> dict:
     pid = str(prod.get("id") or "")
     label = _LABEL.get(pid, prod.get("name") or "")
     paid = (bool(pid) and pid.lower() not in _FREE_IDS) or bool(u.get("go_plus"))
+    if paid and (pid.lower() in _FREE_IDS or label.lower() in _FREE_LABELS):
+        label = "Go+"
+    elif not paid and label.lower() in _PAID_LABELS:
+        label = "Free"
     return {
         "plan": label or (pid if pid else ("Go+" if paid else "Free")),
         "go_plus": paid,
