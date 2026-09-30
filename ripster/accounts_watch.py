@@ -139,10 +139,6 @@ async def _expiring(config: dict) -> list[str]:
     return out
 
 
-def _bot_cfg_path() -> Path:
-    return _BASE_DIR / "tgbot" / "config.json"
-
-
 def _bot_cfg_path(base_dir=None) -> Path:
     """tgbot/config.json приложения — от BASE_DIR, а не от CWD (как telemetry._bot_cfg)."""
     return (Path(base_dir) if base_dir else Path()) / "tgbot" / "config.json"

@@ -621,7 +621,8 @@ def dump_cbcs_structure(data: bytes) -> list[str]:
     init = bytes(data[tops[0].lo:tops[first_moof].lo])
     lines.append("init: " + ", ".join(
         f"{b.typ.decode('latin1')}({b.hi - b.lo})" for b in tops[:first_moof]))
-    for tid, t in sorted(_init_tracks(init).items()):
+    tracks = _init_tracks(init)      # 01.10.2026: ниже `tracks` использовался, но не был определён (NameError при senc)
+    for tid, t in sorted(tracks.items()):
         schm = _find_box(init, 0, len(init), b"schm")
         scheme = (bytes(init[schm.plo + 4:schm.plo + 8]).decode("latin1")
                   if schm else "—")
