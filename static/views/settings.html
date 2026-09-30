@@ -373,10 +373,6 @@
               <input id="s-dlpath" placeholder="./apple-music-downloader" oninput="saveSetting('main-go-path',this.value)"/>
             </div>
           </div>
-          <div class="toggle-row mt8">
-            <div class="toggle-info"><div class="toggle-label" data-i18n="s.folder_by_fmt_label">Папки по качеству</div><div class="toggle-sub"><span data-i18n="s.folder_by_fmt">alac/, flac/, 320/ … — любой сервис кладёт файлы в папку по формату, не по имени сервиса</span></div></div>
-            <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="s-quality-subfolders" onchange="saveSetting('quality-subfolders',this.checked)"><div class="toggle-slider"></div></label>
-          </div>
           <div class="field-group mt8">
             <label class="lbl"><span data-i18n="s.out_fmt">Формат вывода (конвертация для ВСЕХ сервисов)</span></label>
             <select id="s-transcode-format" onchange="saveSetting('transcode-format',this.value)">
@@ -2463,13 +2459,6 @@
             <div id="dg-svc-list" style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px"></div>
 
             <div class="settings-grid">
-              <div class="field-group">
-                <label class="lbl" data-i18n="dg.per_kind">Находок в разделе</label>
-                <select id="s-dg-perkind" onchange="saveSetting('digs-per-kind',parseInt(this.value))">
-                  <option value="6">6</option><option value="12">12</option>
-                  <option value="20">20</option><option value="40">40</option>
-                </select>
-              </div>
               <div class="field-group">
                 <label class="lbl" data-i18n="dg.forgot_days">Забытое — от скольких дней</label>
                 <input id="s-dg-forgot" type="number" min="7" max="720" step="1"

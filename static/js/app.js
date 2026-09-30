@@ -1340,7 +1340,6 @@ function applyConfig() {
   setVal('s-amd-wm-key', c['amd-wm-api-key']||'');
   setVal('s-amd-instance', c['amd-instance-url']||'');
   setChk('s-apple-parallel', c['apple-parallel-tracks']);
-  setChk('s-quality-subfolders', c['quality-subfolders']);
   setVal('s-transcode-format', c['transcode-format'] || (c['transcode-flac'] ? 'flac' : c['transcode-mp3'] ? 'mp3' : ''));
   setChk('s-transcode-keep', c['transcode-keep-original']);
   setVal('s-rename-tmpl',  c['file-rename-template']||'');

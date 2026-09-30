@@ -15,7 +15,8 @@ _SVC_PATH_KEYS: dict[str, str] = {
     "yandex":     "yandex-save-path",
 }
 
-# Quality folder names — what subdirectory to use when quality-subfolders is on.
+# Quality folder names — the <quality> subdirectory under <save-path>/<service>/ (always on:
+# the unified layout has no 'quality-subfolders' switch any more).
 # Per-service overrides live in _QUALITY_FOLDER_SVC; fallback is _QUALITY_FOLDER.
 _QUALITY_FOLDER: dict[str, str] = {
     # Apple Music

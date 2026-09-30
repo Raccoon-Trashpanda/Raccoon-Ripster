@@ -149,7 +149,6 @@ function showStab(id, btn) {
     setVal('s-dg-bg',      c['digs-bg']      || 'earth');
     setVal('s-dg-density', c['digs-density'] || 'normal');
     setVal('s-dg-motion',  c['digs-motion']  || 'full');
-    setVal('s-dg-perkind', String(c['digs-per-kind'] || 12));
     setVal('s-dg-click',   c['digs-click']   || 'play');
     setVal('s-dg-dbl',     c['digs-dblclick']|| 'bubbles');
     const fd = document.getElementById('s-dg-forgot');
