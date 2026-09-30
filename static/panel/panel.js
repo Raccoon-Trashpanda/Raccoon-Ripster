@@ -1503,12 +1503,24 @@ function bindMiniSeek(m) {
 
 /* ── «Прыгалка» внизу мини-плеера: спектр от ПК (k:'viz'), цвет сервиса ── */
 var _vizRaf = 0, _vizLvl = null;
+// Один шаг сглаживания одной полосы (чистая функция — проверяется в node).
+// 30.09 (владелец: «еле шевелится, падает в ноль»): 1) кадр держится 1.6 с, а не
+// 0.4 — окно ПК в фоне шлёт кадры раз в секунду (браузер душит таймеры), и между
+// ними шкала падала на ноль; 2) кривая ^0.85 поднимает середину — на 14-пикселях
+// ровные 120/255 выглядели «мёртвой» полоской; 3) без данных (пауза) — плавный
+// спад, а не обрыв.
+var VIZ_HOLD_MS = 1600;
+function vizStep(prev, raw, fresh) {
+  var target = fresh ? Math.pow(Math.min(1, Math.max(0, (raw || 0) / 255)), 0.85) : 0;
+  var k = target > prev ? 0.85 : (fresh ? 0.22 : 0.12);
+  return prev + (target - prev) * k;
+}
 function vizKick() { if (!_vizRaf) _vizRaf = requestAnimationFrame(vizFrame); }
 function vizFrame() {
   _vizRaf = 0;
   var cv = document.getElementById('mini-viz'), mini = document.getElementById('mini');
   if (!cv || !mini || !mini.classList.contains('on')) return;
-  var fresh = B.live && B.viz && (Date.now() - (B.vizAt || 0) < 400);
+  var fresh = B.live && B.viz && (Date.now() - (B.vizAt || 0) < VIZ_HOLD_MS);
   var w = cv.clientWidth, h = cv.clientHeight, dpr = window.devicePixelRatio || 1;
   if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
   var g = cv.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
@@ -1516,8 +1528,8 @@ function vizFrame() {
   if (!_vizLvl) _vizLvl = new Array(n).fill(0);
   var alive = false;
   for (var i = 0; i < n; i++) {
-    var target = src ? (src[i] || 0) / 255 : 0;
-    _vizLvl[i] += (target - _vizLvl[i]) * (target > _vizLvl[i] ? 0.55 : 0.18);   // быстро вверх, плавно вниз
+    // Вверх — почти сразу (анализатор уже сгладил), вниз — плавно, чтобы не мерцало.
+    _vizLvl[i] = vizStep(_vizLvl[i], src ? src[i] : 0, !!src);
     if (_vizLvl[i] > 0.01) alive = true;
   }
   var col = getComputedStyle(mini).getPropertyValue('--svc').trim() || '#ff3d8b';
