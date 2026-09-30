@@ -1520,6 +1520,8 @@ var LANG = {
     'rl.src_bbc':'новые эфиры шоу','rl.src_sc':'каналы из вишлиста','rl.src_apple':'артисты из вишлиста',
     // ── лейблы в радаре и карточка лейбла 2026-08-16 ──
     'rl.src_labels':'лейблы из вишлиста',
+    'rl.upcoming_badge':'Грядущие релизы',
+    'rl.src_upcoming':'предзаказы и анонсы',
     'rl.labels_badge':'Лейблы',
     'rl.src_panel':'Источники ленты','rl.srcbtn_releases':'Релизы','rl.src_hide_title':'Убрать этот источник из ленты','rl.src_show_title':'Вернуть этот источник в ленту','rl.src_enable_title':'Источник не сканируется — нажми, чтобы включить','rl.src_all_off':'Все источники выключены — включи хотя бы один кнопкой сверху','rl.episode_badge':'ЭФИР','rl.upload_badge':'АПЛОАД',
     'rl.labels_block':'Релизы лейблов',
@@ -3974,6 +3976,8 @@ var LANG = {
     'rl.src_bbc':'new show episodes','rl.src_sc':'channels from the watchlist','rl.src_apple':'artists from the watchlist',
     // ── labels in the radar + label page 2026-08-16 ──
     'rl.src_labels':'labels from the watchlist',
+    'rl.upcoming_badge':'Upcoming releases',
+    'rl.src_upcoming':'pre-orders and announcements',
     'rl.labels_badge':'Labels',
     'rl.src_panel':'Feed sources','rl.srcbtn_releases':'Releases','rl.src_hide_title':'Remove this source from the feed','rl.src_show_title':'Bring this source back into the feed','rl.src_enable_title':'This source is not scanned — click to turn it on','rl.src_all_off':'All sources are off — turn at least one on with the buttons above','rl.episode_badge':'EPISODE','rl.upload_badge':'UPLOAD',
     'rl.labels_block':'Label releases',

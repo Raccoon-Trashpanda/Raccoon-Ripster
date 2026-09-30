@@ -2566,6 +2566,15 @@
               <span style="font-size:12px;font-weight:600;color:var(--text)">🏷 <span data-i18n="rl.labels_badge">Лейблы</span></span>
               <span style="font-size:10px;color:var(--muted);margin-left:auto" data-i18n="rl.src_labels">лейблы из вишлиста</span>
             </label>
+            <!-- Грядущие релизы (предзаказы): ключ `show-upcoming`, по умолчанию ВЫКЛЮЧЕН.
+                 Без этой галочки сторож [preorders] пропускает обход, а панель пишет «выключено в настройках ПК». -->
+            <label style="display:flex;align-items:center;gap:10px;cursor:pointer;padding:8px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px">
+              <input type="checkbox" id="rel-cfg-upcoming" onchange="saveRadarUpcoming(this.checked)"
+                style="width:15px;height:15px;accent-color:#EF9F27;cursor:pointer"/>
+              <span style="width:8px;height:8px;border-radius:50%;background:#EF9F27;flex-shrink:0"></span>
+              <span style="font-size:12px;font-weight:600;color:var(--text)">📅 <span data-i18n="rl.upcoming_badge">Грядущие релизы</span></span>
+              <span style="font-size:10px;color:var(--muted);margin-left:auto" data-i18n="rl.src_upcoming">предзаказы и анонсы</span>
+            </label>
           </div>
           <div style="font-size:11px;color:var(--muted);line-height:1.6;margin-bottom:12px" data-i18n="rl.labels_hint">Лейблы отслеживаются по названию через каталоги Spotify и Deezer — это единственные, кто отвечает на вопрос «что выпустил лейбл». Пока выключено, лента радара ровно такая же, как была.</div>
 

@@ -988,6 +988,8 @@ function _syncReleasesSettingsTab() {
   // Лейблы: отдельный источник, свой ключ конфига, по умолчанию выключен.
   const lcb = document.getElementById('rel-cfg-labels');
   if (lcb) lcb.checked = (c['show-radar-labels'] === true);
+  const ucb = document.getElementById('rel-cfg-upcoming');
+  if (ucb) ucb.checked = (c['show-upcoming'] === true);
 
   // Defaults
   const dSel = document.getElementById('rel-cfg-days');
@@ -1005,6 +1007,11 @@ function saveRadarLabels(on) {
   saveSetting('show-radar-labels', !!on);
   _renderRelActiveSvcs();
   if (typeof loadReleases === 'function') loadReleases(false);
+}
+
+// «Грядущие релизы» (предзаказы/анонсы): включает и сторож [preorders], и раздел радара в панели.
+function saveRadarUpcoming(on) {
+  saveSetting('show-upcoming', !!on);
 }
 
 function _relSaveLS(data, key) {
