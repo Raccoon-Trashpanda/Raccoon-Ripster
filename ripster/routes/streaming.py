@@ -10,6 +10,7 @@ Install: streaming.install(app, cfg)
 """
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 from pathlib import Path
@@ -141,15 +142,86 @@ def _record_listen(stream_type: str, request: Request, track_id: str,
 # Used by Qobuz / Tidal / SoundCloud progressive streams so the browser sees
 # a same-origin response — Web Audio API decodeAudioData then works, unlocking
 # AbsoluteZero gapless playback (and equaliser / visualizer later).
+_UNKNOWN_HOST_CAP = 300 * 1024 * 1024       # потолок на поток с непроверенного CDN
+_AUDIO_CT_OK = ("application/octet-stream", "binary/octet-stream", "application/ogg",
+                "video/mp4", "video/mpeg", "application/x-mpegurl", "")
+
+
+def _http_client(**kw) -> httpx.AsyncClient:
+    """Точка подмены для тестов (MockTransport)."""
+    return httpx.AsyncClient(**kw)
+
+
+async def _host_is_public(host: str, port: int) -> bool:
+    """Все адреса, в которые разрешается хост, — публичные. Любой частный,
+    петлевой, link-local (169.254.169.254 — метаданные облака), multicast или
+    зарезервированный = отказ: иначе прокси стал бы дверью во внутреннюю сеть."""
+    import ipaddress
+    import socket
+    if not host or host.lower() in ("localhost",) or host.lower().endswith(".local"):
+        return False
+    try:
+        infos = await asyncio.to_thread(socket.getaddrinfo, host, port, 0, socket.SOCK_STREAM)
+    except Exception:
+        return False
+    if not infos:
+        return False
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(str(info[4][0]).split("%", 1)[0])
+        except ValueError:
+            return False
+        if not ip.is_global or ip.is_multicast:
+            return False
+    return True
+
+
+async def _vet_public_audio_url(url: str) -> str:
+    """Проверить поток с НЕИЗВЕСТНОГО хоста и вернуть конечный адрес после
+    редиректов. Каждый шаг: только http(s), только публичные адреса, редиректы
+    вручную (не больше 5) с той же проверкой, в ответе — звук, а не страница.
+
+    Остаточный риск честно: между проверкой DNS и соединением имя может
+    перерешиться (DNS-rebinding). Ручка доступна только владельцу и гостям с
+    сессией, а ответы с не-звуковым типом не отдаются."""
+    from urllib.parse import urljoin, urlparse
+    for _hop in range(6):
+        p = urlparse(url)
+        if p.scheme not in ("http", "https"):
+            raise HTTPException(400, "invalid URL")
+        port = p.port or (443 if p.scheme == "https" else 80)
+        if not await _host_is_public(p.hostname or "", port):
+            raise HTTPException(403, f"host not allowed: {p.hostname or url[:40]}")
+        async with _http_client(timeout=httpx.Timeout(10.0, connect=5.0), follow_redirects=False,
+                                headers={"User-Agent": _UA, "Range": "bytes=0-0"}) as c:
+            try:
+                async with c.stream("GET", url) as r:
+                    status, headers = r.status_code, r.headers
+            except httpx.HTTPError as e:
+                raise HTTPException(502, f"upstream error: {type(e).__name__}")
+        if status in (301, 302, 303, 307, 308) and headers.get("location"):
+            url = urljoin(url, headers["location"])
+            continue
+        if status not in (200, 206):
+            raise HTTPException(502, f"upstream HTTP {status}")
+        ct = (headers.get("content-type") or "").split(";", 1)[0].strip().lower()
+        if not (ct.startswith("audio/") or ct in _AUDIO_CT_OK):
+            raise HTTPException(415, f"not audio: {ct}")
+        return url
+    raise HTTPException(403, "too many redirects")
+
+
 async def proxy_cdn_stream(cdn_url: str, request: Request, mime: str,
-                           filename: str) -> StreamingResponse:
+                           filename: str, follow: bool = True, cap: int = 0) -> StreamingResponse:
+    """follow=False + cap — для непроверенного хоста: адрес уже конечный (редиректы
+    пройдены проверкой), тело режется на потолке."""
     range_hdr = request.headers.get("range") or request.headers.get("Range") or ""
     # Probe Content-Length with a HEAD so we can advertise correct sizes.
     total_size = 0
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=5.0),
-                                     follow_redirects=True,
-                                     headers={"User-Agent": _UA}) as probe:
+        async with _http_client(timeout=httpx.Timeout(10.0, connect=5.0),
+                                follow_redirects=follow,
+                                headers={"User-Agent": _UA}) as probe:
             hr = await probe.head(cdn_url)
             if hr.status_code in (200, 206):
                 cl = hr.headers.get("content-length", "")
@@ -164,17 +236,22 @@ async def proxy_cdn_stream(cdn_url: str, request: Request, mime: str,
 
     async def _pipe():
         try:
-            async with httpx.AsyncClient(
+            async with _http_client(
                 headers=fwd_headers,
                 timeout=httpx.Timeout(300.0, connect=10.0),
-                follow_redirects=True,
+                follow_redirects=follow,
             ) as c:
                 async with c.stream("GET", cdn_url) as resp:
                     if resp.status_code not in (200, 206):
                         print(f"[proxy] CDN HTTP {resp.status_code} for {cdn_url[:80]}",
                               flush=True)
                         return
+                    sent = 0
                     async for chunk in resp.aiter_bytes(64 * 1024):
+                        sent += len(chunk)
+                        if cap and sent > cap:
+                            print(f"[proxy] cap {cap} bytes reached for {cdn_url[:80]}", flush=True)
+                            return
                         yield chunk
         except Exception as e:
             print(f"[proxy] stream error: {e}", flush=True)
@@ -239,15 +316,21 @@ async def cdn_proxy(request: Request, u: str = "", svc: str = "any",
     )
     _safe_exact = {"sndcdn.com", "sndcdn.cloud", "dzcdn.net", "qobuz.com", "tidal.com"}
     _host_ok = _host in _safe_exact or any(_host.endswith(s) for s in _safe_suffixes)
+    _cap = 0
     if not _host_ok:
-        raise HTTPException(403, f"host not allowed: {_host or cdn_url[:40]}")
+        # 30.09: неизвестный хост — не отказ, а проверка. Плеер шлёт сюда любой
+        # чужой поток (шкала уровня на любом сервисе), поэтому пускаем только
+        # публичный адрес, проверенный на КАЖДОМ редиректе, и только звук.
+        cdn_url = await _vet_public_audio_url(cdn_url)
+        _cap = _UNKNOWN_HOST_CAP
     track_id = ""
     if "/tracks/" in cdn_url:
         try: track_id = cdn_url.rsplit("/tracks/", 1)[1].split("/", 1)[0]
         except Exception: pass
     _record_listen(svc, request, track_id, name, artist, cdn_url)
     ext = "flac" if "flac" in mime else ("m4a" if "mp4" in mime else "mp3")
-    return await proxy_cdn_stream(cdn_url, request, mime, f"{svc}_{track_id or 'track'}.{ext}")
+    return await proxy_cdn_stream(cdn_url, request, mime, f"{svc}_{track_id or 'track'}.{ext}",
+                                  follow=not _cap, cap=_cap)
 
 
 # ── Qobuz ─────────────────────────────────────────────────────────────────────

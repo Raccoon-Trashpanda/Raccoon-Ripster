@@ -881,8 +881,18 @@ async function _waInit() {
   // AnalyserNode for the fullscreen-player visualizer. Connected in parallel
   // to destination so it taps the post-EQ signal without re-routing audio.
   _WA.analyser = _WA.ctx.createAnalyser();
-  _WA.analyser.fftSize = 128;            // 64 freq bins — plenty for bars
-  _WA.analyser.smoothingTimeConstant = 0.75;
+  // 29.09 (владелец: «амплитуда хромает, вяло прыгает»): 128 точек давали 64
+  // полосы по 345 Гц — весь бас в ОДНОЙ, а три четверти полос уходили в верх,
+  // где энергии мало. 2048 → шаг ~21 Гц, полосы режем по логарифму (_vizBands).
+  _WA.analyser.fftSize = 2048;
+  _WA.analyser.smoothingTimeConstant = 0.5;   // было 0.75 — отклик запаздывал
+  _WA.analyser.minDecibels = -85;
+  _WA.analyser.maxDecibels = -22;
+  // Пауза/продолжение безшовного пути — это suspend()/resume() контекста;
+  // шкалу ведём по нему же (для <audio> её ведут события play/pause).
+  _WA.ctx.addEventListener?.('statechange', () => {
+    try { if (_WA.ctx.state === 'running') _vizStart?.(); else _vizStop?.(); } catch {}
+  });
   _WA.gain.connect(bass).connect(mid).connect(treb);
   treb.connect(_WA.ctx.destination);
   treb.connect(_WA.analyser);            // tap, doesn't double the output
@@ -943,6 +953,32 @@ function resetEQ() {
 
 // ── Visualiser (FFT frequency bars on fullscreen-player background) ─────
 let _vizRAF = null;
+let _vizBuf = null;
+
+/* Полосы спектра по ЛОГАРИФМУ частоты (40 Гц … 16 кГц) — как слышит ухо:
+   бас, середина и верх получают поровну полос. Значение полосы — максимум
+   её точек, 0…255. Общая функция для ПК-шкалы и «прыгалки» панели
+   (panel_host.js), чтобы они не расходились. null — анализатора нет (звук
+   идёт мимо Web Audio: DRM, BBC, системный плеер) — шкалу тогда не рисуем. */
+function _vizBands(count) {
+  if (!_WA.analyser || !_WA.ctx) return null;
+  const n = _WA.analyser.frequencyBinCount;
+  if (!_vizBuf || _vizBuf.length !== n) _vizBuf = new Uint8Array(n);
+  _WA.analyser.getByteFrequencyData(_vizBuf);
+  const hzPerBin = _WA.ctx.sampleRate / 2 / n;
+  const lo = Math.log(40), hi = Math.log(16000);
+  const out = new Array(count);
+  for (let b = 0; b < count; b++) {
+    const f0 = Math.exp(lo + (hi - lo) * b / count);
+    const f1 = Math.exp(lo + (hi - lo) * (b + 1) / count);
+    const i0 = Math.max(1, Math.floor(f0 / hzPerBin));
+    const i1 = Math.max(i0 + 1, Math.min(n, Math.ceil(f1 / hzPerBin)));
+    let mx = 0;
+    for (let i = i0; i < i1; i++) if (_vizBuf[i] > mx) mx = _vizBuf[i];
+    out[b] = mx;
+  }
+  return out;
+}
 // Two canvases share one draw loop: #fp-viz (big, behind the fullscreen panel)
 // and #pp-viz (small, always-visible strip in the compact mini-bar). The mini
 // one used to be the ONLY way most people would ever see this feature was by
@@ -955,13 +991,14 @@ function _vizStart() {
   if (!canvases.length) return;
   const ctx2ds = canvases.map(c => c.getContext('2d'));
   canvases.forEach(c => { c.style.opacity = c.id === 'fp-viz' ? '0.55' : '1'; });
-  const N = _WA.analyser.frequencyBinCount;
-  const data = new Uint8Array(N);
+  if (_vizRAF) return;                    // уже крутится — второй цикл не заводим
   // Re-size canvas DPI-aware on each tick (cheap, handles rotation)
   const draw = () => {
-    const audio = document.getElementById('pp-audio');
-    if (!audio || audio.paused) { _vizStop(); return; }
-    _WA.analyser.getByteFrequencyData(data);
+    // 29.09: проверяли только <audio>. В безшовном режиме (Deezer, своя
+    // фонотека) звук идёт буфером Web Audio мимо <audio>, тот «на паузе» —
+    // и шкала гасла на первом кадре. Спрашиваем общий «играет ли сейчас».
+    if (typeof ripsterIsPaused === 'function' ? ripsterIsPaused()
+        : document.getElementById('pp-audio')?.paused !== false) { _vizStop(); return; }
     // Pick the dominant service-brand color from current track (fallback pink)
     // — same tint the "Live"/service badges use elsewhere, so the bars read
     // as "this is Deezer/Spotify/Qobuz playing", not just decoration.
@@ -988,11 +1025,11 @@ function _vizStart() {
       ctx2d.fillStyle = grad;
       // The mini bar is ~60px wide — fewer, chunkier bars read better there
       // than the 48 thin ones the big fullscreen canvas uses.
-      const bars = Math.min(N, isMini ? 16 : 48);
-      const step = Math.floor(N / bars);
+      const bars = isMini ? 16 : 48;
+      const vals = _vizBands(bars) || [];
       const bw   = w / bars;
       for (let i = 0; i < bars; i++) {
-        const v = data[i * step] / 255;
+        const v = (vals[i] || 0) / 255;
         const bh = Math.max(v * h, h * (isMini ? 0.1 : 0.06));   // tiny idle nub, never fully flat
         ctx2d.fillRect(i * bw + bw * 0.15, h - bh, bw * 0.7, bh);
       }
@@ -1336,6 +1373,8 @@ async function _waPlay(idx, startAtSec = 0) {
   _WA.curItem   = item;
   _WA.curStartT = startedAt - startAtSec;            // virtual t=0
   _WA.curOffset = startAtSec;
+  // Безшовный путь не трогает <audio>, и событие 'play' шкалу не будит.
+  try { _vizStart?.(); } catch {}
   // Update duration display immediately (WA has no durationchange event).
   const _waDurStr = fmtDur(Math.floor(buffer.duration));
   ['pp-dur','pp-dur-big','fp-dur'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = _waDurStr; });
@@ -2621,19 +2660,28 @@ async function _playPreviewAt(idx) {
 // output SILENCE for cross-origin media routed through Web Audio (no CORS). So
 // route iTunes/mzstatic previews through our same-origin /api/proxy → sound + EQ.
 function _proxyAudioUrl(url) {
+  // 30.09 (владелец): шкала уровня обязана жить на ЛЮБОМ потоке, включая сервисы,
+  // о которых Рипстер ещё не знает. Браузер отдаёт Web Audio нули для чужого звука
+  // без CORS, поэтому ВСЁ, что пришло с другого сайта по http(s), идёт через свой
+  // /api/proxy. Список хостов больше не нужен: неизвестные сервер пускает только
+  // после проверки (публичный адрес, каждый редирект, это действительно звук).
+  // Свой адрес, blob: и data: не трогаем.
   try {
-    const h = new URL(url, location.origin).hostname;
-    if (/(^|\.)itunes\.apple\.com$|(^|\.)mzstatic\.com$/.test(h)) {
-      const b64 = btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-      return `/api/proxy?u=${b64}&svc=apple&mime=${encodeURIComponent('audio/mp4')}`;
-    }
-    // 27.09: превью Qobuz (предрелизы, 30 с) шли напрямую с их CDN — звук есть,
-    // а шкала уровня мёртвая: браузер не отдаёт Web Audio чужой звук без CORS.
-    // Сервер эти хосты уже пропускает (streaming.py: .qobuz.com, .akamaized.net).
-    if (/(^|\.)qobuz\.com$|(^|\.)akamaized\.net$/.test(h)) {
-      const b64 = btoa(url).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-      return `/api/proxy?u=${b64}&svc=qobuz&mime=${encodeURIComponent('audio/mpeg')}`;
-    }
+    const u = new URL(url, location.origin);
+    if (u.origin === location.origin) return url;
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return url;
+    const h = u.hostname;
+    const svc = /(^|\.)itunes\.apple\.com$|(^|\.)mzstatic\.com$/.test(h) ? 'apple'
+              : /(^|\.)qobuz\.com$|(^|\.)akamaized\.net$/.test(h) ? 'qobuz' : 'any';
+    const path = u.pathname.toLowerCase();
+    const mime = svc === 'apple' || /\.(m4a|mp4|aac)$/.test(path) ? 'audio/mp4'
+               : /\.flac$/.test(path) ? 'audio/flac'
+               : /\.(ogg|oga|opus)$/.test(path) ? 'audio/ogg'
+               : /\.wav$/.test(path) ? 'audio/wav' : 'audio/mpeg';
+    // btoa понимает только Latin-1: кириллица в адресе уронила бы весь помощник.
+    const b64 = btoa(unescape(encodeURIComponent(url)))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return `/api/proxy?u=${b64}&svc=${svc}&mime=${encodeURIComponent(mime)}`;
   } catch (_) {}
   return url;
 }
