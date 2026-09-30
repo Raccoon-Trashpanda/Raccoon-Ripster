@@ -423,11 +423,11 @@ body:not(.rpwin) .phone {
 .minibtn-sm { width: 32px; height: 32px; font-size: 13px; color: var(--t2); }
 .miniplayer.seeking { cursor: col-resize; }
 .miniplayer.seeking .miniprog { transition: none; }
-.miniviz { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 26px; pointer-events: none; z-index: 0; }
+.miniviz { position: absolute; left: 0; right: 0; bottom: 0; width: 100%; height: 18px; opacity: .55; pointer-events: none; z-index: 0; }
 .minicover { width: 40px; height: 40px; border-radius: 9px; object-fit: cover; background: var(--raised); flex: none; }
 .minitext { flex: 1; min-width: 0; }
-.miniline1 { font-size: var(--label); font-weight: var(--w-standard); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.miniline2 { font-size: var(--caption); color: var(--t3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.miniline1 { font-size: var(--label); font-weight: var(--w-standard); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; color: var(--t1, #fff); text-shadow: 0 1px 3px rgba(0,0,0,.75); }
+.miniline2 { font-size: var(--caption); color: var(--t2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-shadow: 0 1px 3px rgba(0,0,0,.75); }
 .minibtn { width: 38px; height: 38px; border-radius: 50%; display: grid; place-items: center; color: var(--pink); font-size: 15px; flex: none; }
 .minibtn:hover { background: rgba(255,255,255,.07); }
 

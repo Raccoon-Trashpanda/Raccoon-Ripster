@@ -102,13 +102,36 @@ function rpAdoptFromPanel(via) {
   rpPanelStartTick();
 }
 
+/* Таймер для кадров шкалы. 30.09 (владелец: «работает со статтерами»): setInterval в окне/вкладке,
+   которое не на переднем плане, браузер душит до ~1 раза в секунду — кадры спектра шли рывками. Таймер в
+   Web Worker такому душению не подвержен. Не вышло создать воркер (политика, старый движок) — обычный
+   setInterval, как раньше. Возвращает {stop()}. */
+function rpTicker(fn, ms) {
+  var fallback = null, worker = null;
+  function useInterval() { if (!fallback) fallback = setInterval(fn, ms); }
+  try {
+    var src = 'var t=setInterval(function(){postMessage(0)},' + ms + ');' +
+              'onmessage=function(e){if(e.data==="stop"){clearInterval(t);close();}};';
+    worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+    worker.onmessage = function () { fn(); };
+    worker.onerror = function () { try { worker.terminate(); } catch (e) {} worker = null; useInterval(); };
+  } catch (e) { worker = null; useInterval(); }
+  return { stop: function () {
+    if (worker) { try { worker.postMessage('stop'); worker.terminate(); } catch (e) {} worker = null; }
+    if (fallback) { clearInterval(fallback); fallback = null; }
+  } };
+}
+
 function rpPanelStartTick() {
   if (!RP.tick) RP.tick = setInterval(rpPanelPush, 400);
-  if (!RP.vizTick) RP.vizTick = setInterval(rpVizPush, 85);
+  // 29.09 (владелец: «лагает, вяло прыгает»): 85 мс = 12 кадров/с поверх
+  // двойного сглаживания. В своё окно (oswin) шлём ~30 раз/с — это
+  // postMessage внутри машины; через сервер (relay, телефон) — как было.
+  if (!RP.vizTick) RP.vizTick = rpTicker(rpVizPush, RP.transport === 'relay' ? 85 : 33);
 }
 function rpPanelStopTick() {
   if (RP.tick) { clearInterval(RP.tick); RP.tick = null; }
-  if (RP.vizTick) { clearInterval(RP.vizTick); RP.vizTick = null; }
+  if (RP.vizTick) { RP.vizTick.stop(); RP.vizTick = null; }
 }
 
 /* Спектр для «прыгалки» мини-плеера панели (владелец 25.09): тот же
@@ -121,17 +144,10 @@ function rpVizPush() {
   try {
     if (typeof _WA === 'undefined' || !_WA.analyser) return;
     if (typeof ripsterIsPaused === 'function' && ripsterIsPaused()) return;
-    var n = _WA.analyser.frequencyBinCount;
-    var data = RP.vizBuf && RP.vizBuf.length === n ? RP.vizBuf : (RP.vizBuf = new Uint8Array(n));
-    _WA.analyser.getByteFrequencyData(data);
-    var bands = 32, out = new Array(bands), usable = Math.floor(n * 0.8);
-    for (var b = 0; b < bands; b++) {
-      var lo = Math.floor(b * usable / bands), hi = Math.max(lo + 1, Math.floor((b + 1) * usable / bands));
-      var mx = 0;
-      for (var i = lo; i < hi; i++) if (data[i] > mx) mx = data[i];
-      out[b] = mx;
-    }
-    rpPost({ rp: 1, k: 'viz', b: out });
+    // Те же логарифмические полосы, что у ПК-шкалы (player.js _vizBands):
+    // линейная нарезка отдавала 3/4 полос верху, где энергии мало.
+    var out = (typeof _vizBands === 'function') ? _vizBands(32) : null;
+    if (out) rpPost({ rp: 1, k: 'viz', b: out });
   } catch (e) {}
 }
 

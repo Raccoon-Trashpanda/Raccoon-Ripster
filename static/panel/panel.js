@@ -1502,7 +1502,7 @@ function bindMiniSeek(m) {
 }
 
 /* ── «Прыгалка» внизу мини-плеера: спектр от ПК (k:'viz'), цвет сервиса ── */
-var _vizRaf = 0, _vizLvl = null;
+var _vizRaf = 0, _vizLvl = null, _vizT = 0;
 // Один шаг сглаживания одной полосы (чистая функция — проверяется в node).
 // 30.09 (владелец: «еле шевелится, падает в ноль»): 1) кадр держится 1.6 с, а не
 // 0.4 — окно ПК в фоне шлёт кадры раз в секунду (браузер душит таймеры), и между
@@ -1510,9 +1510,12 @@ var _vizRaf = 0, _vizLvl = null;
 // ровные 120/255 выглядели «мёртвой» полоской; 3) без данных (пауза) — плавный
 // спад, а не обрыв.
 var VIZ_HOLD_MS = 1600;
-function vizStep(prev, raw, fresh) {
+// dt (мс) — время с прошлого кадра рисования: сглаживание по ВРЕМЕНИ, а не по кадру (кадры спектра с ПК
+// идут с разной частотой; «скачок к цели за кадр» выглядел статтерами). Вверх ~40 мс, вниз ~140 мс, пауза ~260 мс.
+function vizStep(prev, raw, fresh, dt) {
   var target = fresh ? Math.pow(Math.min(1, Math.max(0, (raw || 0) / 255)), 0.85) : 0;
-  var k = target > prev ? 0.85 : (fresh ? 0.22 : 0.12);
+  var tau = target > prev ? 40 : (fresh ? 140 : 260);
+  var k = 1 - Math.exp(-Math.min(100, Math.max(1, dt || 16.7)) / tau);
   return prev + (target - prev) * k;
 }
 function vizKick() { if (!_vizRaf) _vizRaf = requestAnimationFrame(vizFrame); }
@@ -1527,9 +1530,12 @@ function vizFrame() {
   var src = fresh ? B.viz : null, n = 32;
   if (!_vizLvl) _vizLvl = new Array(n).fill(0);
   var alive = false;
+  var _now = (window.performance && performance.now) ? performance.now() : Date.now();
+  var _dt = _vizT ? _now - _vizT : 16.7;
+  _vizT = _now;
   for (var i = 0; i < n; i++) {
-    // Вверх — почти сразу (анализатор уже сгладил), вниз — плавно, чтобы не мерцало.
-    _vizLvl[i] = vizStep(_vizLvl[i], src ? src[i] : 0, !!src);
+    // Вверх — быстро (анализатор уже сгладил), вниз — плавнее; всё по времени, не по кадру.
+    _vizLvl[i] = vizStep(_vizLvl[i], src ? src[i] : 0, !!src, _dt);
     if (_vizLvl[i] > 0.01) alive = true;
   }
   var col = getComputedStyle(mini).getPropertyValue('--svc').trim() || '#ff3d8b';
@@ -1541,7 +1547,7 @@ function vizFrame() {
     g.fillRect(j * (bw + gap), h - bh, bw, bh);
   }
   g.globalAlpha = 1;
-  if (fresh || alive) _vizRaf = requestAnimationFrame(vizFrame);
+  if (fresh || alive) _vizRaf = requestAnimationFrame(vizFrame); else _vizT = 0;
 }
 
 function renderQueueSheets() {
