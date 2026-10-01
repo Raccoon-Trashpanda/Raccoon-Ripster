@@ -133,7 +133,7 @@ class BBCEngine(EngineBase):
                   f"({ladder.get('best_codec')}), цель MP3 {target}K — без апконверта",
                   flush=True)
         return [
-            yt, "--quiet", "--progress",
+            *yt, "--quiet", "--progress",
             "--downloader", "ffmpeg",
             "--hls-use-mpegts",
             "-x", "--audio-format", "mp3", "--audio-quality", f"{target}K",
