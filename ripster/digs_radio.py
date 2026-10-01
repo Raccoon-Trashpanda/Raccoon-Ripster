@@ -32,33 +32,57 @@ _DZ_SEARCH = "https://api.deezer.com/search/track"
 _UA = {"User-Agent": "Ripster/3.4 (personal music library tool)"}
 
 
+def _track_card(it: dict, nm: str) -> dict:
+    alb = it.get("album") or {}
+    return {
+        "service": "deezer",
+        "id":      str(it.get("id") or ""),
+        "title":   it.get("title") or "",
+        "artist":  nm,
+        "cover":   alb.get("cover_medium") or alb.get("cover") or "",
+        "full":    True,
+        "posKey":  f"deezer:{it.get('id')}",
+        "why":     "",
+    }
+
+
 async def _top_track(client, artist: str) -> dict | None:
     """Самый ходовой трек артиста в Deezer.
 
     Имя сверяется: Deezer всегда что-нибудь возвращает, и без проверки в радио
     приезжает трек постороннего исполнителя — а это ровно то, из-за чего чужие
     рекомендации и раздражают.
-    """
+
+    01.10.2026: раньше искали `search/track?q=artist:"имя"` и брали первые 5 —
+    а там у нишевых артистов (Calibre, Nu:Logic, Wilkinson) идут ремиксы, где они
+    лишь соавторы, имя главного исполнителя другое, сверка всё отбрасывала, и
+    радио говорило «иссякло», хотя похожих было 24. Теперь: найти САМОГО артиста
+    (точное имя), взять его топ-треки; старый путь — запасной."""
+    want = _norm(artist)
+    try:
+        r = await client.get("https://api.deezer.com/search/artist",
+                             params={"q": artist, "limit": 5})
+        if r.status_code == 200:
+            for ar in ((r.json() or {}).get("data") or []):
+                if _norm(ar.get("name") or "") != want or not ar.get("id"):
+                    continue
+                t = await client.get(f"https://api.deezer.com/artist/{ar['id']}/top",
+                                     params={"limit": 5})
+                if t.status_code == 200:
+                    for it in ((t.json() or {}).get("data") or []):
+                        if it.get("id") and it.get("readable", True):
+                            return _track_card(it, (ar.get("name") or artist).strip())
+                break
+    except Exception:
+        pass
     try:
         r = await client.get(_DZ_SEARCH, params={"q": f'artist:"{artist}"', "limit": 5})
         if r.status_code != 200:
             return None
-        want = _norm(artist)
         for it in ((r.json() or {}).get("data") or []):
             nm = ((it.get("artist") or {}).get("name") or "").strip()
-            if _norm(nm) != want:
-                continue
-            alb = it.get("album") or {}
-            return {
-                "service": "deezer",
-                "id":      str(it.get("id") or ""),
-                "title":   it.get("title") or "",
-                "artist":  nm,
-                "cover":   alb.get("cover_medium") or alb.get("cover") or "",
-                "full":    True,
-                "posKey":  f"deezer:{it.get('id')}",
-                "why":     "",
-            }
+            if _norm(nm) == want:
+                return _track_card(it, nm)
     except Exception:
         return None
     return None
