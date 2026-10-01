@@ -27,6 +27,25 @@ from enum import Enum
 from typing import Iterable, Optional
 
 
+
+def title_with_version(title: str, version: str = "") -> str:
+    """Название трека вместе с пометкой версии: «Sky Falls Down (Extended Mix)».
+
+    Qobuz и Tidal отдают версию ОТДЕЛЬНЫМ полем (`version`), а `title` держит
+    только базовое имя. Если брать один `title`, четыре разные версии одного
+    трека (7:04, 3:53, 4:11, 7:13) в списке выглядят как четыре одинаковые строки
+    «Sky Falls Down», и не понять, что скачиваешь. Сервисы в своих приложениях
+    показывают именно «Название (Версия)».
+
+    Пометка не дописывается, если версия уже есть в названии (регистр не важен):
+    часть каталогов кладёт её в `title` сама, и получилось бы «… (Mix) (Mix)».
+    """
+    title = (title or "").strip()
+    version = (version or "").strip()
+    if not version or version.lower() in title.lower():
+        return title
+    return f"{title} ({version})"
+
 class LineLevel(str, Enum):
     """Severity of a log line. Subclasses ``str`` so ``.value`` slots
     straight into existing WebSocket payloads that expect plain strings."""

@@ -33,7 +33,7 @@ import sys
 import time
 from pathlib import Path
 
-from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
+from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi, title_with_version
 from .errors import classify_download_error
 from .registry import register
 # Формирование команды OrpheusDL (bootstrap + коридор конфига + пин сессии) —
@@ -1253,7 +1253,7 @@ class TidalEngine(EngineBase):
                     "id":       tr_id,
                     "track_no": t.get("trackNumber"),
                     "disc":     t.get("volumeNumber"),   # multi-disc support
-                    "title":    t.get("title", ""),
+                    "title":    title_with_version(t.get("title", ""), t.get("version", "")),
                     "artist":   (t.get("artist") or {}).get("name", ""),
                     "duration": t.get("duration", 0),
                     "preview":  "",

@@ -21,7 +21,7 @@ import hashlib
 import re
 from pathlib import Path
 
-from .base import EngineBase, EngineResult
+from .base import EngineBase, EngineResult, title_with_version
 from .registry import register
 from ripster import http_client as _HTTP
 from .streamrip_utils import (
@@ -688,7 +688,7 @@ class QobuzEngine(StreamripMixin, EngineBase):
             for t in (a.get("tracks") or {}).get("items", []):
                 tracks.append({
                     "id":       str(t.get("id", "")),
-                    "title":    t.get("title", ""),
+                    "title":    title_with_version(t.get("title", ""), t.get("version", "")),
                     "artist":   (t.get("performer") or {}).get("name", "") if isinstance(t.get("performer"), dict) else "",
                     "duration": t.get("duration"),
                     "track_no": t.get("track_number"),
