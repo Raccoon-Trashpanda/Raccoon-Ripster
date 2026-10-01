@@ -13,17 +13,18 @@ Public surface:
     run_full_setup()     — master setup routine (installs everything)
     _gamdl_flag(name, *args) — return flag only if gamdl supports it
     _build_env()         — os.environ copy with extra PATH entries
-    download_file(url, dest, label)        — download with progress
-    download_file_no_ssl(url, dest, label) — download, SSL relaxed
+    download_file(url, dest, label)        — download with progress (TLS via certifi)
     install_go_windows()
     install_gpac_windows()
     install_mp4decrypt_windows()
+    clone_pinned(iid, dest, preserve_existing)
     clone_downloader()
     go_mod_download()
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import platform
 import re
@@ -31,11 +32,14 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 import zipfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+from ripster.net_ssl import ssl_context as _ssl_context
 
 # Windows: suppress the console window every child process would otherwise flash
 # on the owner's desktop. Tool-detection probes (docker/gamdl/node/--version)
@@ -233,6 +237,18 @@ async def check_tools() -> dict:
         "path":     str(main_go),
         "version":  "present" if main_go.exists() else "NOT FOUND",
     }
+    result["zhaarey"] = {
+        "label":    "Apple wrapper (zhaarey)",
+        "required": engine == "zhaarey",
+        "found":    main_go.exists()
+                    and bool(tool_path("MP4Box"))
+                    and bool(tool_path("mp4decrypt")),
+        "path":     "",
+        "version":  "ready" if (main_go.exists()
+                                and bool(tool_path("MP4Box"))
+                                and bool(tool_path("mp4decrypt")))
+                    else "incomplete",
+    }
     return result
 
 
@@ -268,8 +284,16 @@ async def istep(name: str, status: str = "running") -> None:
         await _broadcast({"type": "install_step", "name": name, "status": status})
 
 
-async def irun(cmd: list, cwd: Optional[str] = None) -> tuple[int, str]:
-    """Run a command, stream every line to setup console, return (rc, output)."""
+async def irun(cmd: list, cwd: Optional[str] = None,
+               timeout: Optional[int] = None) -> tuple[int, str]:
+    """Run a command, stream every line to setup console, return (rc, output).
+
+    `timeout` — потолок на ВЕСЬ процесс. Раньше его не было: `git clone` на
+    отвалившемся HTTPS, `npm install` без сети и `go mod download` застревали
+    навечно, и человек видел вращающуюся кнопку вместо ошибки (аудит 25.09.2026).
+    По истечении убивается ВСЁ ДЕРЕВО потомков (`taskkill /T`): у npm и go
+    живой ребёнок переживает смерть своего прямого родителя.
+    """
     env   = _build_env()
     flags: dict = {}
     if _is_windows:
@@ -298,21 +322,100 @@ async def irun(cmd: list, cwd: Optional[str] = None) -> tuple[int, str]:
         print(f"[irun] ERROR: {e}", flush=True)
         return -1, str(e)
 
-    out: list[str] = []
-    async for raw in proc.stdout:
-        line = raw.decode(errors="replace").rstrip()
-        if line:
-            out.append(line)
-            await ilog(line, "stdout")
-    await proc.wait()
-    return proc.returncode, "\n".join(out)
+    async def _pump() -> list[str]:
+        acc: list[str] = []
+        async for raw in proc.stdout:
+            line = raw.decode(errors="replace").rstrip()
+            if line:
+                acc.append(line)
+                await ilog(line, "stdout")
+        await proc.wait()
+        return acc
+
+    try:
+        out = await asyncio.wait_for(_pump(), timeout=timeout) if timeout \
+              else await _pump()
+        return proc.returncode, "\n".join(out)
+    except asyncio.TimeoutError:
+        try:
+            if _is_windows:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                               capture_output=True, timeout=20, creationflags=_NO_WIN)
+            else:
+                proc.kill()
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+        msg = f"остановлено по таймауту {timeout} с"
+        await ilog(f"✗ {cmd[0]}: {msg} — процесс снят, Setup продолжится.", "error")
+        return -1, msg
 
 
 # ─── download helpers ─────────────────────────────────────────────────────────
 
-async def download_file(url: str, dest: Path, label: str = "") -> bool:
-    """Download url→dest with live KB/s progress. Thread-safe."""
+# 25.09.2026, аудит автоустановщиков. У `opener.open(url)` таймаута не было НИ
+# на одном скачивании Setup: подвешенное TCP-соединение (провайдер/антивирус
+# молча держит порт открытым) вешало компонент НАВСЕГДА — кнопка крутится,
+# консоль молчит, человек пишет «падает». Замер 23.08.2026 на ffmpeg: 120 КБ/с,
+# клиент отвалился через 880 с, а загрузка шла дальше без него.
+#   STALL_TIMEOUT — сколько можно НЕ получать ни байта (socket-timeout на read);
+#   DOWNLOAD_TIMEOUT — общий потолок на артефакт, даже если капает по чуть-чуть.
+STALL_TIMEOUT    = 30
+DOWNLOAD_TIMEOUT = 900
+_DEFAULT_TIMEOUTS = {}          # id установщика → секунды (из реестра)
+
+
+def _timeout_for(iid: str) -> int:
+    if iid not in _DEFAULT_TIMEOUTS:
+        try:
+            from ripster.installers_manifest import by_id
+            spec = by_id(iid)
+            _DEFAULT_TIMEOUTS[iid] = spec.timeout_s if spec else DOWNLOAD_TIMEOUT
+        except Exception:
+            _DEFAULT_TIMEOUTS[iid] = DOWNLOAD_TIMEOUT
+    return _DEFAULT_TIMEOUTS[iid] or DOWNLOAD_TIMEOUT
+
+
+def _expected_sha256(iid: str) -> str:
+    """Хэш из реестра — НО только когда он реально закреплён (hash_source=pinned).
+
+    Плавные артефакты (ffmpeg с gyan.dev, GPAC-nightly) пересобираются ежедневно:
+    требовать от них хэш — значит сломать установку верным ожиданием неверного
+    файла. Для них хэш берёт установщик у провайдера (go/node/JRE) или не берёт
+    вовсе, и реестр честно помечает это hash_source != pinned (аудит 25.09.2026).
+    """
+    try:
+        from ripster.installers_manifest import by_id
+        spec = by_id(iid)
+        if spec and spec.hash_source == "pinned":
+            return spec.sha256 or ""
+        return ""
+    except Exception:
+        return ""
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+async def _fetch(url: str, dest: Path, label: str, *, iid: str = "",
+                 expected_sha256: Optional[str] = None, timeout: Optional[int] = None) -> bool:
+    """Один честный загрузчик: таймаут на залипание + общий потолок + SHA256.
+
+    Возвращает False с осмысленной строкой в консоли при ЛЮБОЙ неудаче; никогда
+    не зависает. При несовпадении хэша файл СНОВА не оставляют на диске.
+    TLS-проверка — через ripster.net_ssl.ssl_context() (certifi, если есть).
+    """
     label = label or dest.name
+    timeout = timeout if timeout is not None else _timeout_for(iid)
+    if expected_sha256 is None:
+        expected_sha256 = _expected_sha256(iid)
     await ilog(f"⬇ Downloading {label}…", "info")
     await ilog(f"  URL: {url}", "stdout")
 
@@ -332,86 +435,188 @@ async def download_file(url: str, dest: Path, label: str = "") -> bool:
                 lambda m=msg: asyncio.ensure_future(ilog(m, "stdout"), loop=loop)
             )
 
-    def _blocking_dl():
-        opener = urllib.request.build_opener()
+    def _blocking():
+        # 01.10.2026 (079): один контекст на весь проект — certifi-бандл, если
+        # доступен, иначе системный магазин. Без CERT_NONE, без повторов.
+        handler = urllib.request.HTTPSHandler(context=_ssl_context())
+        opener = urllib.request.build_opener(handler)
         opener.addheaders = [("User-Agent", "Mozilla/5.0 ripster-setup")]
-        with opener.open(url) as resp, open(dest, "wb") as out_f:
-            total_size = int(resp.headers.get("Content-Length", 0))
+        deadline = time.monotonic() + timeout
+        with opener.open(url, timeout=STALL_TIMEOUT) as resp, open(dest, "wb") as out_f:
+            total_size = int(resp.headers.get("Content-Length", 0) or 0)
             block, count = 8192, 0
             while chunk := resp.read(block):
                 out_f.write(chunk)
                 count += 1
                 _reporthook(count, block, total_size)
-
-    try:
-        await loop.run_in_executor(None, _blocking_dl)
-        size_mb = dest.stat().st_size / 1_048_576
-        await ilog(f"  ✓ Saved {dest.name} ({size_mb:.1f} MB)", "success")
-        return True
-    except Exception as e:
-        await ilog(f"  ✗ Download failed: {e}", "error")
-        print(f"[download] ERROR: {e}", flush=True)
-        return False
-
-
-async def download_file_no_ssl(url: str, dest: Path, label: str = "") -> bool:
-    """Same as download_file but with SSL cert verification disabled."""
-    import ssl
-    label = label or dest.name
-    await ilog(f"⬇ Downloading {label} (SSL relaxed)…", "info")
-    loop = asyncio.get_running_loop()
-    ctx  = ssl.create_default_context()
-    ctx.check_hostname = False
-    ctx.verify_mode    = ssl.CERT_NONE
-
-    def _blocking():
-        opener = urllib.request.build_opener(urllib.request.HTTPSHandler(context=ctx))
-        opener.addheaders = [("User-Agent", "Mozilla/5.0 ripster-setup")]
-        with opener.open(url, timeout=30) as r, open(dest, "wb") as f:
-            total    = int(r.headers.get("content-length", 0))
-            done     = 0
-            last_pct = -1
-            while True:
-                chunk = r.read(65536)
-                if not chunk:
-                    break
-                f.write(chunk)
-                done += len(chunk)
-                if total > 0:
-                    pct = min(100, int(done * 100 / total))
-                    if pct % 10 == 0 and pct != last_pct:
-                        last_pct = pct
+                if time.monotonic() > deadline:
+                    raise TimeoutError(
+                        f"не уложился в {timeout} с "
+                        f"(получено {out_f.tell() / 1_048_576:.1f} МБ)")
 
     try:
         await loop.run_in_executor(None, _blocking)
-        size_mb = dest.stat().st_size / 1_048_576
-        await ilog(f"  ✓ Saved {dest.name} ({size_mb:.1f} MB)", "success")
-        return True
     except Exception as e:
-        await ilog(f"  ✗ Failed: {e}", "error")
+        try:
+            dest.unlink(missing_ok=True)      # недокачанный хвост не должен
+        except Exception:                      # притворяться целым архивом
+            pass
+        reason = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+        is_tls = "CERTIFICATE" in str(e).upper() or "SSL" in type(e).__name__.upper()
+        if is_tls:
+            await ilog(f"  ✗ {label}: не удалось проверить сертификат сервера — "
+                       f"ничего не скачано. Причина: {reason}", "error")
+            from urllib.parse import urlparse
+            host = urlparse(url).hostname or url
+            await ilog(f"  Обнови корневые сертификаты Windows: Центр обновления "
+                       f"или certutil -generateSSTFromWU (хост: {host}).", "warn")
+        else:
+            await ilog(f"  ✗ {label}: не удалось скачать — {reason}", "error")
+        await ilog(_manual_hint(iid, url), "warn")
+        print(f"[download] ERROR: {reason}", flush=True)
         return False
+
+    size_mb = dest.stat().st_size / 1_048_576
+    if expected_sha256:
+        got = sha256_file(dest)
+        if got.lower() != expected_sha256.lower():
+            dest.unlink(missing_ok=True)
+            await ilog(f"  ✗ {label}: контрольная сумма не совпала "
+                       f"(ожидался {expected_sha256[:12]}…, получен {got[:12]}…) — "
+                       f"файл удалён, установщик не продолжит.", "error")
+            await ilog(_manual_hint(iid, url), "warn")
+            return False
+        await ilog(f"  ✓ SHA256 совпал ({got[:12]}…)", "success")
+    await ilog(f"  ✓ Saved {dest.name} ({size_mb:.1f} MB)", "success")
+    return True
+
+
+def _manual_hint(iid: str, url: str) -> str:
+    """Что человеку делать, когда автоустановка не смогла — по каждому источнику."""
+    return {
+        "go":       "Поставь Go вручную: https://go.dev/dl/",
+        "gpac":     "Поставь GPAC вручную: https://gpac.io/downloads/gpac-nightly-builds/",
+        "bento4":   "Скачай Bento4 вручную: https://www.bento4.com/downloads/",
+        "ffmpeg":   "Поставь ffmpeg вручную: winget install Gyan.FFmpeg",
+        "node":     "Поставь Node вручную: winget install OpenJS.NodeJS.LTS",
+        "spotiflac": "Скачай SpotiFLAC вручную: "
+                     "https://github.com/Nizarberyan/SpotiFLAC/releases",
+    }.get(iid, f"Скачай вручную: {url}")
+
+
+async def download_file(url: str, dest: Path, label: str = "", *,
+                        iid: str = "", expected_sha256: Optional[str] = None,
+                        timeout: Optional[int] = None) -> bool:
+    """Download url→dest with live KB/s progress. Thread-safe.
+    TLS-проверка — через ripster.net_ssl (certifi, если есть; без отключений)."""
+    return await _fetch(url, dest, label, iid=iid, expected_sha256=expected_sha256,
+                        timeout=timeout)
 
 
 # ─── platform installers ──────────────────────────────────────────────────────
 
+async def _verify_runs(exe: str, args: tuple[str, ...] = ("--version",),
+                       label: str = "", timeout: int = 15,
+                       banner: str = "") -> bool:
+    """Доказать, что установленный инструмент РЕАЛЬНО исполняется, а не просто
+    лежит файлом. Половинка установщиков продукта проверяла «файл есть» — и
+    «установлено» означало «скачалось», при сломанном бинаре дальше падал уже
+    движок, в сотне строк от причины.
+
+    `banner` — строка, которая доказывает запуск, даже когда кода возврата нет:
+    замер 25.09.2026 — инструменты Bento4 (`mp4decrypt`, `mp4extract`) не знают
+    флага --version и ВСЕГДА возвращают 1, печатая баннер «Bento4 Version»;
+    требовать от них rc=0 значило бы объявлять живой бинарь сломанным.
+    """
+    name = label or Path(exe).name
+    try:
+        r = subprocess.run([exe, *args], capture_output=True, text=True,
+                           timeout=timeout, creationflags=_NO_WIN)
+        text = f"{r.stdout or ''}\n{r.stderr or ''}"
+        if r.returncode == 0 or (banner and banner in text):
+            ver = text.strip().splitlines()
+            await ilog(f"✓ {name} исполняется: {(ver[0] if ver else '')[:70]}", "success")
+            return True
+        await ilog(f"✗ {name}: установщик отчитался, но запуск вернул "
+                   f"код {r.returncode} — инструмент не работает.", "error")
+    except FileNotFoundError:
+        await ilog(f"✗ {name}: файл есть, но Windows его не запускает "
+                   f"(не тот формат или не хватает DLL).", "error")
+    except Exception as e:
+        await ilog(f"✗ {name}: проверка запуска не пройдена — "
+                   f"{type(e).__name__}: {e}", "error")
+    return False
+
+
+def _go_release_sync(arch: str = "") -> tuple[str, str, str]:
+    """Синхронное ядро выбора релиза Go: (version, filename, sha256).
+
+    Берёт go.dev/dl/?mode=json, ищет самый новый стабильный релиз, у которого
+    есть файл os=windows, arch=<нужная>, kind=archive. Имя файла и SHA256 —
+    из этой же записи (никаких вторичных запросов). Если JSON недоступен или
+    подходящего файла нет — явный запасной релиз из реестра
+    (installers_manifest.BY_ID["go"].extra["fallback"]), а не молчаливый
+    hardcoded в коде.
+
+    Используется и установщиком (через async-обёртку), и стражем
+    (tools/check_installers.py) — чтобы они не могли разойтись.
+    """
+    if not arch:
+        arch = "amd64" if platform.machine().endswith("64") else "386"
+    try:
+        import json
+        with urllib.request.urlopen("https://go.dev/dl/?mode=json",
+                                    timeout=STALL_TIMEOUT) as r:
+            data = json.load(r)
+        for rel in data:
+            if not rel.get("stable"):
+                continue
+            ver = rel.get("version", "")
+            for f in rel.get("files", []):
+                if (f.get("os") == "windows" and f.get("arch") == arch
+                        and f.get("kind") == "archive"):
+                    fname = f.get("filename", "")
+                    return ver, fname, f.get("sha256", "")
+    except Exception:
+        pass
+    from ripster.installers_manifest import by_id
+    fb = (by_id("go").extra.get("fallback") if by_id("go") else "") or "go1.27.1"
+    fname = f"{fb}.windows-{arch}.zip"
+    return fb, fname, ""
+
+
+async def _go_release(arch: str = "") -> tuple[str, str, str]:
+    """Async-обёртка над _go_release_sync: не блокирует event loop на HTTP."""
+    try:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, _go_release_sync, arch)
+    except Exception:
+        from ripster.installers_manifest import by_id
+        if not arch:
+            arch = "amd64" if platform.machine().endswith("64") else "386"
+        fb = (by_id("go").extra.get("fallback") if by_id("go") else "") or "go1.27.1"
+        return fb, f"{fb}.windows-{arch}.zip", ""
+
+
 async def install_go_windows() -> None:
     """Download and install Go on Windows silently."""
     global _need_restart
+    existing = tool_path("go")
+    if existing and Path(existing).is_file() and \
+            str(_base_dir / "tools" / "go").lower() in str(existing).lower():
+        await ilog(f"✓ Go уже стоит (portable): {existing}", "success")
+        return
     await ilog("📦 Fetching latest Go version info…")
-    try:
-        with urllib.request.urlopen("https://go.dev/VERSION?m=text", timeout=10) as r:
-            ver = r.read().decode().strip().split("\n")[0].strip()
-    except Exception:
-        ver = "go1.22.4"
+    ver, fname, sha = await _go_release()
     await ilog(f"   Latest Go: {ver}")
-    arch = "amd64" if platform.machine().endswith("64") else "386"
     # Use the PORTABLE zip, not the MSI: the MSI needs elevation and returned
     # 1603 on a normal (non-admin) install. The zip extracts locally, no admin.
-    url  = f"https://go.dev/dl/{ver}.windows-{arch}.zip"
-    tmp  = Path(tempfile.gettempdir()) / f"{ver}.windows-{arch}.zip"
-    ok   = await download_file(url, tmp, f"Go {ver} (portable zip)")
+    url  = f"https://go.dev/dl/{fname}"
+    tmp  = Path(tempfile.gettempdir()) / fname
+    ok   = await download_file(url, tmp, f"Go {ver} (portable zip)",
+                               iid="go", expected_sha256=sha)
     if not ok:
-        await ilog("   Please install manually: https://go.dev/dl/", "warn")
+        await ilog(_manual_hint("go", url), "warn")
         return
     await ilog("🔧 Extracting Go (portable, no admin)…", "info")
     tools = _base_dir / "tools"
@@ -426,16 +631,23 @@ async def install_go_windows() -> None:
         # Usable immediately this session; tool_path() also finds it after restart.
         os.environ["PATH"] = str(go_bin) + os.pathsep + os.environ.get("PATH", "")
         if (go_bin / "go.exe").exists():
+            await _verify_runs(str(go_bin / "go.exe"), ("version",), "Go")
             await ilog(f"✓ Go installed (portable) → {go_root}", "success")
         else:
             await ilog("✗ Go extracted but go.exe missing", "error")
     except Exception as e:
         await ilog(f"✗ Go extract failed: {e}", "error")
-        await ilog("   Try manual install: https://go.dev/dl/", "warn")
+        await ilog(_manual_hint("go", url), "warn")
 
 
 async def install_gpac_windows() -> None:
     """Download GPAC from the official gpac.io permalink — always the latest build."""
+    existing = tool_path("MP4Box")
+    if existing:
+        await _verify_runs(existing, ("-version",), "MP4Box")
+        await ilog(f"✓ MP4Box уже стоит: {existing}", "success")
+        return
+    await ilog("📦 Fetching GPAC (MP4Box) installer from gpac.io…")
     await ilog("📦 Fetching GPAC (MP4Box) installer from gpac.io…")
     is64 = platform.machine().endswith("64")
 
@@ -451,17 +663,17 @@ async def install_gpac_windows() -> None:
     )
 
     tmp = Path(tempfile.gettempdir()) / "gpac_latest_win.exe"
-    ok  = await download_file(GPAC_NIGHTLY_URL, tmp, "GPAC latest nightly build")
+    ok  = await download_file(GPAC_NIGHTLY_URL, tmp, "GPAC latest nightly build", iid="gpac")
     if not ok:
         await ilog("   Nightly failed, trying stable 26.02…", "stdout")
-        ok = await download_file(GPAC_STABLE_URL, tmp, "GPAC 26.02 stable")
+        ok = await download_file(GPAC_STABLE_URL, tmp, "GPAC 26.02 stable", iid="gpac")
     if not ok:
         await ilog("✗ GPAC download failed", "error")
         await ilog("   Download manually: https://gpac.io/downloads/gpac-nightly-builds/", "warn")
         return
 
     await ilog("🔧 Running GPAC installer (silent)… this may take 10–30 seconds", "info")
-    rc, _ = await irun([str(tmp), "/S"])
+    rc, _ = await irun([str(tmp), "/S"], timeout=600)
     if rc == 0:
         await ilog("✓ GPAC / MP4Box installed successfully", "success")
     elif rc == 1:
@@ -481,8 +693,17 @@ async def install_mp4decrypt_windows() -> None:
     (ALAC: `mp4extract …/alac …`). Extracting only mp4decrypt.exe (the old
     behaviour) left mp4extract.exe missing → every ALAC track died at the decrypt
     step with a cryptic `[WinError 2]` in EVERY region. Grab all bin/*.exe."""
-    await ilog("📦 Downloading Bento4 SDK (mp4decrypt + mp4extract + …)…")
     tools_dir = _base_dir / "tools"
+    dec = tools_dir / "mp4decrypt.exe"
+    ext = tools_dir / "mp4extract.exe"
+    if dec.is_file() and ext.is_file():
+        both_ok = (await _verify_runs(str(dec), (), "mp4decrypt", banner="Bento4")
+                   and await _verify_runs(str(ext), (), "mp4extract", banner="Bento4"))
+        if both_ok:
+            await ilog(f"✓ Bento4 уже стоит в {tools_dir} — перекачиваю не буду", "success")
+            return
+        await ilog("⚠ Bento4 лежит в tools/, но не запускается — перекачиваю.", "warn")
+    await ilog("📦 Downloading Bento4 SDK (mp4decrypt + mp4extract + …)…")
     tools_dir.mkdir(exist_ok=True)
 
     BENTO4_VER  = "1-6-0-641"
@@ -492,10 +713,7 @@ async def install_mp4decrypt_windows() -> None:
     tmp = Path(tempfile.gettempdir()) / name
 
     await ilog(f"   URL: {PRIMARY_URL}", "stdout")
-    ok = await download_file(PRIMARY_URL, tmp, f"Bento4 SDK {BENTO4_VER}")
-    if not ok:
-        await ilog("   Retrying with relaxed SSL…", "stdout")
-        ok = await download_file_no_ssl(PRIMARY_URL, tmp, f"Bento4 SDK {BENTO4_VER} (no-ssl)")
+    ok = await download_file(PRIMARY_URL, tmp, f"Bento4 SDK {BENTO4_VER}", iid="bento4")
     if not ok:
         await ilog("✗ Could not download Bento4", "error")
         await ilog("  Download manually: https://www.bento4.com/downloads/", "warn")
@@ -525,6 +743,9 @@ async def install_mp4decrypt_windows() -> None:
                 "success" if ok else "warn")
             if not ok:
                 await ilog("⚠ Ключевые бинари Bento4 не извлеклись — ALAC-декрипт может падать.", "warn")
+            else:
+                await _verify_runs(str(dec), (), "mp4decrypt", banner="Bento4")
+                await _verify_runs(str(ext), (), "mp4extract", banner="Bento4")
     except Exception as e:
         await ilog(f"✗ Failed: {e}", "error")
 
@@ -544,10 +765,7 @@ async def install_ffmpeg_windows() -> None:
     URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
     tmp = Path(tempfile.gettempdir()) / "ffmpeg-release-essentials.zip"
     await ilog(f"   URL: {URL}", "stdout")
-    ok = await download_file(URL, tmp, "FFmpeg (essentials)")
-    if not ok:
-        await ilog("   Retrying with relaxed SSL…", "stdout")
-        ok = await download_file_no_ssl(URL, tmp, "FFmpeg (no-ssl)")
+    ok = await download_file(URL, tmp, "FFmpeg (essentials)", iid="ffmpeg")
     if not ok:
         await ilog("✗ Could not download FFmpeg", "error")
         await ilog("  Install manually: winget install Gyan.FFmpeg", "warn")
@@ -565,6 +783,10 @@ async def install_ffmpeg_windows() -> None:
         if got:
             # usable immediately this session; on PATH for app subprocesses too
             os.environ["PATH"] = str(tools_dir) + os.pathsep + os.environ.get("PATH", "")
+            for exe in ("ffmpeg.exe", "ffprobe.exe"):
+                f = tools_dir / exe
+                if f.is_file():
+                    await _verify_runs(str(f), ("-version",), exe)
         else:
             await ilog("✗ ffmpeg.exe not found inside zip", "error")
     except Exception as e:
@@ -588,6 +810,29 @@ def _node_version(exe: str) -> int:
         return int(m.group(1)) if m else 0
     except Exception:
         return 0
+
+
+async def _node_provider_sha256(ver: str, fname: str) -> str:
+    """Официальный SHA256 с nodejs.org (SHASUMS256.txt лежит рядом с архивом).
+
+    "" — если SHASUMS не ответил: качаем без сверки, но честно об этом говорим.
+    """
+    try:
+        loop = asyncio.get_running_loop()
+
+        def _get():
+            with urllib.request.urlopen(
+                    f"https://nodejs.org/dist/{ver}/SHASUMS256.txt",
+                    timeout=STALL_TIMEOUT) as r:
+                return r.read().decode(errors="replace")
+        for line in await loop.run_in_executor(None, _get).splitlines():
+            parts = line.split()
+            if len(parts) == 2 and parts[1] == fname:
+                return parts[0]
+    except Exception as e:
+        await ilog(f"   ⚠ SHASUMS256.txt nodejs.org не ответил ({type(e).__name__}) — "
+                   f"хэш проверить нечем, ставим как есть.", "warn")
+    return ""
 
 
 async def install_node_windows() -> Optional[str]:
@@ -627,9 +872,9 @@ async def install_node_windows() -> Optional[str]:
     tmp  = Path(tempfile.gettempdir()) / f"{name}.zip"
     await ilog(f"📦 Downloading Node.js {NODE_VER} (portable, no admin)…")
     await ilog(f"   URL: {url}", "stdout")
-    ok = await download_file(url, tmp, f"Node.js {NODE_VER}")
-    if not ok:
-        ok = await download_file_no_ssl(url, tmp, f"Node.js {NODE_VER} (no-ssl)")
+    sha = await _node_provider_sha256(NODE_VER, f"{name}.zip")
+    ok = await download_file(url, tmp, f"Node.js {NODE_VER}", iid="node",
+                             expected_sha256=sha or None)
     if not ok:
         await ilog("✗ Could not download Node.js", "error")
         await ilog("  Install manually: winget install OpenJS.NodeJS.LTS", "warn")
@@ -645,11 +890,78 @@ async def install_node_windows() -> Optional[str]:
         node_exe = node_dir / "node.exe"
         if node_exe.exists():
             os.environ["PATH"] = str(node_dir) + os.pathsep + os.environ.get("PATH", "")
-            await ilog(f"✓ Node.js installed (portable) → {node_dir}", "success")
-            return str(node_exe)
+            if await _verify_runs(str(node_exe), ("--version",), "Node.js"):
+                await ilog(f"✓ Node.js installed (portable) → {node_dir}", "success")
+                return str(node_exe)
+            await ilog("✗ Node.js скачан, но не запускается — SoundCloud на нём не поедет.", "error")
+            return None
         await ilog("✗ node.exe missing after extract", "error")
     except Exception as e:
         await ilog(f"✗ Node.js extract failed: {e}", "error")
+    return None
+
+
+# Пин релиза SpotiFLAC: двигать ТОЛЬКО вместе с `pin` в installers_manifest.
+SPOTIFLAC_VER = "v1.1.0"
+
+
+def _spotiflac_url(ext: str = "") -> str:
+    """URL релиза из реестра — единственный источник правды для этого бинаря."""
+    try:
+        from ripster.installers_manifest import by_id
+        spec = by_id("spotiflac")
+        if spec:
+            return spec.url.replace("{ext}", ext)
+    except Exception:
+        pass
+    return ("https://github.com/Nizarberyan/SpotiFLAC/releases/download/"
+            f"{SPOTIFLAC_VER}/SpotiFLAC{{ext}}").replace("{ext}", ext)
+
+
+async def install_spotiflac_windows() -> Optional[str]:
+    """SpotiFLAC: до 25.09.2026 ЭТОГО установщика в продукте не было вовсе.
+
+    Движок `ripster/engines/spotiflac.py` умел только сказать «бинарь не найден»,
+    а его `download_url()` не вызывал ни один участок кода — то есть кнопка в
+    Настройках обещала установку, которой не существовало (прямое нарушение
+    правила «настройка, которая ничего не меняет, хуже отсутствующей»).
+
+    Портативный single-file бинарь с оффициального релиза, пин + SHA256 из
+    реестра `installers_manifest`, в tools/ рядом с остальными. Возвращает путь.
+    """
+    tools_dir = _base_dir / "tools"
+    ext  = ".exe" if _is_windows else ""
+    dest = tools_dir / f"spotiflac{ext}"
+    if dest.is_file():
+        if await _verify_runs(str(dest), ("--help",), "SpotiFLAC"):
+            await ilog(f"✓ SpotiFLAC уже стоит: {dest}", "success")
+            return str(dest)
+        try:
+            dest.unlink()                       # нерабочий бинарь чиним перекачкой
+        except Exception:
+            pass
+    url = _spotiflac_url(ext)
+    tmp = Path(tempfile.gettempdir()) / f"SpotiFLAC-{SPOTIFLAC_VER}{ext}"
+    ok = await download_file(url, tmp, f"SpotiFLAC {SPOTIFLAC_VER}", iid="spotiflac")
+    if not ok:
+        await ilog(_manual_hint("spotiflac", url), "warn")
+        return None
+    try:
+        tools_dir.mkdir(exist_ok=True)
+        shutil.move(str(tmp), str(dest))
+        if _is_windows:
+            try:
+                os.chmod(dest, 0o755)
+            except Exception:
+                pass
+        if await _verify_runs(str(dest), ("--help",), "SpotiFLAC"):
+            await ilog(f"✓ SpotiFLAC установлен → {dest}", "success")
+            return str(dest)
+        dest.unlink(missing_ok=True)
+        await ilog("✗ SpotiFLAC скачан, но не запускается — удалён, чтобы движок "
+                   "не падал на нём каждый раз.", "error")
+    except Exception as e:
+        await ilog(f"✗ SpotiFLAC: установка не удалась — {type(e).__name__}: {e}", "error")
     return None
 
 
@@ -686,7 +998,7 @@ async def _wvd_install_jre17() -> bool:
     url = "https://api.adoptium.net/v3/binary/latest/17/ga/windows/x64/jre/hotspot/normal/eclipse"
     tmp = Path(tempfile.gettempdir()) / "temurin17-jre.zip"
     await ilog("│  ⬇ JRE 17 (Adoptium Temurin, ~45 МБ)…", "info")
-    ok = await download_file(url, tmp, "JRE 17") or await download_file_no_ssl(url, tmp, "JRE 17 (no-ssl)")
+    ok = await download_file(url, tmp, "JRE 17", iid="jre17")
     if not ok:
         await ilog("│  ✗ Не удалось скачать JRE 17", "error"); return False
     try:
@@ -702,12 +1014,16 @@ async def _wvd_install_jre17() -> bool:
 async def _wvd_install_cmdline_tools() -> bool:
     if _wvd_sdkmgr().exists():
         await ilog("│  ✓ cmdline-tools уже установлены", "success"); return True
+    from ripster.installers_manifest import by_id as _cmdline_spec
+    spec = _cmdline_spec("cmdline-tools")
+    if not spec:
+        await ilog("│  ✗ cmdline-tools: нет записи в реестре", "error"); return False
     latest = _ANDROID_ROOT / "Sdk" / "cmdline-tools" / "latest"
     latest.parent.mkdir(parents=True, exist_ok=True)
-    url = "https://dl.google.com/android/repository/commandlinetools-win-11076708_latest.zip"
+    url = spec.url
     tmp = Path(tempfile.gettempdir()) / "cmdline-tools.zip"
     await ilog("│  ⬇ Android cmdline-tools…", "info")
-    ok = await download_file(url, tmp, "cmdline-tools") or await download_file_no_ssl(url, tmp, "cmdline-tools (no-ssl)")
+    ok = await download_file(url, tmp, "cmdline-tools", iid="cmdline-tools")
     if not ok:
         await ilog("│  ✗ Не удалось скачать cmdline-tools", "error"); return False
     try:
@@ -744,19 +1060,31 @@ async def _wvd_run_sdk_provision() -> bool:
         f'set "LOG={log}"\r\n'
         'echo licenses> "%LOG%"\r\n'
         '(for /l %%i in (1,1,60) do @echo y)| call "%SDKM%" --licenses >> "%LOG%" 2>&1\r\n'
-        ':retry\r\n'
-        'echo y| call "%SDKM%" "platform-tools" "emulator" '
-        f'"{_WVD_SYS_IMG}" "extras;google;Android_Emulator_Hypervisor_Driver" >> "%LOG%" 2>&1\r\n'
-        'if not "%errorlevel%"=="0" ( timeout /t 15 /nobreak >nul & goto retry )\r\n'
+        # Ретрай был БЕСКОНЕЧНЫМ (`goto retry` без счётчика): на мёртвом
+        # dl.google.com или отклонённой лицензии прогон молча крутился сутками, а
+        # Setup выглядел «зависшим». Теперь ровно 3 попытки и честный финал
+        # RIPSTER_SDK_FAILED в логе — вместо вечного `:retry`.
+        'for /L %%a in (1,1,3) do ( call :try & if not errorlevel 1 goto :installed )\r\n'
+        'echo RIPSTER_SDK_FAILED>> "%LOG%"\r\n'
+        'exit /b 1\r\n'
+        ':installed\r\n'
         # -d pixel: give the AVD a real device profile. A bare `create avd` defaults
         # to hw.ramSize=96M, which starves Android so badly that connectivity/radio
         # services never come up ("Active default network: none"). The pixel profile
         # sets 2G. We ALSO patch config.ini below as belt-and-suspenders.
         f'echo no | call "%AVDM%" create avd -n {_WVD_AVD} -d pixel -k "{_WVD_SYS_IMG}" --force >> "%LOG%" 2>&1\r\n'
-        'echo DONE_MARKER_0>> "%LOG%"\r\n',
+        'echo DONE_MARKER_0>> "%LOG%"\r\n'
+        'exit /b 0\r\n'
+        ':try\r\n'
+        'echo y| call "%SDKM%" "platform-tools" "emulator" '
+        f'"{_WVD_SYS_IMG}" "extras;google;Android_Emulator_Hypervisor_Driver" >> "%LOG%" 2>&1\r\n'
+        'if "%errorlevel%"=="0" exit /b 0\r\n'
+        'timeout /t 15 /nobreak >nul\r\n'
+        'exit /b 1\r\n',
         encoding="utf-8")
     await ilog("│  ⚙ sdkmanager: лицензии + platform-tools + emulator + system-image + AEHD + AVD (5–15 мин)…", "info")
-    rc, _ = await irun(["cmd", "/c", str(bat)])
+    # 3600 с: sdkmanager legitimately качает system-image ~1.5 ГБ; раньше ждали ввек.
+    rc, _ = await irun(["cmd", "/c", str(bat)], timeout=3600)
     done = log.exists() and "DONE_MARKER_0" in log.read_text(encoding="utf-8", errors="replace")
     if done:
         _patch_avd_ram()
@@ -851,7 +1179,7 @@ async def _wvd_install_aehd() -> bool:
     _drvcmd = f'pnputil /add-driver "{inf}" /install & sc start aehd'
     ps = (f"Start-Process -Verb RunAs -WindowStyle Hidden -Wait -FilePath cmd "
           f"-ArgumentList '/c','{_drvcmd}'")
-    await irun(["powershell", "-NoProfile", "-Command", ps])
+    await irun(["powershell", "-NoProfile", "-Command", ps], timeout=600)
     if _aehd_running():
         await ilog("│  ✓ AEHD гипервизор работает", "success"); return True
 
@@ -880,20 +1208,22 @@ async def _ensure_wvd_venv() -> bool:
     try:
         if not vpy.is_file():
             await ilog("│  ⚙ создаю изолированный venv для pywidevine (SC DRM)…", "info")
-            await irun([sys.executable, "-m", "venv", str(venv)])
+            await irun([sys.executable, "-m", "venv", str(venv)], timeout=300)
             if not vpy.is_file():
                 # The bundled embeddable python ships WITHOUT the stdlib `venv`
                 # module → fall back to virtualenv (pip-installable).
                 await irun([sys.executable, "-m", "pip", "install", "-q",
-                            "--break-system-packages", "virtualenv"])
-                await irun([sys.executable, "-m", "virtualenv", str(venv)])
+                            "--break-system-packages", "virtualenv"], timeout=900)
+                await irun([sys.executable, "-m", "virtualenv", str(venv)], timeout=300)
         if not vpy.is_file():
             await ilog("│  ⚠ venv не создан — SC DRM будет на общем python (возможны конфликты)", "warn")
             return False
+        # pywidevine==1.9.0 — пин из реестра (requirements.lock): без пина fresh-venv
+        # получал последний мажор и расходился с остальным тулчейном (аудит 25.09).
         await irun([str(vpy), "-m", "pip", "install", "-q", "--upgrade",
-                    "pip", "pywidevine", "httpx", "mutagen"])
+                    "pip", "pywidevine==1.9.0", "httpx", "mutagen"], timeout=900)
         vrc, vout = await irun([str(vpy), "-c",
-                                "from pywidevine.device import Device; print('wvd-venv OK')"])
+                                "from pywidevine.device import Device; print('wvd-venv OK')"], timeout=120)
         if vrc == 0 and "wvd-venv OK" in (vout or ""):
             await ilog("│  ✓ pywidevine venv готов (изолирован от protobuf/construct-конфликтов)",
                        "success")
@@ -960,7 +1290,8 @@ async def ensure_git() -> Optional[str]:
         return None
     await ilog("📦 Git not found — installing via winget…")
     rc, _ = await irun(["winget", "install", "-e", "--id", "Git.Git", "--silent",
-                        "--accept-package-agreements", "--accept-source-agreements"])
+                        "--accept-package-agreements", "--accept-source-agreements"],
+                       timeout=900)
     # winget's Git-for-Windows installer lands in Program Files (or per-user). Our
     # running process still has the OLD PATH, so refresh it from the registry and
     # probe the known install locations directly.
@@ -993,36 +1324,86 @@ async def ensure_git() -> Optional[str]:
     return git
 
 
+async def clone_pinned(iid: str, *, dest: Path,
+                       preserve_existing: bool = False) -> bool:
+    """Clone *iid*'s repo and check out the pinned commit from the registry.
+
+    One function for every git-clone in the product — the manifest holds the pin,
+    this helper enforces it.  If the commit is unreachable the install fails with
+    a clear log line instead of silently landing on HEAD.
+
+    *dest* — target directory.  When ``dest/.git`` exists the pin is enforced
+    in-place (fetch + checkout).  Otherwise the repo is cloned into a temp
+    directory next to *dest*, the pin is checked out there, and the contents are
+    merged into *dest* (``preserve_existing`` skips files already present —
+    used by OrpheusDL which keeps ``_auth_helper.py`` in the same folder).
+
+    Returns True on success, False on any failure (reason → install_log).
+    """
+    from ripster.installers_manifest import by_id
+    spec = by_id(iid)
+    if not spec or not spec.pin:
+        await ilog(f"✗ {iid}: нет пина в реестре — установка прервана", "error")
+        return False
+    pin = spec.pin
+    url = spec.url
+    git = await ensure_git() or "git"
+
+    if (dest / ".git").is_dir():
+        await ilog(f"⟳ {iid}: обновляю и фиксирую на {pin[:8]}…", "info")
+        rc, _ = await irun([git, "fetch", "--all"], cwd=str(dest), timeout=300)
+        if rc != 0:
+            await ilog(f"✗ {iid}: git fetch failed (exit {rc})", "error")
+            return False
+        rc, _ = await irun([git, "checkout", pin], cwd=str(dest), timeout=120)
+        if rc != 0:
+            await ilog(f"✗ {iid}: коммит {pin[:8]} недоступен — обновите пин в реестре",
+                       "error")
+            return False
+    else:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        tmp = dest.parent / (dest.name + "_clone_tmp")
+        if tmp.exists():
+            shutil.rmtree(tmp, ignore_errors=True)
+        await ilog(f"⬇ Клонирую {iid}…", "info")
+        rc, _ = await irun([git, "clone", url, str(tmp)], timeout=600)
+        if rc != 0:
+            await ilog(f"✗ {iid}: git clone failed (exit {rc})", "error")
+            return False
+        rc, _ = await irun([git, "checkout", pin], cwd=str(tmp), timeout=120)
+        if rc != 0:
+            shutil.rmtree(tmp, ignore_errors=True)
+            await ilog(f"✗ {iid}: коммит {pin[:8]} недоступен — обновите пин в реестре",
+                       "error")
+            return False
+        dest.mkdir(parents=True, exist_ok=True)
+        for item in tmp.iterdir():
+            dst = dest / item.name
+            if preserve_existing and dst.exists():
+                continue
+            if item.is_dir():
+                shutil.copytree(str(item), str(dst), dirs_exist_ok=True)
+            else:
+                shutil.copy2(str(item), str(dst))
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    rc, sha = await irun([git, "rev-parse", "HEAD"], cwd=str(dest), timeout=30)
+    if rc == 0 and sha.strip() != pin:
+        await ilog(f"✗ {iid}: пин {pin[:8]} не совпал с HEAD {sha.strip()[:8]}", "error")
+        return False
+    await ilog(f"✓ {iid}: пин {pin[:8]} зафиксирован", "success")
+    return True
+
+
 async def clone_downloader() -> bool:
     """Clone or update zhaarey/apple-music-downloader next to app.py."""
     main_go = _base_dir / "main.go"
-    # Бандленный exe (см. installer/ripster.iss — apple-music-downloader.exe теперь
-    # входит в установщик) самодостаточен: это НАШ форк со всеми правками, и Go на
-    # машине пользователя не нужен. Если он есть — upstream zhaarey не клонируем.
-    exe = _base_dir / "apple-music-downloader.exe"
-    if exe.exists():
-        await ilog("✓ apple-music-downloader.exe present (bundled) — skipping clone", "success")
-        return True
-    git     = await ensure_git() or "git"
     if main_go.exists():
         await ilog("✓ main.go already present — skipping clone", "success")
         return True
     await ilog("📥 Cloning zhaarey/apple-music-downloader…")
-    tmp_dir = _base_dir / "_zhaarey_clone"
-    rc, _   = await irun([git, "clone", "--depth=1",
-                           "https://github.com/zhaarey/apple-music-downloader.git",
-                           str(tmp_dir)])
-    if rc != 0:
-        await ilog(f"✗ git clone failed (exit {rc})", "error")
+    if not await clone_pinned("zhaarey", dest=_base_dir, preserve_existing=True):
         return False
-    for item in tmp_dir.iterdir():
-        dst = _base_dir / item.name
-        if not dst.exists():
-            if item.is_dir():
-                shutil.copytree(item, dst)
-            else:
-                shutil.copy2(item, dst)
-    shutil.rmtree(tmp_dir, ignore_errors=True)
     _cfg["main-go-path"] = str(_base_dir / "main.go")
     if _save_config:
         _save_config(_cfg)
@@ -1041,7 +1422,7 @@ async def go_mod_download() -> None:
         await ilog("⚠ main.go not found, skipping go mod download", "warn")
         return
     await ilog("📦 Running go mod download…")
-    rc, _ = await irun([go, "mod", "download"], cwd=str(main_go.parent))
+    rc, _ = await irun([go, "mod", "download"], cwd=str(main_go.parent), timeout=900)
     if rc == 0:
         await ilog("✓ Go modules downloaded", "success")
     else:
@@ -1074,20 +1455,27 @@ async def _run_full_setup_inner() -> None:
     await istep("go", "running")
     if engine == "gamdl":
         await ilog("┌─ Step 1/5 : gamdl Python package", "info")
+        # Пин из реестра: раньше стояло `pip install gamdl --upgrade` БЕЗ версии,
+        # и один клик уносил движок на новый мажор посреди рабочей недели (25.09).
+        from ripster.installers_manifest import by_id as _spec_by_id
+        _gpin = getattr(_spec_by_id("pip-gamdl"), "pin", "") or ""
+        _gspec = f"gamdl=={_gpin}" if _gpin else "gamdl"
         rc1, out1 = await irun([sys.executable, "-m", "pip", "install",
-                                 "gamdl", "--upgrade", "--break-system-packages", "-q"])
+                                 _gspec, "--upgrade", "--break-system-packages", "-q"],
+                               timeout=900)
         if rc1 != 0:
             await ilog(f"│  ⚠ gamdl install: {out1[:100]}", "warn")
         await ilog("│  Upgrading protobuf (required by pywidevine)…", "info")
         await irun([sys.executable, "-m", "pip", "install",
-                    "protobuf>=4.21.0", "--upgrade", "--break-system-packages", "-q"])
+                    "protobuf>=4.21.0", "--upgrade", "--break-system-packages", "-q"],
+                   timeout=900)
         _gamdl_flags = set()
         verify_rc, verify_out = await irun([sys.executable, "-c",
-            "import gamdl; print('gamdl', gamdl.__version__)"])
+            "import gamdl; print('gamdl', gamdl.__version__)"], timeout=120)
         if verify_rc == 0:
             await ilog(f"│  ✓ {verify_out.strip()}", "success")
             api_rc, _ = await irun([sys.executable, "-c",
-                "from gamdl.api import AppleMusicApi; print('API OK')"])
+                "from gamdl.api import AppleMusicApi; print('API OK')"], timeout=120)
             if api_rc != 0:
                 await ilog("│  ⚠ Older gamdl API — some features may differ", "warn")
             await istep("go", "done")
@@ -1238,9 +1626,9 @@ __all__ = [
     "check_tools", "tool_path",
     "find_go", "check_docker_installed",
     "_gamdl_flag", "_build_env",
-    "download_file", "download_file_no_ssl",
+    "download_file",
     "install_go_windows", "install_gpac_windows", "install_mp4decrypt_windows",
-    "install_ffmpeg_windows", "install_node_windows",
+    "install_ffmpeg_windows", "install_node_windows", "install_spotiflac_windows",
     "setup_widevine_toolchain",
     "clone_downloader", "go_mod_download",
     "run_full_setup",

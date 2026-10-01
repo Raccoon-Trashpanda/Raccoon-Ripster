@@ -273,7 +273,7 @@ var LANG = {
     'gp.sub':'Все настройки хранятся только в твоём браузере — на сервере ничего не меняется.',
 
     // Setup → Python-зависимости
-    'setup.deps_hdr':'📦 Python-зависимости',
+    'setup.zhaarey.docker_note':'Docker нужен для lossless Apple (ALAC/Atmos)','setup.deps_hdr':'📦 Python-зависимости',
     'setup.deps_note':'Обновление pip-пакетов приложения. <b>📌 закреплённые</b> ломают сборку — «Обновить всё» их не трогает. После обновления нужен рестарт.',
     'setup.deps_check':'🔄 Проверить обновления',
     'setup.deps_update_all':'⬆️ Обновить всё (без закреплённых)',
@@ -2739,7 +2739,7 @@ var LANG = {
     'gp.sub':'All preferences are stored only in your browser — nothing changes on the server.',
 
     // Setup → Python dependencies
-    'setup.deps_hdr':'📦 Python dependencies',
+    'setup.zhaarey.docker_note':'Docker is needed for lossless Apple (ALAC/Atmos)','setup.deps_hdr':'📦 Python dependencies',
     'setup.deps_note':'Updates the bundled pip packages. <b>📌 pinned</b> ones break the build — "Update all" skips them. A restart is needed afterwards.',
     'setup.deps_check':'🔄 Check for updates',
     'setup.deps_update_all':'⬆️ Update all (except pinned)',

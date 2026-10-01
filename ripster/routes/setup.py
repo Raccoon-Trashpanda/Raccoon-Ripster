@@ -42,6 +42,7 @@ import asyncio
 import base64
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -192,7 +193,7 @@ async def widevine_mint_auto():
         rc, out = await _setup.irun(
             ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
              "-File", str(ps1), "-Auto"],
-            cwd=str(ps1.parent))
+            cwd=str(ps1.parent), timeout=2400)
         if "AUTO_RESULT: OK" in (out or ""):
             await _setup.ilog("✓ device.wvd сминчен и установлен — SoundCloud DRM готов.", "success")
             if _broadcast:
@@ -218,7 +219,6 @@ _SETUP_PROBE = {
     "ffmpeg":     "ffmpeg",
     "mp4decrypt": "mp4decrypt",
     "node":       "node",
-    "zhaarey":    "go",
 }
 
 
@@ -261,15 +261,32 @@ async def _run_setup_component(key: str) -> dict:
             done = await _install_jiosaavn_component()
         elif key == "zhaarey":
             # Advanced: the Go downloader toolchain (own premium Apple ID + Docker).
+            # Success = main.go exists AND MP4Box found AND mp4decrypt found.
+            # Docker is informational (needed for lossless Apple), not a condition.
             await _setup.ensure_git()
             if not _setup.tool_path("go"):
                 await _setup.install_go_windows()
-            await _setup.clone_downloader()
+            clone_ok = await _setup.clone_downloader()
+            main_go_path = _base_dir / "main.go"
+            if not clone_ok and not main_go_path.exists():
+                await _setup.ilog("✗ zhaarey: клонирование не удалось — main.go отсутствует",
+                                  "error")
             if not _setup.tool_path("MP4Box"):
                 await _setup.install_gpac_windows()
             await _setup.install_mp4decrypt_windows()
             await _setup.go_mod_download()
-            done = bool(_setup.tool_path("go"))
+            missing = []
+            if not main_go_path.exists():
+                missing.append("main.go")
+            if not _setup.tool_path("MP4Box"):
+                missing.append("MP4Box")
+            if not _setup.tool_path("mp4decrypt"):
+                missing.append("mp4decrypt")
+            if missing:
+                await _setup.ilog(f"✗ zhaarey: не хватает {', '.join(missing)}", "error")
+                done = False
+            else:
+                done = True
         elif key == "widevine":
             # 5–15 min (downloads JRE + Android SDK + system-image + AEHD). Run
             # detached so the request returns now; progress streams to the Setup
@@ -413,6 +430,30 @@ async def get_wrapper_status():
         "has_local_bin":  _amd._wrapper_bin().exists(),
         "wsl_ok":         _amd.check_wsl_available(),
     }
+
+
+# ── WRAPPER LITE: честный статус второго бэкенда ────────────────────────────
+# Четыре разных состояния — «недоступен», «жив, но учётка не залогинена»,
+# «нет Temari», «работает» — каждое названо своими словами, как у публичного
+# wrapper'а выше. Ответ кэшируется в маршрутизаторе (60 с), manual=True —
+# принудительная перепроверка по клику.
+@router.get("/api/apple-lite/status")
+async def apple_lite_status(manual: bool = False):
+    import asyncio as _aio
+    st = await _aio.to_thread(_router.lite_wrapper_state, _cfg, True if manual else False)
+
+    def _extra():
+        from ripster import lite as _lite, lite_shim as _shim
+        try:
+            st["cached_keys"] = _lite.get_client(_cfg).cache.count()
+        except Exception:
+            st["cached_keys"] = 0
+        st["shim_up"] = _shim._shim is not None
+        st["decrypt_port"] = str(_cfg.get("apple-lite-decrypt-port") or "127.0.0.1:12345")
+        st["m3u8_port"]    = str(_cfg.get("apple-lite-m3u8-port") or "127.0.0.1:12346")
+
+    await _aio.to_thread(_extra)
+    return st
 
 
 @router.post("/api/wrapper/start")
@@ -913,8 +954,24 @@ async def deezer_accounts_list(probe: int = 0):
                 "probe_error": f"{type(e).__name__}: {e}"}
 
 
-@router.post("/api/deezer/accounts/add")
-async def deezer_accounts_add(body: dict):
+def _readmit(kind: str, secret: str) -> None:
+    """Владелец осознанно добавляет учётку — это сильнее реестра снятых.
+
+    Без этого ТА ЖЕ строка, однажды снятая (автоматикой или кнопкой «удалить»),
+    после продления подписки добавлялась «успешно» и молча вычищалась первым же
+    сохранением (`retired_credentials.strip_from_config`). `unretire` для этого
+    и был написан, но ни одна ручка добавления его не звала (28.09.2026).
+    """
+    try:
+        from ripster import retired_credentials as _r
+        if _r.unretire(kind, secret):
+            print(f"[accounts] {kind} …{(secret or '')[-6:]} возвращена владельцем "
+                  f"из реестра снятых", flush=True)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+async def _deezer_add_one(body: dict):
     """Add an additional Deezer ARL to the pool. Does NOT touch the primary
     deezer-arl (slot 0) — takes effect on the NEXT queued Deezer download that
     goes through the pool dispatch (ripster/runner.py), no restart needed."""
@@ -928,6 +985,7 @@ async def deezer_accounts_add(body: dict):
     if any(a.get("arl") == arl for a in existing):
         return {"ok": False, "msg": "Этот ARL уже добавлен",
                 "msg_key": "acc.arl_duplicate", "params": {}}
+    _readmit("deezer_arl", arl)
     existing.append({"arl": arl, "label": label})
     _cfg["deezer-accounts"] = existing
     if _save_config:
@@ -938,6 +996,39 @@ async def deezer_accounts_add(body: dict):
                     "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
     return {"ok": True, "msg": f"ARL добавлен как «{label}»",
             "msg_key": "acc.arl_added", "params": {"label": label}}
+
+
+def _remove_via_actions(service: str, pool_key: str, idx: int) -> dict | None:
+    """Удаление учётки из пула настроек ПК — той же серверной логикой, что у
+    панели бота (`ripster/account_actions.py`): по отпечатку секрета, через
+    реестр снятых (удалённое не воскресает из tokens/ и копий), с сохранением
+    конфига и с записью в журнал удалённых (`backups/removed_accounts.json`,
+    30 дней на возврат). Раньше ПК вынимал запись по номеру и в реестр не
+    писал. None — удалено; dict — ответ для экрана (ошибка либо честное
+    предупреждение: каталоги соседних слотов не сдвинулись)."""
+    from ripster import account_actions as _aa
+    existing = list(_cfg.get(pool_key) or [])
+    entry = existing[idx] if 0 <= idx < len(existing) else None
+    sec = _aa.entry_secret(service, entry) if isinstance(entry, dict) else ""
+
+    def _save(c):
+        if _save_config:
+            _save_config(c)
+    try:
+        if sec:
+            r = _aa.remove(service, _aa.account_key(sec), _cfg, _save)
+            # Ключевое слово «warnings»: удаление удалось, но каталоги
+            # соседних слотов не сдвинулись (заняты загрузкой). Спрятать это за
+            # обычным «убрано» — значит соврать про привязку сессий.
+            return None if (r.get("ok") and not r.get("warnings")) else r
+        # Пустая заготовка слота без секрета: удалять из реестра нечего.
+        existing.pop(idx)
+        _cfg[pool_key] = existing
+        _save(_cfg)
+        return None
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
+                "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
 
 
 @router.post("/api/deezer/accounts/{slot}/remove")
@@ -952,14 +1043,10 @@ async def deezer_accounts_remove(slot: int):
     if idx < 0 or idx >= len(existing):
         return {"ok": False, "msg": "Нет такого аккаунта",
                 "msg_key": "acc.no_account", "params": {}}
-    removed = existing.pop(idx)
-    _cfg["deezer-accounts"] = existing
-    if _save_config:
-        try:
-            _save_config(_cfg)
-        except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
-                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
+    removed = existing[idx] if isinstance(existing[idx], dict) else {}
+    err = _remove_via_actions("deezer", "deezer-accounts", idx)
+    if err:
+        return err
     return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
             "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
 
@@ -1181,7 +1268,10 @@ def tidal_pool_append(refresh: str = "", country: str = "", label: str = "",
                    for a in existing)
             or (uid and uid == primary_uid)
             or any(uid and str(a.get("user_id") or "").strip() == uid for a in existing)):
-        return {"ok": False, "msg": "Эта учётка уже добавлена",
+        return {"ok": False,
+                "msg": "Эта учётка уже добавлена. Если входите по ссылке: браузер уже вошёл в Tidal "
+                       "под ней — откройте ссылку в приватном окне (или выйдите из Tidal) и войдите "
+                       "под другой учёткой.",
                 "msg_key": "err.tidal_pool_duplicate"}
     if not label:
         # Страна в метке — не украшение: пять безымянных «account» с телефона не
@@ -1189,6 +1279,7 @@ def tidal_pool_append(refresh: str = "", country: str = "", label: str = "",
         # на сутки раньше).
         n = len(existing) + 1
         label = f"Tidal {country} #{n}" if country else f"Tidal #{n}"
+    _readmit("tidal_account", refresh)
     entry: dict = {"label": label, "refresh": refresh}
     if country:
         entry["country"] = country
@@ -1209,15 +1300,187 @@ def tidal_pool_append(refresh: str = "", country: str = "", label: str = "",
             "label": label, "slot": len(existing), "country": country, "user_id": uid}
 
 
+async def _tidal_check_refresh(refresh: str) -> dict:
+    """Проверить вклеенный refresh-токен Tidal ДО записи в пул.
+
+    {'state': 'ok'|'invalid'|'unknown', 'user_id', 'country'}. «invalid» — только на
+    явный ответ Tidal `invalid_grant` (токен просрочен/неверный): любой другой сбой
+    (сеть, другой код, нет TV client_id) — «unknown», и токен принимается как раньше,
+    чтобы наша проверка не отвергла живую учётку. При «ok» получаем user_id и страну —
+    тогда дедуп по user_id ловит и ту же учётку под другим токеном (30.09: вклейка
+    испорченного токена молча попадала в пул и отсеивалась сторожем через часы)."""
+    try:
+        import httpx as _httpx
+        from ripster.engines.tidal import _tv_client
+        from ripster.routes.core import _TIDAL_AUTH_BASE
+        cid, csec = _tv_client()
+        if not cid:
+            return {"state": "unknown"}
+        async with _httpx.AsyncClient(timeout=15) as c:
+            r = await c.post(_TIDAL_AUTH_BASE + "oauth2/token",
+                             data={"client_id": cid, "client_secret": csec,
+                                   "refresh_token": refresh, "grant_type": "refresh_token",
+                                   "scope": "r_usr w_usr"})
+        if r.status_code == 200:
+            u = (r.json() or {}).get("user") or {}
+            return {"state": "ok", "user_id": str(u.get("userId") or ""),
+                    "country": (u.get("countryCode") or "").upper()}
+        try:
+            err = str((r.json() or {}).get("error") or "")
+        except Exception:                                           # noqa: BLE001
+            err = ""
+        if r.status_code == 400 and err == "invalid_grant":
+            return {"state": "invalid"}
+    except Exception:                                               # noqa: BLE001
+        pass
+    return {"state": "unknown"}
+
+
+# ── Мультивставка токенов (владелец 30.09): по строке/пробелу/запятой ─────────────────
+# «1. NZ 🇳🇿» над токеном — подпись страны: становится меткой учётки. Для ОДНОГО токена
+# (или непонятного ввода) вызывается прежний обработчик с прежним телом — ничего не меняется.
+_MULTI_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-.=+/]{8,}$")
+
+
+def _parse_multi(raw) -> list:
+    """[(токен, подсказка_страны)] — токены длиннее 8 знаков без пробелов; двухбуквенное слово
+    ЗАГЛАВНЫМИ перед токеном («NZ») — подсказка для него; всё прочее (нумерация, эмодзи) — шум."""
+    out, seen, hint = [], set(), ""
+    for line in str(raw or "").splitlines():
+        for piece in re.split(r"[\s,;]+", line):
+            if not piece:
+                continue
+            if _MULTI_TOKEN_RE.match(piece):
+                if piece not in seen:
+                    seen.add(piece)
+                    out.append((piece, hint))
+                hint = ""
+            elif len(piece) == 2 and piece.isalpha() and piece.isascii() and piece.isupper():
+                hint = piece
+    return out
+
+
+async def _fan_out(body: dict, key: str, one, prefix: str) -> dict:
+    toks = _parse_multi(body.get(key))
+    if len(toks) <= 1:
+        return await one(body)                          # прежнее поведение дословно
+    results, ok_n = [], 0
+    for t, hint in toks[:20]:
+        r = await one({**body, key: t, "label": f"{prefix} {hint}" if hint else ""})
+        ok_n += 1 if r.get("ok") else 0
+        results.append({"tail": t[-6:], "ok": bool(r.get("ok")), "label": (r.get("params") or {}).get("label", ""),
+                        "msg_key": r.get("msg_key") or "", "msg": r.get("msg") or ""})
+    fails = "; ".join(f"…{x['tail']} — {x['msg']}" for x in results if not x["ok"])
+    return {"ok": ok_n > 0, "msg": f"Добавлено {ok_n} из {len(results)}." + (f" Не добавлены: {fails}" if fails else ""),
+            "msg_key": "acc.pool_added_many", "params": {"n": ok_n, "m": len(results)}, "results": results}
+
+
+async def _qobuz_check_token(token: str) -> dict:
+    """{'state': 'ok'|'invalid'|'unknown', 'user_id', 'country'} — токен Qobuz без user_id:
+    `user/login` по токену отдаёт пользователя. Только явный 401 — «invalid»."""
+    try:
+        import httpx as _httpx
+        from ripster.qobuz_accounts import _LOGIN, _DEFAULT_APP_ID
+        app_id = str(_cfg.get("qobuz-app-id") or "").strip() or _DEFAULT_APP_ID
+        async with _httpx.AsyncClient(timeout=20) as c:
+            r = await c.post(_LOGIN, params={"user_auth_token": token, "app_id": app_id})
+        if r.status_code == 401:
+            return {"state": "invalid"}
+        if r.status_code == 200:
+            u = (r.json() or {}).get("user") or {}
+            if u.get("id"):
+                return {"state": "ok", "user_id": str(u["id"]),
+                        "country": str(u.get("country_code") or "").upper()}
+    except Exception:                                               # noqa: BLE001
+        pass
+    return {"state": "unknown"}
+
+
+@router.post("/api/deezer/accounts/add")
+async def deezer_accounts_add(body: dict):
+    return await _fan_out(body, "arl", _deezer_add_one, "Deezer")
+
+
+@router.post("/api/soundcloud/accounts/add")
+async def soundcloud_accounts_add(body: dict):
+    return await _fan_out(body, "token", _soundcloud_add_one, "SoundCloud")
+
+
+@router.post("/api/yandex/accounts/add")
+async def yandex_accounts_add(body: dict):
+    return await _fan_out(body, "token", _yandex_add_one, "Yandex")
+
+
+async def _qobuz_add_token(tok: str, hint: str, body: dict) -> dict:
+    chk = await _qobuz_check_token(tok)
+    if chk["state"] == "invalid":
+        return {"ok": False, "msg_key": "err.qobuz_token_invalid",
+                "msg": "Qobuz не принял этот токен (просрочен или неверный)."}
+    if chk["state"] != "ok":
+        return {"ok": False, "msg_key": "err.qobuz_token_unknown",
+                "msg": "Не удалось определить аккаунт по токену (Qobuz не ответил) — повторите позже."}
+    label = f"Qobuz {hint}" if hint else (f"Qobuz {chk['country']}" if chk.get("country") else "")
+    return await _qobuz_add_one({**body, "auth_token": tok, "user_id": chk["user_id"], "label": label})
+
+
+@router.post("/api/qobuz/accounts/add")
+async def qobuz_accounts_add(body: dict):
+    """Один аккаунт как прежде (user_id+auth_token ИЛИ email+password) — либо ТОКЕНЫ без user_id,
+    по одному в строке (можно с подписью страны): user_id определяется по токену."""
+    if (body.get("user_id") or body.get("email")) or not (body.get("auth_token") or "").strip():
+        return await _qobuz_add_one(body)
+    toks = _parse_multi(body.get("auth_token")) or [(str(body["auth_token"]).strip(), "")]
+    if len(toks) == 1:
+        return await _qobuz_add_token(toks[0][0], toks[0][1], body)
+    results, ok_n = [], 0
+    for t, hint in toks[:20]:
+        r = await _qobuz_add_token(t, hint, {**body, "label": ""})
+        ok_n += 1 if r.get("ok") else 0
+        results.append({"tail": t[-6:], "ok": bool(r.get("ok")), "label": (r.get("params") or {}).get("label", ""),
+                        "msg_key": r.get("msg_key") or "", "msg": r.get("msg") or ""})
+    fails = "; ".join(f"…{x['tail']} — {x['msg']}" for x in results if not x["ok"])
+    return {"ok": ok_n > 0, "msg": f"Добавлено {ok_n} из {len(results)}." + (f" Не добавлены: {fails}" if fails else ""),
+            "msg_key": "acc.pool_added_many", "params": {"n": ok_n, "m": len(results)}, "results": results}
+
+
+async def _tidal_add_one(refresh: str, body: dict) -> dict:
+    """Один токен: проверка → запись в пул (см. `tidal_accounts_add`)."""
+    chk = await _tidal_check_refresh(refresh) if refresh else {"state": "unknown"}
+    if chk["state"] == "invalid":
+        return {"ok": False, "msg_key": "err.tidal_refresh_invalid",
+                "msg": "Tidal не принял этот токен (просрочен или неверный) — скопируйте свежий "
+                       "refresh-токен и вставьте снова."}
+    return tidal_pool_append(refresh=refresh,
+                             country=body.get("country") or chk.get("country", ""),
+                             label=body.get("label") or "",
+                             user_id=chk.get("user_id", ""))
+
+
 @router.post("/api/tidal/accounts/add")
 async def tidal_accounts_add(body: dict):
-    """Добавить учётку Tidal в пул по refresh-токену. Основной (`tidal-refresh`,
+    """Добавить учётку(и) Tidal в пул по refresh-токену. Основной (`tidal-refresh`,
     слот 0) не трогает. Вступает в силу на следующей загрузке через пул —
     рестарт не нужен. Автопромоут (`promote_best_tidal`) поднимет её основной,
-    если она реально отдаёт lossless, а текущая основная — нет."""
-    return tidal_pool_append(refresh=body.get("refresh") or body.get("token") or "",
-                             country=body.get("country") or "",
-                             label=body.get("label") or "")
+    если она реально отдаёт lossless, а текущая основная — нет.
+
+    Токен проверяется сразу (`_tidal_check_refresh`): явно негодный не записывается.
+    Можно вставить НЕСКОЛЬКО токенов разом (по одному на строку или через пробел/запятую):
+    каждый проходит тот же путь, ответ — сводка «добавлено N из M» и результат по каждому
+    (`results`, токен опознаётся только хвостом из 6 знаков; сам токен наружу не уходит)."""
+    toks = _parse_multi(body.get("refresh") or body.get("token") or "")
+    if len(toks) <= 1:
+        raw = str(body.get("refresh") or body.get("token") or "").strip()
+        return await _tidal_add_one(toks[0][0] if toks else raw, body)
+    results, ok_n = [], 0
+    for t, hint in toks[:20]:
+        r = await _tidal_add_one(t, {**body, "label": f"Tidal {hint}" if hint else ""})
+        ok_n += 1 if r.get("ok") else 0
+        results.append({"tail": t[-6:], "ok": bool(r.get("ok")), "label": r.get("label") or "",
+                        "msg_key": r.get("msg_key") or "", "msg": r.get("msg") or ""})
+    fails = "; ".join(f"…{x['tail']} — {x['msg']}" for x in results if not x["ok"])
+    msg = f"Добавлено {ok_n} из {len(results)}." + (f" Не добавлены: {fails}" if fails else "")
+    return {"ok": ok_n > 0, "msg": msg, "msg_key": "acc.pool_added_many",
+            "params": {"n": ok_n, "m": len(results)}, "results": results}
 
 
 @router.post("/api/tidal/accounts/{slot}/remove")
@@ -1231,15 +1494,12 @@ async def tidal_accounts_remove(slot: int):
     if idx < 0 or idx >= len(existing):
         return {"ok": False, "msg": "Нет такой учётки",
                 "msg_key": "err.tidal_pool_gone", "params": {}}
-    removed = existing.pop(idx)
-    _cfg["tidal-accounts"] = existing
-    if _save_config:
-        try:
-            _save_config(_cfg)
-        except Exception as e:  # noqa: BLE001
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
-                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
-    return {"ok": True, "msg": f"Учётка {removed.get('label', '')} убрана"}
+    removed = existing[idx] if isinstance(existing[idx], dict) else {}
+    err = _remove_via_actions("tidal", "tidal-accounts", idx)
+    if err:
+        return err
+    return {"ok": True, "msg": f"Учётка {removed.get('label', '')} убрана",
+            "msg_key": "setup.account_removed"}
 
 
 @router.post("/api/tidal/accounts/{slot}/primary")
@@ -1335,8 +1595,7 @@ async def qobuz_accounts_list():
     return _qzp.live_status(_cfg)
 
 
-@router.post("/api/qobuz/accounts/add")
-async def qobuz_accounts_add(body: dict):
+async def _qobuz_add_one(body: dict):
     """Add an additional Qobuz account to the pool — either token mode
     (user_id+auth_token) or email mode (email+password). Does NOT touch the
     primary qobuz-* config keys (slot 0). Takes effect on the NEXT queued
@@ -1351,10 +1610,18 @@ async def qobuz_accounts_add(body: dict):
                 "msg_key": "acc.need_qobuz_creds", "params": {}}
 
     existing = list(_cfg.get("qobuz-accounts") or [])
-    if any((a.get("user_id") == user_id and user_id) or (a.get("email") == email and email)
-           for a in existing):
+    # Дубль — по ТОКЕНУ (или почте), а НЕ по user_id: у Qobuz один аккаунт выдаёт разные токены
+    # (по странам/входам), user_id у них один, и каждый токен — своя строка пула (здоровье и
+    # порядок ключуются токеном). Сравнение по user_id отвергало все токены после первого
+    # (владелец 30.09). Тот же токен, что основной или уже в пуле, — по-прежнему дубль.
+    if (auth_token and auth_token == str(_cfg.get("qobuz-auth-token") or "").strip()) or any(
+            (auth_token and a.get("auth_token") == auth_token)
+            or (not auth_token and user_id and a.get("user_id") == user_id and not a.get("auth_token"))
+            or (email and a.get("email") == email)
+            for a in existing):
         return {"ok": False, "msg": "Этот аккаунт уже добавлен",
                 "msg_key": "acc.account_duplicate", "params": {}}
+    _readmit("qobuz_account", auth_token or email)
     existing.append({"user_id": user_id, "auth_token": auth_token,
                      "email": email, "password": password, "label": label})
     _cfg["qobuz-accounts"] = existing
@@ -1380,14 +1647,10 @@ async def qobuz_accounts_remove(slot: int):
     if idx < 0 or idx >= len(existing):
         return {"ok": False, "msg": "Нет такого аккаунта",
                 "msg_key": "acc.no_account", "params": {}}
-    removed = existing.pop(idx)
-    _cfg["qobuz-accounts"] = existing
-    if _save_config:
-        try:
-            _save_config(_cfg)
-        except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
-                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
+    removed = existing[idx] if isinstance(existing[idx], dict) else {}
+    err = _remove_via_actions("qobuz", "qobuz-accounts", idx)
+    if err:
+        return err
     return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
             "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
 
@@ -1403,8 +1666,7 @@ async def soundcloud_accounts_list():
     return _scp.live_status(_cfg)
 
 
-@router.post("/api/soundcloud/accounts/add")
-async def soundcloud_accounts_add(body: dict):
+async def _soundcloud_add_one(body: dict):
     token = (body.get("token") or "").strip()
     label = (body.get("label") or "").strip() or "account"
     if not token:
@@ -1414,6 +1676,7 @@ async def soundcloud_accounts_add(body: dict):
     if any(a.get("token") == token for a in existing):
         return {"ok": False, "msg": "Этот токен уже добавлен",
                 "msg_key": "acc.token_already", "params": {}}
+    _readmit("soundcloud_token", token)
     existing.append({"token": token, "label": label})
     _cfg["soundcloud-accounts"] = existing
     if _save_config:
@@ -1436,14 +1699,10 @@ async def soundcloud_accounts_remove(slot: int):
     if idx < 0 or idx >= len(existing):
         return {"ok": False, "msg": "Нет такого аккаунта",
                 "msg_key": "acc.no_account", "params": {}}
-    removed = existing.pop(idx)
-    _cfg["soundcloud-accounts"] = existing
-    if _save_config:
-        try:
-            _save_config(_cfg)
-        except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
-                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
+    removed = existing[idx] if isinstance(existing[idx], dict) else {}
+    err = _remove_via_actions("soundcloud", "soundcloud-accounts", idx)
+    if err:
+        return err
     return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
             "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
 
@@ -1538,8 +1797,7 @@ async def yandex_accounts_list():
     return _yxp.live_status(_cfg)
 
 
-@router.post("/api/yandex/accounts/add")
-async def yandex_accounts_add(body: dict):
+async def _yandex_add_one(body: dict):
     token = (body.get("token") or "").strip()
     label = (body.get("label") or "").strip() or "account"
     if not token:
@@ -1549,6 +1807,7 @@ async def yandex_accounts_add(body: dict):
     if any(a.get("token") == token for a in existing):
         return {"ok": False, "msg": "Этот токен уже добавлен",
                 "msg_key": "acc.token_already", "params": {}}
+    _readmit("yandex_token", token)
     existing.append({"token": token, "label": label})
     _cfg["yandex-accounts"] = existing
     if _save_config:
@@ -1571,14 +1830,10 @@ async def yandex_accounts_remove(slot: int):
     if idx < 0 or idx >= len(existing):
         return {"ok": False, "msg": "Нет такого аккаунта",
                 "msg_key": "acc.no_account", "params": {}}
-    removed = existing.pop(idx)
-    _cfg["yandex-accounts"] = existing
-    if _save_config:
-        try:
-            _save_config(_cfg)
-        except Exception as e:
-            return {"ok": False, "msg": f"Не сохранил конфиг: {e}",
-                    "msg_key": "err.cfg_save_failed", "params": {"e": str(e)}}
+    removed = existing[idx] if isinstance(existing[idx], dict) else {}
+    err = _remove_via_actions("yandex", "yandex-accounts", idx)
+    if err:
+        return err
     return {"ok": True, "msg": f"Аккаунт {removed.get('label', '')} убран",
             "msg_key": "acc.account_removed", "params": {"label": removed.get('label', '')}}
 
@@ -1957,28 +2212,20 @@ async def _install_soundcloud_component() -> bool:
     git = shutil.which("git") or "git"
     npm = shutil.which("npm") or "npm"
 
-    # 1 — clone (or update) the Lucida source
-    if (src_dir / ".git").is_dir():
-        await _setup.ilog("⟳ Обновляю исходники Lucida…", "info")
-        rc, _ = await _setup.irun([git, "pull", "--ff-only"], cwd=str(src_dir))
-    else:
-        await _setup.ilog("⬇ Клонирую Lucida…", "info")
-        rc, _ = await _setup.irun([git, "clone", "--depth", "1", _LUCIDA_REPO, str(src_dir)],
-                                  cwd=str(lucida_dir))
-    if rc != 0:
-        await _setup.ilog(f"✗ git: код {rc}", "error")
+    # 1 — clone (or update) the Lucida source at the pinned commit
+    if not await _setup.clone_pinned("lucida-src", dest=src_dir):
         return False
 
     # 2 — install Lucida's own deps. --ignore-scripts skips the husky `prepare` hook.
     await _setup.ilog("⬇ npm install зависимостей Lucida (~1–2 мин)…", "info")
-    rc, _ = await _setup.irun([npm, "install", "--ignore-scripts"], cwd=str(src_dir))
+    rc, _ = await _setup.irun([npm, "install", "--ignore-scripts"], cwd=str(src_dir), timeout=1200)
     if rc != 0:
         await _setup.ilog(f"✗ npm install: код {rc}", "error")
         return False
 
     # 3 — build TypeScript → build/
     await _setup.ilog("🔧 Сборка Lucida (tsc)…", "info")
-    await _setup.irun([npm, "run", "build"], cwd=str(src_dir))
+    await _setup.irun([npm, "run", "build"], cwd=str(src_dir), timeout=600)
 
     if (src_dir / "build" / "index.js").exists():
         await _setup.ilog("✓ Lucida установлена и собрана — SoundCloud готов", "success")
@@ -2007,12 +2254,12 @@ async def _ensure_orpheus_venv() -> "str | None":
         return vpy
     venv = _base_dir / "tools" / "orpheusvenv"
     try:
-        await _setup.irun([sys.executable, "-m", "venv", str(venv)])
+        await _setup.irun([sys.executable, "-m", "venv", str(venv)], timeout=300)
         if not _orpheus_venv_python():
             # Bundled embeddable python lacks the stdlib `venv` module → virtualenv.
             await _setup.irun([sys.executable, "-m", "pip", "install", "-q",
-                               "--break-system-packages", "virtualenv"])
-            await _setup.irun([sys.executable, "-m", "virtualenv", str(venv)])
+                               "--break-system-packages", "virtualenv"], timeout=900)
+            await _setup.irun([sys.executable, "-m", "virtualenv", str(venv)], timeout=300)
     except Exception as e:
         await _setup.ilog(f"⚠ OrpheusDL venv не создан ({e}) — ставлю в общий python", "warn")
         return None
@@ -2030,50 +2277,18 @@ async def _install_orpheus_component() -> bool:
     orph_dir = _orpheus_dir()
     await _setup.ilog("── OrpheusDL (база Spotify / Beatport) ──", "info")
     await _setup.ensure_git()
-    git = shutil.which("git") or "git"
 
-    if (orph_dir / "orpheus.py").exists():
-        await _setup.ilog("↻ OrpheusDL уже есть — git pull…", "info")
-        await _setup.irun([git, "pull"], cwd=str(orph_dir))
-    else:
-        await _setup.ilog("⬇ Клонирую OrpheusDL…", "info")
-        # `git clone` РУГАЕТСЯ на непустой каталог: "destination path already
-        # exists and is not an empty directory". А каталог существует всегда —
-        # установщик кладёт туда наш _auth_helper.py (вход в Spotify). Поэтому
-        # клонируем во временную папку рядом и переносим содержимое, сохраняя
-        # то, что уже лежало.
-        tmp_dir = orph_dir.parent / (orph_dir.name + "_clone_tmp")
-        try:
-            if tmp_dir.exists():
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-            rc, _ = await _setup.irun(
-                [git, "clone", "https://github.com/OrfiTeam/OrpheusDL", str(tmp_dir)])
-            if rc != 0:
-                await _setup.ilog("✗ Ошибка git clone OrpheusDL", "error")
-                shutil.rmtree(tmp_dir, ignore_errors=True)
-                return False
-            orph_dir.mkdir(parents=True, exist_ok=True)
-            for item in tmp_dir.iterdir():
-                dst = orph_dir / item.name
-                if dst.exists():
-                    continue          # своё (например _auth_helper.py) не затираем
-                shutil.move(str(item), str(dst))
-        finally:
-            shutil.rmtree(tmp_dir, ignore_errors=True)
-        if not (orph_dir / "orpheus.py").exists():
-            await _setup.ilog("✗ OrpheusDL склонирован не полностью", "error")
-            return False
+    if not await _setup.clone_pinned("orpheus", dest=orph_dir, preserve_existing=True):
+        return False
+    if not (orph_dir / "orpheus.py").exists():
+        await _setup.ilog("✗ OrpheusDL склонирован не полностью", "error")
+        return False
 
     # Spotify module (separate repo) → orpheus/modules/spotify
     (orph_dir / "modules").mkdir(parents=True, exist_ok=True)
     sp_dir = orph_dir / "modules" / "spotify"
-    if (sp_dir / "interface.py").exists():
-        await _setup.ilog("↻ Модуль Spotify — git pull…", "info")
-        await _setup.irun([git, "pull"], cwd=str(sp_dir))
-    else:
-        await _setup.ilog("⬇ Клонирую модуль Spotify…", "info")
-        await _setup.irun(
-            [git, "clone", "https://github.com/bascurtiz/orpheusdl-spotify", str(sp_dir)])
+    if not await _setup.clone_pinned("orpheus-spotify", dest=sp_dir):
+        return False
 
     # Resilient module init: a newer Spotify module imports symbols the bundled
     # utils lacks (find_system_ffmpeg / vendor_bootstrap) → ImportError that aborts
@@ -2131,7 +2346,7 @@ async def _install_orpheus_component() -> bool:
     if req.exists():
         await _setup.ilog("📦 pip install OrpheusDL requirements…", "info")
         await _setup.irun([pip_py, "-m", "pip", "install", "-r", str(req), "--quiet"],
-                          cwd=str(orph_dir))
+                          cwd=str(orph_dir), timeout=900)
 
     from ripster.engines.orpheus_spotify import is_installed
     ok = is_installed()
@@ -2161,18 +2376,9 @@ async def _install_beatport_component() -> bool:
             await _setup.ilog("✗ Не удалось поставить OrpheusDL — Beatport прерван.", "error")
             return False
     (orph_dir / "modules").mkdir(parents=True, exist_ok=True)
-    git = shutil.which("git") or "git"
 
-    if mod_path.exists():
-        await _setup.ilog("↻ orpheusdl-beatport уже есть — git pull…", "info")
-        await _setup.irun([git, "pull"], cwd=str(mod_path))
-    else:
-        await _setup.ilog("⬇ Клонирую orpheusdl-beatport…", "info")
-        rc, _ = await _setup.irun(
-            [git, "clone", "https://github.com/Dniel97/orpheusdl-beatport", str(mod_path)])
-        if rc != 0:
-            await _setup.ilog("✗ Ошибка git clone", "error")
-            return False
+    if not await _setup.clone_pinned("orpheus-beatport", dest=mod_path):
+        return False
 
     req = mod_path / "requirements.txt"
     if req.exists():
@@ -2180,7 +2386,7 @@ async def _install_beatport_component() -> bool:
         pip_py = await _ensure_orpheus_venv() or sys.executable
         await _setup.ilog("📦 pip install requirements.txt (OrpheusDL venv)…", "info")
         await _setup.irun([pip_py, "-m", "pip", "install", "-r", str(req), "--quiet"],
-                          cwd=str(mod_path))
+                          cwd=str(mod_path), timeout=900)
 
     ok = is_installed()
     await _setup.ilog("✓ orpheusdl-beatport установлен." if ok
@@ -2209,17 +2415,9 @@ async def _install_jiosaavn_component() -> bool:
             return False
     (orph_dir / "modules").mkdir(parents=True, exist_ok=True)
     await _setup.ensure_git()
-    git = shutil.which("git") or "git"
 
-    if (mod_path / ".git").is_dir():
-        await _setup.ilog("↻ orpheusdl-jiosaavn уже есть — git pull…", "info")
-        await _setup.irun([git, "pull", "--ff-only"], cwd=str(mod_path))
-    elif not (mod_path / "interface.py").exists():
-        await _setup.ilog("⬇ Клонирую orpheusdl-jiosaavn…", "info")
-        rc, _ = await _setup.irun([git, "clone", REPO_URL, str(mod_path)])
-        if rc != 0:
-            await _setup.ilog("✗ Ошибка git clone", "error")
-            return False
+    if not await _setup.clone_pinned("orpheus-jiosaavn", dest=mod_path):
+        return False
     _ensure_module_init()
 
     ok = is_installed()
@@ -2248,14 +2446,17 @@ async def fix_gamdl_deps():
         await _setup.ilog("🔧 Fixing gamdl dependencies…", "info")
         rc1, o1 = await _setup.irun([sys.executable, "-m", "pip", "install",
                                       "protobuf>=4.21.0", "--upgrade",
-                                      "--break-system-packages", "-q"])
+                                      "--break-system-packages", "-q"], timeout=900)
         if rc1 == 0:
             await _setup.ilog("   ✓ protobuf upgraded", "success")
         else:
             await _setup.ilog(f"   ✗ protobuf upgrade failed: {o1[:100]}", "error")
+        # pywidevine пинится (25.09.2026, аудит): без пина «--upgrade» тянул
+        # последний мажор, а пин construct рядом — детерминированная пара из
+        # requirements.lock (1.9.0). Один клик не должен уносить движок вдаль.
         rc2, o2 = await _setup.irun([sys.executable, "-m", "pip", "install",
-                                      "pywidevine", "--upgrade",
-                                      "--break-system-packages", "-q"])
+                                      "pywidevine==1.9.0", "--upgrade",
+                                      "--break-system-packages", "-q"], timeout=900)
         if rc2 == 0:
             await _setup.ilog("   ✓ pywidevine upgraded", "success")
         else:
@@ -2286,7 +2487,7 @@ async def fix_gamdl_deps():
         rc3, o3 = await _setup.irun([sys.executable, "-m", "pip", "install",
                                       "construct==2.8.8", "--no-deps",
                                       "--force-reinstall",
-                                      "--break-system-packages", "-q"])
+                                      "--break-system-packages", "-q"], timeout=900)
         if rc3 == 0:
             await _setup.ilog("   ✓ construct закреплён на 2.8.8 (нужен pywidevine)", "success")
         else:
@@ -2294,14 +2495,14 @@ async def fix_gamdl_deps():
 
         # Проверка, которая МОЖЕТ провалиться: импорт, а не наличие файла.
         rc4, o4 = await _setup.irun([sys.executable, "-c",
-            "from pywidevine.device import Device; print('WVD_IMPORT_OK')"])
+            "from pywidevine.device import Device; print('WVD_IMPORT_OK')"], timeout=120)
         if rc4 == 0 and "WVD_IMPORT_OK" in (o4 or ""):
             await _setup.ilog("   ✓ pywidevine импортируется — Apple сможет качать", "success")
         else:
             await _setup.ilog("   ✗ pywidevine НЕ импортируется — загрузки Apple упадут "
                               f"на старте: {(o4 or '')[-160:]}", "error")
         rc_v, verify_out = await _setup.irun([sys.executable, "-c",
-            "from gamdl.downloader import Downloader; print('gamdl OK')"])
+            "from gamdl.downloader import Downloader; print('gamdl OK')"], timeout=120)
         if rc_v == 0:
             await _setup.ilog("✅ gamdl imports OK — ready to download!", "success")
             if _broadcast:
@@ -2351,6 +2552,7 @@ async def update_apply():
         def _bye():
             _t.sleep(3.0)          # let the HTTP response reach the UI first
             _respawn_detached()    # guarantee a successor regardless of launcher state
+            print(f"[lifecycle] pid={os.getpid()} exit for self-update (setup.py:2381)", flush=True)
             os._exit(0)            # overlay already wrote new code → fresh start = new version
         threading.Thread(target=_bye, daemon=True).start()
     return res
@@ -2407,12 +2609,14 @@ async def restart_app():
         # correct — it re-execs in the existing console.
         if os.environ.get("RIPSTER_LAUNCHER") == "1":
             _respawn_detached()    # don't rely on the launcher (it may have only attached)
+            print(f"[lifecycle] pid={os.getpid()} exit for self-update (setup.py:2437)", flush=True)
             os._exit(0)
         elif os.name == "nt":
             # os.execv on Windows re-execs in a NEW console-subsystem process WITHOUT
             # the no-window flag → a cmd window pops. Use the windowless detached
             # respawn instead (same successor mechanism as the launcher path).
             _respawn_detached()
+            print(f"[lifecycle] pid={os.getpid()} exit for self-update (setup.py:2443)", flush=True)
             os._exit(0)
         else:
             os.execv(sys.executable, [sys.executable] + sys.argv)
