@@ -1,0 +1,90 @@
+"""Writes and reads the _ripster.txt marker file placed in every download folder.
+
+The marker serves two purposes:
+  1. Machine-readable: lets /api/download-file find the exact output directory
+     without heuristics by scanning for a file containing "task-id: <id>".
+  2. Human-readable: a thank-you note with release info and a short description
+     of the service, written in Russian and English.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+
+MARKER_FILENAME = "_ripster.txt"
+_TAG = "task-id:"   # prefix used for lookup
+
+
+_TEMPLATE = """\
+╔═══════════════════════════════════════════════╗
+║                  R I P S T E R                   ║
+║       Загрузчик музыки высшего качества       ║
+╚═══════════════════════════════════════════════╝
+
+  Спасибо, что используете Ripster!
+  Thank you for using Ripster!
+
+  Ripster — персональный загрузчик музыки в максимально доступном
+  качестве (ALAC, Hi-Res FLAC, Dolby Atmos).
+  Только для личного использования.
+
+  Ripster is a personal music downloader providing
+  the highest available quality (ALAC, Hi-Res FLAC,
+  Dolby Atmos). For personal use only.
+
+─────────────────────────────────────────────────
+{release_block}─────────────────────────────────────────────────
+
+task-id: {task_id}
+"""
+
+
+def _short_id(task_id: str) -> str:
+    """First 8 hex chars of task_id — display-friendly download number."""
+    clean = task_id.replace("-", "")
+    return clean[:8].upper() if clean else task_id[:8].upper()
+
+
+def write_marker(directory: Path, task_id: str, task: dict) -> bool:
+    """Public build: write ONLY the machine-readable id line — the human-facing
+    banner / thank-you / release description was removed by request (it cluttered
+    download folders and confused users). The `task-id:` line is still needed so
+    find_dir_by_task_id() can locate the output directory for delivery."""
+    try:
+        (directory / MARKER_FILENAME).write_text(f"{_TAG} {task_id}\n", encoding="utf-8")
+        return True
+    except OSError:
+        return False
+
+
+def find_dir_by_task_id(task_id: str, base: Path, max_depth: int = 4) -> Path | None:
+    """Walk *base* up to *max_depth* levels looking for a marker with *task_id*.
+    Returns the directory containing the matching marker, or None.
+    """
+    needle = f"{_TAG} {task_id}"
+
+    def _walk(d: Path, depth: int) -> Path | None:
+        marker = d / MARKER_FILENAME
+        if marker.is_file():
+            try:
+                # Маркер пишут и для людей, поэтому его перебивают блокнотом в
+                # cp1251 — жёсткий utf-8 бросал UnicodeDecodeError сквозь
+                # /api/download-file и вешал поиск папки на одном битом файле.
+                # Строка «task-id: <uuid>» остаётся ASCII, так что мягкое
+                # декодирование находит её и в битом маркере.
+                if needle in marker.read_text(encoding="utf-8", errors="replace"):
+                    return d
+            except OSError:
+                pass
+        if depth <= 0:
+            return None
+        try:
+            for child in sorted(d.iterdir()):
+                if child.is_dir():
+                    result = _walk(child, depth - 1)
+                    if result:
+                        return result
+        except OSError:
+            pass
+        return None
+
+    return _walk(base, max_depth)

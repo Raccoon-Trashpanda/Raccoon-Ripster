@@ -1,0 +1,663 @@
+"""zhaarey/apple-music-downloader engine."""
+from __future__ import annotations
+import json as _json
+import re
+import sys
+from pathlib import Path as _Path
+from typing import Optional
+from .base import EngineBase, EngineResult, Event, EventKind, LineLevel, _strip_ansi
+from .registry import register
+from ripster import http_client as _HTTP
+
+_QUALITIES = [
+    {"id":"alac-hires","label":"ALAC Hi-Res","sub":"audio-alac-stereo (до 24/192)","sub_key":"qual.zhaarey.alac-hires.sub","sub_args":{"codec":"audio-alac-stereo","limit":"24/192"},"badge":"HI-RES","color":"#ffd60a","bitrate":"≤9216 kbps","ext":"m4a","req":"wrapper","flag":""},
+    {"id":"alac",    "label":"ALAC",    "sub":"audio-alac-stereo",    "badge":"LOSSLESS","color":"#c084a0","bitrate":"≤1411 kbps",    "ext":"m4a","req":"wrapper","flag":""},
+    {"id":"atmos",   "label":"Atmos",   "sub":"audio-atmos / EC-3",   "badge":"SPATIAL", "color":"#9090c8","bitrate":"2448–2768 kbps","ext":"m4a","req":"wrapper","flag":"--atmos"},
+    {"id":"aac",     "label":"AAC 256", "sub":"audio-stereo",         "badge":"LOSSY",   "color":"#EF9F27","bitrate":"256 kbps",      "ext":"m4a","req":"token",  "flag":"--aac"},
+    {"id":"aac-lc",  "label":"AAC-LC",  "sub":"audio-stereo",         "badge":"LOSSY",   "color":"#EF9F27","bitrate":"128–256 kbps",  "ext":"m4a","req":"token",  "flag":"--aac-lc"},
+    {"id":"binaural","label":"Binaural","sub":"audio-stereo-binaural","badge":"3D",      "color":"#9090c8","bitrate":"~256 kbps",     "ext":"m4a","req":"wrapper","flag":"--binaural"},
+    {"id":"downmix", "label":"Downmix", "sub":"audio-stereo-downmix", "badge":"STEREO",  "color":"#6a6a8a","bitrate":"~256 kbps",     "ext":"m4a","req":"wrapper","flag":"--downmix"},
+    {"id":"mv",      "label":"MV",      "sub":"music video",          "badge":"VIDEO",   "color":"#c084a0","bitrate":"HD 1080p",      "ext":"mp4","req":"token",  "flag":"--mv"},
+]
+
+_FLAGS = {q["id"]: q["flag"] for q in _QUALITIES}
+
+_RE_DONE    = re.compile(r"Completed:\s*(\d+)/(\d+)")
+# Итоговая сводка Go-загрузчика: «… Errors: N …». Ловим САМО ЧИСЛО, чтобы
+# отличать «ошибок ноль» от настоящей ошибки — по слову их не различить.
+_RE_SUMMARY = re.compile(r"Completed:\s*\d+/\d+.*?Errors:\s*(\d+)", re.I)
+_RE_TRACK   = re.compile(r"Track\s+(\d+)\s+of\s+(\d+)")
+# «нет lossless-потока» — у релиза в манифесте нет ALAC-стерео (частый случай:
+# spatial-переиздания «… Edition» приходят ТОЛЬКО в Dolby Atmos). Раньше
+# загрузчик писал глухое "no codec found", и движок объявлял это «wrapper не
+# отвечает» — неверный диагноз. Новый main.go пишет "no lossless (ALAC) stream…".
+_RE_NO_LOSSLESS = re.compile(r"no (?:lossless \(ALAC\)|ALAC) stream|no codec found", re.I)
+_RE_TOKEN   = re.compile(r"Failed to get token", re.I)
+# Врапперная Apple-сессия потеряла авторизацию посреди рипа: media-user-token
+# протух / устройство отвязано / подписка кончилась. Не «unknown finish state».
+_RE_RIP_401 = re.compile(r"Failed to rip song:\s*401|\b401 Unauthorized\b|"
+                         r"license.*401|unauthorized.*(?:rip|license|widevine)", re.I)
+_RE_RETRY   = re.compile(r"Error detected, press Enter to try again", re.I)
+# Local docker wrapper couldn't mint a content key (expired/unsubscribed Apple
+# session): the wrapper logs "Invalid CKC" and the Go side dies decrypting.
+_RE_DECRYPT_FAIL = re.compile(r"Failed to run v[23]|decryptFragment|Invalid CKC", re.I)
+# zhaarey can exit 0 after logging "Unavailable, trying to dl aac-lc" → "Failed to
+# dl aac-lc: Unavailable" for every track (nothing saved) WITHOUT a "Completed: N/M"
+# summary line. A genuine success always logs Completed, so this only matters in the
+# rc==0 / no-Completed branch of is_finished (don't false-positive a real download).
+_RE_UNAVAIL = re.compile(r"Failed to dl[^\n]*Unavailable|\bUnavailable\b", re.I)
+# Public wrapper (wm.wol.moe) couldn't decrypt: the Go tool logs
+# "Skipping ...: Decryption is not available for media ID: N" for every track and
+# then exits 0 with "Finished with 0 error(s)" → looks like success but 0 files
+# were saved (the "Готово, а файлов нет" report). Treat as a clear failure.
+_RE_DECRYPT_NA = re.compile(r"Decryption is not available", re.I)
+
+# yt-dlp segment noise — hide from console, extract % for progress bar if present
+_RE_NOISY   = re.compile(
+    r'^\[(?:download|ExtractAudio|Merger|MoveFiles|mp4decrypt|FixupM4a|FixupM3u8|hlsnative)\]'
+    r'|\bDownloading\s+(?:fragment|segment)\b',
+    re.I,
+)
+_RE_DL_PCT  = re.compile(r'\[download\]\s+(\d+(?:\.\d+)?)\s*%')
+
+@register
+class ZhaereyEngine(EngineBase):
+    name = "zhaarey"
+
+    def qualities(self) -> list[dict]:
+        return [{**q, "engine": self.name} for q in _QUALITIES]
+
+    def build_cmd(self, url: str, quality: str, config: dict) -> list[str]:
+        go    = config.get("use-go-run", False)
+        main  = config.get("main-go-path", "main.go")
+        gobin = config.get("go-path", "go")
+        flag  = _FLAGS.get(quality, "")
+        # Prefer the compiled binary — `go run` recompiles main.go on EVERY
+        # download (wastes seconds per task). Auto-detect the built binary at the
+        # project root; fall back to `go run` only in dev mode or if it's absent.
+        import os
+        _root = _Path(__file__).resolve().parent.parent.parent
+        bin_path = _root / ("apple-music-downloader.exe" if os.name == "nt"
+                            else "apple-music-downloader")
+        if (not go) and bin_path.is_file():
+            base = [str(bin_path)]
+        else:
+            base = [gobin, "run", main]
+        # Per-release lyrics checkbox (None = leave config.yaml's embed-lrc/
+        # save-lrc-file alone; True/False = this run only, nothing persisted).
+        lyrics_ov = config.get("_lyrics_override")
+        lyrics_flag = ["--lyrics=" + ("on" if lyrics_ov else "off")] if lyrics_ov is not None else []
+        # Разовые тип текста и произношение (бот / карточка): только для этого
+        # запуска, config.yaml не меняется. Значения уже проверены на входе в
+        # очередь, здесь повторяем проверку — задача может прийти мимо неё.
+        _lt = config.get("_lyrics_type_override")
+        if _lt in ("lyrics", "syllable-lyrics"):
+            lyrics_flag.append("--lyrics-type=" + _lt)
+        if config.get("_lyrics_extra_override") == "pronunciation":
+            lyrics_flag.append("--lyrics-extra=pronunciation")
+        # Single-track album link (/album/<slug>/<id>?i=<trackid>): main.go only
+        # honours the ?i= track selection under --song (main.go:1666), so without
+        # this flag a one-track link downloaded the WHOLE album. Add it ONLY when
+        # ?i= is present — --song without an `i` hits the empty branch above and
+        # silently saves nothing.
+        song_flag = []
+        try:
+            from urllib.parse import urlparse, parse_qs
+            if parse_qs(urlparse(url).query).get("i"):
+                song_flag = ["--song"]
+        except Exception:
+            pass
+        # Хост-псевдоним geo.music.apple.com (кнопка «Поделиться») регексы
+        # main.go не принимают вовсе. Очередь чинит это на входе, но задача
+        # может прийти и мимо неё — из бота или восстановленной очереди.
+        try:
+            from ripster.service_layer import normalize_url as _norm
+            url = _norm(url)
+        except Exception:
+            pass
+        # --json makes Go print a JSON array of saved tracks at the end so we
+        # can extract the exact output directory without guessing.
+        return base + ([flag] if flag else []) + lyrics_flag + song_flag + ["--json", url]
+
+    @staticmethod
+    def _json_tracks(line: str) -> Optional[list]:
+        """Extract the --json track array from a log line, tolerant of a prefix
+        (timestamp / log marker / "Saved:" label) before the array. The old code
+        required the line to *start* with '[' — any prefix made it return None, so
+        the runner got no output dir and the release was orphaned at the bare root
+        (= silent non-delivery). Tries every '[' until one json-decodes to a
+        non-empty array, so a bracketed log marker before the array is tolerated."""
+        line = line.strip()
+        j = line.rfind("]")
+        for i, ch in enumerate(line):
+            # Первый '[' принадлежит не массиву, а лог-маркеру («[INFO] »), поэтому
+            # перебираем ВСЕ открывающие скобки, а не полагаемся на первую.
+            if ch != "[" or j <= i:
+                continue
+            try:
+                v = _json.loads(line[i:j + 1])
+            except Exception:
+                continue
+            if isinstance(v, list) and v:
+                return v
+        return None
+
+    def extract_save_dir(self, log_text: str) -> Optional[str]:
+        """Parse the JSON summary line emitted by --json to get the output dir."""
+        for line in reversed(log_text.splitlines()):
+            tracks = self._json_tracks(line)
+            if tracks:
+                p = tracks[0].get("path", "") if isinstance(tracks[0], dict) else ""
+                if p:
+                    return str(_Path(p).parent)
+        return None
+
+    def extract_save_files(self, log_text: str) -> Optional[list[str]]:
+        """Exact basenames of the tracks THIS task saved, from the --json summary.
+        Lets the runner record a per-task file list instead of globbing the output
+        dir — two parallel Apple tasks can resolve to a shared/parent directory, and
+        a blind glob would pull in the OTHER task's files (issue #19). Returns None
+        when no JSON summary is present (caller falls back to the directory glob)."""
+        for line in reversed(log_text.splitlines()):
+            tracks = self._json_tracks(line)
+            if tracks:
+                names = [_Path(t.get("path", "")).name
+                         for t in tracks if isinstance(t, dict) and t.get("path")]
+                return names or None
+        return None
+
+    def iter_events(self, line: str, *, progress: tuple[int, int]):
+        clean = _strip_ansi(line)
+        if _RE_DECRYPT_FAIL.search(clean):
+            # «Invalid CKC» ≠ «сессия умерла». Второй частый случай — у контента
+            # нет прав в регионе аккаунта враппера. Раньше мы не различали:
+            # помечали враппер нездоровым на 15 минут и уводили ВСЮ lossless-
+            # загрузку на публичный wrapper (который регулярно лежит), а владельцу
+            # советовали перелогиниться — совет не просто бесполезный, а вредный:
+            # лишние логины жгут device-lease и загоняют аккаунт в throttle.
+            # 28.07.2026 так и вышло на альбоме, изданном только в tr/ru, при
+            # канадском аккаунте — в те же минуты этот же враппер расшифровал
+            # соседний альбом целиком.
+            #
+            # 22.09.2026 добавился ТРЕТИЙ случай, и он врал уже в обратную
+            # сторону: «сессия ЖИВА» проверялась у основного контейнера, а ключ
+            # запрашивал закреплённый за задачей слот, у которого внутри стоял
+            # device-limit. Поэтому здесь мы больше не выводим из живости сессии
+            # «нет прав в регионе» — права проверяет раннер по каталогу.
+            alive = False
+            try:
+                from ripster.apple_router import (mark_local_wrapper_unhealthy,
+                                                  local_wrapper_session_alive)
+                alive = local_wrapper_session_alive()
+                if not alive:
+                    mark_local_wrapper_unhealthy()
+            except Exception:
+                pass
+            if alive:
+                yield Event(
+                    kind=EventKind.FATAL,
+                    message="✗ Apple не выдал ключ на этот альбом (Invalid CKC), "
+                            "но сессия wrapper'а ЖИВА — значит перелогин не поможет "
+                            "и руками ничего делать не надо: Ripster перебирает "
+                            "остальные свои Apple-аккаунты и по каждому назовёт "
+                            "причину (витрина, лимит устройств, права).",
+                    level=LineLevel.ERROR,
+                )
+            else:
+                yield Event(
+                    kind=EventKind.FATAL,
+                    message="✗ Локальный wrapper не выдаёт ключ (Invalid CKC) и "
+                            "аккаунт-API молчит — Apple-сессия протухла/без "
+                            "подписки. Перелогинь wrapper в Setup → Apple → "
+                            "Wrapper (другие свои учётки тоже будут опрошены).",
+                    level=LineLevel.ERROR,
+                )
+            return
+        if _RE_RETRY.search(clean):
+            yield Event(
+                kind=EventKind.FATAL,
+                message="✗ zhaarey: ошибка загрузки (ALAC без враппера?). "
+                        "Запусти враппер в Setup или включи публичный wrapper.",
+                level=LineLevel.ERROR,
+            )
+            return
+        # yt-dlp segment/fragment noise — suppress from console
+        if _RE_NOISY.search(clean):
+            m = _RE_DL_PCT.search(clean)
+            if m:
+                yield Event(kind=EventKind.PROGRESS, current=int(float(m.group(1))), total=100)
+            return
+        yield from super().iter_events(line, progress=progress)
+
+    def classify_line(self, line: str) -> str:
+        l = line.lower()
+        # ИТОГОВАЯ СВОДКА — сначала. Go-загрузчик заканчивает прогон строкой
+        # «Completed: 10/10 | Warnings: 0 | Errors: 0», и в ней есть слово
+        # «Errors» — из-за чего успешное завершение окрашивалось в КРАСНОЕ и
+        # попадало в счётчик ошибок (09.08.2026: единственная «ошибка» часа
+        # оказалась сообщением об успехе). Смотрим на ЧИСЛО, а не на слово.
+        m = _RE_SUMMARY.search(line)
+        if m:
+            return "error" if int(m.group(1)) > 0 else "success"
+        if any(k in l for k in ("error","panic","fatal","exception")): return "error"
+        if "warning" in l or "no codec found" in l or "no lossless (alac)" in l: return "warn"
+        if any(k in l for k in ("completed","saved","done")):          return "success"
+        return "stdout"
+
+    def parse_progress(self, line: str, current: int, total: int) -> tuple[int, int]:
+        # Match "Track N of M" (in-progress marker) first, then fall back to
+        # "Completed: N/M" which the Go tool emits at end of each track.
+        m = _RE_TRACK.search(line)
+        if not m:
+            m = _RE_DONE.search(line)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        return current, total
+
+    async def search(self, query: str, search_type: str, limit: int, config: dict) -> list[dict]:
+        import httpx as _httpx
+        entity_map = {"album": "album", "track": "song", "artist": "musicArtist", "playlist": "playlist"}
+        entity = entity_map.get(search_type, "album")
+        lang = config.get("language", "en-US")
+        cc = lang.split("-")[-1].upper() if "-" in lang else "US"
+        try:
+            async with _HTTP.ashared(channel="api") as c:
+                r = await c.get("https://itunes.apple.com/search", params={
+                    "term": query, "entity": entity, "limit": limit,
+                    "country": cc, "media": "music",
+                })
+                data = r.json()
+            results = []
+            for item in data.get("results") or []:
+                full_date = (item.get("releaseDate") or "")[:10]
+                results.append({
+                    "id":     str(item.get("collectionId") or item.get("artistId") or item.get("trackId", "")),
+                    "title":  item.get("collectionName") or item.get("trackName") or item.get("artistName", ""),
+                    "artist": item.get("artistName", ""),
+                    "type":   search_type,
+                    "url":    item.get("collectionViewUrl") or item.get("trackViewUrl") or item.get("artistViewUrl", ""),
+                    "cover":  (item.get("artworkUrl100") or "").replace("100x100", "400x400"),
+                    "year":   full_date[:4],
+                    "date":   full_date,
+                    "label":  item.get("copyright", ""),
+                    "tracks": item.get("trackCount"),
+                    "service": "apple",
+                })
+            return results
+        except Exception:
+            return []
+
+    async def get_artist(self, artist_id: str, types: str, config: dict) -> dict:
+        import httpx as _httpx
+        import asyncio as _aio
+        from ripster import compilations as _comps
+        wanted = {t.strip() for t in types.split(",") if t.strip()}
+        lang = config.get("language", "en-US")
+        cc = lang.split("-")[-1].upper() if "-" in lang else "US"
+        try:
+            async def _lookup(entity, limit):
+                async with _HTTP.ashared(channel="api") as c:
+                    r = await c.get("https://itunes.apple.com/lookup", params={
+                        "id": artist_id, "entity": entity, "limit": limit,
+                        "country": cc,
+                    })
+                    return r.json().get("results") or []
+
+            async with _HTTP.ashared(channel="api") as c:
+                r = await c.get("https://itunes.apple.com/lookup", params={
+                    "id": artist_id, "entity": "album", "limit": 200, "country": cc,
+                })
+                album_results = r.json().get("results") or []
+            # Второй проход — трековый: у каждой строки есть родительская
+            # коллекция, и именно так в дискографию попадают VA-сборники и
+            # диджей-миксы, где у артиста одна дорожка. entity=album их НЕ
+            # отдаёт никогда (альбом-артист — не он), поэтому раньше они просто
+            # исчезали: жалоба владельца «рипстер открывает один трек вместо
+            # компилы» растёт отсюда.
+            try:
+                song_results = await _lookup("song", 200)
+            except Exception:
+                song_results = []
+            if not album_results:
+                return {"error": "Artist not found", "releases": []}
+            artist_rec = next((x for x in album_results
+                               if x.get("wrapperType") == "artist"), None)
+            albums = [x for x in album_results
+                      if x.get("wrapperType") == "collection"]
+            songs = [x for x in song_results
+                     if x.get("wrapperType") == "track"]
+            artist_name = (artist_rec or (albums[0] if albums else {})
+                           ).get("artistName", "") if (artist_rec or albums) else ""
+            # Алиасы того же человека (16BL ≡ 16 Bit Lolitas) — чтобы трек под
+            # прежним именем внутри чужого микса не читался чужим. Сеть/MВ
+            # блокирующие, уводим из цикла; любой сбой — пустая группа, и
+            # сравнение откатывается к строгому равенству имён.
+            alias_group = _comps.build_alias_group(frozenset())
+            if artist_name:
+                try:
+                    from ripster import musicbrainz as _mb
+                    al = await _aio.to_thread(_mb.artist_aliases, artist_name)
+                    alias_group = _comps.build_alias_group(al)
+                except Exception:
+                    pass
+            releases = _comps.scan_artist_releases(
+                albums, songs, artist_name, alias_group,
+                wanted or {"all"}, service="apple")
+            if artist_rec:
+                artist = {
+                    "id":      str(artist_rec.get("artistId", "")),
+                    "name":    artist_rec.get("artistName", ""),
+                    "picture": "",
+                    "genre":   artist_rec.get("primaryGenreName", ""),
+                    "url":     artist_rec.get("artistViewUrl") or artist_rec.get("artistLinkUrl", ""),
+                    "service": "apple",
+                }
+            else:
+                artist = {
+                    "id":     artist_id,
+                    "name":   artist_name or (albums[0].get("artistName", "") if albums else ""),
+                    "url":    albums[0].get("artistViewUrl", "") if albums else "",
+                    "service": "apple",
+                }
+            return {"artist": artist, "releases": releases}
+        except Exception as e:
+            return {"error": str(e), "releases": []}
+
+    async def _amp_album_upc(self, album_id: str, region: str, config: dict) -> str:
+        """Album barcode (UPC) from amp-api — the exact key that resolves the
+        SAME physical release on Deezer/Qobuz for cross-service playback (Apple
+        itself can't stream). iTunes lookup never returns it. Empty on any
+        failure (no bearer, 401, etc.) → cross-service play simply stays off."""
+        import httpx as _httpx
+        bearer = (config.get("authorization-token") or "").strip()
+        if not bearer or bearer == "your-authorization-token":
+            return ""
+        mut = (config.get("media-user-token") or "").strip()
+        sf = (region or "US").lower()
+        headers = {"Authorization": f"Bearer {bearer}",
+                   "Origin": "https://music.apple.com"}
+        if mut:
+            headers["media-user-token"] = mut
+        try:
+            async with _HTTP.ashared(channel="metadata") as c:
+                r = await c.get(
+                    f"https://amp-api.music.apple.com/v1/catalog/{sf}/albums/{album_id}",
+                    headers=headers)
+                if r.status_code != 200:
+                    return ""
+                data = (r.json().get("data") or [])
+                if not data:
+                    return ""
+                return str((data[0].get("attributes") or {}).get("upc") or "").strip()
+        except Exception:
+            return ""
+
+    async def _amp_album_tracks(self, album_id: str, region: str, config: dict) -> list:
+        """Full tracklist from the tokened amp-api (music.apple.com catalog).
+
+        The free iTunes lookup omits songs for continuous DJ-mixes; amp-api
+        returns them via the album→tracks relationship. Needs the developer
+        bearer (`authorization-token`) + `media-user-token` from config; on any
+        failure returns [] so the caller keeps the (empty) iTunes result.
+        """
+        import httpx as _httpx
+        bearer = (config.get("authorization-token") or "").strip()
+        if not bearer or bearer == "your-authorization-token":
+            return []
+        mut = (config.get("media-user-token") or "").strip()
+        sf = (region or "US").lower()
+        headers = {"Authorization": f"Bearer {bearer}",
+                   "Origin": "https://music.apple.com"}
+        if mut:
+            headers["media-user-token"] = mut
+        # amp-api со счетов учётки: треклист альбома — это до шести страниц одним
+        # заходом, а страницы эти идут одна за другой на каждой задаче очереди.
+        # Ровно так и набираются «тысячи запросов в сутки», за которые Apple
+        # отвечает 429, а потом банит (чат @apple_music_alac, 24.09).
+        from ripster import pacing
+        who = pacing.ident_for(mut or bearer)
+        if not await pacing.allow("apple", who, config):
+            return []
+        out: list = []
+        try:
+            async with _HTTP.ashared(channel="metadata") as c:
+                url = (f"https://amp-api.music.apple.com/v1/catalog/{sf}"
+                       f"/albums/{album_id}/tracks")
+                # Follow pagination so long mixes (40+ segments) come back whole.
+                params = {"limit": 100}
+                for _ in range(6):
+                    r = await c.get(url, params=params, headers=headers)
+                    pacing.outcome("apple", who, r.status_code)
+                    if r.status_code != 200:
+                        break
+                    data = r.json()
+                    for it in data.get("data") or []:
+                        a = it.get("attributes") or {}
+                        out.append({
+                            "id":       str(it.get("id", "")),
+                            "title":    a.get("name", ""),
+                            "artist":   a.get("artistName", ""),
+                            "duration": (a.get("durationInMillis") or 0) // 1000,
+                            "track_no": a.get("trackNumber"),
+                            "disc":     a.get("discNumber"),
+                            "preview":  ((a.get("previews") or [{}])[0].get("url", "")),
+                            "explicit": (a.get("contentRating") == "explicit"),
+                            "url":      a.get("url", ""),
+                        })
+                    nxt = data.get("next")
+                    if not nxt:
+                        break
+                    # `next` is a path like /v1/catalog/.../tracks?offset=100
+                    url = "https://amp-api.music.apple.com" + nxt.split("?")[0]
+                    off = ""
+                    if "offset=" in nxt:
+                        off = nxt.split("offset=")[-1].split("&")[0]
+                    params = {"limit": 100, "offset": off} if off else {"limit": 100}
+        except Exception:
+            return out
+        return out
+
+    async def get_album(self, album_id: str, config: dict) -> dict:
+        import httpx as _httpx
+        lang = config.get("language", "en-US")
+        cc = lang.split("-")[-1].upper() if "-" in lang else "US"
+        # Probe the account region first, then others (NZ early — pre-releases
+        # land there first), so a release not yet live in the account region
+        # still opens its card instead of "Album not found".
+        regions = [cc] + [r for r in ("NZ", "US", "AU", "CA", "JP", "DE", "GB") if r != cc]
+        try:
+            results = []
+            matched_rc = cc
+            async with _HTTP.ashared(channel="api") as c:
+                for rc in regions:
+                    try:
+                        r = await c.get("https://itunes.apple.com/lookup", params={
+                            "id": album_id, "entity": "song", "limit": 200, "country": rc,
+                        })
+                        results = r.json().get("results") or []
+                    except Exception:
+                        results = []
+                    if results:
+                        matched_rc = rc
+                        break
+            if not results:
+                return {"error": "Album not found"}
+            album_rec = next((x for x in results if x.get("wrapperType") == "collection"), None)
+            songs = [x for x in results if x.get("wrapperType") == "track"]
+            if not album_rec:
+                return {"error": "Album record missing"}
+            tracks = []
+            for s in songs:
+                tracks.append({
+                    "id":       str(s.get("trackId", "")),
+                    "title":    s.get("trackName", ""),
+                    "artist":   s.get("artistName", ""),
+                    "duration": (s.get("trackTimeMillis") or 0) // 1000,
+                    "track_no": s.get("trackNumber"),
+                    "disc":     s.get("discNumber"),
+                    "preview":  s.get("previewUrl", ""),
+                    "explicit": (s.get("trackExplicitness") == "explicit"),
+                    "url":      s.get("trackViewUrl", ""),
+                })
+            # DJ-mixes / continuous mixes: the free iTunes lookup returns the
+            # collection but ZERO song rows (trackCount>0, songs=[]). The tokened
+            # amp-api DOES expose them (same source mp3tag reads) — pull the
+            # tracklist from there so the card isn't a dead "no tracklist" wall.
+            if not tracks and (album_rec.get("trackCount") or 0) > 0:
+                amp = await self._amp_album_tracks(album_id, matched_rc, config)
+                if amp:
+                    tracks = amp
+            # Album barcode → lets the album play cross-service (same release on
+            # Deezer by UPC); Apple has no stream of its own. Best-effort.
+            upc = await self._amp_album_upc(album_id, matched_rc, config)
+            return {
+                "album": {
+                    "id":     str(album_rec.get("collectionId", "")),
+                    "title":  album_rec.get("collectionName", ""),
+                    "artist": album_rec.get("artistName", ""),
+                    "cover":  (album_rec.get("artworkUrl100", "") or "").replace("100x100", "1200x1200"),
+                    "year":   (album_rec.get("releaseDate", "") or "")[:4],
+                    "date":   (album_rec.get("releaseDate", "") or "")[:10],
+                    "label":  album_rec.get("copyright", ""),
+                    "genre":  album_rec.get("primaryGenreName", ""),
+                    "tracks": album_rec.get("trackCount"),
+                    "url":    album_rec.get("collectionViewUrl", ""),
+                    "upc":    upc,
+                    "service":"apple",
+                },
+                "tracks": tracks,
+            }
+        except Exception as e:
+            return {"error": str(e)}
+
+    def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
+        m = _RE_DONE.search(log_text)
+        if m:
+            ok, total = int(m.group(1)), int(m.group(2))
+            if ok == 0 and _RE_UNAVAIL.search(log_text):
+                # "Completed: 0/N" with an Unavailable line above it is the same
+                # quiet give-up _RE_UNAVAIL exists to catch below — just WITH a
+                # summary line this time. Surface the real reason instead of an
+                # empty-error failure that renders as bare "Exit code 0" after
+                # the partial-retry loop exhausts itself (see runner.py msg =
+                # result.error or f"Exit code {rc}").
+                return EngineResult(False, tracks_ok=0, tracks_err=total, error=(
+                    "Apple: трек недоступен в этом регионе/качестве (Unavailable) — "
+                    "у этой учётки нет прав на него. Поможет ссылка из той витрины, "
+                    "где релиз есть, или другое качество."))
+            if ok == 0:
+                # Ноль из N БЕЗ распознанной причины. Раньше сюда попадал
+                # `EngineResult` с пустым `error`, и runner рендерил его как
+                # `Exit code {rc}` — а rc был НУЛЁМ. Гость 23.08.2026 получил
+                # ровно «✗ Exit code 0» на сингле, у которого в логе строкой выше
+                # стояло «Failed to extract info from manifest: no codec found».
+                # Код знал причину, человек — нет.
+                #
+                # Перечислять все формулировки загрузчика бессмысленно: их пишет
+                # чужая программа и меняет от версии к версии. Поэтому берём
+                # последнюю содержательную строку его собственного лога.
+                return EngineResult(False, tracks_ok=0, tracks_err=total,
+                                    error=_last_reason(log_text, total))
+            return EngineResult(success=ok > 0, tracks_ok=ok, tracks_err=total-ok)
+        # Local docker wrapper couldn't mint a content key (logs "Invalid CKC").
+        # This is the decrypt path, NOT the gamdl cookies (those feed
+        # AAC/video/metadata and can be perfectly valid here), and is_finished is
+        # what the card / bot / guest actually display — so it has to say
+        # something better than "unknown finish state".
+        #
+        # What it must NOT do is name a CAUSE. The engine sees one process log and
+        # cannot tell an expired session from a device-lease refusal from a slot
+        # with no account inside. 22.09.2026 this line asserted "сессия протухла
+        # или без активной подписки" while slot 0's session was verifiably alive
+        # and the pinned slot was sitting on `response type 6`; the owner acted on
+        # the wrong diagnosis. The per-slot reason belongs to the runner's ladder,
+        # which asks each wrapper container and reports slot by slot.
+        if _RE_DECRYPT_FAIL.search(log_text):
+            return EngineResult(False, error=(
+                "Локальный wrapper не выдал ключ (Invalid CKC). Куки тут ни при "
+                "чём (они для AAC/видео/метаданных). Почему именно — говорит "
+                "перебор своих учёток: он спрашивает каждый слот враппера и "
+                "называет причину по каждому (сессия, лимит устройств, права "
+                "витрины)."))
+        if _RE_DECRYPT_NA.search(log_text):
+            return EngineResult(False, error=(
+                "Apple: декрипт недоступен для этих треков — wrapper не смог их "
+                "расшифровать. Файлы НЕ сохранены. Причина не в куках; её называет "
+                "перебор своих учёток (по каждому слоту). Повтори позже или "
+                "перелогинь wrapper в Setup → Apple → Wrapper."))
+        if _RE_NO_LOSSLESS.search(log_text):
+            m = re.search(r"no (?:lossless \(ALAC\)|ALAC) stream[^\n]*", log_text, re.I)
+            detail = (m.group(0).strip() if m else "нет ALAC-потока")
+            error_key = "err.apple_no_lossless"
+            return EngineResult(False, error=(
+                f"Apple: у релиза нет lossless — {detail}. "
+                "Часто так у переизданий «… Edition» (только Dolby Atmos). "
+                "Перекачай в AAC (Настройки → качество) или качай оригинальный релиз, а не spatial-версию."))
+        if _RE_TOKEN.search(log_text):
+            return EngineResult(False, error="failed to get token — wrapper not authenticated")
+        if _RE_RIP_401.search(log_text):
+            return EngineResult(False, error=(
+                "Apple: сессия загрузчика потеряла авторизацию (401) — media-user-token "
+                "протух, устройство отвязано или кончилась подписка Apple Music. "
+                "Загрузка Apple временно недоступна, пока владелец не обновит токен."))
+        if rc == 0:
+            # Exit 0 but no "Completed: N/M" summary above. If the log shows the
+            # track(s) were Unavailable / failed to download, zhaarey just gave up
+            # quietly — that's NOT success (it used to be reported as done with 0
+            # files → silent non-delivery).
+            if _RE_UNAVAIL.search(log_text):
+                return EngineResult(False, error=(
+                    "Apple: трек недоступен в этом регионе/качестве (Unavailable) — "
+                    "у этой учётки нет прав на него. Поможет ссылка из той витрины, "
+                    "где релиз есть, или другое качество."))
+            # Нулевой код возврата САМ ПО СЕБЕ ничего не утверждает: настоящая
+            # победа загрузчика всегда помечена строкой — «Completed: N/M» (её
+            # ветка выше), «… saved», «Finished with 0 error(s)» или --json
+            # массивом сохранённых файлов. Не «успех» и пустой лог: там
+            # спрашивать нечего (пин test_zhaarey_is_finished).
+            if not log_text.strip():
+                return EngineResult(success=True)
+            low = log_text.lower()
+            if "saved" in low or re.search(r"finished with 0 error", low):
+                # Положительный маркер есть, но сводки «Completed: N/M» нет —
+                # число сохранённых по этому логу не назвать: tracks_ok=0, как и
+                # было до правки (вердикт считается по маркеру, не по «Queued»).
+                return EngineResult(success=True)
+            # Ни сводки, ни одного сохранённого трека, ни причины — выдумывать
+            # успех нечем: «Готово, 0 треков» (23.08.2026) ровно так и выглядело.
+            return EngineResult(False, tracks_ok=0,
+                                error=_last_reason(log_text, 0))
+        return EngineResult(False, error="unknown finish state")
+
+
+def _last_reason(log_text: str, total: int) -> str:
+    """Последняя осмысленная строка загрузчика — вместо пустого отказа.
+
+    Ищем снизу вверх: предупреждения и ошибки несут причину, строки прогресса и
+    итоговая сводка — нет. Если не нашлось ничего, говорим об этом прямо, а не
+    подставляем код возврата: `Exit code 0` не сообщает ВООБЩЕ ничего и читается
+    как «программа отработала успешно», хотя не скачано ни одного трека.
+    """
+    _skip = ("completed:", "warnings:", "errors:", "[step]", "[ok]", "downloading",
+             "progress", "=======")
+    for raw in reversed((log_text or "").splitlines()):
+        line = raw.strip()
+        if not line or len(line) < 12:
+            continue
+        low = line.lower()
+        if any(k in low for k in _skip):
+            continue
+        if any(k in low for k in ("fail", "error", "unavailable", "warning",
+                                  "not found", "no codec", "invalid", "denied",
+                                  "unable", "cannot", "не удалось")):
+            return f"Apple: {line[:220]}"
+    if not total:
+        # «0 из 0» — загрузчику НЕЧЕГО было качать: витрина не отдала ни одного
+        # трека по этой ссылке. Раньше сюда приходило «не назвал причину», и
+        # задача трижды повторяла заведомо пустой запрос (20.09.2026: битый id
+        # трека — 218 с и три одинаковых прогона вместо одной честной строки).
+        return ("Apple: по этой ссылке в каталоге ничего нет — проверь ссылку "
+                "и регион витрины (storefront)")
+    return (f"Apple: загрузчик завершился, не скачав ни одного трека из {total}, "
+            f"и не назвал причину — смотри консоль задачи")
+

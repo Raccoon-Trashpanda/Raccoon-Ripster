@@ -1,0 +1,3894 @@
+"""
+Discovery routes — search, artist page, album page.
+
+Three services:
+  * Apple Music — via public iTunes Search / Lookup API (no auth)
+  * Deezer     — via public api.deezer.com (no auth)
+  * Qobuz      — via www.qobuz.com/api.json (needs app_id + optional auth-token)
+
+Each endpoint returns a uniform JSON shape so the frontend doesn't care which
+service answered. Search returns ``{results: [...]}``, artist pages return
+``{artist, releases}``, album pages return ``{album, tracks}``.
+
+Installation: ``install(app, config)`` — attach the router and inject the
+app's config dict (used by Qobuz helpers for ``app_id`` and ``auth-token``).
+"""
+from __future__ import annotations
+
+import html as _html_mod
+import re as _re_mod
+import time as _time
+
+from ripster import http_client as _HTTP
+from fastapi import APIRouter, HTTPException, Request
+from ripster.i18n_msg import imsg
+
+router = APIRouter()
+_config: dict = {}   # populated by install()
+
+_QOBUZ_DEFAULT_APP_ID = "312369995"   # public QobuzDownloaderX-compatible app_id (old 798273057 now 401s); works for search without auth
+
+# ── In-process caches ────────────────────────────────────────────────────────
+_sp_app_token:   dict = {"token": "", "expires_at": 0.0}
+_sp_album_cache: dict = {}   # album_id         -> (result_dict, expire_ts)
+_sp_artist_cache: dict = {}  # "artist_id:types" -> (result_dict, expire_ts)
+_SP_ALBUM_TTL  = 1800        # 30 min
+_SP_ARTIST_TTL = 900         # 15 min
+_sp_label_cache: dict = {}   # album_id -> настоящий label из /v1/albums (навсегда: лейбл релиза не меняется)
+_sp_label_cache_loaded = False
+
+
+def _sp_label_cache_path():
+    import os
+    from pathlib import Path as _P
+    base = _P(os.environ.get("RIPSTER_BASE_DIR") or _P(__file__).resolve().parent.parent.parent)
+    p = base / "dist" / "spotify_labels.json"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _sp_label_cache_load() -> None:
+    """Поднять подтверждённые лейблы с диска.
+
+    Замысел сверки прямо на это и опирается: потолок в
+    `_SP_SINGLE_VERIFY_CAP` не теряет данные, «следующий обход досверяет
+    следующую порцию, и через несколько проходов подтверждено всё». Но кэш жил
+    только в памяти процесса — и каждый перезапуск app обнулял всё накопленное,
+    после чего радар заново тратил суточную квоту Spotify на те же релизы.
+    04.09.2026 у владельца квота выбрана на 17 ч 28 мин, а Deezer и Tidal в тот
+    же момент отвечают нормально: чинить надо расход, а не блокировку.
+
+    Лейбл релиза не меняется, поэтому диск здесь уместен. Пишем ТОЛЬКО
+    непустые значения: пустое — это «не подтвердили» (403/429 в тот момент), и
+    сохранять его значило бы навсегда закрепить неудачу проверки как факт.
+    """
+    global _sp_label_cache_loaded
+    if _sp_label_cache_loaded:
+        return
+    _sp_label_cache_loaded = True
+    try:
+        import json as _j
+        d = _j.loads(_sp_label_cache_path().read_text(encoding="utf-8"))
+        if isinstance(d, dict):
+            for k, v in d.items():
+                if isinstance(v, str) and v.strip():
+                    _sp_label_cache.setdefault(k, v)
+            print(f"[label] поднято подтверждённых лейблов с диска: {len(d)}", flush=True)
+    except FileNotFoundError:
+        pass
+    except Exception as e:                       # noqa: BLE001
+        print(f"[label] кэш лейблов не прочитан: {e!r}", flush=True)
+
+
+def _sp_label_cache_save() -> None:
+    try:
+        import json as _j
+        good = {k: v for k, v in _sp_label_cache.items() if isinstance(v, str) and v.strip()}
+        if not good:
+            return
+        _sp_label_cache_path().write_text(_j.dumps(good, ensure_ascii=False, indent=1),
+                                          encoding="utf-8")
+    except Exception as e:                       # noqa: BLE001
+        print(f"[label] кэш лейблов не сохранён: {e!r}", flush=True)
+_sp_rate_limit_until: float = 0.0   # epoch-seconds; Spotify API blocked until this time
+
+
+def _record_sp_rate_limit(retry_after: int) -> None:
+    global _sp_rate_limit_until, _sp_bg_fail_streak
+    _sp_rate_limit_until = _time.time() + max(retry_after, 5)
+    # Любой 429 (фон или интерактив) — сигнал фону дышать чаще: бан общий,
+    # и продлить его повторным стуком нельзя даже интерактивной кнопкой.
+    _sp_bg_fail_streak += 1
+
+
+def _sp_rate_limit_msg() -> str:
+    """Human-readable 'wait until …' string; call only when rate-limited."""
+    remaining = int(_sp_rate_limit_until - _time.time())
+    if remaining <= 0:
+        return "лимит запросов Spotify"
+    if remaining < 120:
+        return f"лимит запросов Spotify, подожди {remaining}с"
+    if remaining < 3600:
+        mins = (remaining + 59) // 60
+        return f"лимит запросов Spotify, подожди {mins} мин"
+    hrs  = remaining // 3600
+    mins = (remaining % 3600) // 60
+    tail = f" {mins} мин" if mins else ""
+    return f"лимит запросов Spotify — блокировка на {hrs} ч{tail} (слишком много запросов к API)"
+
+
+def _sp_unban_clock() -> str:
+    """Локальные часы (HH:MM), до которых длится бан Spotify. Человек мыслит
+    моментом снятия, а не длительностью: «до 23:41» честнее, чем «ещё 2 ч 11»,
+    когда неизвестно, с какого часа считать. `localtime` — без tzdata (на этой
+    машине его нет), поэтому опираемся на системное локальное время."""
+    try:
+        return _time.strftime("%H:%M", _time.localtime(_sp_rate_limit_until))
+    except Exception:
+        return ""
+
+
+def _sp_rate_limit_i18n() -> tuple[str, dict]:
+    """Тот же текст, но ключом и числами — чтобы английский интерфейс не получал
+    русскую фразу. Русский `error` рядом остаётся: его читают бот и healthcheck,
+    живущие в русской среде."""
+    remaining = int(_sp_rate_limit_until - _time.time())
+    if remaining <= 0:
+        return "err.sp_rl_now", {}
+    if remaining < 120:
+        return "err.sp_rl_sec", {"s": remaining}
+    if remaining < 3600:
+        return "err.sp_rl_min", {"m": (remaining + 59) // 60}
+    return "err.sp_rl_hr", {"h": remaining // 3600, "m": (remaining % 3600) // 60}
+
+
+def _sp_rate_limit_payload() -> dict:
+    """Готовые поля отказа по лимиту: русский текст + ключ + подстановки."""
+    key, args = _sp_rate_limit_i18n()
+    return {"error": _sp_rate_limit_msg(), "error_key": key, "error_args": args}
+
+
+def _sp_is_rate_limited() -> bool:
+    return _time.time() < _sp_rate_limit_until
+
+
+# ── Бюджет ФОНОВЫХ запросов к Spotify ────────────────────────────────────────
+#
+# Радар (сверка лейблов, обход вотчлиста, кросс-сервисная сопоставка) ходит к
+# Spotify ТЕМ ЖЕ app-токеном, что и интерактивное ▶ в релиз-радаре. Spotify
+# банит токен, а не вызывающего: обход на сотни одиночных /v1/albums выбивал
+# 429, токен уходил в бан на часы (Retry-After до 12 ч, 23.08.2026), и 23.09
+# нажатие ▶ отвечало «блокировка на 2 ч 11 мин» — человек лишался звука потому,
+# что что-то где-то фоново сверяло лейблы.
+#
+# Правила:
+#   * фону — маленький скользящий бюджет (окно 60 с, не более N запросов, пауза
+#     между запросами); интерактивные запросы бюджет НЕ тратят и идут всегда;
+#   * первый же 429 ОСТАНАВЛИВАЕТ фоновый цикл и разносит интервалы запросов
+#     экспоненциально — в стену ногами не ходим;
+#   * отказ бюджета — не ошибка: релиз остаётся «неподтверждённым в этот раз»,
+#     следующий обход досверяет его следующей порцией.
+_SP_BG_WINDOW     = 60.0   # сек, скользящее окно
+_SP_BG_MAX        = 8      # фоновых запросов в окно — на порядок ниже порога Spotify
+_SP_BG_GAP        = 2.0    # минимальная пауза между двумя фоновыми запросами, сек
+_SP_BG_GAP_CAP    = 16     # потолок множителя расхода паузы
+_sp_bg_hist: list = []
+_sp_bg_gap_until: float = 0.0
+_sp_bg_fail_streak: int = 0
+
+
+def _sp_bg_admit() -> bool:
+    """Пускать ли ОДИН фоновый запрос к Spotify? Вызов потребляет разрешение."""
+    global _sp_bg_gap_until
+    if _sp_is_rate_limited():
+        return False
+    now = _time.time()
+    if now < _sp_bg_gap_until:
+        return False
+    _sp_bg_hist[:] = [x for x in _sp_bg_hist if now - x < _SP_BG_WINDOW]
+    if len(_sp_bg_hist) >= _SP_BG_MAX:
+        return False
+    _sp_bg_hist.append(now)
+    _sp_bg_gap_until = now + _SP_BG_GAP * (2 ** min(_sp_bg_fail_streak, _SP_BG_GAP_CAP))
+    return True
+
+
+async def _sp_bg_admit_wait() -> bool:
+    """То же разрешение, но с одной короткой паузой, если щель свежая.
+
+    «Альбом → треки» — ОДИН логический обход, а каждое разрешение сдвигает
+    паузу на 2 с: без ожидания вторая половина sequence отбивалась молча,
+    ISRC из Spotify не добывался никогда, и релиз с другим штрихкодом в
+    магазине оставался «нигде нет» (замер 24.09.2026). Долги бан не ждём."""
+    if _sp_bg_admit():
+        return True
+    wait = _sp_bg_gap_until - _time.time()
+    if 0 < wait <= _SP_BG_GAP:
+        import asyncio
+        await asyncio.sleep(wait)
+    return _sp_bg_admit()
+
+
+def _sp_bg_state_reset() -> None:
+    """Только для тестов и перезапуска: забыть накопленный бюджет и провалы."""
+    global _sp_bg_gap_until, _sp_bg_fail_streak
+    _sp_bg_hist.clear()
+    _sp_bg_gap_until = 0.0
+    _sp_bg_fail_streak = 0
+
+
+def install(app, ctx) -> None:
+    global _config
+    _config = ctx.config
+    app.include_router(router)
+
+
+# ── Lyrics (LRCLIB) ────────────────────────────────────────────────────────
+def _lrc_candidates(artist: str, track: str) -> list[tuple[str, str]]:
+    """Пары (артист, название) от точной к самой упрощённой.
+
+    lrclib — общественная база, и в ней лежат ОРИГИНАЛЬНЫЕ названия. У нас же
+    названия приходят из каталога стриминга, где к ним приклеены украшения
+    версии и полный список соавторов:
+
+        anamē & Above & Beyond — Gratitude (feat. Marty Longstaff) [Mixed]  → 404
+        Above & Beyond         — Gratitude                                  → есть
+
+    Поэтому не один запрос, а лестница: снимаем по одному «слою» и на каждом
+    шаге пробуем снова. Порядок важен — первым идёт самый точный вариант, чтобы
+    у трека с честным совпадением не подхватился чужой ремикс.
+    """
+    import re as _re
+
+    def clean(t: str, level: int) -> str:
+        s = t.strip()
+        if level >= 1:                       # [Mixed], [Radio Edit], [Explicit]
+            s = _re.sub(r"\s*\[[^\]]*\]", "", s)
+        if level >= 2:                       # (feat. …), (with …)
+            s = _re.sub(r"\s*\((?:feat|ft|with)\.?[^)]*\)", "", s, flags=_re.I)
+        if level >= 3:                       # (… Mix), (… Remix), (… Version)
+            s = _re.sub(r"\s*\([^)]*(?:mix|remix|edit|version|dub)\)", "", s, flags=_re.I)
+        return _re.sub(r"\s{2,}", " ", s).strip(" -–—")
+
+    # Соавторы: пробуем всю склейку, затем каждого по отдельности. Первым — тот,
+    # кто указан последним: в наших склейках основной исполнитель часто идёт
+    # после приглашённого («anamē & Above & Beyond» — релиз Above & Beyond).
+    #
+    # 🔴 По «&» делим ТОЛЬКО если в строке есть запятая. Иначе «Above & Beyond»
+    # разваливается на «Above» и «Beyond» — двух несуществующих артистов, и
+    # лестница запросов начинает искать чушь. Ровно на этом уже обжигались в
+    # подсказках вишлиста; правило записано в памяти проекта.
+    sep = r"\s*(?:,|/|\bfeat\.?\b|\bft\.?\b)\s*"
+    if "," in artist:
+        sep = r"\s*(?:&|,|/|\bfeat\.?\b|\bft\.?\b)\s*"
+    parts = [p.strip() for p in _re.split(sep, artist, flags=_re.I) if p.strip()]
+    artists = [artist.strip()] + [p for p in reversed(parts) if p != artist.strip()]
+
+    # «Хвосты» по «&», от длинного к короткому: «anamē & Above & Beyond» даёт
+    # «Above & Beyond» — именно он и находится в базе. Так мы добираемся до
+    # настоящего имени группы, не разрывая его пополам: длинный хвост пробуется
+    # раньше короткого, поэтому «Above & Beyond» опережает бессмысленное
+    # «Beyond», и до последнего дело обычно не доходит.
+    amp = [p.strip() for p in artist.split("&") if p.strip()]
+    for start in range(1, len(amp)):
+        tail = " & ".join(amp[start:])
+        if tail and tail not in artists:
+            artists.append(tail)
+
+    seen, out = set(), []
+    for lvl in (0, 1, 2, 3):
+        t = clean(track, lvl)
+        if not t:
+            continue
+        for a in artists:
+            key = (a.lower(), t.lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((a, t))
+    return out
+
+
+_RE_LRC_STAMP = _re_mod.compile(r"^\s*\[\d{1,2}:\d{2}(?:[.:]\d{1,3})?\]", _re_mod.M)
+
+
+def _split_lrc(text: str) -> dict:
+    """Разложить текст на synced/plain по наличию таймкодов.
+
+    Один и тот же тег может содержать и то и другое: наш загрузчик кладёт LRC с
+    метками, когда Apple их дала, и голый текст, когда нет.
+    """
+    text = (text or "").strip()
+    if not text:
+        return {"synced": "", "plain": ""}
+    if _RE_LRC_STAMP.search(text):
+        return {"synced": text, "plain": _RE_LRC_STAMP.sub("", text).strip()}
+    return {"synced": "", "plain": text}
+
+
+def _lyrics_from_file(path: str) -> dict:
+    """Текст, вшитый в САМ файл. Самый точный источник: угадывать нечего.
+
+    Для локального трека это правильный первый шаг — ни сети, ни сопоставления
+    по названию, которое у миксов и коллабов регулярно мажет.
+    """
+    try:
+        from ripster.routes.library import _safe_resolve
+        import mutagen
+        real = _safe_resolve(path)
+        if not real.is_file():
+            return {}
+        a = mutagen.File(str(real), easy=False)
+        if a is None or not a.tags:
+            return {}
+        raw = ""
+        # MP4/M4A (ALAC, AAC)
+        # У Vorbis-тегов (FLAC/OGG) `get("©lyr")` бросает ValueError — ключ
+        # недопустим, — и общий except ниже прятал вшитый LYRICS: текст из FLAC
+        # не читался вовсе (12.10.2026). Поэтому этот ключ — в своём try.
+        try:
+            v = a.tags.get("\xa9lyr") if hasattr(a.tags, "get") else None
+        except Exception:
+            v = None
+        if v:
+            raw = str(v[0]) if isinstance(v, list) else str(v)
+        # FLAC / Vorbis
+        if not raw:
+            for k in ("LYRICS", "lyrics", "UNSYNCEDLYRICS", "unsyncedlyrics"):
+                v = a.tags.get(k) if hasattr(a.tags, "get") else None
+                if v:
+                    raw = v[0] if isinstance(v, list) else str(v)
+                    break
+        # MP3 (ID3 USLT — ключ содержит язык и описание)
+        if not raw:
+            for k in list(getattr(a.tags, "keys", lambda: [])()):
+                if str(k).startswith("USLT"):
+                    raw = str(a.tags[k].text if hasattr(a.tags[k], "text") else a.tags[k])
+                    break
+        out = _split_lrc(raw)
+        return {**out, "source": "файл"} if (out["synced"] or out["plain"]) else {}
+    except Exception as e:                                      # noqa: BLE001
+        print(f"[lyrics] file tag not read: {e}", flush=True)
+        return {}
+
+
+async def _lyrics_from_apple(song_id: str) -> dict:
+    """Текст из каталога Apple ПО ID — тоже без угадывания.
+
+    Магазин перебираем так же, как в загрузчике: текст живёт в магазине
+    ПОДПИСКИ, а не в том, что стоит в ссылке (08.08.2026: ru → 404, ca → 200).
+    Apple отдаёт TTML; при `itunes:timing="Line"` у строк есть begin= — из них
+    собираем обычный LRC. Пословной разметки нашему токену не дают, поэтому
+    караоке по словам не обещаем.
+    """
+    cfg = _config or {}
+    bearer = str(cfg.get("authorization-token") or "")
+    mut = str(cfg.get("media-user-token") or "")
+    if not (song_id and bearer and len(mut) > 50):
+        return {}
+    fronts, seen = [], set()
+    for s in (cfg.get("apple-country"), cfg.get("storefront"), "us"):
+        s = str(s or "").strip().lower()
+        if s and s not in seen:
+            seen.add(s); fronts.append(s)
+    hdr = {"Authorization": f"Bearer {bearer}", "Origin": "https://music.apple.com",
+           "Referer": "https://music.apple.com/", "Cookie": f"media-user-token={mut}"}
+    try:
+        async with _HTTP.ashared() as c:
+            for sf in fronts:
+                r = await c.get(
+                    f"https://amp-api.music.apple.com/v1/catalog/{sf}/songs/{song_id}/lyrics",
+                    params={"l": "en-US"}, headers=hdr)
+                if r.status_code != 200:
+                    continue
+                data = (r.json().get("data") or [{}])[0]
+                ttml = (data.get("attributes") or {}).get("ttml") or ""
+                if not ttml:
+                    continue
+                return {**_ttml_to_lyrics(ttml), "source": f"Apple ({sf})"}
+    except Exception as e:                                      # noqa: BLE001
+        print(f"[lyrics] Apple: {e}", flush=True)
+    return {}
+
+
+def _ttml_to_lyrics(ttml: str) -> dict:
+    """TTML → {synced (LRC), plain}. Умеет и построчный тайминг, и его отсутствие."""
+    def _to_sec(v: str) -> float:
+        v = (v or "").strip()
+        if v.endswith("s") and ":" not in v:
+            try: return float(v[:-1])
+            except ValueError: return 0.0
+        parts = v.split(":")
+        try:
+            parts = [float(x) for x in parts]
+        except ValueError:
+            return 0.0
+        sec = 0.0
+        for p in parts:
+            sec = sec * 60 + p
+        return sec
+
+    lines = _re_mod.findall(r"<p\b([^>]*)>(.*?)</p>", ttml, _re_mod.S)
+    plain, lrc = [], []
+    for attrs, inner in lines:
+        text = _re_mod.sub(r"<[^>]+>", "", inner)
+        text = _html_mod.unescape(text).strip()
+        if not text:
+            continue
+        plain.append(text)
+        m = _re_mod.search(r'begin="([^"]+)"', attrs)
+        if m:
+            s = _to_sec(m.group(1))
+            lrc.append(f"[{int(s // 60):02d}:{s % 60:05.2f}]{text}")
+    return {"synced": "\n".join(lrc) if lrc else "", "plain": "\n".join(plain)}
+
+
+@router.get("/api/lyrics")
+async def lyrics(artist: str = "", track: str = "", album: str = "", duration: int = 0,
+                 path: str = "", apple_id: str = "", isrc: str = "",
+                 tidal_id: str = "", spotify_id: str = "", deezer_id: str = ""):
+    return await lyrics_ladder(artist=artist, track=track, album=album, duration=duration,
+                               path=path, apple_id=apple_id, isrc=isrc,
+                               tidal_id=tidal_id, spotify_id=spotify_id,
+                               deezer_id=deezer_id)
+
+
+async def lyrics_ladder(artist: str, track: str, album: str = "", duration: int = 0,
+                        path: str = "", apple_id: str = "", isrc: str = "",
+                        tidal_id: str = "", spotify_id: str = "", deezer_id: str = "",
+                        words: bool = True) -> dict:
+    """Текст песни из первого источника, который его отдал.
+
+    Это ещё и чистая (не HTTP) точка входа: ею запускается
+    `/api/pair/lyrics` для телефона. `words=False` пропускает пословной
+    ход Apple — телефон берет его отдельным запросом, платить за
+    него здесь второй раз нечего.
+
+    Лестница по убыванию точности:
+
+      1. тег самого файла            — ничего не угадывает
+      2. Apple по ID трека           — точное попадание
+      3. Tidal / Spotify / Deezer    — по ID, если он известен; иначе поиск
+      4. lrclib.net                  — общественная база, поиск по строке
+
+    Порядок не случаен. Первые два не могут ошибиться адресом. Сервисы дальше
+    ищут по «артист + название», поэтому у них есть проверки на совпадение и на
+    длительность, а lrclib стоит последним: у миксов и коллабов он мажет чаще,
+    чем попадает.
+
+    Ответ всегда одной формы: {synced, plain, source}. Пустой — если текста нет
+    нигде; поле `source` тогда пустое.
+    """
+    # Лучший, а не первый (12.10.2026): раньше первый же ответ закрывал лестницу,
+    # и голый текст из тега или построчный из Tidal прятал пословный из другого
+    # источника. Теперь собираем кандидатов и берём с лучшим качеством:
+    # пословный > построчный > голый; при равенстве выигрывает более ранний.
+    cands_got: list = []
+
+    def _q(g: dict) -> int:
+        return 3 if g.get("words") else 2 if g.get("synced") else 1 if g.get("plain") else 0
+
+    def _best() -> dict:
+        ok = [g for g in cands_got if _q(g)]
+        return max(ok, key=_q) if ok else {}
+
+    if path:
+        got = _lyrics_from_file(path)
+        if got:
+            cands_got.append(got)
+    # Пословно (караоке) из Apple `syllable-lyrics` — высшая точность. Раньше
+    # считали, что «пословной не дают», но она есть в storefront ПОДПИСКИ
+    # (14.09.2026). Отдаём `words` для караоке-рендера + построчный `synced`/
+    # `plain` как фолбэк, чтобы старый фронт (без word-режима) не сломался.
+    if words and track:
+        try:
+            from ripster import apple_lyrics
+            wl = await apple_lyrics.word_lyrics(track, artist, isrc)
+        except Exception:  # noqa: BLE001
+            wl = None
+        if wl and wl.get("lines"):
+            def _line_txt(ln):
+                return "".join(w["w"] + (" " if w.get("sp") else "") for w in ln["words"]).strip()
+            synced = "\n".join(
+                f"[{int(l['s'] // 60000):02d}:{(l['s'] % 60000) / 1000:05.2f}]{_line_txt(l)}"
+                for l in wl["lines"]
+            )
+            return {"synced": synced, "plain": "\n".join(_line_txt(l) for l in wl["lines"]),
+                    "words": wl["lines"], "source": "Apple (word)"}
+    if apple_id:
+        got = await _lyrics_from_apple(apple_id)
+        if got and (got.get("synced") or got.get("plain")):
+            cands_got.append(got)
+
+    # Потоковые сервисы. Порядок — по качеству синхронизации: у Tidal она
+    # построчная и обычно аккуратнее прочих, у Deezer бывает грубее.
+    # Сервис без ключей молча пропускает ход: отсутствие ARL или sp_dc — это не
+    # ошибка лирики, а просто «этот источник сегодня не участвует».
+    if artist and track:
+        from ripster import lyrics_sources as _LSRC
+        _c = _config or {}
+        for _fn in (
+            lambda: _LSRC.from_tidal(artist, track, duration, _c, tidal_id),
+            lambda: _LSRC.from_spotify(artist, track, duration, spotify_id),
+            lambda: _LSRC.from_deezer(artist, track, duration, _c, deezer_id),
+        ):
+            # Построчная синхра уже есть — остальным потоковым сервисам тут
+            # делать нечего (они дают то же самое), идём за пословной.
+            if any(_q(g) >= 2 for g in cands_got):
+                break
+            try:
+                got = await _fn()
+            except Exception:
+                got = None
+            if got and (got.get("synced") or got.get("plain")):
+                cands_got.append(got)
+
+        # Пословный текст из NetEase (анонимно, YRC + романизация). Идём за ним,
+        # пока слов нет ни у кого: Apple без подписки их не отдаёт.
+        if not any(_q(g) >= 3 for g in cands_got):
+            try:
+                from ripster import lyrics_netease as _NE
+                got = await _NE.from_netease(artist, track, duration)
+            except Exception:
+                got = None
+            if got and (got.get("synced") or got.get("plain")):
+                cands_got.append(got)
+
+        # Musixmatch — пословный (richsync) или построчный, с токеном владельца
+        # из конфига (14.10.2026). Без токена ход пропускается сам.
+        if not any(_q(g) >= 3 for g in cands_got):
+            try:
+                from ripster import lyrics_musixmatch as _MXM
+                got = await _MXM.from_musixmatch(artist, track, duration, _config or {}, isrc)
+            except Exception:
+                got = None
+            if got and (got.get("synced") or got.get("plain")):
+                cands_got.append(got)
+
+    if any(_q(g) >= 2 for g in cands_got):
+        return _best()
+    if not artist or not track:
+        return _best() or {"synced": "", "plain": "", "source": ""}
+    cands = _lrc_candidates(artist, track)
+    try:
+        async with _HTTP.ashared() as c:
+            for i, (a, t) in enumerate(cands):
+                params = {"artist_name": a, "track_name": t}
+                # Альбом и длительность сужают поиск и потому помогают ТОЛЬКО
+                # точному варианту: у упрощённого названия длительность уже
+                # другой записи, и совпадение не найдётся никогда.
+                if i == 0:
+                    if album:    params["album_name"] = album
+                    if duration: params["duration"]   = str(duration)
+                r = await c.get("https://lrclib.net/api/get", params=params)
+                if r.status_code == 200:
+                    data = r.json()
+                    if data.get("syncedLyrics") or data.get("plainLyrics"):
+                        return {
+                            "synced": data.get("syncedLyrics") or "",
+                            "plain":  data.get("plainLyrics")  or "",
+                            "source": "lrclib" if i == 0 else f"lrclib:упрощён ({a} — {t})",
+                        }
+                elif r.status_code not in (404, 400):
+                    return _best() or {"synced": "", "plain": "", "source": "",
+                                       "error": f"lrclib {r.status_code}"}
+
+            # Ничего точного — последняя попытка через поиск по самому
+            # упрощённому варианту: он даёт лучшее совпадение, а не точное.
+            a, t = cands[-1] if cands else (artist, track)
+            sr = await c.get("https://lrclib.net/api/search",
+                             params={"track_name": t, "artist_name": a})
+            if sr.status_code == 200:
+                arr = sr.json() or []
+                if arr:
+                    data = arr[0]
+                    return {
+                        "synced": data.get("syncedLyrics") or "",
+                        "plain":  data.get("plainLyrics")  or "",
+                        "source": "lrclib-search",
+                    }
+            return _best() or {"synced": "", "plain": "", "source": ""}
+    except Exception as e:
+        return _best() or {"synced": "", "plain": "", "source": "", "error": str(e)}
+
+
+# ── Search ────────────────────────────────────────────────────────────────
+async def _search_beatport(q: str, ent: str, limit: int) -> dict:
+    """Unified-search wire for Beatport. The dedicated /api/beatport/search route
+    works fine; this bridges it into /api/search so the MAIN search bar (source =
+    Beatport) returns hits instead of `Unknown service: beatport` — the gap the
+    owner hit 18.09.2026 ('вбил в строке поиска, выбрал битпорт — ничего'). Maps
+    the unified album/track entity to Beatport's releases/tracks and normalizes
+    each card to the shared shape (service/cover/type) the result grid reads. On a
+    creds/token/network failure it surfaces the REAL reason (honest error), not a
+    silent empty list that reads as 'nothing found'."""
+    from ripster.routes.beatport import beatport_search as _bp_search
+    from fastapi import HTTPException as _HTTPException
+    rtype = "tracks" if ent == "track" else "releases"
+    try:
+        res = await _bp_search(q=q, result_type=rtype, page=1,
+                               per_page=max(5, min(int(limit or 25), 50)))
+    except _HTTPException as e:
+        d = e.detail
+        msg = d.get("msg") if isinstance(d, dict) else (d if isinstance(d, str) else str(d))
+        return {"results": [], "error": msg}
+    except Exception as e:
+        return {"results": [], "error": f"Beatport: {e}"}
+    out = []
+    for it in (res.get("results") or []):
+        it = dict(it)
+        it.setdefault("cover", it.get("artworkUrl", ""))
+        it["service"] = "beatport"
+        # НЕ переписываем `type`: _fmt_release/_fmt_track уже отдают
+        # 'release'/'track', и фронтовый _renderSearchCard рисует фирменную
+        # Beatport-карточку именно по `type in (release,track) && service==beatport`
+        # (static/js/cookies_ui.js). Клоббер в 'album' ронял релизы в дженерик.
+        out.append(it)
+    return {"results": out}
+
+
+async def _search_jiosaavn(q: str, ent: str, limit: int) -> dict:
+    """Unified-search wire for JioSaavn (public web API, no login). The logic
+    lives next to the engine (ripster/engines/orpheus_jiosaavn.search_jiosaavn);
+    search works from anywhere — only JioSaavn's audio CDN is geo-locked."""
+    try:
+        from ripster.engines.orpheus_jiosaavn import search_jiosaavn
+        return await search_jiosaavn(q, ent, limit)
+    except Exception as e:  # noqa: BLE001
+        return {"results": [], "error": f"JioSaavn: {e}"}
+
+
+#: Кэш горячего поиска: (service, type, q, limit, country) -> (ответ, expire_ts).
+#: Ответы каталога за пару минут не меняются, поэтому выдача из кэша неотличима
+#: от свежего запроса; наружу не годится только явная ошибка — её не храним.
+_search_cache: dict = {}
+_SEARCH_TTL = 120.0        # сек
+_SEARCH_CACHE_MAX = 512    # потолок записей, чтобы листание не раздувало память
+
+
+@router.get("/api/search")
+async def api_search(q: str, service: str = "apple", type: str = "album", limit: int = 20, country: str = "",
+                     request: Request = None):
+    """
+    Search across services.
+    Apple: iTunes Search API (public, no auth)
+    Deezer: Deezer API (public, no auth)
+    Qobuz: Qobuz API (needs app_id + secret from settings)
+
+    24.09.2026: Deezer тянул живой запрос на каждый показ (p50 3.7s). Один и тот
+    же запрос теперь читается из короткоживущего кэша; за TTL=2 мин каталог не
+    успевает измениться, так что поведение для клиента то же, только быстрее.
+    """
+    if not q.strip():
+        return {"results": []}
+
+    # Apply the same rate limit used by queue/add for guest sessions
+    if request is not None:
+        try:
+            from ripster.guest_manager import get_manager as _get_gm
+            from fastapi import HTTPException as _HTTPException
+            gm  = _get_gm()
+            sid = gm.get_session_id_from_request(request)
+            if sid and gm.get_session(sid):
+                if not gm.check_rate(sid):
+                    raise _HTTPException(429, "Too many requests, please wait")
+                gm.record_rate(sid)
+        except Exception as exc:
+            from fastapi import HTTPException as _HTTPException
+            if isinstance(exc, _HTTPException):
+                raise
+
+    now = _time.monotonic()
+    key = (service, type, q.strip().casefold(), int(limit), country)
+    hit = _search_cache.get(key)
+    if hit is not None and hit[1] > now:
+        return hit[0]
+
+    result = await _dispatch_search(q, service, type, limit, country)
+    if type == "album" and isinstance(result, dict) and "error" not in result:
+        result = await _with_artist_discography(q, service, country, result)
+    if isinstance(result, dict) and "error" not in result:
+        if len(_search_cache) >= _SEARCH_CACHE_MAX:       # листание не раздувает память
+            for k in [k for k, (_, exp) in _search_cache.items() if exp <= now]:
+                _search_cache.pop(k, None)
+            while len(_search_cache) >= _SEARCH_CACHE_MAX:
+                _search_cache.pop(next(iter(_search_cache)), None)
+        _search_cache[key] = (result, now + _SEARCH_TTL)
+    return result
+
+
+def _norm_name(s: str) -> str:
+    return " ".join(str(s or "").casefold().split())
+
+
+async def _with_artist_discography(q: str, service: str, country: str, result: dict) -> dict:
+    """Запрос = имя артиста → добавить к выдаче его дискографию.
+
+    Владелец 29.09: «в поиске ставишь по дате — всё равно может не отобразить
+    свежий релиз, приходится переходить на артиста». Поиск сервиса отдаёт 24
+    самых «релевантных» релиза, и сортировка по дате переставляет только их;
+    свежий релиз ещё не набрал популярности и в эти 24 не попадает (у Apple
+    поиск iTunes к тому же отстаёт от каталога). Страница артиста берёт всю
+    дискографию — поэтому там он есть.
+
+    Только при ТОЧНОМ совпадении имени (без регистра и лишних пробелов):
+    однофамильца по похожести не подмешиваем. Релизы артиста идут после
+    результатов поиска (порядок «по релевантности» не меняется), сборники с
+    его участием не берём. Сбой или долгий ответ — выдача как была.
+    """
+    if service not in _ENGINE_SERVICES or not isinstance(result.get("results"), list):
+        return result
+    want = _norm_name(q)
+    if not want:
+        return result
+    import asyncio
+    try:
+        arts = await asyncio.wait_for(_dispatch_search(q, service, "artist", 5, country), 6)
+        hit = next((a for a in (arts or {}).get("results") or []
+                    if _norm_name(a.get("name") or a.get("title") or a.get("artist")) == want
+                    and a.get("id")), None)
+        if not hit:
+            return result
+        from ripster.engines import get_engine
+        disco = await asyncio.wait_for(
+            get_engine(_ENGINE_SERVICES[service]).get_artist(str(hit["id"]), "album,single,ep", _config), 8)
+    except Exception:                                          # noqa: BLE001
+        return result
+    have = {str(r.get("id")) for r in result["results"] if r.get("id")}
+    name = hit.get("name") or hit.get("title") or q.strip()
+    extra = []
+    for r in sorted((disco or {}).get("releases") or [],
+                    key=lambda r: str(r.get("date") or r.get("year") or ""), reverse=True):
+        rid = str(r.get("id") or "")
+        if not rid or rid in have:
+            continue
+        have.add(rid)
+        extra.append({**r, "id": rid, "artist": r.get("artist") or name,
+                      "artist_id": r.get("artist_id") or str(hit["id"]),
+                      "kind": r.get("type") or "", "type": "album",
+                      "service": r.get("service") or service, "from_artist": True})
+    if not extra:
+        return result
+    return {**result, "results": list(result["results"]) + extra}
+
+
+async def _dispatch_search(q: str, service: str, type: str, limit: int, country: str) -> dict:
+    """Непосредственно прогон поиска по сервисам. Без кэша — кэш накладывает
+    `api_search`, чтобы сюда всегда приходили только за реальным ответом."""
+    # Label search is its own thing: only some services can filter by label at
+    # the API level, and for the rest we have to fall back to matching the label
+    # field of album metadata. Handled before the per-service dispatch below.
+    if type == "label":
+        return await _search_label(q, service, limit, country)
+
+    if service == "apple":
+        # iTunes direct (_search_apple): includes 30-sec previewUrl (the zhaarey
+        # engine search omitted it → cards had no ▶ play), supports the music-video
+        # entity, and is a plain reliable REST call. The zhaarey engine search was
+        # a worse duplicate, so Apple search always goes through iTunes now.
+        return await _search_apple(q, type, limit, country)
+    elif service in ("deezer", "qobuz"):
+        # Delegate to engine.search() — engines are the source of truth for
+        # service-specific search (BaseSourceAdapter pattern).
+        try:
+            from ripster.engines import get_engine
+            eng = get_engine(service)
+            results = await eng.search(q, type, limit, _config)
+            if results:
+                return {"results": results}
+        except (KeyError, Exception):
+            pass
+        # Fallback to inline implementations if engine search unavailable
+        if service == "deezer":
+            return await _search_deezer(q, type, limit)
+        return await _search_qobuz(q, type, limit)
+    elif service == "tidal":
+        try:
+            from ripster.engines import get_engine
+            eng = get_engine("tidal")
+            results = await eng.search(q, type, limit, _config)
+            if results:
+                return {"results": results}
+        except (KeyError, Exception):
+            pass
+        return await _search_tidal(q, type, limit)
+    elif service == "spotify":
+        return await _search_spotify(q, type, limit)
+    elif service == "yandex":
+        return await _search_yandex(q, type, limit)
+    elif service == "beatport":
+        return await _search_beatport(q, type, limit)
+    elif service == "jiosaavn":
+        return await _search_jiosaavn(q, type, limit)
+    else:
+        return {"results": [], "error": f"Unknown service: {service}"}
+
+# ── Label search ─────────────────────────────────────────────────────────────
+# Which services can actually filter by label, verified live (2026-07-27):
+#   Spotify — yes, `label:"Hospital Records"` in the search query
+#   Deezer  — yes, same advanced-query syntax, and album objects carry `label`
+#   others  — no label filter in their search API, so we search albums by the
+#             label's name and keep only those whose metadata really names it
+# ТОЛЬКО spotify. У Deezer фильтра `label:` в API НЕТ вовсе — строка
+# `label:"fabric"` уходит туда обычным текстом и матчится по чему угодно, включая
+# ИМЯ АРТИСТА. Так у владельца в ленте лейбла fabric оказался «Dominik Fabrici»
+# с треком «Oj, na hori tri topoli»: подстрока «fabric» нашлась внутри фамилии.
+# Проверить такой результат нечем — Deezer не отдаёт лейбл релиза, а его id не
+# сверить со Spotify. Неверифицируемый источник хуже отсутствующего: он выглядит
+# как данные. 16.08.2026.
+_LABEL_NATIVE = ("spotify",)
+
+# Строка копирайта/фонограммы вместо имени лейбла. Spotify и Apple сплошь и
+# рядом отдают в поле label именно её — «℗ 2024 Erased Tapes Records Ltd.»,
+# «(P) 2019 XL Recordings Ltd under exclusive licence to …». Такое «имя» не
+# находит ни `label:"…"`, ни сверка по границам слов, и правильно подписанный
+# лейбл выглядит опечаткой.
+_PLINE_START = _re_mod.compile(r"^\s*(?:[℗©]|[\(\[]\s*[cCpP]\s*[\)\]])")
+_PLINE_HEAD = _re_mod.compile(r"^\s*(?:[℗©]|[\(\[]\s*[cCpP]\s*[\)\]]|\s)+")
+_PLINE_YEAR = _re_mod.compile(r"^\s*(?:19|20)\d{2}\b[\s.,\-–—]*")
+_LABEL_TAIL = _re_mod.compile(
+    r"\s*(?:,?\s*(?:under\s+exclusive\s+licen[cs]e|under\s+licen[cs]e|"
+    r"exclusively\s+licen[cs]ed|distributed\s+by|marketed\s+by|"
+    r"a\s+division\s+of|a\s+\w[\w\s]*?\s+company)\b.*)$",
+    _re_mod.IGNORECASE)
+_LABEL_SUFFIX = _re_mod.compile(
+    r"[\s,]+(?:ltd|limited|llc|l\.l\.c|inc|incorporated|corp|corporation|"
+    r"co|company|gmbh|mbh|ug|kg|ag|s\.?a|s\.?a\.?s|s\.?l|s\.?r\.?l|s\.?p\.?a|"
+    r"b\.?v|n\.?v|pty|pvt|oy|ab|a/s|aps|kft|d\.?o\.?o)\.?\s*$",
+    _re_mod.IGNORECASE)
+
+
+def _clean_label(name: str) -> str:
+    """Имя лейбла, выдернутое из возможной строки копирайта.
+
+    «℗ 2024 Erased Tapes Records Ltd.» → «Erased Tapes Records». Срезаем метки
+    ℗/©/(P)/(C) и — только если они были — ведущий год, хвост «under exclusive
+    licence to …» и юр-суффикс (Ltd/LLC/GmbH/…). «Records/Recordings/Music» не
+    трогаем: это часть имени, а `_label_matches` и так терпит лишнее слово.
+    Идемпотентна — чистое имя не меняется. На вход-мусор возвращает исходную
+    строку, а не пустоту."""
+    s = (name or "").strip().strip('"').strip()
+    if not s:
+        return ""
+    orig = s
+    if _PLINE_START.match(s):
+        s = _PLINE_HEAD.sub("", s, count=1)
+        s = _PLINE_YEAR.sub("", s, count=1)
+    s = _LABEL_TAIL.sub("", s).strip()
+    for _ in range(3):
+        s2 = _LABEL_SUFFIX.sub("", s).strip(" .,-–—")
+        if s2 == s:
+            break
+        s = s2
+    s = _re_mod.sub(r"\s{2,}", " ", s).strip(" .,-–—")
+    return s or orig
+
+
+def _label_matches(value: str, wanted: str) -> bool:
+    """Loose label comparison: catalogue spellings differ wildly
+    ('Hospital', 'Hospital Records', 'Hospital Records Ltd')."""
+    a = _clean_label(value).lower()
+    b = _clean_label(wanted).lower()
+    if not a or not b:
+        return False
+    if a == b or a.startswith(b) or b.startswith(a):
+        return True
+    # Подстрока `b in a` пускала «fabric» внутрь «Prefabricated Sounds».
+    # Лейбл — это набор слов, а не набор букв: сверяем по границам слов.
+    return _re_mod.search(r"(?<![a-z0-9])" + _re_mod.escape(b) + r"(?![a-z0-9])", a) is not None
+
+
+# Разрешён ли нашему токену ПАКЕТНЫЙ /v1/albums. Выясняется первым же отказом
+# и дальше не перепроверяется в пределах запуска.
+_SP_ALBUMS_BATCH_OK = True
+
+# Сколько релизов сверяем ПОШТУЧНО за один вызов, когда пакетный запрос запрещён.
+#
+# Поштучный обход задумывался как фоллбэк на 403, но фоллбэк без потолка — это не
+# фоллбэк, а два порядка запросов: радар зовёт сверку на каждый лейбл с limit=40,
+# двадцать два лейбла дают до 880 одиночных запросов за обход. Токен на этом
+# сгорел (12-часовой Retry-After, 23.08.2026).
+#
+# Потолок не теряет данные: `_sp_label_cache` живёт всё время работы процесса,
+# поэтому следующий обход досверяет следующую порцию, и через несколько проходов
+# подтверждено всё. Лучше подтверждать постепенно, чем один раз и потом сутки
+# вообще ничего.
+_SP_SINGLE_VERIFY_CAP = 10
+
+
+def _label_from_album(alb: dict) -> str:
+    """Имя лейбла из ответа `/v1/albums/{id}`.
+
+    Поля `label` в ответе может не быть ВООБЩЕ: нашему client-credentials
+    токену Spotify отдаёт album-объект без него (замерено 22.08.2026 — статус
+    200, ключа `label` в теле нет). Пустое поле читалось как «лейбл не
+    подтверждён», и сверка выбрасывала весь список.
+
+    Зато в том же ответе есть `copyrights`, и там то же имя: «1997 XL
+    Recordings Ltd». Это улика того же качества — она из ответа Spotify про
+    ИМЕННО ЭТОТ релиз, а не из совпадения подстроки в имени артиста, ради
+    которого сверка и заводилась. Год и (C)/(P) срезаем, остальное оставляем
+    как есть: сверка ниже сравнивает по границам слов и лишний «Ltd» ей не
+    мешает."""
+    lab = str(alb.get("label") or "").strip()
+    if lab:
+        return lab
+    for c in (alb.get("copyrights") or []):
+        t = str(c.get("text") or "").strip()
+        t = _re_mod.sub(r"^[(\[]?\s*[CPcp]\s*[)\]]?\s*", "", t)
+        t = _re_mod.sub(r"^(19|20)\d{2}\s+", "", t).strip()
+        if t:
+            return t
+    return ""
+
+
+async def _sp_real_labels(ids: list[str]) -> tuple[dict, bool]:
+    """Настоящий label релизов Spotify. `/v1/search` его НЕ отдаёт, `/v1/albums`
+    отдаёт.
+
+    ПАКЕТНЫЙ `/v1/albums?ids=` нашему client-credentials токену запрещён — 403
+    Forbidden, при том что ОДИНОЧНЫЙ `/v1/albums/{id}` тем же токеном отвечает
+    200 (замерено 22.08.2026). Пакет остаётся первой попыткой: где он разрешён,
+    это один запрос вместо двадцати. Но отказ пакета больше не значит «лейбл
+    неизвестен» — он значит «спроси по одному».
+
+    Почему это важнее экономии запросов: сверка ВЫБРАСЫВАЕТ релиз, у которого
+    лейбл подтвердить не удалось. Пока пакет молча ломался на `break`,
+    подтверждено было НОЛЬ у каждого лейбла, и лента лейблов опустела целиком —
+    вместо чужих артистов человек получил пустоту. Отсутствие записи неотличимо
+    от «проверка не работала», поэтому код ответа теперь пишется в лог.
+
+    Кэш вечный: лейбл выпущенного релиза не меняется, а один и тот же лейбл
+    опрашивается и радаром, и вотчлистом, и страницей лейбла.
+
+    ВОЗВРАЩАЕТ ПАРУ `(labels, verified)`. Второе — «сверка вообще смогла
+    отработать». Без него отказ ПРОВЕРКИ неотличим от вердикта «лейбл не тот», и
+    вызывающий выбрасывает найденное, а человеку говорит «не найдено, проверь
+    написание». Замерено 23.08.2026 на «Balance Music»: `/v1/search` тем же
+    токеном отвечает 200 и отдаёт 10 релизов лейбла, `/v1/albums?ids=` — 403,
+    `/v1/albums/{id}` — 429 без `Retry-After`. То есть подтвердить нельзя НИ
+    ОДИН, и лейбл, существующий во всех каталогах, объявлялся опечаткой."""
+    _sp_label_cache_load()
+    want = [i for i in ids if i and i not in _sp_label_cache]
+    verified = True
+    before = len(_sp_label_cache)
+    if want:
+        token = await _get_spotify_app_token()
+        if not token:
+            print("[label] verify skipped: нет app-токена Spotify "
+                  "(spotify-client-id/secret не заданы)", flush=True)
+            return {i: _sp_label_cache.get(i, "") for i in ids}, False
+        h = {"Authorization": f"Bearer {token}"}
+        # Уже под баном — не долбимся. Каждый запрос в стену 429 ПРОДЛЕВАЕТ бан,
+        # а ответа всё равно не будет.
+        if _sp_is_rate_limited():
+            print(f"[label] verify skipped: {_sp_rate_limit_msg()}", flush=True)
+            return {i: _sp_label_cache.get(i, "") for i in ids}, False
+        try:
+            async with _HTTP.ashared() as c:
+                # Флаг ЗАПОМИНАЕТСЯ на процесс: обход лейблов делает по запросу
+                # на каждый, и без памяти мы стучались бы в запрещённый пакет
+                # двадцать два раза за скан, каждый раз получая тот же 403.
+                global _SP_ALBUMS_BATCH_OK
+                batch_ok = _SP_ALBUMS_BATCH_OK
+                for k in range(0, len(want), 20):
+                    chunk = want[k:k + 20]
+                    if not _sp_bg_admit():
+                        # Бюджет исчерпан или токен под баном: остаток —
+                        # «не проверен в этот раз», а не «лейбл не тот».
+                        verified = False
+                        print(f"[label] сверка приостановлена: фоновый бюджет Spotify "
+                              f"выбран (подтверждено {len(_sp_label_cache) - before} "
+                              f"за этот вызов)", flush=True)
+                        break
+                    if batch_ok:
+                        r = await c.get("https://api.spotify.com/v1/albums",
+                                        params={"ids": ",".join(chunk)}, headers=h)
+                        if r.status_code == 200:
+                            for alb in (r.json().get("albums") or []):
+                                if alb and alb.get("id"):
+                                    _sp_label_cache[alb["id"]] = _label_from_album(alb)
+                            continue
+                        if r.status_code == 429:
+                            # Бан приходит и на пакет — не переходим к поштучному
+                            # обходу, который только продлил бы стену 429.
+                            _record_sp_rate_limit(int(r.headers.get("Retry-After", 3600)))
+                            print(f"[label] 429 на batch /v1/albums — {_sp_rate_limit_msg()}; "
+                                  f"сверка лейблов остановлена", flush=True)
+                            if len(_sp_label_cache) != before:
+                                _sp_label_cache_save()
+                            return ({i: _sp_label_cache.get(i, "") for i in ids}, False)
+                        batch_ok = _SP_ALBUMS_BATCH_OK = False
+                        print(f"[label] batch /v1/albums -> HTTP {r.status_code}, "
+                              f"перехожу на поштучный запрос", flush=True)
+                    if len(chunk) > _SP_SINGLE_VERIFY_CAP:
+                        # Остаток не «не сошёлся», а «не проверен» — поэтому
+                        # verified=False, и вызывающий не выдаст пустоту за вердикт.
+                        verified = False
+                        chunk = chunk[:_SP_SINGLE_VERIFY_CAP]
+                    for one in chunk:
+                        if not _sp_bg_admit():
+                            verified = False
+                            break
+                        r1 = await c.get(f"https://api.spotify.com/v1/albums/{one}",
+                                         headers=h)
+                        if r1.status_code == 429:
+                            # ЗДЕСЬ и сгорал токен. Поштучный обход — фоллбэк на
+                            # 403 пакетного запроса (3.6.3), и он получился без
+                            # тормоза: радар зовёт `_label_releases(name, 40)` на
+                            # КАЖДЫЙ лейбл, 22 лейбла = до 880 одиночных запросов
+                            # за обход. Первый же 429 не останавливал цикл, и
+                            # оставшиеся сотни запросов летели в стену, продлевая
+                            # бан. 23.08.2026 Spotify выдал Retry-After на 12 часов.
+                            # Теперь: записываем бан и ВЫХОДИМ, а не продолжаем.
+                            _record_sp_rate_limit(int(r1.headers.get("Retry-After", 3600)))
+                            print(f"[label] 429 на /v1/albums/{one} — {_sp_rate_limit_msg()}; "
+                                  f"сверка лейблов остановлена", flush=True)
+                            # Сохраняем то, что успели подтвердить ДО стены:
+                            # иначе потраченные на них запросы пропадают, и
+                            # следующий проход платит за них снова.
+                            if len(_sp_label_cache) != before:
+                                _sp_label_cache_save()
+                            return ({i: _sp_label_cache.get(i, "") for i in ids}, False)
+                        if r1.status_code != 200:
+                            print(f"[label] /v1/albums/{one} -> HTTP {r1.status_code}",
+                                  flush=True)
+                            # Отказ НАШЕЙ проверки, а не факт о релизе. 429/403
+                            # здесь массовые: если их считать «лейбл не сошёлся»,
+                            # пустеет вся выдача лейбла разом.
+                            verified = False
+                            continue
+                        alb = r1.json()
+                        if alb.get("id"):
+                            _sp_label_cache[alb["id"]] = _label_from_album(alb)
+        except Exception as e:
+            print(f"[label] verify failed: {e}", flush=True)
+            verified = False
+        if len(_sp_label_cache) != before:
+            _sp_label_cache_save()
+    return {i: _sp_label_cache.get(i, "") for i in ids}, verified
+
+
+async def _search_spotify_label(label: str, limit: int) -> dict:
+    """Поиск по лейблу со сверкой по НАСТОЯЩЕМУ полю label релиза.
+
+    `label:"fabric"` у Spotify — не фильтр, а подсказка ранжирования: 16.08.2026
+    он вернул «Dominik Fabrici — Oj, na hori tri topoli» (совпало ИМЯ артиста) и
+    «Perviro — Fabricated Dream» (совпало НАЗВАНИЕ). Владелец увидел это в
+    релиз-радаре.
+
+    Сверять есть с чем: `/v1/albums` отдаёт настоящий label. Релиз, у которого
+    лейбл не сошёлся, выбрасывается; релиз, у которого лейбл узнать не удалось
+    (сеть, токен), выбрасывается ТОЖЕ — непроверенная запись выглядит как
+    данные, и это хуже её отсутствия."""
+    label = _clean_label(label) or label
+    out = await _search_spotify(f'label:"{label}"', "album", limit, bg=True)
+    if out.get("bg_deferred"):
+        # Отказ нашего бюджета, а не отсутствие лейбла: наружу — verify_failed,
+        # чтобы пустая лента не читалась как «проверь написание».
+        out["verify_failed"] = True
+        out["candidates"] = 0
+        return out
+    res = out.get("results") or []
+    # Полное имя лейбла нередко чуть длиннее того, что Spotify индексирует в
+    # `label:` («Erased Tapes Records» vs «Erased Tapes»). Пусто по полному —
+    # пробуем более короткие префиксы из первых слов; сверка ниже всё равно
+    # подтверждает по настоящему полю label релиза, так что мусор не пройдёт.
+    if not res:
+        words = label.split()
+        for n in (3, 2):
+            if len(words) > n:
+                alt = " ".join(words[:n])
+                out = await _search_spotify(f'label:"{alt}"', "album", limit, bg=True)
+                if out.get("bg_deferred"):
+                    out["verify_failed"] = True
+                    out["candidates"] = 0
+                    return out
+                res = out.get("results") or []
+                if res:
+                    break
+    out["candidates"] = len(res)
+    out["verify_failed"] = False
+    out["unverified"] = []
+    if not res:
+        return out
+    real, verified = await _sp_real_labels([str(r.get("id") or "") for r in res])
+    keep = []
+    for r in res:
+        got = real.get(str(r.get("id") or ""), "")
+        if got and _label_matches(got, label):
+            r["label"] = got
+            keep.append(r)
+    if len(keep) != len(res):
+        print(f"[label] «{label}»: spotify отдал {len(res)}, лейбл подтверждён у {len(keep)}"
+              + ("" if verified else " (сверка НЕ отработала — отказ /v1/albums)"),
+              flush=True)
+    out["results"] = keep
+    # Отказ сверки — не вердикт о лейбле. Отдаём его отдельно, вместе с тем, что
+    # НАШЛОСЬ, но подтвердить не удалось: без этого вызывающий видит пустой
+    # список и не может отличить «такого лейбла нет» от «Spotify не дал
+    # проверить». Именно на этой неразличимости 23.08 «Balance Music» —
+    # существующий лейбл с десятью релизами в выдаче — объявлялся опечаткой.
+    if not keep and not verified:
+        out["verify_failed"] = True
+        out["unverified"] = res
+    return out
+
+
+async def _search_label(q: str, service: str, limit: int, country: str = "") -> dict:
+    """Releases put out by a label.
+
+    Returns the usual {"results": [...]} shape so the UI renders label hits with
+    the same album cards as everything else. `native` tells the caller whether
+    the service filtered server-side (trustworthy) or we filtered locally
+    (best-effort — a service that doesn't expose the label field at all can only
+    return name matches)."""
+    label = _clean_label(q.strip().strip('"'))
+    if not label:
+        return {"results": []}
+
+    if service == "spotify":
+        out = await _search_spotify_label(label, limit)
+        out["native"] = True
+        out["label"] = label
+        return out
+
+    if service == "deezer":
+        out = await _search_deezer(f'label:"{label}"', "album", limit)
+        # Deezer honours the filter but still returns loose matches; keep the
+        # ones we can confirm, and don't drop entries whose label is unknown
+        # (search results omit `label` on some albums).
+        res = out.get("results") or []
+        confirmed = [r for r in res if not r.get("label") or _label_matches(r.get("label", ""), label)]
+        out["results"] = confirmed or res
+        out["native"] = True
+        out["label"] = label
+        return out
+
+    # ── Services without a label filter: find the releases elsewhere, then
+    #    locate each one HERE. Spotify/Deezer act as the catalogue of "what this
+    #    label put out"; the target service only has to be asked "do you have
+    #    this album". That gives real label results everywhere instead of
+    #    name-matching, which returned almost nothing.
+    seeds, info = await _label_seeds_ex(label, limit)
+    if not seeds:
+        # Две разные причины пустоты — два разных ответа. Раньше обе сводились к
+        # «проверь написание», и правильно набранный лейбл выглядел опечаткой.
+        if info.get("verify_failed"):
+            return {"results": [], "label": label, "native": False,
+                    "verify_failed": True,
+                    "candidates": info.get("candidates", 0),
+                    "note_key": "lbl.note_unverified",
+                    "note_args": {"label": label, "n": info.get("candidates", 0)},
+                    "note": (f"Релизы лейбла «{label}» нашлись ({info.get('candidates', 0)}), "
+                             f"но Spotify сейчас не даёт проверить лейбл — показать их "
+                             f"как подтверждённые нельзя")}
+        return {"results": [], "label": label, "native": False,
+                "note_key": "lbl.note_not_found",
+                "note_args": {"label": label},
+                "note": f"Не нашёл релизов лейбла «{label}» — проверь написание"}
+
+    found = await _match_seeds_in_service(seeds, service, label, limit, country)
+    return {"results": found, "label": label, "native": False,
+            "matched_from": "spotify",
+            "note_key": ("" if found else "lbl.note_no_match_in_svc"),
+            "note_args": {"service": service},
+            "note": ("" if found else
+                     f"Релизы лейбла найдены, но в {service} их сопоставить не удалось")}
+
+
+async def _label_seeds_ex(label: str, limit: int) -> tuple[list[dict], dict]:
+    """То же, что `_label_seeds`, но вторым значением — ПОЧЕМУ список такой.
+
+    Пустой список имеет две несовместимые причины: лейбла нет в каталоге, или
+    наша сверка не смогла отработать. Пока функция отдавала только список, обе
+    сводились к одному ответу — «не найдено, проверь написание», — и человека
+    отправляли исправлять правильно набранное имя.
+
+    `info` — {candidates, verify_failed, unverified}: сколько релизов вернул
+    поиск, сломалась ли сверка и что именно она не смогла подтвердить.
+
+    24.09.2026: к списку добавился второй этап — `fallback`. Spotify подтверждал
+    лейбл по `/v1/albums`, а этот эндпоинт нашему токену отказывает; две подписки
+    («Semantica Records», «Night Time Stories (NTS)») висели непроверенными
+    ВООБЩЕ. Теперь, когда Spotify не подтвердил, спрашиваем остальные каталоги
+    (`ripster/label_sources.py`) — и отмечаем `last_check` по ЛЮБОМУ ответившему
+    пути, иначе «не проверено» снова станет неотличимо от «проверено и пусто»."""
+    seeds, seen = [], set()
+    info = {"candidates": 0, "verify_failed": False, "unverified": []}
+    for svc in _LABEL_NATIVE:
+        try:
+            out = await (_search_spotify_label(label, limit)
+                         if svc == "spotify" else
+                         _search_deezer(f'label:"{label}"', "album", limit))
+        except Exception as e:
+            # A SEARCH that errored (429/ban/network/timeout) is NOT the label
+            # saying "I have no releases" — it's us failing to ask. Swallowing it
+            # as an empty result is exactly what made a valid label read as a
+            # typo (03.09.2026: Spotify under a multi-hour 429 ban → "Label
+            # Furatena is not in the Spotify catalogue — check the spelling").
+            info["verify_failed"] = True
+            info.setdefault("errors", []).append(f"{svc}: {type(e).__name__}: {e}")
+            print(f"[label] search «{label}» via {svc} failed: {e}", flush=True)
+            continue
+        info["candidates"] += int(out.get("candidates") or len(out.get("results") or []))
+        if out.get("verify_failed"):
+            info["verify_failed"] = True
+            info["unverified"].extend(out.get("unverified") or [])
+        for r in (out.get("results") or []):
+            key = (_wl_norm(r.get("artist", "")), _wl_norm(r.get("title", "")))
+            if key in seen or not key[1]:
+                continue
+            seen.add(key)
+            seeds.append(r)
+        if len(seeds) >= limit * 2:
+            break
+    if seeds:
+        _note_label_artists(label, seeds)
+        # Отметка по УСПЕШНОМУ пути, а не только по обходу вишлиста: радар и
+        # страница лейбла звали ту же сверку и молчали, из-за чего подписки
+        # «Semantica Records» и «Night Time Stories (NTS)» висели с
+        # `last_check = null`, хотя их проверяли каждый проход.
+        _stamp_label_check(label, ["spotify"])
+    # ── второй этап: другие каталоги ─────────────────────────────────────────
+    # Зовём и когда сверка ОТКАЗАЛА, и когда Spotify просто ничего не отдал:
+    # андеграундный лейбл может отсутствовать в его каталоге вовсе, а на Bandcamp
+    # иметь предзаказ, которого нет больше нигде.
+    if not seeds:
+        # «лейбл не найден» и «сверка не отработала» — разные ответы; второй
+        # теперь чинится не одним Spotify-эндпоинтом, а цепочкой каталогов.
+        seeds, info = await _label_fallback(label, limit, info, seen)
+    return seeds, info
+
+
+async def _label_fallback(label: str, limit: int, info: dict,
+                          seen: set) -> tuple[list, dict]:
+    """Подтвердить релизы лейбла любым источником, кроме отказавшего Spotify.
+
+    Пустой ответ здесь означает ровно то, что написан в `info["health"]`:
+    «источники не ответили», «нет учётки Beatport» — но НИКОГДА «проверь
+    написание имени». За одно и то же сообщение 23.08 человека отправляли
+    исправлять правильно набранный лейбл.
+    """
+    from ripster import label_sources as _ls
+    seeds: list = []
+    try:
+        more, finfo = await _ls.label_releases_any(label, limit,
+                                                   band_url=_bandcamp_url_of(label))
+    except Exception as e:
+        info["fallback"] = {"error": f"{type(e).__name__}: {e}"}
+        print(f"[label] fallback «{label}» failed: {e}", flush=True)
+        return [], info
+    sources = finfo.get("sources") or {}
+    info["fallback"] = {"via": finfo.get("via") or [],
+                        "sources": sources,
+                        "health": finfo.get("health") or ("", {})}
+    for r in (more or []):
+        key = (_wl_norm(r.get("artist", "")), _wl_norm(r.get("title", "")))
+        if not key[1]:
+            continue
+        info["candidates"] += 1
+        if r.get("metadata_only"):
+            # Метаданные (MusicBrainz/Discogs) подтверждают ФАКТ релиза, но не
+            # его дату — будущее по ним радар показывать не имеет права.
+            info.setdefault("metadata_only", []).append(r)
+            continue
+        if key in seen:
+            continue
+        seen.add(key)
+        # Промолчавший Spotify больше не делает выдачу «непроверенной»: у нас
+        # есть подтверждение из источника, который ответил.
+        info["verify_failed"] = False
+        seeds.append(r)
+    if info["fallback"]["via"]:
+        _note_label_artists(label, seeds)
+        _stamp_label_check(label, info["fallback"]["via"])
+        print(f"[label] «{label}»: подтверждено источником "
+              f"{', '.join(info['fallback']['via'])}, релизов {len(seeds)}", flush=True)
+    elif not seeds:
+        # Ни один источник не подтвердил: честная строка вместо «лейбла нет».
+        key, args = info["fallback"].get("health") or ("lbl.health_unverified", {})
+        info["health_key"] = key
+        info["health_args"] = args or {}
+        refused = ", ".join(f"{k}:{v.get('status')}" for k, v in sorted(sources.items()))
+        print(f"[label] «{label}»: не подтверждено ни одним источником ({refused})",
+              flush=True)
+    return seeds, info
+
+
+def _bandcamp_url_of(label: str) -> str:
+    """Ручная ссылка на страницу Bandcamp из подписки (поле `bandcamp_url`).
+
+    Имя лейбла и его страница на Bandcamp совняются не всегда — у владельца
+    было именно так, поэтому поле заведено, и оно важнее автопоиска.
+    """
+    try:
+        from ripster.routes import watchlist as _wl
+        want = _wl_norm(label)
+        for e in (_wl._s.get("items") or []):
+            if (e.get("kind") == "label"
+                    and _wl_norm(e.get("name") or "") == want):
+                return str(e.get("bandcamp_url") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _note_label_artists(label: str, seeds: list) -> None:
+    """Запомнить артистов лейбла — из них позже растёт «артист из твоих
+    лейблов» в ранжировании грядущего."""
+    try:
+        from ripster import upcoming_taste as _ut
+        _ut.note_label_artists(label, [s.get("artist", "") for s in seeds])
+    except Exception:
+        pass
+
+
+def _stamp_label_check(label: str, via: list) -> None:
+    """Отметить `last_check` у подписки на лейбл: сверка сработала."""
+    try:
+        from ripster import label_sources as _ls
+        from ripster.routes import watchlist as _wl
+        items = _wl._s.get("items") or []
+        if _ls.stamp_label_checks(items, label, {"via": via}):
+            save = _wl._s.get("save")
+            if save:
+                save(items)
+    except Exception as e:
+        print(f"[label] stamp last_check «{label}»: {e}", flush=True)
+
+
+async def _label_seeds(label: str, limit: int) -> list[dict]:
+    """What the label released, from whoever can actually answer that.
+
+    Тонкая обёртка над `_label_seeds_ex` для мест, которым причина не нужна.
+    ВНИМАНИЕ: `_LABEL_NATIVE` сейчас — только Spotify. Deezer сюда не включён:
+    его `label:"..."` не фильтр, а подсказка ранжирования, и на «Balance Music»
+    он отдаёт 300 записей артиста «Balance Autonomic Nerves with Music Therapy».
+    Пока у нас нет строгой сверки лейбла на стороне Deezer, называть его вторым
+    каталогом в сообщениях человеку нельзя."""
+    seeds, _ = await _label_seeds_ex(label, limit)
+    return seeds
+
+
+def _wl_norm(s: str) -> str:
+    import re as _r
+    return _r.sub(r"[^a-z0-9а-я]+", "", (s or "").lower())
+
+
+async def _seed_upc(seed: dict) -> str:
+    """Barcode of a release, fetched from wherever the seed came from.
+
+    Search endpoints don't return it, so it costs one extra request — worth it,
+    because a barcode is an exact identity. Title matching confuses deluxe
+    editions, remasters and "Extended Mix" versions with the original."""
+    sid, svc = str(seed.get("id") or ""), seed.get("service", "")
+    if not sid:
+        return ""
+    try:
+        if svc == "spotify":
+            # Фон (вотчлист/доступность): без разрешения бюджета не стучимся,
+            # 429 фиксируем как бан — раньше он терялся в `except` и не
+            # останавливал следующий seed.
+            if not _sp_bg_admit():
+                return ""
+            token = await _get_spotify_app_token()
+            if not token:
+                return ""
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.spotify.com/v1/albums/{sid}",
+                                headers={"Authorization": f"Bearer {token}"})
+                if r.status_code == 429:
+                    _record_sp_rate_limit(int(r.headers.get("Retry-After", 30)))
+                    return ""
+            return str(((r.json().get("external_ids") or {}).get("upc") or "")).strip()
+        if svc == "deezer":
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.deezer.com/album/{sid}")
+            return str(r.json().get("upc") or "").strip()
+    except Exception:
+        return ""
+    return ""
+
+
+async def _seed_isrcs(seed: dict, limit: int = 4) -> list[str]:
+    """ISRC нескольких первых треков релиза.
+
+    Сверка по ОДНОМУ первому треку промахивалась: у Qobuz замер 27.07 дал 3 из 4
+    — единственного взятого ISRC не оказалось в каталоге, и весь релиз считался
+    отсутствующим, хотя остальные треки там были. Берём несколько и пробуем по
+    очереди: попадания достаточно одного.
+    """
+    sid, svc = str(seed.get("id") or ""), seed.get("service", "")
+    if not sid:
+        return []
+    out: list[str] = []
+    try:
+        if svc == "spotify":
+            if not await _sp_bg_admit_wait():
+                return []
+            token = await _get_spotify_app_token()
+            if not token:
+                return []
+            h = {"Authorization": f"Bearer {token}"}
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.spotify.com/v1/albums/{sid}/tracks",
+                                params={"limit": limit}, headers=h)
+                if r.status_code == 429:
+                    _record_sp_rate_limit(int(r.headers.get("Retry-After", 30)))
+                    return []
+                ids = [it.get("id") for it in (r.json().get("items") or []) if it.get("id")]
+                if not ids:
+                    return []
+                if not await _sp_bg_admit_wait():
+                    return []
+                r2 = await c.get("https://api.spotify.com/v1/tracks",
+                                 params={"ids": ",".join(ids[:limit])}, headers=h)
+                if r2.status_code == 429:
+                    _record_sp_rate_limit(int(r2.headers.get("Retry-After", 30)))
+                    return []
+                batch = r2.json().get("tracks") if r2.status_code == 200 else None
+                if batch:
+                    for t in (batch or []):
+                        v = str(((t or {}).get("external_ids") or {}).get("isrc") or "").upper()
+                        if v and v not in out:
+                            out.append(v)
+                else:
+                    # Замер 24.09.2026: пачка /v1/tracks на наш app-токен
+                    # отвечает 403 Forbidden, а одиночный /v1/tracks/{id} —
+                    # 200 с external_ids.isrc. Без этого хода ISRC-мост к
+                    # Deezer/Qobuz не строился никогда.
+                    for tid in ids[:limit]:
+                        if not await _sp_bg_admit_wait():
+                            break
+                        r3 = await c.get(f"https://api.spotify.com/v1/tracks/{tid}",
+                                         headers=h)
+                        if r3.status_code == 429:
+                            _record_sp_rate_limit(int(r3.headers.get("Retry-After", 30)))
+                            break
+                        if r3.status_code != 200:
+                            continue
+                        v = str(((r3.json() or {}).get("external_ids") or {}).get("isrc") or "").upper()
+                        if v and v not in out:
+                            out.append(v)
+                        if len(out) >= 2:
+                            break
+            return out
+        if svc == "deezer":
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.deezer.com/album/{sid}")
+                tracks = ((r.json().get("tracks") or {}).get("data") or [])[:limit]
+                for tr in tracks:
+                    try:
+                        r2 = await c.get(f"https://api.deezer.com/track/{tr['id']}")
+                        v = str(r2.json().get("isrc") or "").upper()
+                        if v and v not in out:
+                            out.append(v)
+                    except Exception:
+                        continue
+            return out
+    except Exception:
+        return out
+    return out
+
+
+async def _seed_isrc(seed: dict) -> str:
+    """ISRC первого трека — обратная совместимость для старых вызовов."""
+    v = await _seed_isrcs(seed, limit=1)
+    return v[0] if v else ""
+
+
+async def _seed_profile(seed: dict, isrcs: "list[str] | None" = None) -> dict:
+    """Паспорт ИСХОДНОГО релиза: штрихкод, ISRC, число треков, длительность.
+
+    Матрице доступа нужны последние два: одно и то же издание живёт в витринах
+    под РАЗНЫМИ штрихкодами (замер 24.09.2026, Evanescence «Sweet Sacrifice
+    (Remastered 2026)»: Spotify 00888072836037, Deezer 888072836020), и когда
+    точные ключи промахнулись, издание опознаётся парой «то же число треков +
+    та же длительность», а не одним названием. ISRC берём тем же путем, что
+    фоллбэк «Spotify не отдаёт» (23.09.2026) — `_seed_isrcs`, а не его копией.
+    `isrcs` — уже добытые, чтобы не ходить дважды.
+    """
+    prof = {"upc": "", "isrcs": list(isrcs or []), "tracks": 0, "duration_s": 0}
+    sid, svc = str(seed.get("id") or ""), str(seed.get("service") or "").lower()
+    if not sid:
+        return prof
+    if not prof["isrcs"]:
+        prof["isrcs"] = await _seed_isrcs(seed)
+    try:
+        if svc == "spotify":
+            if not await _sp_bg_admit_wait():
+                return prof
+            token = await _get_spotify_app_token()
+            if not token:
+                return prof
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.spotify.com/v1/albums/{sid}",
+                                params={"limit": 50},
+                                headers={"Authorization": f"Bearer {token}"})
+                if r.status_code == 429:
+                    _record_sp_rate_limit(int(r.headers.get("Retry-After", 30)))
+                    return prof
+            j = r.json() if r.status_code == 200 else {}
+            prof["upc"] = str(((j.get("external_ids") or {}).get("upc") or "")).strip()
+            tr = j.get("tracks") or {}
+            items = tr.get("items") or []
+            prof["tracks"] = int(tr.get("total") or j.get("total_tracks") or len(items) or 0)
+            # Длительность считаем только когда весь треклист влез в ответ:
+            # частичная сумма хуже отсутствующей — сверку ±3 с ней не пройти.
+            if items and prof["tracks"] and prof["tracks"] <= len(items):
+                prof["duration_s"] = int(round(
+                    sum(int(i.get("duration_ms") or 0) for i in items) / 1000.0))
+        elif svc == "deezer":
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.deezer.com/album/{sid}")
+            j = r.json() if r.status_code == 200 else {}
+            prof["upc"] = str(j.get("upc") or "").strip()
+            items = ((j.get("tracks") or {}).get("data") or [])
+            prof["tracks"] = int(j.get("nb_tracks") or len(items) or 0)
+            if items and prof["tracks"] and prof["tracks"] <= len(items):
+                prof["duration_s"] = sum(int(i.get("duration") or 0) for i in items)
+    except Exception:
+        return prof
+    return prof
+
+
+async def _find_by_isrc(isrc: str, service: str) -> dict | None:
+    """Exact lookup through the ISRC matchers that already ship in routes/isrc.py."""
+    if not isrc:
+        return None
+    try:
+        from ripster.routes import isrc as _isrc_mod
+        if service == "qobuz":
+            hit = await _isrc_mod._qobuz_search_isrc(
+                isrc, (_config.get("qobuz-app-id") or "312369995").strip(),
+                (_config.get("qobuz-auth-token") or "").strip())
+        elif service == "tidal":
+            # NOT config["tidal-token"]: that one is minted by auth.py's
+            # _tidal_refresh_token(), which tries web client_ids WITHOUT a
+            # secret — Tidal rejects them for a TV-issued refresh token
+            # ("This token was issued to another client"), so it sits there
+            # expired. The engine's OrpheusDL TV session refreshes correctly
+            # (TV client_id + secret) and is what downloads already use.
+            tok, cc = "", ""
+            try:
+                from ripster.engines import tidal as _tid
+                tok, cc = await _tid._orpheus_access_token()
+            except Exception:
+                tok = ""
+            if not tok:
+                tok = (_config.get("tidal-token") or "").strip()
+                cc = (_config.get("tidal-country") or "US").strip().upper()
+            hit = await _isrc_mod._tidal_search_isrc(
+                isrc, tok, (cc or _config.get("tidal-country") or "US").strip().upper())
+        elif service == "beatport":
+            # У Beatport ISRC живёт на ТРЕКЕ, а нас интересует релиз, в котором
+            # он лежит — поэтому ищем трек и поднимаемся к его release.
+            from ripster.routes import beatport as _bp
+            tok = await _bp._get_token()
+            if not tok:
+                return None
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"{_bp._BASE}/catalog/tracks/", params={"isrc": isrc},
+                                headers=_bp._auth_headers(tok))
+            res = (r.json().get("results") or []) if r.status_code == 200 else []
+            rel = (res[0].get("release") or {}) if res else {}
+            if not rel.get("id"):
+                return None
+            return {"id": str(rel.get("id")), "title": rel.get("name") or "",
+                    "artist": ", ".join(a.get("name", "") for a in (res[0].get("artists") or [])
+                                        if isinstance(a, dict)),
+                    "url": f"https://www.beatport.com/release/{rel.get('slug','')}/{rel.get('id')}",
+                    "cover": ((rel.get("image") or {}).get("uri") or "")
+                             .replace("{w}", "400").replace("{h}", "400"),
+                    "service": "beatport", "type": "album", "matched_by": "isrc"}
+        elif service == "deezer":
+            # Публичный `track/isrc:` — токен не нужен. Нужен он затем, что
+            # издание Deezer часто несёт ДРУГОЙ штрихкод, и поиск по UPC его не
+            # находит при том, что релиз в каталоге есть (замер 06.09.2026,
+            # «Random Access Memories»).
+            hit = await _isrc_mod._deezer_search_isrc(isrc)
+        elif service == "apple":
+            bearer = (_config.get("authorization-token") or "").strip()
+            if not bearer or bearer == "your-authorization-token":
+                return None
+            sf = (_config.get("apple-country") or _config.get("storefront") or "us").strip().lower()
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.music.apple.com/v1/catalog/{sf}/songs",
+                                params={"filter[isrc]": isrc},
+                                headers={"Authorization": f"Bearer {bearer}",
+                                         "Origin": "https://music.apple.com"})
+            data = (r.json().get("data") or []) if r.status_code == 200 else []
+            if not data:
+                return None
+            at = (data[0].get("attributes") or {})
+            # У песни ссылка ведёт на альбом с якорем ?i=<song>; альбомный
+            # адрес получаем отсечением якоря — отдельный запрос ради этого
+            # не нужен.
+            u = str(at.get("url") or "").split("?")[0]
+            return {"id": "", "title": at.get("albumName") or at.get("name", ""),
+                    "artist": at.get("artistName", ""), "url": u,
+                    "cover": _amp_art(at, 300), "service": "apple",
+                    "type": "album", "matched_by": "isrc"}
+        else:
+            return None
+        if not hit:
+            return None
+        return {"id": str(hit.get("album_id") or ""), "title": hit.get("album") or hit.get("title", ""),
+                "artist": hit.get("artist", ""), "url": hit.get("url", ""),
+                "cover": hit.get("cover", ""), "service": service, "type": "album",
+                "matched_by": "isrc"}
+    except Exception:
+        return None
+
+
+async def _find_by_upc(upc: str, service: str, country: str = "") -> dict | None:
+    """Exact release lookup by barcode. Returns a result dict or None."""
+    upc = "".join(ch for ch in (upc or "") if ch.isdigit())
+    if not upc:
+        return None
+    try:
+        if service == "deezer":
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.deezer.com/album/upc:{upc}")
+            j = r.json()
+            if j and not j.get("error") and j.get("id"):
+                # Идентификатором здесь считается ПОЛЕ ОТВЕТА, а не то, что мы
+                # подставили в строку запроса: замер 27.09.2026 — Deezer на
+                # `/album/upc:602498478981` (Anthrax «Colour Collection», 2007,
+                # 15 тр.) выдал альбом 239256 «Madhouse: The Very Best Of
+                # Anthrax» с собственным `upc` 731458600428 и 12 треками. Тот же
+                # принцип уже защищал Qobuz и Tidal в `availability`
+                # (`_qobuz_by_barcode`: «поисковая строка сама по себе ничего не
+                # гарантирует»). Без сверки матрица объявляла чужой релиз
+                # «можно скачать», а запасной путь поставил бы в очередь его
+                # вместо того, что просил гость.
+                from ripster.availability import norm_barcode
+                if norm_barcode(str(j.get("upc") or "")) != norm_barcode(upc):
+                    return None
+                return {"id": str(j["id"]), "title": j.get("title", ""),
+                        "artist": (j.get("artist") or {}).get("name", ""),
+                        "url": j.get("link", ""), "cover": j.get("cover_medium", ""),
+                        "date": j.get("release_date", ""), "label": j.get("label", ""),
+                        "service": "deezer", "type": "album", "matched_by": "upc"}
+        elif service == "apple":
+            bearer = (_config.get("authorization-token") or "").strip()
+            if bearer and bearer != "your-authorization-token":
+                sf = (country or _config.get("storefront", "us") or "us").lower()
+                h = {"Authorization": f"Bearer {bearer}",
+                     "Origin": "https://music.apple.com"}
+                async with _HTTP.ashared() as c:
+                    r = await c.get(f"https://api.music.apple.com/v1/catalog/{sf}/albums",
+                                    params={"filter[upc]": upc}, headers=h)
+                data = (r.json().get("data") or []) if r.status_code == 200 else []
+                if data:
+                    a = data[0]; at = a.get("attributes") or {}
+                    return {"id": a.get("id", ""), "title": at.get("name", ""),
+                            "artist": at.get("artistName", ""), "url": at.get("url", ""),
+                            "cover": _amp_art(at, 300), "date": at.get("releaseDate", ""),
+                            "label": at.get("recordLabel", ""), "service": "apple",
+                            "type": "album", "matched_by": "upc"}
+        elif service == "beatport":
+            from ripster.routes import beatport as _bp
+            tok = await _bp._get_token()
+            if not tok:
+                return None
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"{_bp._BASE}/catalog/releases/", params={"upc": upc},
+                                headers=_bp._auth_headers(tok))
+            res = (r.json().get("results") or []) if r.status_code == 200 else []
+            if res:
+                d = _bp._fmt_release(res[0])
+                return {"id": str(d.get("id") or ""), "title": d.get("title", ""),
+                        "artist": d.get("artist", ""), "url": d.get("url", ""),
+                        "cover": d.get("artworkUrl", ""),
+                        "date": (res[0].get("publish_date") or ""),
+                        "label": d.get("label", ""), "service": "beatport",
+                        "type": "album", "matched_by": "upc"}
+    except Exception:
+        return None
+    return None
+
+
+def _titles_match(want: str, cand: str) -> bool:
+    """Одно ли это издание по названию.
+
+    Раньше хватало вхождения подстроки в любую сторону, а это ловит совсем
+    посторонние релизы: короткое название входит в длинное чужое. Требуем либо
+    точного совпадения, либо вхождения при близкой длине — «Album» и «Album
+    (Deluxe)» это одно, «Insight» и «Insight Out Reworked» уже нет.
+    """
+    if not want or not cand:
+        return False
+    if want == cand:
+        return True
+    if want in cand or cand in want:
+        short, long_ = sorted((len(want), len(cand)))
+        return short / long_ >= 0.7
+    return False
+
+
+async def _match_seeds_in_service(seeds: list[dict], service: str, label: str,
+                                  limit: int, country: str = "") -> list[dict]:
+    """Look each release up in the target service.
+
+    Barcode first (exact), title+artist only as a fallback.
+
+    У Deezer и Spotify ветки поиска по названию не было вовсе (`else: continue`),
+    хотя `_search_deezer`/`_search_spotify` давно существуют. Единственной
+    дорогой туда оставался штрихкод, а `_seed_upc` умеет доставать его только из
+    самих Deezer/Spotify — то есть релиз, найденный в Apple, НИКОГДА не
+    переводился в Deezer, и подписка «следить → качать из Deezer» молча падала
+    на запасной вариант. Найдено 31.07.2026 живой проверкой: альбом в Deezer
+    есть, а сопоставление возвращало пусто."""
+    out = []
+    for s in seeds:
+        if len(out) >= limit:
+            break
+        # ── exact paths first, guessing only as a last resort ────────────────
+        # barcode → the release itself (Apple, Deezer)
+        if service in ("apple", "deezer"):
+            upc = await _seed_upc(s)
+            if upc:
+                hit = await _find_by_upc(upc, service, country)
+                if hit:
+                    hit["label"] = hit.get("label") or label
+                    hit["date"] = hit.get("date") or s.get("date", "")
+                    out.append(hit)
+                    continue
+        # track ISRC → the album that contains it (Qobuz, Tidal).
+        # Пробуем несколько треков, а не только первый: его ISRC вполне может
+        # отсутствовать в каталоге, хотя сам релиз там есть.
+        if service in ("qobuz", "tidal"):
+            hit = None
+            for isrc in await _seed_isrcs(s):
+                hit = await _find_by_isrc(isrc, service)
+                if hit:
+                    break
+            if hit:
+                hit["label"] = hit.get("label") or label
+                hit["date"] = hit.get("date") or s.get("date", "")
+                out.append(hit)
+                continue
+        artist, title = s.get("artist", ""), s.get("title", "")
+        term = f"{artist} {title}".strip()
+        if not term:
+            continue
+        try:
+            if service == "apple":
+                r = await _search_apple(term, "album", 3, country)
+            elif service in ("qobuz", "tidal"):
+                try:
+                    from ripster.engines import get_engine
+                    res = await get_engine(service).search(term, "album", 3, _config) or []
+                    r = {"results": res}
+                except Exception:
+                    r = await (_search_qobuz(term, "album", 3) if service == "qobuz"
+                               else _search_tidal(term, "album", 3))
+            elif service == "yandex":
+                r = await _search_yandex(term, "album", 3)
+            elif service == "deezer":
+                r = await _search_deezer(term, "album", 3)
+            elif service == "spotify":
+                r = await _search_spotify(term, "album", 3, bg=True)
+            else:
+                continue
+        except Exception:
+            continue
+        want_t = _wl_norm(title)
+        want_a = _wl_norm(artist)
+        for cand in (r.get("results") or []):
+            if not _titles_match(want_t, _wl_norm(cand.get("title", ""))):
+                continue
+            # Артист не проверялся ВООБЩЕ — совпадения искали по одному
+            # названию. Вместе с проверкой «одно входит в другое» это давало
+            # чужие альбомы: 29.07.2026 запрос «нет такого» принял «нет такого
+            # как он». Для автоскачивания это не мелочь: оно кладёт находку в
+            # очередь без участия человека.
+            cand_a = _wl_norm(cand.get("artist", ""))
+            if want_a and cand_a and not (want_a in cand_a or cand_a in want_a):
+                continue
+            # Apple exposes the label inside the copyright line ("℗ 2020 Hospital
+            # Records Limited") — use it to confirm, but don't require it: the
+            # field is absent on plenty of albums.
+            cp = cand.get("copyright", "") or ""
+            if cp and label.lower() not in cp.lower() and not _label_matches(cand.get("label", ""), label):
+                continue
+            cand["label"] = cand.get("label") or label
+            cand["date"] = cand.get("date") or s.get("date", "")
+            out.append(cand)
+            break
+    return out
+
+
+_AMP_TYPE = {"album": "albums", "track": "songs", "song": "songs",
+             "artist": "artists", "video": "music-videos", "playlist": "playlists"}
+
+
+def _amp_art(attrs: dict, size: int = 200) -> str:
+    art = (attrs.get("artwork") or {}).get("url") or ""
+    if not art:
+        return ""
+    return (art.replace("{w}", str(size)).replace("{h}", str(size))
+               .replace("{f}", "jpg").replace("{c}", "bb"))
+
+
+async def _search_apple_ampapi(q: str, ent: str, limit: int, country: str) -> dict:
+    """Live Apple Music catalog search via amp-api. Unlike the iTunes Search
+    index, this reflects the catalog immediately, so a brand-new album (whose
+    lead singles are the only thing the iTunes index has indexed so far) shows
+    up. Needs the developer bearer (+ media-user-token); on any failure the
+    caller falls back to the auth-free iTunes path. Returns {"results": [...]}
+    (empty on any problem — never raises)."""
+    bearer = (_config.get("authorization-token") or "").strip()
+    if not bearer or bearer == "your-authorization-token":
+        return {"results": []}
+    mut  = (_config.get("media-user-token") or "").strip()
+    lang = _config.get("language", "en-US")
+    cc   = lang.split("-")[-1].upper() if "-" in lang else "US"
+    sf   = (country or cc or "US").lower()
+    type_key = _AMP_TYPE.get(ent, "albums")
+    is_track = ent in ("track", "song", "video")
+    headers = {"Authorization": f"Bearer {bearer}", "Origin": "https://music.apple.com"}
+    if mut:
+        headers["media-user-token"] = mut
+    try:
+        r = await _HTTP.aclient().get(
+            f"https://amp-api.music.apple.com/v1/catalog/{sf}/search",
+            params={"term": q, "types": type_key, "limit": min(max(limit, 1), 25),
+                    "include[albums]": "artists", "include[songs]": "artists"},
+            headers=headers,
+        )
+        if r.status_code != 200:
+            return {"results": []}
+        data = ((r.json().get("results") or {}).get(type_key) or {}).get("data") or []
+    except Exception:
+        return {"results": []}
+    out = []
+    for it in data:
+        a = it.get("attributes") or {}
+        full_date = (a.get("releaseDate") or "")[:10]
+        previews  = a.get("previews") or []
+        artist_rel = (((it.get("relationships") or {}).get("artists") or {}).get("data") or [])
+        artist_id  = str(artist_rel[0].get("id", "")) if artist_rel else ""
+        out.append({
+            "id":      str(it.get("id", "")),
+            "title":   a.get("name", ""),
+            "artist":  a.get("artistName", ""),
+            "artist_id": artist_id,
+            "album":   a.get("albumName", "") if is_track else "",
+            "type":    ent,
+            "url":     a.get("url", ""),
+            "cover":   _amp_art(a, 200),
+            "year":    full_date[:4],
+            "date":    full_date,
+            "label":   a.get("recordLabel", "") or a.get("copyright", ""),
+            "tracks":  a.get("trackCount"),
+            "preview": (previews[0].get("url", "") if previews else ""),
+            "service": "apple",
+        })
+    return {"results": out}
+
+
+async def _search_apple(q: str, ent: str, limit: int, country: str) -> dict:
+    """Apple search: live catalog (amp-api) first, iTunes Search index as
+    fallback. amp-api surfaces fresh releases the iTunes index hasn't picked up
+    yet (the "new album missing, only its singles show" symptom); iTunes is the
+    auth-free safety net when the bearer is absent/expired."""
+    amp = await _search_apple_ampapi(q, ent, limit, country)
+    if amp.get("results"):
+        return {"results": amp["results"][: max(limit * 2, 24)]}
+    return await _search_apple_itunes(q, ent, limit, country)
+
+
+async def _search_apple_itunes(q: str, ent: str, limit: int, country: str) -> dict:
+    """iTunes Search API — completely public, no auth.
+
+    Searches the account region AND New Zealand (where releases often go live
+    first) and merges, so pre-releases not yet available in the account region
+    still appear. Each result's URL carries its own region storefront, so the
+    download path pulls it from wherever it's streamable."""
+    import asyncio
+    entity_map = {"album":"album","track":"song","artist":"musicArtist",
+                  "playlist":"playlist","video":"musicVideo"}
+    entity = entity_map.get(ent, "album")
+    media  = "musicVideo" if entity == "musicVideo" else "music"
+    lang = _config.get("language", "en-US")
+    _cc = lang.split("-")[-1].upper() if "-" in lang else "US"
+    sf = (country or _cc or "US").lower()
+    regions = [sf] + (["nz"] if sf != "nz" else [])
+
+    _is_track = ent in ("track", "song", "video")
+    def _map(item):
+        full_date = (item.get("releaseDate") or "")[:10]
+        if _is_track:
+            # TRACK search → identify by the SONG, not its album. Using collection*
+            # here showed album names as "tracks" and made the download grab the
+            # whole album / "some track from it".
+            _id    = str(item.get("trackId") or item.get("collectionId") or item.get("artistId",""))
+            _title = item.get("trackName") or item.get("collectionName") or item.get("artistName","")
+            _url   = item.get("trackViewUrl") or item.get("collectionViewUrl") or item.get("artistViewUrl","")
+        else:
+            _id    = str(item.get("collectionId") or item.get("artistId") or item.get("trackId",""))
+            _title = item.get("collectionName") or item.get("trackName") or item.get("artistName","")
+            _url   = item.get("collectionViewUrl") or item.get("trackViewUrl") or item.get("artistViewUrl","")
+        return {
+            "id":       _id,
+            "title":    _title,
+            "artist":   item.get("artistName",""),
+            "artist_id": str(item.get("artistId","")),
+            "album":    item.get("collectionName","") if _is_track else "",
+            "type":     ent,
+            "url":      _url,
+            "cover":    (item.get("artworkUrl100") or "").replace("100x100","200x200"),
+            "year":     full_date[:4],
+            "date":     full_date,
+            "label":    item.get("copyright", ""),
+            "tracks":   item.get("trackCount"),
+            "preview":  item.get("previewUrl", ""),
+            "service":  "apple",
+        }
+
+    async def _one(cc):
+        try:
+            r = await _HTTP.aclient().get("https://itunes.apple.com/search", params={
+                "term": q, "entity": entity, "limit": limit, "country": cc, "media": media
+            })
+            return [_map(x) for x in (r.json().get("results") or [])]
+        except Exception:
+            return []
+
+    try:
+        batches = await asyncio.gather(*[_one(cc) for cc in regions])
+        seen, merged = set(), []
+        for batch in batches:                     # account region first, then NZ-only extras
+            for it in batch:
+                k = it["id"] or it["url"]
+                if not k or k in seen:
+                    continue
+                seen.add(k)
+                merged.append(it)
+        return {"results": merged[: max(limit * 2, 24)]}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
+
+# ── Yandex Music search (via the yandex_music library — sync, run in threadpool) ──
+_ym_client = None        # cached Client; re-init only when the token changes
+_ym_client_token = ""
+
+
+def _ym_cover(uri: str, size: str = "400x400") -> str:
+    if not uri:
+        return ""
+    u = uri.replace("%%", size)
+    return u if u.startswith("http") else ("https://" + u)
+
+
+async def _search_yandex(q: str, ent: str, limit: int) -> dict:
+    token = (_config.get("yandex-token") or "").strip()
+    if not token:
+        return {"results": [], "error_key": "err.ya_no_token", "error": "Укажи токен Яндекса в Settings → Яндекс"}
+    from fastapi.concurrency import run_in_threadpool
+
+    def _do():
+        global _ym_client, _ym_client_token
+        from yandex_music import Client
+        if _ym_client is None or _ym_client_token != token:
+            _ym_client = Client(token).init()
+            _ym_client_token = token
+        t = {"album": "album", "track": "track", "artist": "artist",
+             "playlist": "playlist"}.get(ent, "album")
+        res = _ym_client.search(q, type_=t)
+        out: list[dict] = []
+        if t == "album" and res and res.albums:
+            for a in (res.albums.results or [])[:limit]:
+                out.append({
+                    "id": str(a.id), "title": a.title or "",
+                    "artist": ", ".join(ar.name for ar in (a.artists or [])),
+                    "type": "album", "url": f"https://music.yandex.ru/album/{a.id}",
+                    "cover": _ym_cover(a.cover_uri), "year": str(a.year or ""),
+                    "tracks": a.track_count, "service": "yandex",
+                })
+        elif t == "track" and res and res.tracks:
+            for tr in (res.tracks.results or [])[:limit]:
+                alb = (tr.albums or [None])[0]
+                aid = alb.id if alb else ""
+                out.append({
+                    "id": str(tr.id), "title": tr.title or "",
+                    "artist": ", ".join(ar.name for ar in (tr.artists or [])),
+                    "type": "track",
+                    "url": f"https://music.yandex.ru/album/{aid}/track/{tr.id}",
+                    "cover": _ym_cover(tr.cover_uri), "service": "yandex",
+                })
+        elif t == "artist" and res and res.artists:
+            for ar in (res.artists.results or [])[:limit]:
+                cov = getattr(ar, "cover", None)
+                out.append({
+                    "id": str(ar.id), "title": ar.name or "", "artist": ar.name or "",
+                    "type": "artist", "url": f"https://music.yandex.ru/artist/{ar.id}",
+                    "cover": _ym_cover(getattr(cov, "uri", "") if cov else ""),
+                    "service": "yandex",
+                })
+        return out
+
+    try:
+        results = await run_in_threadpool(_do)
+        return {"results": results}
+    except Exception as e:
+        return {"results": [], "error": f"Yandex: {e}"}
+
+
+async def _search_deezer(q: str, ent: str, limit: int) -> dict:
+    """Deezer API — completely public, no auth needed."""
+    ent_map = {"album":"album","track":"track","artist":"artist","playlist":"playlist"}
+    ep = ent_map.get(ent, "album")
+    try:
+        async with _HTTP.ashared() as c:
+            r = await c.get(f"https://api.deezer.com/search/{ep}", params={"q": q, "limit": limit})
+            data = r.json()
+        results = []
+        for item in data.get("data") or []:
+            if ep == "album":
+                results.append({
+                    "id":     str(item.get("id","")),
+                    "title":  item.get("title",""),
+                    "artist": (item.get("artist") or {}).get("name",""),
+                    "artist_id": str((item.get("artist") or {}).get("id","")),
+                    "type":   ent,
+                    "url":    item.get("link",""),
+                    "cover":  item.get("cover_medium","") or item.get("cover_big","") or item.get("cover",""),
+                    "year":   (item.get("release_date") or "")[:4],
+                    "date":   item.get("release_date",""),
+                    "label":  item.get("label",""),
+                    "tracks": item.get("nb_tracks"),
+                    "service":"deezer",
+                })
+            elif ep == "track":
+                results.append({
+                    "id":     str(item.get("id","")),
+                    "title":  item.get("title",""),
+                    "artist": (item.get("artist") or {}).get("name",""),
+                    "artist_id": str((item.get("artist") or {}).get("id","")),
+                    "type":   ent,
+                    "url":    item.get("link",""),
+                    "cover":  (item.get("album") or {}).get("cover_medium","") or (item.get("album") or {}).get("cover_small","") or (item.get("album") or {}).get("cover",""),
+                    "duration": item.get("duration") or 0,
+                    "service":"deezer",
+                })
+            elif ep == "artist":
+                results.append({
+                    "id":     str(item.get("id","")),
+                    "title":  item.get("name",""),
+                    "artist": item.get("name",""),
+                    "type":   ent,
+                    "url":    item.get("link",""),
+                    "cover":  item.get("picture_medium",""),
+                    "service":"deezer",
+                })
+        return {"results": results}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
+
+async def _search_qobuz(q: str, ent: str, limit: int) -> dict:
+    """Qobuz search.
+
+    Uses the public ``app_id`` that streamrip also defaults to when none is
+    set — this makes search work out of the box, no Settings required.
+    The user can override via ``qobuz-app-id`` if the public one gets revoked.
+
+    The ``X-User-Auth-Token`` header is only sent if the user has a
+    ``qobuz-auth-token`` — without it we get non-personalised results, which
+    is fine for search. (Key name note: the setting is ``qobuz-auth-token``,
+    not ``qobuz-token`` — the latter was a typo that never picked anything up.)
+    """
+    app_id = (_config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+    token  = (_config.get("qobuz-auth-token") or "").strip()
+    # «Премиум Ripster»: своих токенов нет — ищем выданной поисковой учёткой (ripster/premium_search.py).
+    if not token:
+        from ripster import premium_search as _ps
+        if _ps.premium_search_on(_config, "qobuz"):
+            _tok, _aid = await _ps.qobuz_creds()
+            token = _tok
+            if _aid and not (_config.get("qobuz-app-id") or "").strip():
+                app_id = _aid
+    # URL path uses singular form; response JSON uses plural as top-level key.
+    ep_url_map = {"album": "album",  "track": "track",  "artist": "artist"}
+    ep_key_map = {"album": "albums", "track": "tracks", "artist": "artists"}
+    ep_url = ep_url_map.get(ent, "album")
+    ep_key = ep_key_map.get(ent, "albums")
+    try:
+        async with _HTTP.ashared() as c:
+            r = await c.get(f"https://www.qobuz.com/api.json/0.2/{ep_url}/search", params={
+                "query": q, "limit": limit, "app_id": app_id
+            }, headers={"X-User-Auth-Token": token} if token else {})
+            data = r.json()
+        results = []
+        items = (data.get(ep_key) or {}).get("items") or []
+        for item in items:
+            full_date = (item.get("release_date_original") or "")
+            # Qobuz returns album covers at `item.image` for album/artist hits
+            # but only at `item.album.image` for TRACK hits. Try both.
+            img_obj = item.get("image") if isinstance(item.get("image"), dict) else None
+            if not img_obj:
+                alb_img = (item.get("album") or {}).get("image") if isinstance(item.get("album"), dict) else None
+                img_obj = alb_img if isinstance(alb_img, dict) else {}
+            cover_url = img_obj.get("large", "") or img_obj.get("small", "")
+            _alb = item.get("album") if isinstance(item.get("album"), dict) else {}
+            _artist_obj = (item.get("artist") if isinstance(item.get("artist"), dict) else None) \
+                or (item.get("performer") if isinstance(item.get("performer"), dict) else None) \
+                or (_alb.get("artist") if isinstance(_alb.get("artist"), dict) else None) or {}
+            results.append({
+                "id":     str(item.get("id","")),
+                "title":  item.get("title") or item.get("name",""),
+                # tracks carry the artist in `performer`, not `artist`
+                "artist": _artist_obj.get("name",""),
+                "artist_id": str(_artist_obj.get("id","")),
+                "type":   ent,
+                "url":    item.get("url","") or f"https://www.qobuz.com/album/{item.get('id','')}",
+                "cover":  cover_url,
+                "year":   full_date[:4],
+                "date":   full_date,
+                "label":  (item.get("label") or {}).get("name","") if isinstance(item.get("label"), dict) else "",
+                "hires":  item.get("hires", False),
+                "tracks": item.get("tracks_count"),
+                "service":"qobuz",
+            })
+            if ent == "track":
+                # Станционным событиям нужна длительность именно этого трека —
+                # везём её с поиска, как у Deezer/Tidal.
+                results[-1]["duration"] = item.get("duration") or 0
+        return {"results": results}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
+
+# ── Artist / Album detail pages ───────────────────────────────────────────
+# These power the "artist page" UI (future iteration). They unify response
+# shape across Apple / Deezer / Qobuz so the frontend doesn't have to care
+# which service it's talking to.
+
+# Сервисы, у которых есть карточка артиста и альбома. Яндекса тут не было, хотя
+# `YandexEngine.get_artist/get_album` написаны ровно под этот роут и отдают ту же
+# форму `{album, tracks}`: поиск по Яндексу работал, находил, отдавал результаты
+# с `service: "yandex"` — а клик по найденному упирался в 400 «Unsupported
+# service». Ровно тот класс, который ловит самопроверка связей: код есть, дороги
+# к нему нет.
+_ENGINE_SERVICES = {"apple": "zhaarey", "deezer": "deezer", "qobuz": "qobuz",
+                    "tidal": "tidal", "spotify": "spotify", "yandex": "yandex",
+                    "jiosaavn": "orpheus_jiosaavn"}
+
+
+@router.get("/api/artist/{service}/{artist_id}")
+async def api_artist_detail(service: str, artist_id: str, types: str = "album,single,compilation"):
+    """Return artist info + their releases, filtered by types."""
+    eng_name = _ENGINE_SERVICES.get(service)
+    if not eng_name:
+        raise HTTPException(400, f"Unsupported service: {service}")
+    from ripster.engines import get_engine
+    from ripster import premium_search as _ps
+    return await get_engine(eng_name).get_artist(artist_id, types, await _ps.cfg_view(_config, service))
+
+
+@router.get("/api/album/{service}/{album_id}")
+async def api_album_detail(service: str, album_id: str):
+    """Return album metadata + full track list with preview URLs (if any)."""
+    eng_name = _ENGINE_SERVICES.get(service)
+    if not eng_name:
+        raise HTTPException(400, f"Unsupported service: {service}")
+    from ripster.engines import get_engine
+    from ripster import premium_search as _ps
+    d = await get_engine(eng_name).get_album(album_id, await _ps.cfg_view(_config, service))
+    # Apple/Spotify can't stream through us — resolve the SAME release on Deezer
+    # by UPC so the card (and the search-tile ▶) plays the whole thing, not a
+    # 30-sec preview. Frontend still shows the original service. Best-effort.
+    if isinstance(d, dict) and not d.get("error") and service in ("spotify", "apple"):
+        alb_info = d.get("album") or {}
+        tried = await _attach_playable_sources(
+            d.get("tracks") or [], alb_info.get("upc", ""),
+            title=alb_info.get("title", ""), artist=alb_info.get("artist", ""))
+        d["_tried_services"] = tried
+    return d
+
+
+_RE_ALBUM_ID = {
+    "spotify": _time.__class__,  # placeholder, real regex set below
+}
+
+import re as _re_mod
+_RE_SP_ALBUM = _re_mod.compile(r'open\.spotify\.com/album/([A-Za-z0-9]+)')
+_RE_QB_ALBUM = _re_mod.compile(r'qobuz\.com/(?:[a-z-]+/)?album/[^/]+/([A-Za-z0-9]+)')
+_RE_TD_ALBUM = _re_mod.compile(r'tidal\.com/(?:browse/)?album/(\d+)')
+_RE_DZ_ALBUM = _re_mod.compile(r'deezer\.com/(?:[a-z]+/)?album/(\d+)')
+_RE_AP_ALBUM = _re_mod.compile(r'music\.apple\.com/(?:[a-z]+/)?album/[^/]+/(\d+)')
+
+
+@router.get("/api/release/expand")
+async def api_release_expand(service: str, url: str, title: str = "", artist: str = ""):
+    """Expand a release URL → {album, tracks} via the appropriate engine.
+
+    Used by the Releases tab's ▶ play button. Returns the same shape as
+    /api/album/{service}/{id} so the frontend can reuse handlers.
+    """
+    service = (service or "").lower().strip()
+    url = (url or "").strip()
+    if not url:
+        raise HTTPException(400, "Missing url")
+
+    # SoundCloud has no numeric album_id in its URLs (soundcloud.com/user/sets/…),
+    # so resolve the URL to its object, then reuse the playlist expander.
+    if service == "soundcloud":
+        from ripster.routes.soundcloud import (
+            _get_client_id, _API, _UA, _norm_track, _artwork, sc_playlist,
+        )
+        cid = await _get_client_id()
+        if not cid:
+            raise HTTPException(400, imsg("err.sc_no_client_id", "Не удалось получить client_id SoundCloud"))
+        try:
+            async with _HTTP.ashared() as c:
+                rr = await c.get(f"{_API}/resolve", params={"url": url, "client_id": cid})
+                if rr.status_code in (401, 403):
+                    cid = await _get_client_id(force=True)
+                    rr = await c.get(f"{_API}/resolve", params={"url": url, "client_id": cid})
+                if rr.status_code != 200:
+                    raise HTTPException(404, imsg("err.sc_not_found", f"SoundCloud: не найдено ({rr.status_code})", code=rr.status_code))
+                obj = rr.json()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(502, f"SoundCloud resolve error: {e}")
+        kind = obj.get("kind")
+        if kind == "playlist":
+            return await sc_playlist(str(obj.get("id")))
+        if kind == "track":
+            return {"ok": True, "title": obj.get("title", ""),
+                    "artist": (obj.get("user") or {}).get("username", ""),
+                    "artwork": _artwork(obj.get("artwork_url") or "", "original"),
+                    "tracks": [_norm_track(obj)]}
+        raise HTTPException(400, imsg("err.sc_not_playlist", f"SoundCloud URL не плейлист/трек (kind={kind})", kind=kind))
+
+    rx = {
+        "spotify": _RE_SP_ALBUM, "qobuz": _RE_QB_ALBUM,
+        "tidal":   _RE_TD_ALBUM, "deezer": _RE_DZ_ALBUM,
+        "apple":   _RE_AP_ALBUM,
+    }.get(service)
+    if not rx:
+        raise HTTPException(400, f"Unsupported service: {service}")
+    m = rx.search(url)
+    if not m:
+        raise HTTPException(400, imsg("err.no_album_id", f"Не удалось извлечь album_id из URL ({service})", service=service))
+    album_id = m.group(1)
+    eng_name = _ENGINE_SERVICES.get(service)
+    if not eng_name:
+        raise HTTPException(400, f"Unsupported service: {service}")
+    from ripster.engines import get_engine
+    from ripster import premium_search as _ps
+    d = await get_engine(eng_name).get_album(album_id, await _ps.cfg_view(_config, service))
+    if not isinstance(d, dict):
+        raise HTTPException(502, "Bad engine response")
+    if d.get("error"):
+        # Spotify под лимитом — это НЕ приговор воспроизведению.
+        #
+        # Звук у Spotify-карточки и так берётся не из Spotify: треки
+        # разрешаются в ту же физическую запись на Deezer (см.
+        # `_attach_playable_sources`). То есть Spotify нужен здесь ровно за одним
+        # — за списком треков. Когда его API отказывает, спросить тот же список
+        # у Deezer напрямую дешевле, чем сказать человеку «не играет».
+        # 23.08.2026 нажатие ▶ в радаре отвечало «блокировка на 12 ч», хотя
+        # играть было откуда.
+        #
+        # Фоллбэк срабатывает на ЛЮБОЙ отказ Spotify, а не только на бан:
+        # 5xx/сетевая ошибка движка оставляли человека без звука так же верно,
+        # как 429, а копия на Deezer при этом никуда не делась.
+        if service == "spotify" and (title or artist):
+            alt = await _deezer_album_by_name(title, artist)
+            if alt:
+                return {"ok": True, "via": "deezer", **alt}
+            # Копии на Deezer нет — называем причину по-человечески, вместо
+            # сырого JSON-дампа `{"detail":{key,params,msg}}` в интерфейсе (23.09).
+            if _sp_is_rate_limited():
+                raise HTTPException(503, imsg(
+                    "err.play_sp_banned_noalt",
+                    "Spotify заблокирован до {t}, точной копии релиза на Deezer не нашлось — играть нечем",
+                    t=_sp_unban_clock()))
+            raise HTTPException(502, imsg(
+                "err.play_sp_failed_noalt",
+                "Spotify не отвечает, точной копии релиза на Deezer не нашлось — играть нечем"))
+        if d.get("error_key"):
+            raise HTTPException(502, imsg(d["error_key"], d["error"],
+                                          **(d.get("error_args") or {})))
+        raise HTTPException(502, d["error"])
+    # Играбельная копия по UPC нужна не только Spotify.
+    #
+    # У APPLE своего потока нет и быть не может: полный трек требует
+    # расшифровки, а враппер работает на скачивание, не на живой поток. Поэтому
+    # Apple-карточка играла 30-секундным превью — включая mixed-релизы, где
+    # сегменты по минуте-две и превью бессмысленно.
+    #
+    # Тот же разрешитель по штрихкоду находит ту же самую физическую запись в
+    # Deezer, и релиз играет ЦЕЛИКОМ. Интерфейс по-прежнему показывает Apple —
+    # человеку важно, откуда релиз, а не через что он звучит.
+    #
+    # Эксклюзивы Apple этим не лечатся — копии нет нигде; для них отдельный путь
+    # «скачать и включить».
+    if service in ("spotify", "apple"):
+        alb_info = d.get("album") or {}
+        tried = await _attach_playable_sources(
+            d.get("tracks") or [], alb_info.get("upc", ""),
+            title=alb_info.get("title", ""), artist=alb_info.get("artist", ""))
+        d["_tried_services"] = tried
+    return {"ok": True, **d}
+
+
+async def _deezer_album_by_name(title: str, artist: str) -> dict | None:
+    """Тот же релиз в Deezer по названию и артисту — запасной путь для ▶.
+
+    Точный ключ (штрихкод) здесь недоступен: он лежит в ответе Spotify, а
+    спросить Spotify мы как раз и не можем. Поэтому ищем по имени и берём
+    совпадение, у которого сошлись И артист, И название — на кнопке «слушать»
+    цена ошибки невелика, а альтернатива — тишина.
+
+    Возвращает форму `/api/album/...`, чтобы фронт не различал источники: треки
+    сразу помечены играбельными на Deezer, и фильтр в `playRelease` их не
+    вычищает."""
+    # Скобочный хвост («(Mixed Version)», «[Deluxe Edition]») ломает поиск
+    # Deezer: по полному названию он отдаёт НОЛЬ, по обрезанному — три точных
+    # попадания. Замерено 23.08.2026 на «Balance presents Sunsetstrip (Mixed
+    # Version)»: 0 против 3. Поэтому пробуем от точного к обрезанному, а не
+    # одним запросом.
+    bare = _re_mod.sub(r"\s*[\(\[][^)\]]*[\)\]]\s*$", "", title or "").strip()
+    queries = []
+    for t in (title, bare):
+        if not t:
+            continue
+        for q_ in (" ".join(x for x in (artist, t) if x).strip(), t.strip()):
+            if q_ and q_ not in queries:
+                queries.append(q_)
+    if not queries:
+        return None
+    want_t, want_a = _wl_norm(title), _wl_norm(artist)
+    want_bare = _wl_norm(bare)
+    try:
+        async with _HTTP.ashared() as c:
+            alb = None
+            for q in queries:
+                r = await c.get("https://api.deezer.com/search/album",
+                                params={"q": q, "limit": 5})
+                if r.status_code != 200:
+                    continue
+                hits = (r.json() or {}).get("data") or []
+                for h in hits:
+                    ht = _wl_norm(h.get("title", ""))
+                    ha = _wl_norm((h.get("artist") or {}).get("name", ""))
+                    if not ht or not ha:
+                        continue
+                    t_ok = any(ht == w or (w and (ht.startswith(w) or w.startswith(ht)))
+                               for w in (want_t, want_bare) if w)
+                    a_ok = (not want_a) or ha == want_a                         or ha.startswith(want_a) or want_a.startswith(ha)
+                    if t_ok and a_ok:
+                        alb = h
+                        break
+                if alb:
+                    break
+            if not alb:
+                return None
+            tr = await c.get(f"https://api.deezer.com/album/{alb['id']}/tracks",
+                             params={"limit": 200})
+            if tr.status_code != 200:
+                return None
+            dz = (tr.json() or {}).get("data") or []
+    except Exception:
+        return None
+    if not dz:
+        return None
+    cover = alb.get("cover_medium") or alb.get("cover") or ""
+    return {
+        "album": {"id": str(alb.get("id")), "title": alb.get("title", ""),
+                  "artist": (alb.get("artist") or {}).get("name", ""),
+                  "cover": cover, "service": "deezer"},
+        "tracks": [{
+            "id": str(t.get("id")), "title": t.get("title", ""),
+            "artist": (t.get("artist") or {}).get("name", ""),
+            "disc": t.get("disk_number") or 1,
+            "track_no": t.get("track_position"),
+            "duration": t.get("duration") or 0,
+            "artwork": cover,
+            "url": t.get("link", ""),
+            "playable_service": "deezer", "playable_id": str(t.get("id")),
+        } for t in dz if t.get("id")],
+    }
+
+
+def _qobuz_configured() -> bool:
+    return bool((_config.get("qobuz-auth-token") or "").strip())
+
+
+async def _qobuz_album_tracks(album_id: str) -> list[dict]:
+    app_id = (_config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+    token = (_config.get("qobuz-auth-token") or "").strip()
+    if not token:
+        return []
+    async with _HTTP.ashared() as c:
+        r = await c.get("https://www.qobuz.com/api.json/0.2/album/get",
+                        params={"album_id": album_id, "app_id": app_id, "limit": 500},
+                        headers={"X-User-Auth-Token": token})
+        if r.status_code != 200:
+            return []
+        a = r.json()
+        if a.get("status") == "error":
+            return []
+        return (a.get("tracks") or {}).get("items") or []
+
+
+async def _qobuz_album_by_upc(upc: str) -> dict | None:
+    if not _qobuz_configured():
+        return None
+    app_id = (_config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+    token = (_config.get("qobuz-auth-token") or "").strip()
+    candidates = [upc] if len(upc) <= 12 else [upc.lstrip("0") or upc, upc]
+    async with _HTTP.ashared() as c:
+        for cand in dict.fromkeys(candidates):
+            r = await c.get("https://www.qobuz.com/api.json/0.2/album/search",
+                            params={"query": cand, "limit": 5, "app_id": app_id},
+                            headers={"X-User-Auth-Token": token})
+            if r.status_code != 200:
+                continue
+            for item in (r.json().get("albums", {}).get("items") or []):
+                item_upc = str(item.get("upc") or "")
+                if item_upc and item_upc.lstrip("0") == upc.lstrip("0"):
+                    return {"album_id": str(item["id"]), "service": "qobuz"}
+    return None
+
+
+async def _qobuz_album_by_name(title: str, artist: str) -> dict | None:
+    if not _qobuz_configured():
+        return None
+    app_id = (_config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+    token = (_config.get("qobuz-auth-token") or "").strip()
+    bare = _re_mod.sub(r"\s*[\(\[][^)\]]*[\)\]]\s*$", "", title or "").strip()
+    queries = []
+    for t in (title, bare):
+        if not t:
+            continue
+        for q_ in (" ".join(x for x in (artist, t) if x).strip(), t.strip()):
+            if q_ and q_ not in queries:
+                queries.append(q_)
+    if not queries:
+        return None
+    want_t, want_a = _wl_norm(title), _wl_norm(artist)
+    want_bare = _wl_norm(bare)
+    async with _HTTP.ashared() as c:
+        for q in queries:
+            r = await c.get("https://www.qobuz.com/api.json/0.2/album/search",
+                            params={"query": q, "limit": 5, "app_id": app_id},
+                            headers={"X-User-Auth-Token": token})
+            if r.status_code != 200:
+                continue
+            for item in (r.json().get("albums", {}).get("items") or []):
+                ht = _wl_norm(item.get("title", ""))
+                ha = _wl_norm((item.get("artist") or {}).get("name", ""))
+                if not ht or not ha:
+                    continue
+                t_ok = any(ht == w or (w and (ht.startswith(w) or w.startswith(ht)))
+                           for w in (want_t, want_bare) if w)
+                a_ok = (not want_a) or ha == want_a or ha.startswith(want_a) or want_a.startswith(ha)
+                if t_ok and a_ok:
+                    return {"album_id": str(item["id"]), "service": "qobuz"}
+    return None
+
+
+async def _tidal_album_tracks(album_id: str) -> list[dict]:
+    if not _tidal_configured():
+        return []
+    try:
+        async with _HTTP.ashared() as c:
+            r, cc = await _tidal_get(c, f"{_TIDAL_API}/albums/{album_id}/tracks",
+                                     {"countryCode": _tidal_country(), "limit": 100})
+            if r is None or r.status_code != 200:
+                return []
+            return (r.json().get("items") or [])
+    except Exception:
+        return []
+
+
+async def _tidal_album_by_upc(upc: str) -> dict | None:
+    if not _tidal_configured():
+        return None
+    try:
+        async with _HTTP.ashared() as c:
+            r, cc = await _tidal_get(c, f"{_TIDAL_API}/search/albums",
+                                     {"query": upc, "limit": 5})
+            if r is None or r.status_code != 200:
+                return None
+            for item in (r.json().get("items") or []):
+                alb_id = str(item.get("id", ""))
+                if not alb_id:
+                    continue
+                ar, cc2 = await _tidal_get(c, f"{_TIDAL_API}/albums/{alb_id}",
+                                           {"countryCode": _tidal_country()})
+                if ar is None or ar.status_code != 200:
+                    continue
+                alb_upc = str(ar.json().get("upc") or "")
+                if alb_upc and alb_upc.lstrip("0") == upc.lstrip("0"):
+                    return {"album_id": alb_id, "service": "tidal"}
+    except Exception:
+        pass
+    return None
+
+
+async def _tidal_album_by_name(title: str, artist: str) -> dict | None:
+    if not _tidal_configured():
+        return None
+    bare = _re_mod.sub(r"\s*[\(\[][^)\]]*[\)\]]\s*$", "", title or "").strip()
+    queries = []
+    for t in (title, bare):
+        if not t:
+            continue
+        for q_ in (" ".join(x for x in (artist, t) if x).strip(), t.strip()):
+            if q_ and q_ not in queries:
+                queries.append(q_)
+    if not queries:
+        return None
+    want_t, want_a = _wl_norm(title), _wl_norm(artist)
+    want_bare = _wl_norm(bare)
+    try:
+        async with _HTTP.ashared() as c:
+            for q in queries:
+                r, cc = await _tidal_get(c, f"{_TIDAL_API}/search/albums",
+                                         {"query": q, "limit": 5})
+                if r is None or r.status_code != 200:
+                    continue
+                for item in (r.json().get("items") or []):
+                    ht = _wl_norm(item.get("title", ""))
+                    ha = _wl_norm((item.get("artist") or {}).get("name", ""))
+                    if not ht or not ha:
+                        continue
+                    t_ok = any(ht == w or (w and (ht.startswith(w) or w.startswith(ht)))
+                               for w in (want_t, want_bare) if w)
+                    a_ok = (not want_a) or ha == want_a or ha.startswith(want_a) or want_a.startswith(ha)
+                    if t_ok and a_ok:
+                        return {"album_id": str(item["id"]), "service": "tidal"}
+    except Exception:
+        pass
+    return None
+
+
+def _match_tracks_by_pos(tracks: list, remote_tracks: list, service: str,
+                          pos_key_disk: str = "disk_number",
+                          pos_key_track: str = "track_position") -> None:
+    by_pos = {}
+    for rt in remote_tracks:
+        d = rt.get(pos_key_disk) or rt.get("media_number") or rt.get("volumeNumber") or 1
+        p = rt.get(pos_key_track) or rt.get("track_number") or rt.get("trackNumber")
+        rid = rt.get("id")
+        if p and rid:
+            by_pos[(d, p)] = rt
+    for t in tracks:
+        if not isinstance(t, dict) or t.get("playable_service"):
+            continue
+        hit = by_pos.get((t.get("disc") or 1, t.get("track_no")))
+        if hit:
+            t["playable_service"] = service
+            t["playable_id"] = str(hit["id"])
+
+
+async def _attach_playable_sources(tracks: list, upc: str,
+                                    title: str = "", artist: str = "") -> list[str]:
+    """Spotify/Apple have no /api/stream proxy \u2014 resolve each track to the EXACT
+    same physical copy on Deezer \u2192 Qobuz \u2192 Tidal via the album's UPC (barcode),
+    falling back to name+artist matching. Same barcode = same physical release,
+    so matching by (disc, track_no) inside that release is deterministic.
+    Uses the FIRST service that finds the album (no mixing services). Mutates
+    each track dict in place with playable_service/playable_id. Returns the list
+    of services that were actually tried (for the frontend message)."""
+    upc = "".join(ch for ch in (upc or "") if ch.isdigit())
+    tried: list[str] = []
+    if not tracks:
+        return tried
+
+    async def _try_deezer_upc() -> list[dict] | None:
+        if not upc:
+            return None
+        tried.append("deezer")
+        candidates = [upc] if len(upc) <= 12 else [upc.lstrip("0") or upc, upc]
+        async with _HTTP.ashared() as c:
+            for cand in dict.fromkeys(candidates):
+                r = await c.get(f"https://api.deezer.com/album/upc:{cand}")
+                if r.status_code == 200:
+                    j = r.json()
+                    if not j.get("error") and j.get("id"):
+                        tr = await c.get(f"https://api.deezer.com/album/{j['id']}/tracks",
+                                         params={"limit": 200})
+                        if tr.status_code == 200:
+                            return (tr.json() or {}).get("data") or []
+        return None
+
+    async def _try_deezer_name() -> list[dict] | None:
+        if not (title or artist):
+            return None
+        if "deezer" not in tried:
+            tried.append("deezer")
+        alt = await _deezer_album_by_name(title, artist)
+        if not alt:
+            return None
+        return [{"id": t["playable_id"], "disk_number": t.get("disc", 1),
+                 "track_position": t.get("track_no")}
+                for t in alt.get("tracks", []) if t.get("playable_id")]
+
+    async def _try_qobuz_upc() -> list[dict] | None:
+        if not upc or not _qobuz_configured():
+            return None
+        tried.append("qobuz")
+        alb = await _qobuz_album_by_upc(upc)
+        if not alb:
+            return None
+        return await _qobuz_album_tracks(alb["album_id"])
+
+    async def _try_qobuz_name() -> list[dict] | None:
+        if not (title or artist) or not _qobuz_configured():
+            return None
+        if "qobuz" not in tried:
+            tried.append("qobuz")
+        alb = await _qobuz_album_by_name(title, artist)
+        if not alb:
+            return None
+        return await _qobuz_album_tracks(alb["album_id"])
+
+    async def _try_tidal_upc() -> list[dict] | None:
+        if not upc or not _tidal_configured():
+            return None
+        tried.append("tidal")
+        alb = await _tidal_album_by_upc(upc)
+        if not alb:
+            return None
+        return await _tidal_album_tracks(alb["album_id"])
+
+    async def _try_tidal_name() -> list[dict] | None:
+        if not (title or artist) or not _tidal_configured():
+            return None
+        if "tidal" not in tried:
+            tried.append("tidal")
+        alb = await _tidal_album_by_name(title, artist)
+        if not alb:
+            return None
+        return await _tidal_album_tracks(alb["album_id"])
+
+    _STEPS = [
+        ("deezer", _try_deezer_upc, "disk_number", "track_position"),
+        ("deezer", _try_deezer_name, "disk_number", "track_position"),
+        ("qobuz",  _try_qobuz_upc,  "media_number", "track_number"),
+        ("qobuz",  _try_qobuz_name, "media_number", "track_number"),
+        ("tidal",  _try_tidal_upc,  "volumeNumber", "trackNumber"),
+        ("tidal",  _try_tidal_name, "volumeNumber", "trackNumber"),
+    ]
+    for svc, step, dk, tp in _STEPS:
+        remote = await step()
+        if not remote:
+            continue
+        _match_tracks_by_pos(tracks, remote, svc, pos_key_disk=dk, pos_key_track=tp)
+        if any(t.get("playable_service") == svc for t in tracks if isinstance(t, dict)):
+            break
+    return tried
+
+# ── Tidal (authenticated API — needs tidal-token in config) ──────────────
+
+_TIDAL_API = "https://api.tidal.com/v1"
+
+
+def _tidal_configured() -> bool:
+    """Есть ли чем говорить с Tidal: живая сессия движка ИЛИ вставленный токен.
+
+    Синхронный и без сети сознательно: им пользуются как ПРОПУСОМ источника
+    («есть учётка — ищем»), а проверять сессию дешёво только по наличию
+    refresh-токена в хранилище.
+    """
+    if (_config.get("tidal-token") or "").strip():
+        return True
+    try:
+        from ripster.engines.tidal import session_refresh_token
+        if session_refresh_token():
+            return True
+    except Exception:                                        # noqa: BLE001
+        pass
+    from ripster import premium_search as _ps               # выданная поисковая учётка Премиума
+    return _ps.premium_search_on(_config, "tidal")
+
+
+async def _tidal_get(c, url: str, params: dict) -> tuple:
+    """GET Bearer'ом из живой сессии → (response, country); на 401 перевыпускает
+    токен и повторяет РОВНО ОДИН раз (общая реализация с движком).
+    None в ответе — говорить с Tidal нечем."""
+    from ripster.engines.tidal import _api_get
+    r, _tok, cc = await _api_get(c, url, params, _config)
+    if r is None:           # своего токена нет — пробуем выданную Премиумом поисковую учётку
+        from ripster import premium_search as _ps
+        if _ps.premium_search_on(_config, "tidal"):
+            return await _ps.tidal_get(c, url, params)
+    return r, cc
+
+
+def _tidal_country() -> str:
+    return (_config.get("tidal-country") or "US").strip().upper() or "US"
+
+
+def _tidal_cover(uuid: str, size: int = 160) -> str:
+    """Convert Tidal's UUID cover format to CDN URL."""
+    if not uuid:
+        return ""
+    return f"https://resources.tidal.com/images/{uuid.replace('-', '/')}/{size}x{size}.jpg"
+
+
+async def _search_tidal(q: str, ent: str, limit: int) -> dict:
+    if not _tidal_configured():
+        return {"results": [], "error_key": "err.tidal_no_token_cfg", "error": "Tidal access_token не настроен. Добавь в Settings → Tidal."}
+    type_map = {"album": "albums", "track": "tracks", "artist": "artists"}
+    t_type = type_map.get(ent, "albums")
+    try:
+        async with _HTTP.ashared() as c:
+            r, _cc = await _tidal_get(c, f"{_TIDAL_API}/search/{t_type}",
+                                     {"query": q, "limit": limit})
+            if r is None:
+                return {"results": [], "error_key": "err.tidal_no_token_cfg",
+                        "error": "Tidal: нет живого токена — обнови вход в Settings → Tidal."}
+            if r.status_code == 401:
+                return {"results": [], "error_key": "err.tidal_token_expired",
+                        "error": "Tidal: токен не принят даже после перевыпуска из refresh "
+                                 "— нужен новый вход в Settings → Tidal."}
+            data = r.json()
+        results = []
+        for item in data.get("items") or []:
+            if t_type == "albums":
+                alb_id = str(item.get("id", ""))
+                results.append({
+                    "id":      alb_id,
+                    "title":   item.get("title", ""),
+                    "artist":  (item.get("artist") or {}).get("name", ""),
+                    "artist_id": str((item.get("artist") or {}).get("id", "")),
+                    "type":    ent,
+                    "url":     f"https://listen.tidal.com/album/{alb_id}",
+                    "cover":   _tidal_cover(item.get("cover", "")),
+                    # Полная дата, а не только год. Tidal её отдаёт, но её
+                    # обрезали до четырёх символов и клали лишь в `year` — у
+                    # всех остальных сервисов поле `date` есть, и карточки
+                    # сортируются по нему. Из-за этого свежий релиз Tidal
+                    # оказывался в выборке по новизне неизвестно где: сортировке
+                    # было не за что зацепиться.
+                    "date":    (item.get("releaseDate") or "")[:10],
+                    "year":    (item.get("releaseDate") or "")[:4],
+                    "tracks":  item.get("numberOfTracks"),
+                    "service": "tidal",
+                })
+            elif t_type == "tracks":
+                tr_id = str(item.get("id", ""))
+                results.append({
+                    "id":      tr_id,
+                    "title":   item.get("title", ""),
+                    "artist":  (item.get("artist") or {}).get("name", ""),
+                    "artist_id": str((item.get("artist") or {}).get("id", "")),
+                    "type":    ent,
+                    "url":     f"https://listen.tidal.com/track/{tr_id}",
+                    "cover":   _tidal_cover((item.get("album") or {}).get("cover", "")),
+                    "duration": item.get("duration") or 0,
+                    "service": "tidal",
+                })
+            elif t_type == "artists":
+                art_id = str(item.get("id", ""))
+                results.append({
+                    "id":      art_id,
+                    "title":   item.get("name", ""),
+                    "artist":  item.get("name", ""),
+                    "type":    ent,
+                    "url":     f"https://listen.tidal.com/artist/{art_id}",
+                    "cover":   _tidal_cover(item.get("picture", "")),
+                    "service": "tidal",
+                })
+        return {"results": results}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
+
+
+# ── Spotify (Web API — needs client_id + client_secret from config) ──────────
+
+async def _get_spotify_app_token() -> str:
+    now = _time.time()
+    if _sp_app_token["token"] and now < _sp_app_token["expires_at"] - 60:
+        return _sp_app_token["token"]
+    cid    = (_config.get("spotify-client-id")     or "").strip()
+    secret = (_config.get("spotify-client-secret") or "").strip()
+    if not cid or not secret:
+        return ""
+    import base64
+    creds = base64.b64encode(f"{cid}:{secret}".encode()).decode()
+    try:
+        async with _HTTP.ashared() as c:
+            r = await c.post(
+                "https://accounts.spotify.com/api/token",
+                headers={"Authorization": f"Basic {creds}",
+                         "Content-Type": "application/x-www-form-urlencoded"},
+                data={"grant_type": "client_credentials"},
+            )
+            if r.status_code != 200:
+                return ""
+            data = r.json()
+            _sp_app_token["token"]      = data.get("access_token", "")
+            _sp_app_token["expires_at"] = now + data.get("expires_in", 3600)
+            return _sp_app_token["token"]
+    except Exception:
+        return ""
+
+
+def _sp_cover(images: list) -> str:
+    # Spotify returns images largest-first (~640px). Cards only need ~300px — use
+    # the medium image to cut search-result traffic/load time.
+    if not images:
+        return ""
+    pick = images[1] if len(images) >= 2 else images[0]
+    return pick.get("url", "")
+
+
+async def _search_spotify(q: str, ent: str, limit: int, bg: bool = False) -> dict:
+    if _sp_is_rate_limited():
+        return {"results": [], **_sp_rate_limit_payload()}
+    if bg and not _sp_bg_admit():
+        # Фон не пустили в бюджет — это НЕ «ничего не найдено»: вызывающий
+        # обязан относится к этому как к «в этот раз не проверили».
+        return {"results": [], "bg_deferred": True,
+                "error": "фоновый бюджет запросов Spotify исчерпан — досверяем в следующий обход"}
+    token = await _get_spotify_app_token()
+    if not token:
+        return {"results": [], "error_key": "err.sp_not_configured", "error": "Spotify API не настроен — добавь Client ID/Secret в Settings → Spotify"}
+    type_map = {"album": "album", "track": "track", "artist": "artist"}
+    sp_type  = type_map.get(ent, "album")
+    try:
+        async with _HTTP.ashared() as c:
+            r = await c.get("https://api.spotify.com/v1/search",
+                            headers={"Authorization": f"Bearer {token}"},
+                            # Found 2026-07-22: this client_id/app returns a
+                            # flat 400 "Invalid limit" for any limit > 10 on
+                            # /v1/search — NOT the documented 1-50 range,
+                            # presumably a quota-tier restriction Spotify
+                            # applies to this app. Silently broke ALL Spotify
+                            # search results (empty array, no visible error)
+                            # since the caller's default limit=20 always hit
+                            # it. Clamp instead of trusting the docs.
+                            params={"q": q, "type": sp_type, "limit": min(max(limit, 1), 10)})
+            if r.status_code == 401:
+                _sp_app_token["token"] = ""
+                return {"results": [], "error_key": "err.sp_token_expired", "error": "Spotify: токен истёк, попробуй снова"}
+            if r.status_code == 429:
+                _record_sp_rate_limit(int(r.headers.get("Retry-After", 30)))
+                return {"results": [], **_sp_rate_limit_payload()}
+            if not r.content:
+                return {"results": [], "error": f"Spotify API: HTTP {r.status_code}"}
+            data = r.json()
+            # Any other non-2xx (e.g. the "Invalid limit" 400 above, before it was
+            # clamped) must surface as an error, not a silent empty result — that
+            # silence is exactly what let the limit bug above go unnoticed.
+            if r.status_code >= 300:
+                return {"results": [], "error": f"Spotify API: HTTP {r.status_code} — "
+                                                f"{(data.get('error') or {}).get('message', data)}"}
+        results = []
+        if sp_type == "album":
+            for item in (data.get("albums") or {}).get("items") or []:
+                if not item:
+                    continue
+                results.append({
+                    "id":     item["id"],
+                    "title":  item.get("name", ""),
+                    "artist": ", ".join(a.get("name", "") for a in item.get("artists") or []),
+                    "type":   ent,
+                    "url":    item.get("external_urls", {}).get("spotify",
+                              f"https://open.spotify.com/album/{item['id']}"),
+                    "cover":  _sp_cover(item.get("images")),
+                    "year":   (item.get("release_date") or "")[:4],
+                    "date":   item.get("release_date", ""),
+                    "tracks": item.get("total_tracks"),
+                    "service": "spotify",
+                })
+        elif sp_type == "track":
+            for item in (data.get("tracks") or {}).get("items") or []:
+                if not item:
+                    continue
+                results.append({
+                    "id":      item["id"],
+                    "title":   item.get("name", ""),
+                    "artist":  ", ".join(a.get("name", "") for a in item.get("artists") or []),
+                    "type":    ent,
+                    "url":     item.get("external_urls", {}).get("spotify",
+                               f"https://open.spotify.com/track/{item['id']}"),
+                    "cover":   _sp_cover((item.get("album") or {}).get("images")),
+                    "preview": item.get("preview_url", ""),
+                    "service": "spotify",
+                })
+        elif sp_type == "artist":
+            for item in (data.get("artists") or {}).get("items") or []:
+                if not item:
+                    continue
+                results.append({
+                    "id":     item["id"],
+                    "title":  item.get("name", ""),
+                    "artist": item.get("name", ""),
+                    "type":   ent,
+                    "url":    item.get("external_urls", {}).get("spotify",
+                              f"https://open.spotify.com/artist/{item['id']}"),
+                    "cover":  _sp_cover(item.get("images")),
+                    "service": "spotify",
+                })
+        return {"results": results}
+    except Exception as e:
+        return {"results": [], "error": str(e)}
+
+
+async def _artist_spotify(artist_id: str, types: str) -> dict:
+    cache_key = f"{artist_id}:{types}"
+    now = _time.time()
+    cached, exp = _sp_artist_cache.get(cache_key, (None, 0))
+    if cached and now < exp:
+        return cached
+    if _sp_is_rate_limited():
+        if cached: return cached
+        return {"releases": [], **_sp_rate_limit_payload()}
+
+    token = await _get_spotify_app_token()
+    if not token:
+        return {"error_key": "err.sp_not_configured_short", "error": "Spotify API не настроен", "releases": []}
+    wanted = {t.strip() for t in types.split(",") if t.strip()} if types else set()
+    # `all` — это «без фильтра», а не тип релиза. Deezer и Qobuz это знали
+    # (у них ниже стоит `wanted != {"all"}`), Spotify — нет: строка сравнивалась
+    # с `album`/`single`/`compilation`/`appears_on`, не совпадала ни с одной, и
+    # выбор «все типы» отдавал ПУСТУЮ дискографию. Проверено на живом роуте:
+    # без параметра 10 релизов, с `types=all` — 0.
+    if "all" in wanted:
+        wanted = set()
+    try:
+        async with _HTTP.ashared() as c:
+            info_r = await c.get(f"https://api.spotify.com/v1/artists/{artist_id}",
+                                 headers={"Authorization": f"Bearer {token}"})
+            if info_r.status_code == 401:
+                _sp_app_token["token"] = ""
+                return {"error_key": "err.sp_token_expired", "error": "Spotify: токен истёк, попробуй снова", "releases": []}
+            if info_r.status_code == 429:
+                _record_sp_rate_limit(int(info_r.headers.get("Retry-After", 30)))
+                if cached: return cached
+                return {"releases": [], **_sp_rate_limit_payload()}
+            if not info_r.content:
+                return {"error_key": "err.sp_empty_resp", "error": "Spotify API: пустой ответ", "releases": []}
+            info = info_r.json()
+            alb_r = await c.get(f"https://api.spotify.com/v1/artists/{artist_id}/albums",
+                                headers={"Authorization": f"Bearer {token}"},
+                                # Same quota-tier limit>10 → 400 as /v1/search, see there.
+                                # `appears_on` — сборники и чужие релизы, где артист
+                                # только участвует. Раньше группу не запрашивали
+                                # вовсе, хотя тип для неё в type_map уже был: на
+                                # телефоне строка «участие» всегда пустовала.
+                                params={"limit": 10,
+                                        "include_groups": "album,single,compilation,appears_on"})
+            if alb_r.status_code == 429:
+                _record_sp_rate_limit(int(alb_r.headers.get("Retry-After", 30)))
+                if cached: return cached
+                return {"releases": [], **_sp_rate_limit_payload()}
+            if not alb_r.content:
+                return {"error_key": "err.sp_empty_resp", "error": "Spotify API: пустой ответ", "releases": []}
+            alb_data = alb_r.json()
+        type_map = {"album": "album", "single": "single", "compilation": "compilation", "appears_on": "appears_on"}
+        releases = []
+        for a in alb_data.get("items") or []:
+            rtype = type_map.get(a.get("album_group") or a.get("album_type", "album"), "album")
+            if wanted and rtype not in wanted:
+                continue
+            releases.append({
+                "id":     a["id"],
+                "title":  a.get("name", ""),
+                "cover":  _sp_cover(a.get("images")),
+                "year":   (a.get("release_date") or "")[:4],
+                "date":   a.get("release_date", ""),
+                "tracks": a.get("total_tracks"),
+                "type":   rtype,
+                "url":    a.get("external_urls", {}).get("spotify",
+                          f"https://open.spotify.com/album/{a['id']}"),
+                "service": "spotify",
+                # Чей это релиз — берём из самого объекта альбома, он уже в
+                # ответе. Раньше значение добывалось ниже из ПЕРВОГО ТРЕКА
+                # сборника, а первый трек чужого сборника принадлежит кому
+                # угодно: карточка подписывалась случайным исполнителем вместо
+                # «Various Artists». Здесь же это и бесплатно — без лишнего
+                # запроса к API, у которого мы и так выбираем суточную квоту.
+                "album_artist": ", ".join(dict.fromkeys(
+                    x.get("name", "") for x in (a.get("artists") or []) if x.get("name"))),
+            })
+        # Чем именно артист участвует в чужом релизе. Спрашиваем ТОЛЬКО для
+        # таких строк и не больше пяти: у Spotify живой лимит запросов, и радар
+        # уже ловил 429-баны — доплата за справку не должна стоить ленты.
+        appears = [r for r in releases if r["type"] in ("appears_on", "compilation")][:5]
+        if appears and not _sp_is_rate_limited():
+            try:
+                async with _HTTP.ashared() as c2:
+                    for row in appears:
+                        # Дополнение «чем участвует» — фон: без разрешения
+                        # бюджета снимаем со страницы доплату, а не лимит.
+                        if not _sp_bg_admit():
+                            break
+                        tr = await c2.get(
+                            f"https://api.spotify.com/v1/albums/{row['id']}/tracks",
+                            headers={"Authorization": f"Bearer {token}"},
+                            params={"limit": 50})
+                        if tr.status_code == 429:
+                            _record_sp_rate_limit(int(tr.headers.get("Retry-After", 30)))
+                            break
+                        if not tr.content:
+                            continue
+                        mine = []
+                        for t in (tr.json().get("items") or []):
+                            if any(str(x.get("id")) == str(artist_id) for x in (t.get("artists") or [])):
+                                mine.append(t.get("name", ""))
+                        mine = [x for x in dict.fromkeys(mine) if x]
+                        if mine:
+                            row["appears_as"] = "; ".join(mine)
+            except Exception as e:          # noqa: BLE001
+                print(f"[spotify] appears_as не собран: {e!r}", flush=True)
+
+        releases.sort(key=lambda r: r.get("date", ""), reverse=True)
+        result = {
+            "artist": {
+                "id":      artist_id,
+                "name":    info.get("name", ""),
+                "picture": _sp_cover(info.get("images")),
+                "fans":    (info.get("followers") or {}).get("total"),
+                "url":     info.get("external_urls", {}).get("spotify",
+                           f"https://open.spotify.com/artist/{artist_id}"),
+                "service": "spotify",
+            },
+            "releases": releases,
+        }
+        _sp_artist_cache[cache_key] = (result, now + _SP_ARTIST_TTL)
+        return result
+    except Exception as e:
+        return {"error": str(e), "releases": []}
+
+
+async def _album_spotify(album_id: str) -> dict:
+    now = _time.time()
+    cached, exp = _sp_album_cache.get(album_id, (None, 0))
+    if cached and now < exp:
+        return cached
+    if _sp_is_rate_limited():
+        if cached: return cached
+        return _sp_rate_limit_payload()
+
+    token = await _get_spotify_app_token()
+    if not token:
+        return {"error_key": "err.sp_not_configured_short", "error": "Spotify API не настроен"}
+    try:
+        async with _HTTP.ashared() as c:
+            r = await c.get(f"https://api.spotify.com/v1/albums/{album_id}",
+                            headers={"Authorization": f"Bearer {token}"})
+            if r.status_code == 401:
+                _sp_app_token["token"] = ""
+                return {"error_key": "err.sp_token_expired", "error": "Spotify: токен истёк, попробуй снова"}
+            if r.status_code == 429:
+                _record_sp_rate_limit(int(r.headers.get("Retry-After", 10)))
+                if cached:
+                    return cached
+                return _sp_rate_limit_payload()
+            if not r.content:
+                return {"error_key": "err.sp_empty_resp_http", "error_args": {"code": r.status_code}, "error": f"Spotify API: пустой ответ (HTTP {r.status_code})"}
+            a = r.json()
+            if a.get("error"):
+                return {"error": f"Spotify: {a['error'].get('message', str(a['error']))}"}
+        tracks = []
+        for t in (a.get("tracks") or {}).get("items") or []:
+            tracks.append({
+                "id":       t["id"],
+                "title":    t.get("name", ""),
+                "artist":   ", ".join(ar.get("name", "") for ar in t.get("artists") or []),
+                "duration": (t.get("duration_ms") or 0) // 1000,
+                "track_no": t.get("track_number"),
+                "disc":     t.get("disc_number"),
+                "preview":  t.get("preview_url") or "",
+                "explicit": t.get("explicit", False),
+                "url":      t.get("external_urls", {}).get("spotify",
+                            f"https://open.spotify.com/track/{t['id']}"),
+            })
+        real_id = a.get("id", album_id)
+        result = {
+            "album": {
+                "id":     real_id,
+                "title":  a.get("name", ""),
+                "artist": ", ".join(ar.get("name", "") for ar in a.get("artists") or []),
+                "cover":  _sp_cover(a.get("images")),
+                "year":   (a.get("release_date") or "")[:4],
+                "date":   a.get("release_date", ""),
+                "label":  a.get("label", ""),
+                "upc":    (a.get("external_ids") or {}).get("upc", ""),
+                "tracks": a.get("total_tracks"),
+                "url":    a.get("external_urls", {}).get("spotify",
+                          f"https://open.spotify.com/album/{real_id}"),
+                "service": "spotify",
+            },
+            "tracks": tracks,
+        }
+        _sp_album_cache[album_id] = (result, now + _SP_ALBUM_TTL)
+        return result
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# ── ISRC upgrade: find a Spotify track on lossless services ──────────────────
+
+_ARTIST_STOPWORDS = frozenset({
+    "the", "a", "an", "feat", "ft", "featuring", "and", "with", "x", "vs",
+    "of", "de", "la", "le", "los", "las", "el", "y", "e", "di", "das", "der", "und",
+})
+
+
+def _artist_tokens(s: str) -> set:
+    import re
+    toks = re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
+    return {t for t in toks if t and t not in _ARTIST_STOPWORDS}
+
+
+def _same_artist(src: str, cand: str) -> bool:
+    """True when a fuzzy candidate plausibly belongs to the source artist.
+
+    Lenient on purpose: a single shared significant token (stopwords like
+    'the'/'feat' dropped) is enough, so feat./collab/transliteration variants
+    still pass — while a same-titled release by a wholly different artist
+    ("New Love" by Kloyd vs Ziggy Alberts) is rejected. When the source artist
+    is unknown (Spotify Web API geo-blocked → only the oembed title survived)
+    we cannot verify, so we ALLOW rather than block every result."""
+    st = _artist_tokens(src)
+    if not st:
+        return True            # no source artist to compare against → don't guard
+    ct = _artist_tokens(cand)
+    if not ct:
+        return False           # we know the artist, candidate has none → unconfirmed
+    return bool(st & ct)
+
+
+async def _resolve_spotify_album(sp_url: str) -> dict:
+    """Resolve a Spotify ALBUM to the same release on lossless services: Deezer &
+    Apple exact via UPC barcode, Qobuz/Tidal/Yandex via name+artist (Qobuz also
+    tries UPC). Best 1 candidate per service. Mirrors the track resolver so the
+    bot's convert-first picker works for full releases, not just single tracks."""
+    alb_id = sp_url.split("/album/")[-1].split("?")[0].strip()
+    upc = name = artist = ""
+    token = await _get_spotify_app_token()
+    if not token:
+        try:
+            from ripster.engines.orpheus_spotify import _creds_path as _osp_creds
+            import json as _json
+            p = _osp_creds()
+            if p.exists():
+                token = _json.loads(p.read_text(encoding="utf-8")).get("access_token", "")
+        except Exception:
+            pass
+    if token:
+        try:
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"https://api.spotify.com/v1/albums/{alb_id}",
+                                headers={"Authorization": f"Bearer {token}"})
+                if r.status_code == 200:
+                    ad = r.json()
+                    upc    = (ad.get("external_ids") or {}).get("upc", "") or ""
+                    name   = ad.get("name", "") or ""
+                    artist = ", ".join(a.get("name", "") for a in (ad.get("artists") or [])) or ""
+        except Exception:
+            pass
+    # Spotify Web API geo-blocks some regions (403 "Spotify is unavailable in
+    # this country" — e.g. behind a RU VPN), leaving name+upc empty and making the
+    # convert picker wrongly report "no lossless analog". Fall back to the PUBLIC
+    # oembed endpoint (no auth, not geo-blocked) for at least the release name, so
+    # the fuzzy lossless search still runs.
+    if not name:
+        try:
+            async with _HTTP.ashared() as c:
+                r = await c.get("https://open.spotify.com/oembed", params={"url": sp_url})
+                if r.status_code == 200:
+                    name = (r.json().get("title") or "").strip()
+        except Exception:
+            pass
+
+    if not name and not upc:
+        return {"results": [], "upc": ""}
+
+    candidates: dict[str, dict] = {}
+
+    def _norm(s: str) -> str:
+        return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+    _nn = _norm(name)
+
+    def _title_matches(cand_title: str) -> bool:
+        ct = _norm(cand_title)
+        return bool(ct and _nn and (ct == _nn or ct in _nn or _nn in ct))
+
+    def _add(entry: dict) -> None:
+        if not entry.get("url"):
+            return
+        # A FUZZY album match (search by artist+name) can return a DIFFERENT
+        # album by the same artist — or pure garbage (e.g. "DE STAAT" → "Mozart:
+        # Requiem"). Reject any fuzzy candidate whose title isn't the requested
+        # release, so the user never gets the wrong album. Exact (UPC) is trusted.
+        if entry.get("match") == "fuzzy":
+            if _nn and not _title_matches(entry.get("title", "")):
+                return
+            # ...and whose ARTIST isn't the requested one. Same-titled albums by
+            # DIFFERENT artists ("New Love" by Kloyd vs Ziggy Alberts) otherwise
+            # pass the title check — and worse, the wrong Deezer hit's UPC gets
+            # borrowed below to poison the Apple/Qobuz exact lookups. Skipped only
+            # when the source artist is unknown (Spotify geo-block, oembed title).
+            if not _same_artist(artist, entry.get("artist", "")):
+                return
+        svc = entry["service"]
+        prev = candidates.get(svc)
+        if prev is None or (entry["match"] == "exact" and prev["match"] != "exact"):
+            candidates[svc] = entry
+
+    q = f"{artist} {name}".strip()
+
+    # Deezer — UPC exact, then fuzzy album search
+    try:
+        async with _HTTP.ashared() as c:
+            if upc:
+                r = await c.get(f"https://api.deezer.com/2.0/album/upc:{upc}")
+                d = r.json()
+                if not d.get("error") and d.get("id"):
+                    _add({"service": "deezer", "url": d.get("link", ""),
+                          "title": d.get("title", name),
+                          "artist": (d.get("artist") or {}).get("name", artist),
+                          "quality": "FLAC", "match": "exact"})
+            if "deezer" not in candidates and q:
+                r = await c.get("https://api.deezer.com/search/album",
+                                params={"q": q, "limit": 3})
+                for item in (r.json().get("data") or [])[:1]:
+                    _add({"service": "deezer", "url": item.get("link", ""),
+                          "title": item.get("title", ""),
+                          "artist": (item.get("artist") or {}).get("name", ""),
+                          "quality": "FLAC", "match": "fuzzy"})
+    except Exception:
+        pass
+
+    # Spotify gave no UPC (geo-block)? Borrow it from the Deezer match we just
+    # found, so the Apple/Qobuz exact-UPC lookups below work WITHOUT the
+    # (geo-blocked) Spotify API. Deezer search items omit upc → fetch the album.
+    if not upc and "deezer" in candidates:
+        try:
+            import re as _re
+            m = _re.search(r"/album/(\d+)", candidates["deezer"].get("url", ""))
+            if m:
+                async with _HTTP.ashared() as c:
+                    dd = (await c.get(f"https://api.deezer.com/album/{m.group(1)}")).json()
+                if not dd.get("error") and dd.get("upc"):
+                    upc = str(dd["upc"])
+        except Exception:
+            pass
+
+    # Apple (iTunes) — UPC lookup, then fuzzy
+    try:
+        async with _HTTP.ashared() as c:
+            if upc:
+                r = await c.get("https://itunes.apple.com/lookup",
+                                params={"upc": upc, "entity": "album", "limit": 1})
+                for s in [x for x in (r.json().get("results") or [])
+                          if x.get("wrapperType") == "collection"][:1]:
+                    _add({"service": "apple", "url": s.get("collectionViewUrl", ""),
+                          "title": s.get("collectionName", ""), "artist": s.get("artistName", ""),
+                          "quality": "ALAC", "match": "exact"})
+            if "apple" not in candidates and q:
+                r = await c.get("https://itunes.apple.com/search",
+                                params={"term": q, "entity": "album", "limit": 3, "media": "music"})
+                for s in (r.json().get("results") or [])[:1]:
+                    _add({"service": "apple", "url": s.get("collectionViewUrl", ""),
+                          "title": s.get("collectionName", ""), "artist": s.get("artistName", ""),
+                          "quality": "ALAC", "match": "fuzzy"})
+    except Exception:
+        pass
+
+    # Qobuz — UPC as query first, then name+artist
+    qz_token  = (_config.get("qobuz-auth-token") or "").strip()
+    qz_app_id = (_config.get("qobuz-app-id")     or "").strip() or _QOBUZ_DEFAULT_APP_ID
+    if qz_token:
+        try:
+            async with _HTTP.ashared() as c:
+                def _qz_alb(item: dict, match: str) -> dict:
+                    aid = item.get("id", "")
+                    return {"service": "qobuz",
+                            "url": item.get("url") or f"https://open.qobuz.com/album/{aid}",
+                            "title": item.get("title", ""),
+                            "artist": (item.get("artist") or {}).get("name", ""),
+                            "quality": "Hi-Res FLAC", "match": match}
+                if upc:
+                    r = await c.get("https://www.qobuz.com/api.json/0.2/album/search",
+                                    params={"query": upc, "limit": 3, "app_id": qz_app_id},
+                                    headers={"X-User-Auth-Token": qz_token})
+                    for item in (r.json().get("albums", {}).get("items") or []):
+                        _add(_qz_alb(item, "exact" if item.get("upc") == upc else "fuzzy"))
+                if "qobuz" not in candidates and q:
+                    r = await c.get("https://www.qobuz.com/api.json/0.2/album/search",
+                                    params={"query": q, "limit": 3, "app_id": qz_app_id},
+                                    headers={"X-User-Auth-Token": qz_token})
+                    for item in (r.json().get("albums", {}).get("items") or [])[:1]:
+                        _add(_qz_alb(item, "fuzzy"))
+        except Exception:
+            pass
+
+    # Tidal — fuzzy album search
+    try:
+        if _tidal_configured() and q:
+            td = await _search_tidal(q, "album", 3)
+            for item in (td.get("results") or [])[:1]:
+                _add({"service": "tidal", "url": item.get("url", ""),
+                      "title": item.get("title", ""), "artist": item.get("artist", ""),
+                      "quality": "Lossless", "match": "fuzzy"})
+    except Exception:
+        pass
+
+    # Yandex — fuzzy album search
+    try:
+        if (_config.get("yandex-token") or "").strip() and q:
+            ym = await _search_yandex(q, "album", 3)
+            for item in (ym.get("results") or [])[:1]:
+                _add({"service": "yandex", "url": item.get("url", ""),
+                      "title": item.get("title", ""), "artist": item.get("artist", ""),
+                      "quality": "FLAC", "match": "fuzzy"})
+    except Exception:
+        pass
+
+    order = ["deezer", "apple", "qobuz", "tidal", "yandex"]
+    return {"results": [candidates[s] for s in order if s in candidates], "upc": upc}
+
+
+async def _resolve_release_id(url: str) -> str:
+    """Map any supported release URL to a CANONICAL content id, so the bot can
+    cache/dedupe by the actual release rather than the (decorated, per-service)
+    link. Track → ``isrc:<ISRC>``, album → ``upc:<UPC>``. Falls back to
+    ``url:<host+path>`` when the content id can't be determined.
+
+    The same release from a different service/link resolves to the same id
+    (Deezer/Apple/Qobuz/Spotify share UPC/ISRC), so a hit is reliable."""
+    import re as _re
+    from urllib.parse import urlparse
+    u = (url or "").strip()
+    host = (urlparse(u).hostname or "").lower()
+
+    def _fallback() -> str:
+        from urllib.parse import parse_qs
+        p = urlparse(u)
+        base = (p.netloc + p.path.rstrip("/")).lower()
+        # Apple single-track links share the ALBUM path and only differ by the
+        # ?i=<track-id> query marker (music.apple.com/<sf>/album/<name>/<album-id>?i=<track-id>).
+        # Strip the query (default urlparse fallback) and a one-track request
+        # collapses onto the whole-album cache id → cache.has() is wrongly True
+        # and the track never gets mirrored to the cache channel. Keep ?i= so a
+        # single track gets its own id, distinct from the full album.
+        i = (parse_qs(p.query).get("i") or [""])[0]
+        if i:
+            base += "?i=" + i.lower()
+        return "url:" + base
+
+    try:
+        if "spotify.com" in host:
+            m = _re.search(r"/(track|album)/([A-Za-z0-9]+)", u)
+            if not m:
+                return _fallback()
+            kind, sid = m.group(1), m.group(2)
+            token = await _get_spotify_app_token()
+            if not token:
+                return _fallback()
+            async with _HTTP.ashared() as c:
+                ep = "tracks" if kind == "track" else "albums"
+                r = await c.get(f"https://api.spotify.com/v1/{ep}/{sid}",
+                                headers={"Authorization": f"Bearer {token}"})
+                if r.status_code == 200:
+                    ext = r.json().get("external_ids") or {}
+                    if kind == "track" and ext.get("isrc"):
+                        return f"isrc:{ext['isrc']}"
+                    if kind == "album" and ext.get("upc"):
+                        return f"upc:{ext['upc']}"
+            return _fallback()
+
+        if "deezer.com" in host:
+            m = _re.search(r"/(track|album)/(\d+)", u)
+            if not m:
+                return _fallback()
+            kind, did = m.group(1), m.group(2)
+            async with _HTTP.ashared() as c:
+                d = (await c.get(f"https://api.deezer.com/{kind}/{did}")).json()
+            if not d.get("error"):
+                if kind == "track" and d.get("isrc"):
+                    return f"isrc:{d['isrc']}"
+                if kind == "album" and d.get("upc"):
+                    return f"upc:{d['upc']}"
+            return _fallback()
+
+        if "qobuz.com" in host:
+            qz_token = (_config.get("qobuz-auth-token") or "").strip()
+            qz_app   = (_config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+            hdr = {"X-User-Auth-Token": qz_token} if qz_token else {}
+            mt = _re.search(r"/track/(\d+)", u)
+            # ID АЛЬБОМА У QOBUZ — ПОСЛЕДНИЙ СЕГМЕНТ ПУТИ, А НЕ ПЕРВЫЙ ПОСЛЕ
+            # `/album/`.
+            #
+            # Ссылка выглядит так:
+            #   qobuz.com/us-en/album/random-access-memories-daft-punk/0886443927087
+            # Здесь после `/album/` идёт СЛАГ, и `([A-Za-z0-9]+)` откусывал от
+            # него «random» (дефис в класс не входит), после чего album/get
+            # спрашивался про несуществующий альбом и ветка молча падала в
+            # `url:`-фолбэк. Дальше по цепочке это выглядело не как ошибка
+            # разбора, а как «релиза нигде нет»: матрица получала ключ
+            # `name:…`, ни одного идентификатора у неё не было, и она честно
+            # отвечала «не спрашивал, нет ISRC» про все пять сервисов сразу
+            # (замер 06.09.2026 на живой ссылке Daft Punk).
+            #
+            # Тот же дефект в тот же день чинился в мобильном `QobuzUrl.kt` —
+            # правило одно: берём последний сегмент, а старую форму
+            # `/album/-/<id>` он покрывает сам собой.
+            ma = _re.search(r"/album/(?:[^/?#]+/)*([A-Za-z0-9]+)/?(?:[?#]|$)", u)
+            async with _HTTP.ashared() as c:
+                if mt:
+                    r = await c.get("https://www.qobuz.com/api.json/0.2/track/get",
+                                    params={"track_id": mt.group(1), "app_id": qz_app}, headers=hdr)
+                    if r.status_code == 200 and r.json().get("isrc"):
+                        return f"isrc:{r.json()['isrc']}"
+                elif ma:
+                    r = await c.get("https://www.qobuz.com/api.json/0.2/album/get",
+                                    params={"album_id": ma.group(1), "app_id": qz_app}, headers=hdr)
+                    if r.status_code == 200 and r.json().get("upc"):
+                        return f"upc:{r.json()['upc']}"
+            return _fallback()
+
+        if "beatport.com" in host:
+            # Клубный релиз часто живёт ТОЛЬКО в Beatport, и без этой ветки его
+            # задача уходила в матрицу под ключом `url:beatport.com/…`, а карточка
+            # спрашивала по `upc:` — итог загрузки и вопрос о доступности не
+            # встречались никогда.
+            from ripster.routes import beatport as _bp
+            m = _re.search(r"/(track|release)/[^/]*/(\d+)", u)
+            if not m:
+                return _fallback()
+            kind, bid = m.group(1), m.group(2)
+            # Токен ТОЛЬКО из сессии OrpheusDL (она пишет повёрнутый
+            # refresh_token обратно). Свой обмен на auth/o/token здесь запрещён:
+            # ротация отзывает семейство токенов → Beatport ложится у гостей
+            # (19.09.2026). Нет сессии → честный url:-фолбэк.
+            try:
+                from ripster.engines.orpheus_beatport import _beatport_access_token
+                tok = await _beatport_access_token()
+            except Exception:
+                tok = ""
+            if not tok:
+                return _fallback()
+            ep = "tracks" if kind == "track" else "releases"
+            async with _HTTP.ashared() as c:
+                r = await c.get(f"{_bp._BASE}/catalog/{ep}/{bid}/",
+                                headers=_bp._auth_headers(tok))
+            if r.status_code == 200:
+                d = r.json() or {}
+                if kind == "track" and d.get("isrc"):
+                    return f"isrc:{d['isrc']}"
+                if kind == "release" and d.get("upc"):
+                    return f"upc:{d['upc']}"
+            return _fallback()
+
+        if "tidal.com" in host:
+            # Bearer из ЖИВОЙ сессии движка (перевыпускается из refresh, на 401
+            # повторяет ровно один раз) — вставленный tidal-token живёт ~16 ч, и
+            # когда он умирал, isrc/upc-поиск получал 401 и откатывался к url: id.
+            # Тогда Tidal-релизы кэшировались под url:tidal.com/… вместо isrc:/upc:
+            # и не дедуплицировались между сервисами.
+            m = _re.search(r"/(track|album)/(\d+)", u)
+            if m:
+                kind, tid = m.group(1), m.group(2)
+                ep = "tracks" if kind == "track" else "albums"
+                async with _HTTP.ashared() as c:
+                    r, _cc = await _tidal_get(c, f"{_TIDAL_API}/{ep}/{tid}", {})
+                    if r is not None and r.status_code == 200:
+                        d = r.json()
+                        if kind == "track" and d.get("isrc"):
+                            return f"isrc:{d['isrc']}"
+                        if kind == "album" and d.get("upc"):
+                            return f"upc:{d['upc']}"
+            return _fallback()
+
+        if "music.apple.com" in host:
+            # Apple Catalog API exposes isrc (songs) / upc (albums) — resolve them
+            # so an Apple release dedupes against the SAME release from Qobuz/
+            # Deezer/Tidal/Spotify (shared UPC/ISRC). Best-effort: falls back to a
+            # url: id (with ?i= track marker preserved) when the catalog/bearer is
+            # unavailable. See ripster/metadata/apple.content_id.
+            try:
+                from ripster.metadata import apple as _apple
+                cid = await _apple.content_id(u)
+                if cid:
+                    return cid
+            except Exception:
+                pass
+            return _fallback()
+
+        # Yandex / SoundCloud: no cheap content-id endpoint — the normalized URL
+        # still dedupes the common "same link again" case.
+        return _fallback()
+    except Exception:
+        return _fallback()
+
+
+@router.post("/api/release-id")
+async def release_id(body: dict):
+    """URL → canonical release id (``isrc:…`` / ``upc:…`` / ``url:…``) for the
+    bot's cache keying."""
+    return {"id": await _resolve_release_id((body.get("url") or "").strip())}
+
+
+@router.post("/api/isrc-upgrade")
+async def isrc_upgrade(body: dict):
+    """Search for a Spotify track on lossless services by title+artist (+ ISRC if available).
+    Returns best 1 candidate per service: {service, url, title, artist, quality, isrc, match}.
+    A Spotify ALBUM url is delegated to the UPC-based album resolver.
+    """
+    title  = (body.get("title")  or "").strip()
+    artist = (body.get("artist") or "").strip()
+    sp_url = (body.get("url")    or "").strip()
+
+    # Full release → match the whole album on other services by UPC/name.
+    if "open.spotify.com/album/" in sp_url:
+        return await _resolve_spotify_album(sp_url)
+
+    # A Spotify track URL is enough on its own — title/artist are derived from it
+    # below (so the bot can resolve a release with just the link).
+    if not title and not artist and "open.spotify.com/track/" not in sp_url:
+        raise HTTPException(400, "title or artist required")
+
+    isrc: str = ""
+    sp_upc: str = ""      # Spotify album UPC — lets us prefer the SAME album on
+    sp_album: str = ""    # other services (not a random compilation appearance)
+
+    # 1. Fetch ISRC from Spotify — app token preferred (auto-refreshed), OrpheusDL token as fallback
+    if "open.spotify.com/track/" in sp_url:
+        tid = sp_url.split("/track/")[-1].split("?")[0].strip()
+        token = await _get_spotify_app_token()
+        if not token:
+            try:
+                from ripster.engines.orpheus_spotify import _creds_path as _osp_creds
+                import json as _json
+                p = _osp_creds()
+                if p.exists():
+                    token = _json.loads(p.read_text(encoding="utf-8")).get("access_token", "")
+            except Exception:
+                pass
+        if token:
+            try:
+                async with _HTTP.ashared() as c:
+                    r = await c.get(
+                        f"https://api.spotify.com/v1/tracks/{tid}",
+                        headers={"Authorization": f"Bearer {token}"},
+                    )
+                    if r.status_code == 200:
+                        _td = r.json()
+                        isrc = (_td.get("external_ids") or {}).get("isrc", "")
+                        # Derive title/artist from the URL too, so callers (the bot)
+                        # can resolve with just a Spotify link — no title/artist needed.
+                        if not title:
+                            title = _td.get("name", "") or title
+                        if not artist:
+                            artist = ", ".join(a.get("name", "") for a in (_td.get("artists") or [])) or artist
+                        # Capture the track's album + UPC so each service can return
+                        # the track AS IT APPEARS ON THAT ALBUM (correct cover),
+                        # instead of a random compilation that shares the ISRC.
+                        _alb = _td.get("album") or {}
+                        sp_album = _alb.get("name", "") or ""
+                        _alb_id = _alb.get("id", "")
+                        if _alb_id:
+                            try:
+                                ra = await c.get(
+                                    f"https://api.spotify.com/v1/albums/{_alb_id}",
+                                    headers={"Authorization": f"Bearer {token}"})
+                                if ra.status_code == 200:
+                                    sp_upc = (ra.json().get("external_ids") or {}).get("upc", "") or ""
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
+    # Spotify Web API geo-blocked (403) → no title/isrc. Fall back to the public
+    # oembed endpoint (no auth, not geo-blocked) for the track name, so the fuzzy
+    # lossless search still runs under a VPN. ISRC is then borrowed from the Deezer
+    # match below (Deezer search items carry isrc), so Apple/Qobuz exact still work.
+    if (not title or not artist) and "open.spotify.com/track/" in sp_url:
+        # Без токена берём метаданные СО СТРАНИЦЫ. oembed даёт только название;
+        # og-теги самой страницы дают ещё и артистов, а без артиста поиск на
+        # Deezer промахивается чаще (одно название носят десятки треков). Это
+        # ровно приём из reverse-skill: разобрать то, что страница отдаёт
+        # публично, вместо запроса к закрытому API.
+        try:
+            async with _HTTP.ashared() as c:
+                pg = await c.get(sp_url, headers={"User-Agent": "Mozilla/5.0"})
+                if pg.status_code == 200:
+                    import re as _re2
+                    h = pg.text
+                    _ot = _re2.search(r'<meta property="og:title" content="([^"]+)"', h)
+                    _od = _re2.search(r'<meta property="og:description" content="([^"]+)"', h)
+                    if _ot and not title:
+                        title = _ot.group(1).strip()
+                    # og:description = «Артист1, Артист2 · Название» — берём часть
+                    # до разделителя как список артистов.
+                    if _od and not artist:
+                        _d = _od.group(1)
+                        artist = (_d.split("·")[0].strip() if "·" in _d else "").strip()
+        except Exception:
+            pass
+        # Запасной путь, если og не отдался: oembed хотя бы с названием.
+        if not title:
+            try:
+                async with _HTTP.ashared() as c:
+                    r = await c.get("https://open.spotify.com/oembed", params={"url": sp_url})
+                    if r.status_code == 200:
+                        title = (r.json().get("title") or "").strip()
+            except Exception:
+                pass
+
+    def _norm(s: str) -> str:
+        return "".join(ch for ch in (s or "").lower() if ch.isalnum())
+
+    # candidates[service] -> best dict (exact preferred over fuzzy)
+    candidates: dict[str, dict] = {}
+    _ntitle = _norm(title)
+
+    def _add(entry: dict) -> None:
+        # Reject a FUZZY title+artist match whose title isn't the requested track
+        # (a search can return a different song by the same artist). ISRC-exact
+        # matches are trusted. Prevents delivering the wrong recording.
+        if entry.get("match") == "fuzzy":
+            if _ntitle:
+                ct = _norm(entry.get("title", ""))
+                if not (ct and (ct == _ntitle or ct in _ntitle or _ntitle in ct)):
+                    return
+            # ...and whose ARTIST differs from the requested one (a same-titled
+            # song by a different artist). Skipped when the source artist is
+            # unknown (Spotify geo-block left only the oembed title).
+            if not _same_artist(artist, entry.get("artist", "")):
+                return
+        svc = entry["service"]
+        prev = candidates.get(svc)
+        if prev is None or (entry["match"] == "exact" and prev["match"] != "exact"):
+            candidates[svc] = entry
+
+    # 2. Deezer — ISRC exact first, then fuzzy title+artist
+    try:
+        async with _HTTP.ashared() as c:
+            if isrc:
+                r = await c.get(f"https://api.deezer.com/2.0/track/isrc:{isrc}")
+                d = r.json()
+                if not d.get("error") and d.get("id"):
+                    dz_url = d.get("link", "")
+                    # /track/isrc returns ONE appearance — often a compilation, so
+                    # the cover/album are wrong. Prefer the same album as Spotify
+                    # (by UPC): pull that album and use its track with this title.
+                    dz_alb = _norm((d.get("album") or {}).get("title", ""))
+                    if sp_upc and _norm(sp_album) and dz_alb != _norm(sp_album):
+                        try:
+                            ar = await c.get(f"https://api.deezer.com/2.0/album/upc:{sp_upc}")
+                            ad = ar.json()
+                            if not ad.get("error") and ad.get("id"):
+                                for tr in ((ad.get("tracks") or {}).get("data") or []):
+                                    if _norm(tr.get("title", "")) == _norm(title):
+                                        dz_url = tr.get("link", dz_url)
+                                        break
+                        except Exception:
+                            pass
+                    _add({"service": "deezer", "url": dz_url,
+                          "title": d.get("title", ""),
+                          "artist": (d.get("artist") or {}).get("name", ""),
+                          "quality": "FLAC", "isrc": isrc, "match": "exact"})
+            if "deezer" not in candidates:
+                q = f'artist:"{artist}" track:"{title}"' if artist and title else (title or artist)
+                r = await c.get("https://api.deezer.com/search", params={"q": q, "limit": 3})
+                for item in (r.json().get("data") or []):
+                    _add({"service": "deezer", "url": item.get("link", ""),
+                          "title": item.get("title", ""),
+                          "artist": (item.get("artist") or {}).get("name", ""),
+                          "quality": "FLAC", "isrc": item.get("isrc", ""), "match": "fuzzy"})
+    except Exception:
+        pass
+
+    # Spotify gave no ISRC (geo-block)? Borrow it from the Deezer match (its search
+    # items carry isrc) so the Apple/Qobuz ISRC-exact lookups below work WITHOUT
+    # the geo-blocked Spotify API.
+    if not isrc:
+        isrc = ((candidates.get("deezer") or {}).get("isrc") or "").strip()
+
+    # 3. Apple Music (iTunes) — ISRC lookup first, then fuzzy
+    try:
+        async with _HTTP.ashared() as c:
+            if isrc:
+                r = await c.get("https://itunes.apple.com/lookup",
+                                params={"isrc": isrc, "entity": "song", "limit": 1})
+                for s in [x for x in (r.json().get("results") or [])
+                          if x.get("wrapperType") == "track"][:1]:
+                    ap_url = s.get("trackViewUrl", "")
+                    # Prefer the same album as Spotify (right cover) over whatever
+                    # the ISRC lookup happened to return (often a compilation).
+                    if sp_upc and _norm(sp_album) and _norm(s.get("collectionName", "")) != _norm(sp_album):
+                        try:
+                            ra = await c.get("https://itunes.apple.com/lookup",
+                                             params={"upc": sp_upc, "entity": "song"})
+                            for tr in (ra.json().get("results") or []):
+                                if (tr.get("wrapperType") == "track"
+                                        and _norm(tr.get("trackName", "")) == _norm(title)):
+                                    ap_url = tr.get("trackViewUrl", ap_url)
+                                    break
+                        except Exception:
+                            pass
+                    _add({"service": "apple", "url": ap_url,
+                          "title": s.get("trackName", ""), "artist": s.get("artistName", ""),
+                          "quality": "ALAC", "isrc": isrc, "match": "exact"})
+            if "apple" not in candidates:
+                q = f"{artist} {title}".strip()
+                r = await c.get("https://itunes.apple.com/search",
+                                params={"term": q, "entity": "song", "limit": 3, "media": "music"})
+                for s in (r.json().get("results") or [])[:1]:
+                    _add({"service": "apple", "url": s.get("trackViewUrl", ""),
+                          "title": s.get("trackName", ""), "artist": s.get("artistName", ""),
+                          "quality": "ALAC", "isrc": "", "match": "fuzzy"})
+    except Exception:
+        pass
+
+    # 4. Qobuz — ISRC search first (search API accepts ISRC as query), then title+artist
+    qz_token  = (_config.get("qobuz-auth-token") or "").strip()
+    qz_app_id = (_config.get("qobuz-app-id")     or "").strip() or _QOBUZ_DEFAULT_APP_ID
+    if qz_token:
+        try:
+            async with _HTTP.ashared() as c:
+                def _qz_item(item: dict, match: str) -> dict:
+                    tid  = item.get("id", "")
+                    turl = item.get("url") or f"https://open.qobuz.com/track/{tid}"
+                    return {"service": "qobuz", "url": turl,
+                            "title":  item.get("title", ""),
+                            "artist": (item.get("performer") or {}).get("name", ""),
+                            "quality": "Hi-Res FLAC",
+                            "isrc":   item.get("isrc", ""), "match": match}
+                if isrc:
+                    r = await c.get("https://www.qobuz.com/api.json/0.2/track/search",
+                                    params={"query": isrc, "limit": 3, "app_id": qz_app_id},
+                                    headers={"X-User-Auth-Token": qz_token})
+                    its = (r.json().get("tracks", {}).get("items") or [])
+                    # Among the appearances that share this ISRC, prefer the one on
+                    # the SAME album as Spotify (right cover) — _add keeps the first
+                    # exact, so add the album-matching one first.
+                    exact_its = [it for it in its if it.get("isrc", "") == isrc]
+                    if sp_upc and _norm(sp_album):
+                        exact_its.sort(key=lambda it: 0 if _norm((it.get("album") or {}).get("title", "")) == _norm(sp_album) else 1)
+                    for item in exact_its:
+                        _add(_qz_item(item, "exact"))
+                    for item in its:
+                        if item.get("isrc", "") != isrc:
+                            _add(_qz_item(item, "fuzzy"))
+                if "qobuz" not in candidates:
+                    q = f"{artist} {title}".strip()
+                    r = await c.get("https://www.qobuz.com/api.json/0.2/track/search",
+                                    params={"query": q, "limit": 3, "app_id": qz_app_id},
+                                    headers={"X-User-Auth-Token": qz_token})
+                    for item in (r.json().get("tracks", {}).get("items") or [])[:1]:
+                        _add(_qz_item(item, "fuzzy"))
+        except Exception:
+            pass
+
+    # 5. Tidal — fuzzy title+artist (the v1 user API has no clean ISRC endpoint)
+    try:
+        if _tidal_configured():
+            q = f"{artist} {title}".strip()
+            td = await _search_tidal(q, "track", 3)
+            for item in (td.get("results") or [])[:1]:
+                if item.get("url"):
+                    _add({"service": "tidal", "url": item.get("url", ""),
+                          "title": item.get("title", ""), "artist": item.get("artist", ""),
+                          "quality": "Lossless", "isrc": "", "match": "fuzzy"})
+    except Exception:
+        pass
+
+    # 6. Yandex Music — fuzzy title+artist (no ISRC in the search API)
+    try:
+        if (_config.get("yandex-token") or "").strip():
+            q = f"{artist} {title}".strip()
+            ym = await _search_yandex(q, "track", 3)
+            for item in (ym.get("results") or [])[:1]:
+                if item.get("url"):
+                    _add({"service": "yandex", "url": item.get("url", ""),
+                          "title": item.get("title", ""), "artist": item.get("artist", ""),
+                          "quality": "FLAC", "isrc": "", "match": "fuzzy"})
+    except Exception:
+        pass
+
+    order   = ["deezer", "apple", "qobuz", "tidal", "yandex"]
+    results = [candidates[s] for s in order if s in candidates]
+    return {"results": results, "isrc": isrc}
+
+
+# ── Матрица доступности релиза ────────────────────────────────────────────────
+
+async def _upc_from_url(url: str) -> str:
+    """Штрихкод релиза по его ссылке — чтобы карточке хватало того, что у неё есть.
+
+    Раньше здесь был обеднённый дубль `_resolve_release_id`: понимал ТОЛЬКО
+    deezer.com и spotify.com. Для карточки радара с ссылкой music.apple.com он
+    возвращал пусто → в `availability.matrix` ветки apple/deezer (`if upc`) не
+    выполнялись вовсе, и панель «Где можно скачать?» печатала «ещё не появился»
+    про сервисы, которых НЕ СПРАШИВАЛА. При этом плеер тот же релиз играл: он
+    идёт другим путём (`/api/release/expand` по album_id из ссылки, UPC не нужен).
+    `_resolve_release_id` умеет apple/qobuz/tidal/deezer/spotify и отдаёт
+    `upc:<UPC>` / `isrc:<ISRC>`; проверено на живой ссылке Apple (10.08.2026):
+    music.apple.com/us/album/.../6799376650 → upc:00600574110367.
+    """
+    try:
+        rid = await _resolve_release_id(url or "")
+    except Exception:
+        rid = ""
+    if rid.startswith("upc:"):
+        return rid[4:]
+
+    # ПОСЛЕДНИЙ ХОД: спросить Odesli.
+    #
+    # Свой резолвер знает шесть хостов (apple, deezer, qobuz, tidal, spotify,
+    # beatport). Ссылка с YouTube Music, Amazon, Яндекса, Napster или Pandora
+    # для него — `url:`-фолбэк, то есть идентификатора нет вовсе, и матрица
+    # честно отвечает «не спрашивал» про все сервисы разом. Odesli эти площадки
+    # знает и отдаёт штрихкод.
+    #
+    # Берём отсюда ТОЛЬКО идентификатор. Ни одно «есть на платформе X» с их
+    # стороны не становится нашим `available`: доступность у нас значит «эта
+    # учётка может скачать сейчас», а этого Odesli знать не может — проверяем
+    # сами. Подробности и замер закрытого API — в ripster/odesli.py.
+    try:
+        from ripster import odesli as _od
+        info = await _od.identify(url or "")
+        if info and info.get("upc"):
+            print(f"[availability] штрихкод получен через Odesli: {info['upc']}", flush=True)
+            return info["upc"]
+        # Штрихкода у них может не быть: он есть только когда его сообщила
+        # ИСХОДНАЯ площадка. Замер 06.09.2026 по одному и тому же альбому —
+        # ссылка Spotify даёт upc 886443927087, ссылки Яндекса и Amazon не дают
+        # ничего. Зато Odesli отдаёт ссылки на площадки, которые наш резолвер
+        # РАЗБИРАЕТ, — и это его настоящая польза: перевести незнакомую ссылку
+        # в знакомую, а идентификатор добыть уже своими руками.
+        for known in ("spotify", "deezer", "appleMusic", "tidal", "qobuz"):
+            alt = (info or {}).get("links", {}).get(known) or ""
+            if not alt:
+                continue
+            rid2 = await _resolve_release_id(alt)
+            if rid2.startswith("upc:"):
+                print(f"[availability] штрихкод через Odesli→{known}: {rid2[4:]}", flush=True)
+                return rid2[4:]
+    except Exception as e:                                     # noqa: BLE001
+        print(f"[availability] Odesli не помог: {e!r}", flush=True)
+    return ""
+
+
+@router.get("/api/availability")
+async def api_availability(upc: str = "", isrc: str = "", title: str = "",
+                           artist: str = "", url: str = "", force: bool = False):
+    """Где релиз можно скачать ПРЯМО СЕЙЧАС, а не где он «вышел».
+
+    Отвечает по каждому сервису отдельно и с причиной: витрина ещё не
+    наполнилась / нет в регионе аккаунта / нет токена — это три разные истории,
+    и лечатся они по-разному.
+    """
+    from ripster import availability as _av
+    if not upc and url:
+        upc = await _upc_from_url(url)
+    if not (upc or isrc or title):
+        return {"ok": False, "error_key": "err.need_query_id", "error": "нужен upc, isrc, ссылка или название"}
+    # Сид источника — чтобы матрица добыла ISRC треков ДО опроса витрин: у
+    # одного издания штрихкоды в магазинах разные (24.09.2026, Evanescence
+    # «Sweet Sacrifice (Remastered 2026)»: Spotify 00888072836037, Deezer
+    # 888072836020), и карточка радара врала «нигде нет» при живом Deezer.
+    seed = None
+    sm = _re_mod.search(r"open\.spotify\.com/(?:intl-[a-z-]+/)?album/([A-Za-z0-9]+)",
+                        url or "")
+    if sm:
+        seed = {"id": sm.group(1), "service": "spotify"}
+    else:
+        dm = _re_mod.search(r"deezer\.com/[a-z]{2}/album/(\d+)", url or "")
+        if dm:
+            seed = {"id": dm.group(1), "service": "deezer"}
+    m = await _av.matrix(upc=upc, isrc=isrc, title=title, artist=artist,
+                         force=force, seed=seed)
+    return {"ok": True, **m,
+            "recommended": _av.pick_source(m["services"]),
+            "summary": _av.summary_ru(m["services"])}

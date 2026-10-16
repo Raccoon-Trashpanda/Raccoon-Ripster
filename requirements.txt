@@ -1,0 +1,51 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+pyyaml>=6.0.1
+mutagen>=1.47.0
+httpx>=0.27
+# Spectral-fingerprint analysis for the spectrogram endpoint (cutoff frequency,
+# brickwall/rolloff detection) — /api/spectrogram, ripster/routes/spectrogram.py.
+numpy>=1.26
+# Required by FastAPI for Form/multipart endpoints (uploads). Without it the app
+# crashes at startup: 'Form data requires "python-multipart" to be installed'.
+python-multipart>=0.0.9
+
+# CRITICAL — do NOT loosen. Several deps (esp. standard pywidevine) try to drag
+# protobuf below 4.x — this hard pin blocks that downgrade.
+# 6.33.4: OrpheusDL Spotify desktop_api + pywidevine ship protobuf-6.33 gencode
+# (runtime must be >= gencode). Do NOT drop below 6.33 or OrpheusDL/pywidevine
+# fail to import (VersionError).
+# grpcio выпилен 25.09.2026 вместе с движком `amd`: живых gRPC-клиентов в
+# проекте нет (публичный wrapper — HTTP Wrapper-Lite), ни один модуль `grpc`
+# не импортирует.
+protobuf==6.33.4
+
+# Optional: enable Deezer engine (remove if you don't need Deezer)
+deemix>=3.6.6
+
+# Qobuz + Tidal engines (single package, serves both).
+# Pinned to 2.0.5 — the last 2.0.x on PyPI. streamrip 2.1.x broke Qobuz login
+# (GitHub #954, #956, #796), and 2.0.6 was never published to PyPI (the jump is
+# 2.0.5 → 2.1.0), so `==2.0.6` made `pip install -r` fail. Do NOT bump to 2.1.x.
+# streamrip pulls its own aiofiles<0.8; do NOT add a separate aiofiles line.
+streamrip==2.0.5
+
+# Desktop launcher — Ripster opens in its OWN native window (not a browser tab)
+# via the system webview (Edge WebView2 on Windows; no bundled Chromium, unlike
+# Electron/QtWebEngine). ripster_launcher.py falls back to the default browser if
+# this is absent. Pulls pythonnet + clr_loader on Windows.
+pywebview==6.2.1
+# IANA tz database. Windows ships none, and `zoneinfo` silently raises
+# ZoneInfoNotFoundError → the account-countries panel lost every timezone
+# offset. Pure DATA (all 633 files; the 22 __init__.py hold 252 bytes of
+# docstring, no code) with ZERO Requires-Dist, so it cannot perturb the
+# construct/protobuf pins in ripster-dependency-versions. Pinned like every
+# other line here on purpose: `updater.update_source()` re-runs a plain
+# `pip install -r requirements.txt`, and an unpinned line gives pip a reason
+# to re-resolve the whole file — the exact way a "harmless" package breaks
+# Apple decrypt. Bump deliberately, next to a re-verify of pywidevine+pymp4.
+tzdata==2026.4
+sounddevice==0.5.6
+soundfile==0.14.0
+temari==0.3.1

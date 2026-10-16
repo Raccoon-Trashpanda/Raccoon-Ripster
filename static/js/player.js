@@ -1,0 +1,4294 @@
+// Ripster player — Preview, Web Audio (gapless + EQ + visualizer),
+// fullscreen player, floating PiP, seek-bar drag.
+// Loaded AFTER app.js — relies on its globals (esc, toast, t, S, _svcColor, etc).
+fetch('/api/sc_fps_log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ msg: '[player.js] v8 init', ua: navigator.userAgent.slice(0, 150) }) }).catch(() => {});
+
+const Preview = { queue: [], idx: -1, _bound: false, mode: 'spotify' };
+// Pre-resolved next-track state for near-gapless transitions.
+// _Pre.idx is the queue index whose URL is ready in _Pre.url.
+const _Pre = { idx: -1, url: '', resolving: false };
+
+// ── События прослушивания СТАНЦИЙ (серверная база stations.db) ──────────────
+// Шлются ТОЛЬКО пока играет станция: станция помечает свой массив очереди в
+// _StEv.queue, любая другая очередь означает «станцию заглушили другим
+// запуском» — сессия закрывается. Секунды играют берутся из живых аудио-часов
+// (currentTime / _waCurrentTime), а длительность — только из карточки того же
+// трека (_stevLen), не из того, что сейчас стоит в <audio>; не из таймера.
+//
+// ГЛУБИНА (`played_s`/`length_s`) — на КАЖДОМ событии про трек, а не только на
+// скипе. Лайк, дизлайк и «скачал» происходят на конкретной секунде конкретной
+// записи, и молчать об этом значит терять ровно тот сигнал, из-за которого
+// петля и затевалась: и Яндекс (`totalPlayedSeconds`), и Spotify
+// (`time_played_ms` + `track_length_ms`) считают интерес по секундам, а не по
+// флагу «понравилось». Нет длительности — поля нет вовсе: «не знаю» честнее
+// вранья и не должно наказываться как «не слушали».
+//
+// ТРАНСПОРТ. Событие копится в `_StEv.pending` и уезжает ТЕЛОМ следующего
+// `/api/station/session/{id}/next` — ровно как `feedbacks` у Яндекса: сервер
+// пересобирает остаток пула уже ЗНАЯ, что человек сказал, и одной пачкой
+// вместо десяти одиночных POST. Не успевшее уехать (станцию остановили, вкладку
+// закрыли) дописывается напрямую в `/api/stations/event`. Без этого второго
+// пути «слушал 4 минуты из 6 и ушёл» не узнает никто — раньше, кстати, именно
+// так и было: ручная пауза и закрытие вкладки не писали ничего.
+//
+// Отправка «выстрелил и забыл»: статистика не смеет тормозить или ломать игру.
+const _StEv = { session: '', batch: '', source: '', queue: null, pending: [] };
+
+/** Позиция воспроизведения в секундах с того движка, что сейчас играет. */
+function _stevPos() {
+  try {
+    if (_WA.curSource) return Math.max(0, _waCurrentTime());
+    const el = Preview._fpsEl || document.getElementById('pp-audio');
+    if (el && !Number.isNaN(el.currentTime)) return el.currentTime;
+  } catch (_) {}
+  return null;
+}
+
+/** Длительность ИМЕННО того трека, к которому относится событие. Достоверны
+ *  ровно два источника: метаданные карточки очереди (item.duration — станции
+ *  несут её с сервера) и показания движка, который прямо сейчас играет ЭТОТ
+ *  же item. Длительность из <audio> без такой привязки — это молчание о
+ *  вчерашнем треке: Frankie Bones стартанул с длиной Pete Namlook
+ *  (замер 20.09.2026). Не знаем — поля не шлём, «не знаю» честнее вранья. */
+function _stevLen(item) {
+  if (!item) return null;
+  const meta = Number(item.duration);
+  if (isFinite(meta) && meta > 0) return meta;
+  try {
+    if (_WA.curItem === item && _WA.curBuffer) {
+      const b = _WA.curBuffer.duration;
+      if (isFinite(b) && b > 0) return b;
+    }
+    const el = Preview._fpsEl || document.getElementById('pp-audio');
+    if (el && el._stevItem === item && isFinite(el.duration) && el.duration > 0) {
+      return el.duration;
+    }
+  } catch (_) {}
+  return null;
+}
+
+/* Единственный источник правды «пауза ли сейчас». Читает состояние ТОГО движка,
+   который реально издаёт звук, а не `pp-audio`: в бесшовном (Web Audio) режиме
+   <audio> стоит на месте — звук идёт из AudioContext.BufferSource, — и наивное
+   `pp-audio.paused` врёт «пауза» при играющем миксе. Из-за этого и кнопка
+   внешнего плеера, и плитка «сейчас играет» показывали ▶ при звучащем треке
+   (25.09.2026, Dusky). Порядок движков — тот же, что у rpEngine(). */
+function ripsterIsPaused() {
+  try {
+    if (typeof Preview !== 'undefined' && Preview.mode === 'bbc') {
+      var b = document.getElementById('bbc-audio');
+      return b ? !!b.paused : true;
+    }
+    if (typeof _NA !== 'undefined' && _NA.active) return !!_NA.paused;
+    if (typeof _waEnabled === 'function' && _waEnabled() &&
+        typeof _WA !== 'undefined' && _WA && _WA.curSource) {
+      return _WA.ctx ? _WA.ctx.state === 'suspended' : true;
+    }
+    if (typeof Preview !== 'undefined' && Preview._fpsEl) return !!Preview._fpsEl.paused;
+    var a = document.getElementById('pp-audio');
+    return a ? !!a.paused : true;
+  } catch (e) { return true; }
+}
+
+function _stevMeta(item) {
+  return { service: (item && item.service) || '', service_id: String((item && item.id) || ''),
+           artist: (item && item.artist) || '', title: (item && item.title) || '' };
+}
+
+function _stevActive() {
+  return !!_StEv.session && Preview.queue === _StEv.queue && !!Preview.queue[Preview.idx];
+}
+
+/** Глубина прослушивания ИМЕННО этого трека: сколько звучало и каков он цели-
+ *  ком. Любое из чисел может отсутствовать — поля тогда просто нет. */
+function _stevDepth(item, played) {
+  const d = {};
+  const p = played === undefined ? _stevPos() : played;
+  if (p != null && isFinite(p)) d.played_s = Math.max(0, Math.round(p * 10) / 10);
+  const l = _stevLen(item);
+  if (l != null) d.length_s = l;
+  return d;
+}
+
+/** Текущий трек станции или null (чужая очередь — не событие станции). */
+function _stevItem() {
+  return _stevActive() ? Preview.queue[Preview.idx] : null;
+}
+
+function _stevSend(ev) {
+  if (!_StEv.session) return;
+  try {
+    _StEv.pending.push(Object.assign({ session_id: _StEv.session,
+                                       batch_id: _StEv.batch,
+                                       source: _StEv.source }, ev));
+    // Буфер обязан оставаться коротким: зависший `next` не имеет права
+    // разрастать память до размеров эфира.
+    if (_StEv.pending.length > 80) _StEv.pending.splice(0, _StEv.pending.length - 80);
+    // Любое событие значит, что слушатель сдвинулся по очереди, — заодно
+    // проверяем резерв. Дозаказ начинается за 3 трека, не за один.
+    if (typeof stRefillIfLow === 'function') stRefillIfLow();
+  } catch (_) {}
+}
+
+/** Забрать накопленное телом `/session/{id}/next`. */
+function _stevTakePending() {
+  const rows = _StEv.pending; _StEv.pending = [];
+  return rows;
+}
+
+/** `next` не дошёл — события возвращаются в буфер, а не исчезают. */
+function _stevReturnPending(rows) {
+  if (rows && rows.length) _StEv.pending = rows.concat(_StEv.pending);
+}
+
+/** Остаток буфера уходит в базу напрямую: стоп станции, закрытая вкладка. */
+function _stevFlushDirect() {
+  _StEv.pending.forEach(ev => {
+    try {
+      fetch('/api/stations/event', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+        body: JSON.stringify(ev),
+      }).catch(() => {});
+    } catch (_) {}
+  });
+  _StEv.pending = [];
+}
+
+/**
+ * Станция открыта: `session` и `batch` выдаёт СЕРВЕР (сессия станции живёт в
+ * `station_sessions.py`), фронт только шьёт их в каждое событие. До этого
+ * `session_id` придумывался здесь и не значил ничего, а `batch_id` не шлёт
+ * никто — сервер не знал, какая именно выдача сработала.
+ * Вызывается и при тихой ротации: резерв кончился, новая волна доклеивается к
+ * играющему эфиру — старая сессия закрывается, новая начинается, звук не
+ * прерывается.
+ */
+function _stevStationStart(source, session, batch) {
+  if (_StEv.session) _stevStationStop({ reason: 'replaced' });
+  _StEv.session = String(session || '');
+  _StEv.batch = String(batch || '');
+  _StEv.source = String(source || '');
+  _StEv.queue = Preview.queue;
+  _stevSend({ event: 'station_started' });
+}
+
+/** Следующая пачка той же сессии: все новые события шьются её `batch_id`. */
+function _stevBatch(batch) { _StEv.batch = String(batch || ''); }
+
+function _stevStationStop(extra) {
+  if (!_StEv.session) return;
+  const item = _StEv.queue === Preview.queue ? Preview.queue[Preview.idx] : null;
+  _stevSend(Object.assign({ event: 'station_stopped' }, _stevMeta(item),
+                          _stevDepth(item),
+                          extra ? { extra } : {}));
+  _stevFlushDirect();
+  _StEv.session = ''; _StEv.batch = ''; _StEv.queue = null;
+}
+
+function _stevTrackStarted(item) {
+  _stevSend(Object.assign({ event: 'track_started' }, _stevMeta(item),
+                           _stevDepth(item, 0)));
+}
+
+/** Естественный конец трека. gapless=true — бесшовный стык: буфер доигран
+ *  ровно до границы, поэтому played берём из длины, а не из часовых показаний. */
+function _stevEnded(gapless) {
+  if (Preview._suppressEnded) return;        // фантомный «end» при смене источника
+  if (!_stevActive()) return;
+  const item = Preview.queue[Preview.idx];
+  _stevSend(Object.assign({ event: 'track_finished',
+                            extra: { end_reason: 'natural' } }, _stevMeta(item),
+                          _stevDepth(item, gapless ? _stevLen(item) : _stevPos())));
+}
+
+/** Ручной переход вперёд/назад. Авто-переход после «end» сюда не попадает —
+ *  его вызовы помечены параметром auto в previewNext. */
+function _stevSkip(dir) {
+  if (!_stevActive()) return;
+  const item = Preview.queue[Preview.idx];
+  _stevSend(Object.assign({ event: 'skip', extra: { end_reason: dir } },
+                          _stevMeta(item), _stevDepth(item)));
+}
+
+/** «В любимые» из плеера — плюс, и с секундами: «полюбилось на 40-й из 200-й»
+ *  и «полюбилось в первые пять» для ранкера разные вещи. */
+function _stevLike(item) {
+  item = item || _stevItem();
+  if (!item || !_stevActive()) return;
+  _stevSend(Object.assign({ event: 'like' }, _stevMeta(item), _stevDepth(item)));
+}
+
+/**
+ * Минус по треку станции — единственная отрицательная обратная связь в живом
+ * эфире, и до сих пор её не шлёт никто: кнопки не было, события не было, а из-за
+ * этого механизм бана трека на сервере (`banned_track_keys`) оставался мёртвым
+ * кодом. `on=false` — сняли минус: тем же `undislike` бан снимается, иначе
+ * «навсегда» оказалось бы ловушкой для одной промашной кнопки.
+ */
+function _stevDislike(item, on) {
+  item = item || _stevItem();
+  if (!item || !_stevActive()) return;
+  _stevSend(Object.assign({ event: on ? 'dislike' : 'undislike' },
+                          _stevMeta(item), _stevDepth(item)));
+}
+
+/** Скачал = любит, и это самый сильный наш плюс (вес 1.5), которого у сервисов
+ *  нет вовсе. Раньше его не шлёт никто, и строка `downloads` в профиле артиста
+ *  на живых данных всегда ноль. */
+function _stevDownload(item) {
+  item = item || _stevItem();
+  if (!item || !_stevActive()) return;
+  _stevSend(Object.assign({ event: 'download' }, _stevMeta(item), _stevDepth(item)));
+}
+
+// Новый трек станции стартует через ту же разметку, что и подсветка очереди:
+// _playPreviewAt и бесшовный стык уже шлют ripster:track-start.
+document.addEventListener('ripster:track-start', (e) => {
+  if (!_StEv.session) return;
+  if (Preview.queue !== _StEv.queue) {           // чужая очередь — станцию сменили
+    _stevStationStop({ reason: 'queue_change' });
+    return;
+  }
+  _stevTrackStarted((e.detail && e.detail.item) || Preview.queue[Preview.idx]);
+});
+
+// Вкладку закрыли: всё, что человек уже сказал этой пачке, обязано дойти до
+// базы. Без этого «слушал 4 минуты из 6 и ушёл» не узнает никто никогда.
+window.addEventListener('pagehide', () => {
+  if (_StEv.session) _stevStationStop({ reason: 'pagehide' });
+});
+
+/**
+ * Станция не имеет права кончаться тишиной. Очередь дошла до края, а резерв на
+ * сервере ещё есть (или пора открыть новую волну) — просим пачку СЕЙЧАС и
+ * продолжаем, когда она придёт: пауза в пару сотен миллисекунд лучше пустоты
+ * в колонках на остаток вечера. true — значит «тишину брать не нужно».
+ */
+function _stevExtendQueue() {
+  if (!_stevActive() || typeof stRefillNow !== 'function') return false;
+  stRefillNow().then(n => {
+    if (n > 0 && Preview.idx < Preview.queue.length - 1) previewNext(1);
+    else if (typeof closePreview === 'function') closePreview();
+  }).catch(() => { if (typeof closePreview === 'function') closePreview(); });
+  return true;
+}
+
+// Spotify items carry _streamService/_streamId — the ISRC-matched Deezer/Qobuz
+// copy the backend resolved, since Spotify has no /api/stream proxy of its own.
+// ALL stream-URL construction must go through these two, never item.service/
+// item.id directly — display (label/badge) code keeps using item.service so
+// the player never reveals the real source.
+function _effSvc(item) { return item._streamService || item.service; }
+function _effId(item)  { return item._streamId != null ? item._streamId : item.id; }
+
+// hls.js — ЛОКАЛЬНЫЙ. Здесь лежала вторая, независимая от разметки ссылка на
+// jsdelivr: плеер подгружал свою копию сам. При медленной или отсутствующей
+// сети это ожидание приходится ровно на начало микса — владелец слышал это
+// как «третий трек грузился, никакой плавности» (02.08.2026). Файл уже лежит
+// в static/vendor с тех пор, как та же зависимость убила плеер BBC.
+const _HLS_JS_CDN = '/static/vendor/hls.min.js';
+async function _ensureHlsJs() {
+  if (window.Hls) return true;
+  await new Promise((res, rej) => {
+    const s = document.createElement('script');
+    s.src = _HLS_JS_CDN; s.onload = res; s.onerror = rej;
+    document.head.appendChild(s);
+  }).catch(() => {});
+  return !!(window.Hls && Hls.isSupported());
+}
+
+// ── Web Audio gapless engine (optional, sample-accurate) ──────────────────
+// When `player-gapless` setting is on, playback bypasses <audio> and uses
+// pre-decoded AudioBuffers fed into a BufferSource. Adjacent tracks share
+// the same destination — no element swap, no fetch latency at handoff,
+// sample-accurate boundary like a glued FLAC.
+// Cost: each buffer is ~5-15 MB decoded; we keep at most current+next.
+const _WA = {
+  ctx: null,        // AudioContext
+  gain: null,       // GainNode → destination (volume control)
+  curSource: null,  // currently playing BufferSource
+  curBuffer: null,  // its AudioBuffer
+  curItem:   null,  // queue item it belongs to
+  curStartT: 0,     // AC.currentTime when source.start() was called
+  curOffset: 0,     // playback offset (for seek+resume)
+  nextBuffer: null,
+  nextItem:   null,
+  // A BufferSource for the NEXT track, already started with a future start time
+  // so the hand-over happens on the audio clock instead of in a JS callback.
+  schedSource: null,
+  schedBuffer: null,
+  schedItem:   null,
+  schedIdx:    -1,
+  schedStartT: 0,
+  suspendedAt: 0,   // ctx.currentTime at pause
+  loading: false,
+  _preloading: false, // guard against concurrent preload fetches
+  // Look-ahead кэш декодированных буферов на несколько треков вперёд. Один
+  // сосед (nextBuffer) не спасает DJ-микс: после длинного трека идёт трек на
+  // 37с, а декод FLAC у Deezer под троттлингом = 20–40с, и предзагрузка не
+  // успевает → стык 5с. Держим горизонт из LOOKAHEAD треков: пока играет
+  // длинный, короткие успевают подгрузиться заранее.
+  ahead:     new Map(),   // absIdx → AudioBuffer
+  aheadItem: new Map(),   // absIdx → queue item (валидация, что очередь не сменилась)
+  _aheadRunning: false,
+};
+const _WA_LOOKAHEAD = 3;
+function _waEnabled() {
+  // Mobile: force the plain <audio> path (no Web Audio gapless). The WA
+  // buffer-source graph runs on an AudioContext that the OS suspends in the
+  // background, killing playback on a locked screen. Bare <audio> survives.
+  if (_isMobileDevice()) return false;
+  return !!(S.config && S.config['player-gapless']);
+}
+
+// ── iOS background-audio keepalive ────────────────────────────────────────────
+// iOS Safari suspends AudioContext when the app goes to background. A silent
+// <audio> loop keeps the audio session alive so AudioContext.resume() works
+// immediately when the user returns. Must be started from a user gesture.
+let _waKeepalive = null;
+function _waKeepaliveUrl() {
+  if (_waKeepaliveUrl._url) return _waKeepaliveUrl._url;
+  const sr = 8000, n = sr; // 1s silent mono 16-bit WAV
+  const buf = new Uint8Array(44 + n * 2);
+  const v = new DataView(buf.buffer);
+  buf.set([0x52,0x49,0x46,0x46],  0); v.setUint32( 4, 36+n*2, true);
+  buf.set([0x57,0x41,0x56,0x45],  8);
+  buf.set([0x66,0x6d,0x74,0x20], 12); v.setUint32(16, 16,     true);
+  v.setUint16(20,1,true); v.setUint16(22,1,true);
+  v.setUint32(24, sr, true); v.setUint32(28, sr*2, true);
+  v.setUint16(32,2,true); v.setUint16(34,16,true);
+  buf.set([0x64,0x61,0x74,0x61], 36); v.setUint32(40, n*2, true);
+  _waKeepaliveUrl._url = URL.createObjectURL(new Blob([buf], {type:'audio/wav'}));
+  return _waKeepaliveUrl._url;
+}
+function _waStartKeepalive() {
+  if (_waKeepalive) return;
+  const a = new Audio(_waKeepaliveUrl());
+  a.loop = true; a.volume = 0;
+  a.play().catch(() => {});
+  _waKeepalive = a;
+}
+function _waStopKeepalive() {
+  if (!_waKeepalive) return;
+  _waKeepalive.pause();
+  _waKeepalive = null;
+}
+
+// ── <audio> unlock on first gesture (SC first-tap fix) ────────────────────────
+// On touch devices there's no hover, so the SC stream cache isn't pre-warmed →
+// the FIRST tap resolves the stream URL via `await fetch`, and by the time
+// `audio.play()` runs the user-gesture activation has expired → the play is
+// rejected and the first tap silently fails (only the second — a synchronous
+// cache hit — works). Priming pp-audio with 1s of real silence on the very first
+// user gesture "blesses" the element so every later programmatic play() — even
+// after an async resolve — is allowed. Plain <audio> only; never AudioContext.
+let _audioUnlocked = false;
+function _installAudioUnlock() {
+  const unlock = () => {
+    if (_audioUnlocked) return;
+    _audioUnlocked = true;
+    try {
+      const a = document.getElementById('pp-audio');
+      if (a && (!a.src || a.paused)) {        // never interrupt active playback
+        a.src = _waKeepaliveUrl();             // silent 1s WAV — inaudible
+        const p = a.play();
+        if (p && p.catch) p.catch(() => {});
+      }
+    } catch (_) {}
+  };
+  ['pointerdown', 'touchstart', 'mousedown', 'keydown'].forEach(ev =>
+    document.addEventListener(ev, unlock, { capture: true, once: true }));
+}
+_installAudioUnlock();
+
+// Resume playback when user returns from background (iOS suspends AudioContext).
+let _bgWasPlaying = false;
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden') {
+    _bgWasPlaying = (_waEnabled() && _WA.curSource && !_waIsPaused?.()) ||
+      (() => { const a = document.getElementById('pp-audio'); return !!(a && a.src && !a.paused); })();
+    return;
+  }
+  if (!_bgWasPlaying) return;
+  _bgWasPlaying = false;
+  // Always resume AudioContext — <audio> is wired through it for EQ even when gapless is off.
+  // Without this, currentTime advances but no sound reaches the speaker (suspended destination).
+  if (_WA.ctx?.state === 'suspended') {
+    _WA.ctx.resume().then(() => {
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    }).catch(() => {});
+  }
+  if (_waEnabled() && _WA.curSource) {
+    // gapless WA path: ctx.resume() above is sufficient
+  } else {
+    const a = document.getElementById('pp-audio');
+    if (a && a.paused && a.src) a.play().catch(() => {});
+  }
+});
+// Web Audio API needs CORS-readable audio bytes. SC/Qobuz/Tidal CDNs don't send
+// Access-Control-Allow-Origin, so decodeAudioData fails for cross-origin URLs.
+// We can still use WA for SAME-ORIGIN streams (our /api/stream/deezer proxy,
+// /api/library/file). For others — silently fall back to the normal <audio>
+// path, which doesn't need CORS.
+// ── SoundCloud DRM (encrypted HLS) ───────────────────────────────────────────
+// SC uses two encrypted-HLS variants:
+//   drm-hls-ctr  — CENC/Widevine.  Works in Chrome, Edge, Firefox.
+//                  HLS.js with emeEnabled + Widevine CDM.
+//   drm-hls-cbc  — CBCS/FairPlay.  Works in Safari only.
+//                  Uses native <audio> src — Safari handles FairPlay transparently.
+function _scDrmSkip(reason) {
+  _FP._drmHits = (_FP._drmHits || 0) + 1;
+  const cur = Preview.idx;
+  if (cur >= 0 && cur < Preview.queue.length - 1) {
+    Preview.idx = cur + 1;
+    _playPreviewAt(cur + 1);
+  } else {
+    const n = _FP._drmHits; _FP._drmHits = 0;
+    toast(ti('p.sc_skipped',{n:n,reason:reason}), 'var(--orange)', '', 7000);
+  }
+}
+
+async function _scDrmHls(audioEl, item, playBtn, playBtnB) {
+  // Локальный, как и вторая копия выше: две независимые ссылки на один и тот
+  // же чужой CDN — и обе били по миксам.
+  const HLS_JS_CDN = '/static/vendor/hls.min.js';
+  const licToken   = item.license_token || '';
+
+  // ── CBC = FairPlay (Safari / iOS only) ───────────────────────────────────
+  if (item.format === 'drm-hls-cbc') {
+    // FairPlay: Safari's <audio> does NOT support EME/FPS — must use a hidden <video> element.
+    // We create one persistent pp-fps-video, route FPS through it, and mirror UI events manually.
+    const _fpsLog = (msg) => {
+      console.log(msg);
+      fetch('/api/sc_fps_log', { method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ msg, ua: navigator.userAgent.slice(0, 200) }),
+      }).catch(() => {});
+    };
+
+    // Get or create hidden <video> — FairPlay only works on <video> in Safari/iOS.
+    let fpsEl = document.getElementById('pp-fps-video');
+    if (!fpsEl) {
+      fpsEl = document.createElement('video');
+      fpsEl.id = 'pp-fps-video';
+      fpsEl.setAttribute('playsinline', '');
+      fpsEl.setAttribute('webkit-playsinline', '');
+      Object.assign(fpsEl.style, {
+        position: 'fixed', top: '-9999px', left: '-9999px',
+        width: '1px', height: '1px', opacity: '0', pointerEvents: 'none',
+      });
+      document.body.appendChild(fpsEl);
+    }
+    // Reset state from any previous FPS track.
+    fpsEl.pause();
+    try { await fpsEl.setMediaKeys(null); } catch (_) {}
+    fpsEl.removeAttribute('src'); fpsEl.load();
+    // Silence real audio element so it doesn't interfere.
+    audioEl.pause(); audioEl.src = '';
+
+    // Expose for previewToggle / previewSeek / previewVolume.
+    Preview._fpsEl = fpsEl;
+
+    // ── CDM availability check ────────────────────────────────────────────
+    // iOS always fires webkitneedkey (native HLS), never encrypted — don't set up both paths.
+    const hasWebKitKeys = 'WebKitMediaKeys' in window;
+    let hasStdFps = false;
+    if (!hasWebKitKeys) {
+      try {
+        await navigator.requestMediaKeySystemAccess('com.apple.fps', [{
+          initDataTypes: ['skd'], videoCapabilities: [{ contentType: 'video/mp4' }],
+        }]);
+        hasStdFps = true;
+      } catch (_) {}
+    }
+
+    if (!hasWebKitKeys && !hasStdFps) {
+      Preview._fpsEl = null;
+      _scDrmSkip(t('p.drm_fps_safari'));
+      return;
+    }
+    _fpsLog(`[FPS] v8 video elm, wk=${hasWebKitKeys} std=${hasStdFps}`);
+
+    // ── Fetch server certificate ──────────────────────────────────────────
+    let serverCert;
+    try {
+      const certResp = await fetch('/api/sc_fps_cert');
+      serverCert = new Uint8Array(await certResp.arrayBuffer());
+      _fpsLog(`[FPS] cert ${serverCert.length}B`);
+    } catch (e) {
+      _fpsLog('[FPS] cert fail: ' + e.message);
+      Preview._fpsEl = null; _scDrmSkip(t('p.drm_fps_cert')); return;
+    }
+
+    const fpsLicUrl = `https://license.media-streaming.soundcloud.cloud/playback/fairplay?license_token=${encodeURIComponent(licToken)}`;
+    let _keyInstalled = false;
+    let _fpsPending = false;
+    const _doLicense = async (spc) => {
+      const r = await fetch(fpsLicUrl, {
+        method: 'POST', body: spc,
+        headers: { 'Content-Type': 'application/octet-stream' },
+      });
+      if (!r.ok) throw new Error(`lic ${r.status}`);
+      return new Uint8Array(await r.arrayBuffer());
+    };
+
+    // ── Standard EME on <video> (Safari 12.1+ / iOS 12.2+) ───────────────
+    if (hasStdFps) {
+      let mediaKeys = null;
+      try {
+        const acc = await navigator.requestMediaKeySystemAccess('com.apple.fps', [{
+          initDataTypes: ['skd'], videoCapabilities: [{ contentType: 'video/mp4' }],
+        }]);
+        mediaKeys = await acc.createMediaKeys();
+        await mediaKeys.setServerCertificate(serverCert);
+        await fpsEl.setMediaKeys(mediaKeys);
+        _fpsLog('[FPS] EME ok');
+      } catch (e) {
+        _fpsLog('[FPS] EME err: ' + e.message); mediaKeys = null;
+      }
+      if (mediaKeys) {
+        fpsEl.addEventListener('encrypted', async (e) => {
+          _fpsLog('[FPS] encrypted: ' + e.initDataType);
+          if (_keyInstalled || _fpsPending) return;
+          _fpsPending = true;
+          try {
+            const sess = mediaKeys.createSession();
+            sess.addEventListener('message', async (msg) => {
+              try {
+                _fpsLog('[FPS] SPC → CKC...');
+                const ckc = await _doLicense(msg.message);
+                await sess.update(ckc);
+                _keyInstalled = true;
+                _fpsLog('[FPS] key OK');
+              } catch (err) { _fpsPending = false; _fpsLog('[FPS] lic: ' + err.message); }
+            });
+            await sess.generateRequest(e.initDataType, e.initData);
+          } catch (err) { _fpsPending = false; _fpsLog('[FPS] sess: ' + err.message); }
+        }, { once: false });
+      }
+    }
+
+    // ── Legacy WebKit FPS on <video> (iOS < 12.2) ─────────────────────────
+    if (hasWebKitKeys) {
+      try {
+        const wkKeys = new WebKitMediaKeys('com.apple.fps.1_0');
+        fpsEl.webkitSetMediaKeys(wkKeys);
+        _fpsLog('[FPS] WK set');
+        fpsEl.addEventListener('webkitneedkey', async (e) => {
+          if (_keyInstalled || _fpsPending) return;
+          _fpsPending = true;
+          _fpsLog('[FPS] webkitneedkey');
+          try {
+            const sess = wkKeys.createSession('video/mp4');
+            sess.addEventListener('webkitkeymessage', async (msg) => {
+              try {
+                _fpsLog('[FPS] WK SPC → CKC...');
+                const ckc = await _doLicense(msg.message);
+                sess.update(ckc);
+                _keyInstalled = true;
+                _fpsLog('[FPS] WK key OK');
+              } catch (err) { _fpsPending = false; _fpsLog('[FPS] WK lic: ' + err.message); }
+            });
+            sess.addEventListener('webkitkeyerror', (ev) => {
+              _fpsPending = false;
+              _fpsLog(`[FPS] WK keyerr ${ev.errorCode?.code || '?'}`);
+            });
+            // Apple FPS spec: [4B BE keyId len][keyId][4B BE cert len][cert]
+            // keyId = content ID extracted from skd:// URI (strip the scheme prefix)
+            const uri = new TextDecoder('utf-8').decode(new Uint8Array(e.initData));
+            const keyId = uri.startsWith('skd://') ? uri.slice(6) : uri;
+            const keyIdBytes = new TextEncoder().encode(keyId);
+            const payload = new Uint8Array(4 + keyIdBytes.length + 4 + serverCert.length);
+            const dv = new DataView(payload.buffer);
+            dv.setUint32(0, keyIdBytes.length, false);
+            payload.set(keyIdBytes, 4);
+            dv.setUint32(4 + keyIdBytes.length, serverCert.length, false);
+            payload.set(serverCert, 4 + keyIdBytes.length + 4);
+            sess.generateKeyRequest('video/mp4', payload);
+            _fpsLog(`[FPS] WK req sent, keyId=${keyId.slice(0, 32)}`);
+          } catch (err) { _fpsPending = false; _fpsLog('[FPS] WK req: ' + err.message); }
+        }, { once: false });
+      } catch (e) { _fpsLog('[FPS] WK init: ' + e.message); }
+    }
+
+    // ── Mirror <video> events → player UI ────────────────────────────────
+    fpsEl.addEventListener('timeupdate', () => {
+      const cur = fpsEl.currentTime, dur = fpsEl.duration;
+      if (!dur || !isFinite(dur)) return;
+      if (_seekDragging) return;
+      const pctNum = cur / dur * 100;
+      const pct = pctNum + '%';
+      const t = fmtDur(Math.floor(cur));
+      ['pp-fill','pp-fill-big','fp-fill'].forEach(id => { const e = document.getElementById(id); if(e) e.style.width = pct; });
+      // #pp-cur excluded: the rAF ms-loop (_ppMsLoop, already reads Preview._fpsEl)
+      // exclusively owns it so it always shows M:SS.mmm — see the timeupdate fix
+      // on the plain <audio> element for the full explanation.
+      ['pp-cur-big','fp-cur'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = t; });
+      // Thumb uses --x-pct on transform (GPU, no layout). Older code set
+      // `style.left` directly which forced a reflow every timeupdate tick.
+      const thumb = document.getElementById('fp-thumb'); if (thumb) thumb.style.setProperty('--x-pct', _fpThumbPx(pctNum));
+      try { _mixPosSave?.(item.posKey, cur, dur); } catch {}
+      try { _lrcSyncTick?.(cur); } catch {}
+      if ('mediaSession' in navigator && dur > 0) {
+        try { navigator.mediaSession.setPositionState({duration: dur, playbackRate: 1, position: Math.min(cur, dur)}); } catch {}
+      }
+    });
+    fpsEl.addEventListener('durationchange', () => {
+      if (!fpsEl.duration || !isFinite(fpsEl.duration)) return;
+      const d = fmtDur(Math.floor(fpsEl.duration));
+      ['pp-dur','pp-dur-big','fp-dur'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = d; });
+    });
+    fpsEl.addEventListener('play', () => {
+      ['pp-play','pp-play-big','fp-play'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = '⏸'; });
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    });
+    fpsEl.addEventListener('pause', () => {
+      ['pp-play','pp-play-big','fp-play'].forEach(id => { const e = document.getElementById(id); if(e) e.textContent = '▶'; });
+      if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    });
+    fpsEl.addEventListener('ended', () => {
+      try { _stevEnded(); } catch (_) {}     // трек станции доигран — до сброса элемента
+      Preview._fpsEl = null;
+      if (!Preview._suppressEnded) {
+        if (Preview.idx >= 0 && Preview.idx < Preview.queue.length - 1) previewNext(1);
+        else if (!_stevExtendQueue()) closePreview?.();
+      }
+    }, { once: true });
+    fpsEl.addEventListener('error', () => {
+      const c = fpsEl.error?.code, m = fpsEl.error?.message || '';
+      _fpsLog(`[FPS] video err ${c}: ${m}`);
+    }, { once: true });
+
+    // Diagnostic: no key event within 6 s
+    const _diagT = setTimeout(() => {
+      if (_keyInstalled) return;
+      _fpsLog(`[FPS] no event 6s rs=${fpsEl.readyState} err=${fpsEl.error?.code || 0}`);
+    }, 6000);
+    fpsEl.addEventListener('playing', () => clearTimeout(_diagT), { once: true });
+
+    fpsEl.volume = audioEl.volume || 1;
+    fpsEl.src = item.url;
+    fpsEl.load();
+    if (_WA.ctx && _WA.ctx.state === 'suspended') _WA.ctx.resume().catch(() => {});
+    try {
+      await fpsEl.play();
+    } catch (e) {
+      _fpsLog('[FPS] play blocked: ' + e.message);
+      if (playBtn)  playBtn.textContent  = '▶';
+      if (playBtnB) playBtnB.textContent = '▶';
+    }
+    return;
+  }
+
+  // ── CTR = CENC/Widevine (Chrome, Edge, Firefox) ───────────────────────────
+  // Widevine pre-flight — fail fast before loading HLS.js.
+  try {
+    await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
+      initDataTypes: ['cenc'],
+      audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"',
+                            robustness: 'SW_SECURE_CRYPTO' }],
+    }]);
+  } catch (_) {
+    _scDrmSkip(t('p.drm_no_wv'));
+    return;
+  }
+
+  // ── Load HLS.js ──────────────────────────────────────────────────────────
+  if (!window.Hls) {
+    await new Promise((res, rej) => {
+      const s = document.createElement('script');
+      s.src = HLS_JS_CDN; s.onload = res; s.onerror = rej;
+      document.head.appendChild(s);
+    }).catch(() => {});
+  }
+  if (!window.Hls || !Hls.isSupported()) {
+    _scDrmSkip(t('p.drm_no_mse'));
+    return;
+  }
+
+  const licenseProxyUrl = `/api/sc_license?token=${encodeURIComponent(licToken)}`;
+  const hlsCfg = {
+    emeEnabled: true,
+    drmSystems: { 'com.widevine.alpha': { licenseUrl: licenseProxyUrl } },
+    drmSystemOptions: { 'com.widevine.alpha': {
+      audioRobustness: 'SW_SECURE_CRYPTO', videoRobustness: 'SW_SECURE_CRYPTO' } },
+    licenseXhrSetup(xhr) {
+      xhr.setRequestHeader('Content-Type', 'application/octet-stream');
+    },
+  };
+
+  let hls;
+  try {
+    hls = new Hls(hlsCfg);
+  } catch (e) {
+    console.error('[SC DRM] HLS init failed:', e);
+    _scDrmSkip(t('p.drm_hls_init'));
+    return;
+  }
+  Preview._hls = hls;
+
+  hls.on(Hls.Events.ERROR, (_, data) => {
+    const details = (typeof data.details === 'string') ? data.details.toLowerCase() : '';
+    const isKeyErr = details.includes('keysystem') || data.type === 'keySystemError';
+    console.warn('[SC DRM CTR]', data.type, details, 'fatal:', data.fatal);
+
+    if (!data.fatal && !isKeyErr) return;
+
+    hls.destroy(); Preview._hls = null;
+    if (item.id && typeof _scStreamCache !== 'undefined') {
+      _scStreamCache.delete(String(item.id));
+    }
+    const reason = isKeyErr
+      ? (details.includes('license') ? t('p.drm_lic_expired') : t('p.drm_key_unavail'))
+      : data.type === 'networkError'
+        ? ti('p.sc_net',{d:(data.details||'?')})
+        : `DRM: ${data.details||data.type||'?'}`;
+    _scDrmSkip(reason);
+  });
+
+  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    if (_WA.ctx && _WA.ctx.state === 'suspended') _WA.ctx.resume().catch(() => {});
+    const p = audioEl.play();
+    if (p) p.catch(e => {
+      console.warn('[SC DRM CTR] autoplay blocked:', e.message);
+      if (playBtn)  playBtn.textContent  = '▶';
+      if (playBtnB) playBtnB.textContent = '▶';
+    });
+  });
+
+  try {
+    hls.loadSource(item.url);
+    hls.attachMedia(audioEl);
+  } catch (e) {
+    console.error('[SC DRM] loadSource/attachMedia failed:', e);
+    hls.destroy(); Preview._hls = null;
+    _scDrmSkip(t('p.drm_hls_load'));
+  }
+}
+
+// Plain (unencrypted) HLS — SC serves this for most non-DRM tracks/mixes.
+// Safari's <audio> parses .m3u8 natively (canPlayType handles that below), but
+// Chrome/Firefox/Edge have NO native HLS support in <audio> — silently no
+// sound if you just set audio.src to an .m3u8 URL, which is exactly what the
+// generic fallback path did before this existed. No DRM/EME setup needed here
+// (unlike drm-hls-ctr) since the manifest carries no #EXT-X-KEY.
+async function _playPlainHls(audioEl, item, playBtn, playBtnB) {
+  if (!(await _ensureHlsJs())) {
+    // No HLS.js (blocked/offline CDN) — last resort: let <audio> try natively,
+    // which works on Safari and silently fails elsewhere (no worse than before).
+    audioEl.src = item.url;
+    return;
+  }
+  if (Preview._hls) { Preview._hls.destroy(); Preview._hls = null; }
+  let hls;
+  try {
+    hls = new Hls({});
+  } catch (e) {
+    console.error('[HLS] init failed:', e);
+    audioEl.src = item.url;
+    return;
+  }
+  Preview._hls = hls;
+  hls.on(Hls.Events.ERROR, (_, data) => {
+    if (!data.fatal) return;
+    console.warn('[HLS] fatal error', data.type, data.details);
+    hls.destroy(); Preview._hls = null;
+    _scDrmSkip(ti('p.sc_net', {d: data.details || data.type || '?'}));
+  });
+  hls.on(Hls.Events.MANIFEST_PARSED, () => {
+    if (_WA.ctx && _WA.ctx.state === 'suspended') _WA.ctx.resume().catch(() => {});
+    const p = audioEl.play();
+    if (p) p.catch(e => {
+      console.warn('[HLS] autoplay blocked:', e.message);
+      if (playBtn)  playBtn.textContent  = '▶';
+      if (playBtnB) playBtnB.textContent = '▶';
+    });
+  });
+  try {
+    hls.loadSource(item.url);
+    hls.attachMedia(audioEl);
+  } catch (e) {
+    console.error('[HLS] loadSource/attachMedia failed:', e);
+    hls.destroy(); Preview._hls = null;
+    audioEl.src = item.url;
+  }
+}
+
+// Safari parses .m3u8 in a plain <audio> element; everyone else needs HLS.js.
+function _audioHasNativeHls(audioEl) {
+  return !!audioEl.canPlayType && !!audioEl.canPlayType('application/vnd.apple.mpegurl');
+}
+
+function _waCanPlay(item) {
+  if (!item) return false;
+  const _svc = _effSvc(item);
+  // Сэмпл-точный gapless (движок Web Audio) требует скачать и раскодировать
+  // трек ЦЕЛИКОМ до первого сэмпла. У часового микса это минуты ожидания,
+  // поэтому SoundCloud и Deezer были исключены — но исключены ЦЕЛИКОМ, вместе
+  // с обычными четырёхминутными треками, которые декодируются мгновенно.
+  //
+  // Из-за этого большая часть прослушивания шла через <audio> с резким стыком,
+  // хотя могла идти без единого зазора. Отсекаем теперь по ДЛИНЕ, а не по
+  // сервису: длинное — потоком, короткое — сэмпл-точно.
+  //
+  // 12 минут: обычный трек и даже длинный прог-эпик укладываются, а DJ-микс и
+  // радиошоу — нет. Длительности не знаем — считаем длинным: лучше потерять
+  // gapless на одном треке, чем заставить человека ждать минуту.
+  const _WA_MAX_SEC = 12 * 60;
+  const _heavy = (_svc === 'soundcloud' || _svc === 'deezer'
+                  || (item.posKey || '').startsWith('soundcloud:'));
+  if (_heavy) {
+    const dur = Number(item.duration || item.dur || item.length || 0);
+    if (!dur || dur > _WA_MAX_SEC) return false;
+  }
+  // Локальный микс тоже декодируется ЦЕЛИКОМ (ALAC→FLAC-транскод без Range).
+  // Обычный трек альбома (2–5 мин) — мгновенно; но одиночный часовой DJ-микс
+  // одним файлом раскодировать в память нельзя. Длину из тегов знаем всегда —
+  // длинный отдаём обычным <audio> потоком. Неизвестна — доверяем (allow).
+  if (item.local) {
+    const dur = Number(item.duration || item.dur || item.length || 0);
+    if (dur && dur > _WA_MAX_SEC) return false;
+  }
+  if (!item.url) return true;       // lazy resolve → will hit our same-origin /api/stream/<svc>
+  try {
+    const u = new URL(item.url, location.origin);
+    return u.origin === location.origin;
+  } catch { return false; }
+}
+async function _waInit() {
+  if (_WA.ctx) {
+    if (_WA.ctx.state === 'suspended') await _WA.ctx.resume();
+    return;
+  }
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  _WA.ctx = new Ctx();
+  _WA.gain = _WA.ctx.createGain();
+  _WA.gain.gain.value = (S.config?.['player-volume'] ?? 1);
+  // 3-band EQ — gain → bass → mid → treble → destination. Same chain serves
+  // both gapless (buffer source → gain) and standard <audio> (mediaElement
+  // source → gain) playback.
+  const bass = _WA.ctx.createBiquadFilter();
+  bass.type = 'lowshelf';  bass.frequency.value = 320;
+  const mid  = _WA.ctx.createBiquadFilter();
+  mid.type  = 'peaking';   mid.frequency.value  = 1000;  mid.Q.value = 1;
+  const treb = _WA.ctx.createBiquadFilter();
+  treb.type = 'highshelf'; treb.frequency.value = 3200;
+  bass.gain.value = parseFloat(S.config?.['player-eq-bass']   ?? 0);
+  mid.gain.value  = parseFloat(S.config?.['player-eq-mid']    ?? 0);
+  treb.gain.value = parseFloat(S.config?.['player-eq-treble'] ?? 0);
+  _WA.eq = {bass, mid, treble: treb};
+  // AnalyserNode for the fullscreen-player visualizer. Connected in parallel
+  // to destination so it taps the post-EQ signal without re-routing audio.
+  _WA.analyser = _WA.ctx.createAnalyser();
+  // 29.09 (владелец: «амплитуда хромает, вяло прыгает»): 128 точек давали 64
+  // полосы по 345 Гц — весь бас в ОДНОЙ, а три четверти полос уходили в верх,
+  // где энергии мало. 2048 → шаг ~21 Гц, полосы режем по логарифму (_vizBands).
+  _WA.analyser.fftSize = 2048;
+  _WA.analyser.smoothingTimeConstant = 0.5;   // было 0.75 — отклик запаздывал
+  _WA.analyser.minDecibels = -85;
+  _WA.analyser.maxDecibels = -22;
+  // Пауза/продолжение безшовного пути — это suspend()/resume() контекста;
+  // шкалу ведём по нему же (для <audio> её ведут события play/pause).
+  _WA.ctx.addEventListener?.('statechange', () => {
+    try { if (_WA.ctx.state === 'running') _vizStart?.(); else _vizStop?.(); } catch {}
+  });
+  _WA.gain.connect(bass).connect(mid).connect(treb);
+  treb.connect(_WA.ctx.destination);
+  treb.connect(_WA.analyser);            // tap, doesn't double the output
+}
+
+// Pipe the <audio> element through the WA EQ chain. Same-origin only (CORS):
+// our /api/proxy + /api/stream/deezer + /api/library/file qualify.
+function _isMobileDevice() {
+  const ua = navigator.userAgent || '';
+  return /Mobi|Android|iPhone|iPad|iPod/i.test(ua) ||
+         (navigator.maxTouchPoints > 1 && /Macintosh/.test(ua));  // iPadOS reports as Mac
+}
+
+async function _wireAudioToEQ() {
+  // MOBILE: never route <audio> through the Web Audio EQ graph. A
+  // MediaElementSource pins the element's output to the AudioContext, which
+  // iOS/Android SUSPEND when the page is backgrounded → the track goes silent on
+  // the lock screen (currentTime keeps ticking but no sound). A bare <audio>
+  // element keeps playing in the background under OS control + the Media Session
+  // lock-screen controls. We trade the (rarely-used-on-mobile) EQ for working
+  // background playback. Desktop keeps the EQ chain.
+  if (_isMobileDevice()) return false;
+  if (_WA._audioSourceNode) {
+    // Already wired; make sure context is running (mobile may have suspended it)
+    if (_WA.ctx?.state === 'suspended') _WA.ctx.resume().catch(() => {});
+    return true;
+  }
+  await _waInit();
+  const audio = document.getElementById('pp-audio');
+  if (!audio) return false;
+  try {
+    _WA._audioSourceNode = _WA.ctx.createMediaElementSource(audio);
+    _WA._audioSourceNode.connect(_WA.gain);
+    // Mobile browsers (iOS Safari, Chrome Android) often start AudioContext suspended.
+    // After wiring, audio plays (currentTime ticks) but is silent until context resumes.
+    if (_WA.ctx.state === 'suspended') _WA.ctx.resume().catch(() => {});
+    return true;
+  } catch (e) {
+    console.warn('[eq] cannot wire <audio> to WA (probably cross-origin):', e.message);
+    return false;
+  }
+}
+
+// Setter — called by Settings sliders. dB in [-12..+12].
+function setEQ(band, db) {
+  const v = Math.max(-12, Math.min(12, parseFloat(db) || 0));
+  if (_WA.eq && _WA.eq[band]) _WA.eq[band].gain.value = v;
+  saveSetting('player-eq-' + band, v);
+  const lbl = document.getElementById('s-eq-' + band + '-val');
+  if (lbl) lbl.textContent = v > 0 ? `+${v}` : String(v);
+}
+function resetEQ() {
+  ['bass','mid','treble'].forEach(b => {
+    setEQ(b, 0);
+    const el = document.getElementById('s-eq-' + b); if (el) el.value = 0;
+  });
+}
+
+// ── Visualiser (FFT frequency bars on fullscreen-player background) ─────
+let _vizRAF = null;
+let _vizBuf = null;
+
+/* Полосы спектра по ЛОГАРИФМУ частоты (40 Гц … 16 кГц) — как слышит ухо:
+   бас, середина и верх получают поровну полос. Значение полосы — максимум
+   её точек, 0…255. Общая функция для ПК-шкалы и «прыгалки» панели
+   (panel_host.js), чтобы они не расходились. null — анализатора нет (звук
+   идёт мимо Web Audio: DRM, BBC, системный плеер) — шкалу тогда не рисуем. */
+function _vizBands(count) {
+  if (!_WA.analyser || !_WA.ctx) return null;
+  const n = _WA.analyser.frequencyBinCount;
+  if (!_vizBuf || _vizBuf.length !== n) _vizBuf = new Uint8Array(n);
+  _WA.analyser.getByteFrequencyData(_vizBuf);
+  const hzPerBin = _WA.ctx.sampleRate / 2 / n;
+  const lo = Math.log(40), hi = Math.log(16000);
+  const out = new Array(count);
+  for (let b = 0; b < count; b++) {
+    const f0 = Math.exp(lo + (hi - lo) * b / count);
+    const f1 = Math.exp(lo + (hi - lo) * (b + 1) / count);
+    const i0 = Math.max(1, Math.floor(f0 / hzPerBin));
+    const i1 = Math.max(i0 + 1, Math.min(n, Math.ceil(f1 / hzPerBin)));
+    let mx = 0;
+    for (let i = i0; i < i1; i++) if (_vizBuf[i] > mx) mx = _vizBuf[i];
+    out[b] = mx;
+  }
+  return out;
+}
+// Two canvases share one draw loop: #fp-viz (big, behind the fullscreen panel)
+// and #pp-viz (small, always-visible strip in the compact mini-bar). The mini
+// one used to be the ONLY way most people would ever see this feature was by
+// opening fullscreen — which nobody does — so it's no longer gated on
+// _FP.open; it runs for as long as audio is actually playing.
+const _VIZ_CANVAS_IDS = ['fp-viz', 'pp-viz'];
+function _vizStart() {
+  if (!(S.config?.['player-viz']) || !_WA.analyser) return;
+  const canvases = _VIZ_CANVAS_IDS.map(id => document.getElementById(id)).filter(Boolean);
+  if (!canvases.length) return;
+  const ctx2ds = canvases.map(c => c.getContext('2d'));
+  canvases.forEach(c => { c.style.opacity = c.id === 'fp-viz' ? '0.55' : '1'; });
+  if (_vizRAF) return;                    // уже крутится — второй цикл не заводим
+  // Re-size canvas DPI-aware on each tick (cheap, handles rotation)
+  const draw = () => {
+    // 29.09: проверяли только <audio>. В безшовном режиме (Deezer, своя
+    // фонотека) звук идёт буфером Web Audio мимо <audio>, тот «на паузе» —
+    // и шкала гасла на первом кадре. Спрашиваем общий «играет ли сейчас».
+    if (typeof ripsterIsPaused === 'function' ? ripsterIsPaused()
+        : document.getElementById('pp-audio')?.paused !== false) { _vizStop(); return; }
+    // Pick the dominant service-brand color from current track (fallback pink)
+    // — same tint the "Live"/service badges use elsewhere, so the bars read
+    // as "this is Deezer/Spotify/Qobuz playing", not just decoration.
+    const item = Preview.queue[Preview.idx];
+    const tint = (typeof _svcColor === 'function' && item?.service)
+                   ? _svcColor(item.service) : '#c084a0';
+    canvases.forEach((canvas, ci) => {
+      const dpr = window.devicePixelRatio || 1;
+      if (canvas.width !== canvas.clientWidth * dpr) {
+        canvas.width  = canvas.clientWidth  * dpr;
+        canvas.height = canvas.clientHeight * dpr;
+      }
+      const ctx2d = ctx2ds[ci];
+      const w = canvas.width, h = canvas.height;
+      const isMini = canvas.id === 'pp-viz';
+      ctx2d.clearRect(0, 0, w, h);
+      const grad = ctx2d.createLinearGradient(0, h, 0, 0);
+      // The mini strip is tiny and sits on a near-black bar — a gradient that
+      // fades to transparent at the top read as "barely there". Keep it near
+      // full-strength most of the way up so the bars are actually visible.
+      grad.addColorStop(0, tint);
+      grad.addColorStop(isMini ? 0.85 : 1, tint);
+      grad.addColorStop(1, tint + (isMini ? 'aa' : '00'));
+      ctx2d.fillStyle = grad;
+      // The mini bar is ~60px wide — fewer, chunkier bars read better there
+      // than the 48 thin ones the big fullscreen canvas uses.
+      const bars = isMini ? 16 : 48;
+      const vals = _vizBands(bars) || [];
+      const bw   = w / bars;
+      for (let i = 0; i < bars; i++) {
+        const v = (vals[i] || 0) / 255;
+        const bh = Math.max(v * h, h * (isMini ? 0.1 : 0.06));   // tiny idle nub, never fully flat
+        ctx2d.fillRect(i * bw + bw * 0.15, h - bh, bw * 0.7, bh);
+      }
+    });
+    _vizRAF = requestAnimationFrame(draw);
+  };
+  _vizRAF = requestAnimationFrame(draw);
+}
+function _vizStop() {
+  if (_vizRAF) { cancelAnimationFrame(_vizRAF); _vizRAF = null; }
+  _VIZ_CANVAS_IDS.forEach(id => {
+    const canvas = document.getElementById(id);
+    if (canvas) {
+      canvas.style.opacity = '0';
+      canvas.getContext('2d')?.clearRect(0, 0, canvas.width, canvas.height);
+    }
+  });
+}
+// Toggle (called by Settings):
+function _vizConfigChanged() {
+  const audio = document.getElementById('pp-audio');
+  if (S.config?.['player-viz'] && audio && !audio.paused) _vizStart();
+  else _vizStop();
+}
+async function _waLoadBuffer(url, timeoutMs) {
+  // Таймаут+abort ОБЯЗАТЕЛЕН для look-ahead: Deezer под рейт-лимитом держит
+  // соединение открытым, и `arrayBuffer()` может не завершиться никогда — тогда
+  // вся последовательная предзагрузка виснет, `_aheadRunning` застревает в true,
+  // и дозагрузка мертва. С abort зависший трек просто отваливается и повторяется.
+  let ctrl = null, timer = null;
+  const opts = {credentials: 'same-origin'};
+  if (timeoutMs) {
+    ctrl = new AbortController();
+    opts.signal = ctrl.signal;
+    timer = setTimeout(() => { try { ctrl.abort(); } catch (_) {} }, timeoutMs);
+  }
+  try {
+    const r   = await fetch(url, opts);
+    const ab  = await r.arrayBuffer();
+    return await _WA.ctx.decodeAudioData(ab);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+// DRM format preference for SoundCloud — detected once at startup.
+// 'ctr' = Widevine (Chrome/Edge/Firefox), 'cbc' = FairPlay (Safari/iOS).
+// Exposed as window._scDrmPrefer so sc.js can also read it.
+window._scDrmPrefer = 'ctr';
+(async () => {
+  // iOS uses legacy WebKitMediaKeys for FairPlay — detect this synchronously first
+  // before any async EME calls. Standard EME requestMediaKeySystemAccess with
+  // audioCapabilities/com.apple.fps (no .1_0) fails on iOS even though FPS works.
+  if ('WebKitMediaKeys' in window) {
+    window._scDrmPrefer = 'cbc';
+    fetch('/api/sc_fps_log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ msg: '[DRM] iOS WebKitMediaKeys → prefer=cbc', ua: navigator.userAgent.slice(0, 150) }) }).catch(() => {});
+    return;
+  }
+  try {
+    await navigator.requestMediaKeySystemAccess('com.widevine.alpha', [{
+      initDataTypes: ['cenc'],
+      audioCapabilities: [{ contentType: 'audio/mp4; codecs="mp4a.40.2"' }],
+    }]);
+    window._scDrmPrefer = 'ctr';
+  } catch (_) {
+    const hasFps = await navigator.requestMediaKeySystemAccess(
+      'com.apple.fps.1_0', [{ initDataTypes: ['skd'],
+        videoCapabilities: [{ contentType: 'video/mp4' }] }])
+      .then(() => true).catch(() => false);
+    window._scDrmPrefer = hasFps ? 'cbc' : 'ctr';
+  }
+  console.log('[DRM] prefer:', window._scDrmPrefer);
+})();
+
+// Returns per-service quality query param based on player-stream-quality setting.
+function _streamQp(service) {
+  const q = S.config?.['player-stream-quality'] || 'mp3';
+  if (service === 'deezer') {
+    return q === 'mp3' ? 'quality=3' : 'quality=9';           // 320 or FLAC
+  }
+  if (service === 'qobuz') {
+    const fid = q === 'hires' ? 27 : q === 'lossless' ? 6 : 5;
+    return `format_id=${fid}`;                                 // HiRes/FLAC/MP3-320
+  }
+  if (service === 'tidal') {
+    const _tq = { hires: 'HI_RES', lossless: 'LOSSLESS' };
+    return `quality=${_tq[q] || 'HIGH'}`;
+  }
+  if (service === 'soundcloud') {
+    return `prefer=${window._scDrmPrefer || 'ctr'}`;
+  }
+  return '';
+}
+
+// ── In-player quality switcher ────────────────────────────────────────────
+// The global `player-stream-quality` setting (mp3 | lossless | hires) drives
+// _streamQp(); the pill in the bar exposes only the tiers that make sense for
+// the current track's service. Services with a fixed source quality (SC /
+// Spotify / Apple) show a static, non-interactive label.
+function _qualityOptionsFor(service) {
+  switch (service) {
+    case 'deezer': return [{v:'mp3',l:'MP3',s:'320 kbps'}, {v:'lossless',l:'FLAC',s:'16/44'}];
+    case 'qobuz':  return [{v:'mp3',l:'MP3',s:'320 kbps'}, {v:'lossless',l:'FLAC',s:'16/44'}, {v:'hires',l:'Hi-Res',s:'24-bit'}];
+    case 'tidal':  return [{v:'mp3',l:'High',s:'AAC'}, {v:'lossless',l:'FLAC',s:'16/44'}, {v:'hires',l:'Hi-Res',s:'24-bit'}];
+    default:       return [];  // soundcloud / spotify / apple — fixed source quality
+  }
+}
+function _qualityShortLabel(service, q) {
+  if (service === 'soundcloud') return 'AAC';
+  const hit = _qualityOptionsFor(service).find(o => o.v === q);
+  return hit ? hit.l : (q === 'lossless' ? 'FLAC' : q === 'hires' ? 'Hi-Res' : 'MP3');
+}
+function _curPlayerItem() {
+  try { return Preview?.queue?.[Preview.idx] || null; } catch { return null; }
+}
+function _updateQualityPill(item) {
+  const btn = document.getElementById('pp-quality-btn');
+  const lab = document.getElementById('pp-quality-label');
+  if (!btn || !lab) return;
+  const svc = item?.service || '';
+  const q = S.config?.['player-stream-quality'] || 'mp3';
+  lab.textContent = _qualityShortLabel(svc, q);
+  const fixed = _qualityOptionsFor(svc).length === 0;
+  btn.style.opacity = fixed ? '.55' : '1';
+  btn.style.pointerEvents = fixed ? 'none' : 'auto';
+  btn.title = fixed
+    ? (svc === 'soundcloud' ? t('p.q_fixed_sc') : t('p.q_fixed'))
+    : t('p.stream_q');
+}
+function _closeQualityMenu() {
+  const m = document.getElementById('pp-quality-menu');
+  if (m) m.style.display = 'none';
+}
+function toggleQualityMenu(event) {
+  if (event) event.stopPropagation();
+  const m = document.getElementById('pp-quality-menu');
+  if (!m) return;
+  if (m.style.display === 'block') { m.style.display = 'none'; return; }
+  const svc = (_curPlayerItem()?.service) || '';
+  const opts = _qualityOptionsFor(svc);
+  if (!opts.length) return;
+  const cur = S.config?.['player-stream-quality'] || 'mp3';
+  m.innerHTML = opts.map(o =>
+    `<div class="pp-q-opt${o.v===cur?' active':''}" onclick="setStreamQuality('${o.v}')">` +
+    `<span>${o.l}</span><span class="pp-q-sub">${o.s}</span></div>`
+  ).join('');
+  m.style.display = 'block';
+}
+async function setStreamQuality(q) {
+  _closeQualityMenu();
+  try {
+    if (typeof saveSetting === 'function') saveSetting('player-stream-quality', q);
+    else if (S.config) S.config['player-stream-quality'] = q;
+  } catch (_) {}
+  const item = _curPlayerItem();
+  _updateQualityPill(item);
+  if (!item) return;
+  // Re-resolve the current track at the new quality, resuming from the current position.
+  try {
+    const audio = document.getElementById('pp-audio');
+    const onWA = (typeof _waEnabled === 'function' && _waEnabled() && _WA?.curSource);
+    const pos  = onWA ? _waCurrentTime() : (audio?.currentTime || 0);
+    item.url = '';  // force re-fetch with the new quality param
+    if (onWA && typeof _waCanPlay === 'function' && _waCanPlay(item)) {
+      await _waPlay(Preview.idx, pos);
+    } else if (audio) {
+      const seekOnce = () => {
+        try { if (pos > 0) audio.currentTime = pos; } catch (_) {}
+        audio.removeEventListener('loadedmetadata', seekOnce);
+      };
+      audio.addEventListener('loadedmetadata', seekOnce);
+      await _playPreviewAt(Preview.idx);
+    }
+    if (typeof toast === 'function') toast(t('p.quality_c')+_qualityShortLabel(item.service, q), 'var(--green)', 2500);
+  } catch (e) {
+    console.warn('[quality] switch failed:', e?.message);
+    if (typeof toast === 'function') toast(t('p.q_fail'), 'var(--red)');
+  }
+}
+// Close the quality menu on any outside click.
+document.addEventListener('click', (e) => {
+  const wrap = document.getElementById('pp-quality');
+  const m = document.getElementById('pp-quality-menu');
+  if (m && m.style.display === 'block' && wrap && !wrap.contains(e.target)) m.style.display = 'none';
+});
+
+// Returns {url, status} so caller can distinguish 451 DRM from other failures.
+async function _waResolveUrl(item) {
+  if (item.url) return {url: item.url, status: 200};
+  const svc = _effSvc(item), id = _effId(item);
+  if (!svc || !id) return {url: null, status: 0};
+  const qp = _streamQp(svc);
+  // Deezer streams raw audio bytes from our same-origin proxy and the URL is
+  // deterministic, so build it directly — DON'T pre-fetch. The old code fetched
+  // the whole (decrypted) track here just to read resp.url, then _waLoadBuffer
+  // downloaded it a SECOND time to decode: double the server work + a multi-second
+  // stall on track switch/seek for long mixes.
+  if (svc === 'deezer') {
+    item.url = `/api/stream/deezer/${id}` +
+      `?name=${encodeURIComponent(item.title || '')}` +
+      `&artist=${encodeURIComponent(item.artist || '')}` +
+      (qp ? `&${qp}` : '');
+    return {url: item.url, status: 200};
+  }
+  const resp = await fetch(
+    `/api/stream/${svc}/${id}` +
+    `?name=${encodeURIComponent(item.title || '')}` +
+    `&artist=${encodeURIComponent(item.artist || '')}` +
+    (qp ? `&${qp}` : ''));
+  if (!resp.ok) return {url: null, status: resp.status};
+  const ct = (resp.headers.get('content-type') || '').toLowerCase();
+  if (ct.includes('application/json')) {
+    const j = await resp.json();
+    item.url = j?.url || '';
+    if (j?.artwork && !item.cover) item.cover = j.artwork;
+    return {url: item.url, status: 200};
+  }
+  item.url = resp.url;
+  return {url: item.url, status: 200};
+}
+/* Остановить Web-Audio-источник, если он играет. Нужен обеим сторонам: у плеера
+ * два независимых движка, и каждый умел гасить только свой. */
+function _waStopIfPlaying() {
+  try {
+    if (typeof _waCancelScheduled === 'function') _waCancelScheduled();
+    if (_WA && _WA.curSource) {
+      try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch (_) {}
+      _WA.curSource = null;
+    }
+  } catch (_) {}
+}
+
+/* И симметрично — заглушить обычный <audio>. */
+function _plainStopIfPlaying() {
+  try {
+    const a = document.getElementById('pp-audio');
+    if (a && !a.paused) a.pause();
+  } catch (_) {}
+}
+
+// ЕДИНЫЙ ВЛАДЕЛЕЦ ВОСПРОИЗВЕДЕНИЯ. В приложении два независимых звука: главный
+// плеер (pp-audio + Web Audio + свой тракт _NA + FairPlay/HLS) и BBC-радио
+// (отдельный <audio id="bbc-audio"> со своим HLS). Раньше каждый ПУСК глушил
+// только то, о чём сам догадывался: WA- и _na-ветки `_playPreviewAt` не трогали
+// BBC, поэтому Deezer/Tidal начинали играть ПОВЕРХ включённого радио — двойной
+// звук (замер 2026-09: pp-audio и bbc-audio оба не на паузе). Теперь перед ЛЮБЫМ
+// новым звуком вызывается эта функция, и она глушит ВСЁ, кроме того источника,
+// который сейчас сам стартует (`keep`). Ни один вызывающий код не принимает
+// решение о том, что заглушить, — решение живёт в одном месте.
+function _silenceAllBut(keep) {
+  if (keep !== 'main') {
+    // Отменяем незавершённый асинхронный старт главного плеера: резолв стрима
+    // идёт в `await`, и без this gen-гарда он доиграл бы бы старый трек.
+    Preview._playGen = (Preview._playGen || 0) + 1;
+    const a = document.getElementById('pp-audio');
+    // Снимаем src ПОЛНОСТЬЮ, а не только pause: поток в состоянии буферизации
+    // сам дёргает play() когда накопится — иначе Tidal «выстреливает» уже после
+    // того, как мы ушли на другой источник.
+    if (a) { try { a.pause(); } catch (_) {} a.removeAttribute('src'); try { a.load(); } catch (_) {} }
+    _waStopIfPlaying();
+    try { _waStopKeepalive(); } catch (_) {}
+    if (_NA.active) { try { _naStop(); } catch (_) {} }
+    if (Preview._hls) { Preview._hls.destroy(); Preview._hls = null; }
+    if (Preview._fpsEl) { Preview._fpsEl.pause(); Preview._fpsEl.src = ''; Preview._fpsEl = null; }
+  }
+  if (keep !== 'bbc') {
+    const b = document.getElementById('bbc-audio');
+    if (b) { try { b.pause(); } catch (_) {} b.removeAttribute('src'); try { b.load(); } catch (_) {} }
+    try { if (typeof BBC !== 'undefined' && BBC.hls) { BBC.hls.destroy(); BBC.hls = null; } } catch (_) {}
+    if (Preview.mode === 'bbc') Preview.mode = 'spotify';
+  }
+}
+
+async function _waPlay(idx, startAtSec = 0) {
+  await _waInit();
+  const item = Preview.queue[idx];
+  if (!item) return false;
+  // Симметрично обычному пути: он мог играть прямо сейчас, и без этого два
+  // движка звучали бы вместе.
+  _plainStopIfPlaying();
+  _WA.loading = true;
+  // Any pending hand-over belongs to the track we are leaving — drop it, or a
+  // manual skip would be overtaken by the previously scheduled next track.
+  _waCancelScheduled();
+  let buffer = null;
+  // Reuse pre-decoded next buffer if available (seamless gapless auto-advance).
+  if (_WA.nextItem === item && _WA.nextBuffer) {
+    buffer = _WA.nextBuffer;
+    _WA.nextItem = null;
+    _WA.nextBuffer = null;
+  } else {
+    // Explicit switch/seek to a track we DON'T have preloaded → stop the current
+    // source NOW, so the user gets instant feedback instead of the old track
+    // playing on through the network load+decode of the new one.
+    if (_WA.curSource) { try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch {} _WA.curSource = null; }
+    const r = await _waResolveUrl(item);
+    if (!r.url) {
+      _WA.loading = false;
+      // 451 = DRM-only (paid SC release w/o Go+). 404/451 → silently skip to
+      // next track; show ONE summary toast when we exhaust the whole queue.
+      if (r.status === 451 || r.status === 404) {
+        _WA._drmHits = (_WA._drmHits || 0) + 1;
+        if (idx + 1 < Preview.queue.length) return _waPlay(idx + 1, 0);
+        const n = _WA._drmHits;
+        _WA._drmHits = 0;
+        if (item.service === 'soundcloud') {
+          toast(ti('p.sc_paid_skipped',{n:n}), 'var(--orange)', '', 6000);
+        } else {
+          toast(ti('p.drm_skipped',{n:n}), 'var(--orange)', '', 6000);
+        }
+        return false;
+      }
+      // Other failures — generic toast
+      toast(ti('p.stream_svc',{svc:item.service,st:(r.status || t('p.no_url'))}), 'var(--red)');
+      if (idx + 1 < Preview.queue.length) return _waPlay(idx + 1, 0);
+      return false;
+    }
+    try { buffer = await _waLoadBuffer(r.url); }
+    catch (e) {
+      console.warn('[gapless] decode failed:', e.message);
+      _WA.loading = false;
+      // Advance on decode failure too
+      if (idx + 1 < Preview.queue.length) return _waPlay(idx + 1, 0);
+      return false;
+    }
+  }
+  // Stop any in-flight source — И curSource, И запланированный стык. Раньше
+  // гасился только curSource: при ручном скипе (⏭) уже запланированный
+  // schedSource оставался и стартовал параллельно с новым треком → «фоном пошёл
+  // другой трек, каша». Теперь любой явный старт трека сначала снимает стык.
+  _waCancelScheduled();
+  if (_WA.curSource) { try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch {} }
+  const src = _WA.ctx.createBufferSource();
+  src.buffer = buffer;
+  src.playbackRate.value = (S.config?.['player-speed'] ?? 1);
+  src.connect(_WA.gain);
+  const startedAt = _WA.ctx.currentTime + 0.02;     // small headroom
+  src.start(startedAt, startAtSec);
+  _WA.curSource = src;
+  _WA.curBuffer = buffer;
+  _WA.curItem   = item;
+  _WA.curStartT = startedAt - startAtSec;            // virtual t=0
+  _WA.curOffset = startAtSec;
+  // Безшовный путь не трогает <audio>, и событие 'play' шкалу не будит.
+  try { _vizStart?.(); } catch {}
+  // Update duration display immediately (WA has no durationchange event).
+  const _waDurStr = fmtDur(Math.floor(buffer.duration));
+  ['pp-dur','pp-dur-big','fp-dur'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = _waDurStr; });
+  _WA.loading   = false;
+  Preview.idx = idx;
+  // Pre-decode the next track in background (which then schedules the join).
+  _waPreloadNext();
+  _waScheduleNext();          // buffer may already be in hand (manual skip)
+  _waAttachEnded(src, idx);
+  // Mirror to UI (title/cover/play-state) so the visible plumbing stays in sync.
+  if (typeof fpSyncMeta === 'function') fpSyncMeta(item);
+  ['pp-play','pp-play-big','fp-play'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = '⏸';
+  });
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+  _waStartKeepalive();
+  try { _syncAlbumPlayBtns?.(); } catch {}
+  return true;
+}
+// Выбросить из look-ahead кэша всё, что уже позади текущего трека — иначе 48
+// декодированных FLAC (~30МБ PCM каждый) съедят память.
+function _waPruneAhead() {
+  const keepFrom = Preview.idx;   // текущий + будущее держим, прошлое чистим
+  for (const k of [..._WA.ahead.keys()]) {
+    if (k < keepFrom) { _WA.ahead.delete(k); _WA.aheadItem.delete(k); }
+  }
+}
+
+// Заполнить горизонт из LOOKAHEAD треков ВПЕРЁД — ПОСЛЕДОВАТЕЛЬНО (один за
+// другим), чтобы не плодить параллельные запросы к Deezer, который от них
+// троттлит ещё сильнее. Каждый трек — с ретраями на рейт-лимит. Идемпотентна:
+// уже загруженное не трогает, поэтому её безопасно дёргать из тика.
+async function _waPreloadAhead() {
+  if (_WA._aheadRunning) return;
+  _WA._aheadRunning = true;
+  try {
+    for (let n = 1; n <= _WA_LOOKAHEAD; n++) {
+      const idx = Preview.idx + n;
+      if (idx >= Preview.queue.length) break;
+      const item = Preview.queue[idx];
+      if (!item) continue;
+      // Уже в кэше и это тот же трек (очередь могли пересобрать) — пропускаем.
+      if (_WA.ahead.has(idx) && _WA.aheadItem.get(idx) === item) continue;
+      // Кросс-сервисный LOSSLESS prefetch (проверено 02.08.2026). Deezer сам себя
+      // троттлит при параллели (играющий поток + предзагрузка через один аккаунт)
+      // → на коротком треке микса следующий не успевает → яма. Тянем следующий с
+      // ДРУГОГО сервиса по тому же ISRC (Tidal — другой CDN/auth, Deezer его не
+      // видит). СТРОГО lossless→lossless: FLAC даёт идентичный PCM без priming/
+      // padding, стык сэмпл-точный; AAC сдвинул бы микросекунды и сломал
+      // бесшовность. `/api/stream/tidal-dash` — same-origin fMP4-FLAC,
+      // decodeAudioData его берёт (dur/ch/rate верные, decode ~165мс). Best-effort:
+      // не нашлось/не загрузилось — откат на Deezer, рабочий gapless не страдает.
+      // (undefined = ещё не пробовали, null = пробовали, alt нет.)
+      if (item._altUrl === undefined && _effSvc(item) === 'deezer') {
+        item._altUrl = null;
+        try {
+          const a = await fetch('/api/gapless/altsource?service=deezer&id=' +
+            encodeURIComponent(_effId(item))).then(r => r.json());
+          if (a && a.ok && a.service && a.id) {
+            const rr = await _waResolveUrl({service: a.service, id: String(a.id),
+                                            title: item.title, artist: item.artist});
+            if (rr && rr.url) {
+              item._altUrl = rr.url;
+              console.log(`[gapless] alt lossless ${a.service}:`, item.title);
+            }
+          }
+        } catch (_) { /* alt не вышел — Deezer ниже */ }
+      }
+      let buf = null;
+      for (let attempt = 1; attempt <= 3 && !buf; attempt++) {
+        try {
+          let loadUrl = item._altUrl;
+          if (!loadUrl) { const r = await _waResolveUrl(item); loadUrl = r?.url; }
+          if (!loadUrl) throw new Error('no url');
+          buf = await _waLoadBuffer(loadUrl, 30000);   // abort зависший трек
+        } catch (e) {
+          if (item._altUrl) item._altUrl = null;       // alt подвёл → откат на Deezer
+          // Рейт-лимит/сеть — подождать и повторить, а не бросать трек.
+          if (attempt < 3) await new Promise(res => setTimeout(res, 1500 * attempt));
+          else console.warn(`[gapless] preload idx ${idx} failed:`, e.message);
+        }
+      }
+      if (!buf) continue;                    // не смогли — оставим на след. тик
+      // Пока грузили, трек мог доиграться/смениться — проверяем актуальность.
+      if (Preview.queue[idx] !== item) continue;
+      _WA.ahead.set(idx, buf);
+      _WA.aheadItem.set(idx, item);
+      console.log(`[gapless] preloaded +${n}:`, item.title);
+      // Ближайший сосед — сразу в nextBuffer + планируем стык, если играем.
+      if (idx === Preview.idx + 1) {
+        _WA.nextBuffer = buf; _WA.nextItem = item;
+        _waScheduleNext();
+      }
+    }
+  } finally {
+    _WA._aheadRunning = false;
+  }
+}
+
+// Совместимость: старое имя. Теперь тянет ближайший из look-ahead кэша (если он
+// уже там) и в любом случае запускает дозаполнение горизонта.
+async function _waPreloadNext() {
+  const nextIdx = Preview.idx + 1;
+  const item = Preview.queue[nextIdx];
+  if (item && _WA.ahead.has(nextIdx) && _WA.aheadItem.get(nextIdx) === item) {
+    _WA.nextBuffer = _WA.ahead.get(nextIdx); _WA.nextItem = item;
+    _waScheduleNext();
+  }
+  _waPruneAhead();
+  _waPreloadAhead();       // не await — фон
+}
+
+// ── Sample-accurate hand-over ─────────────────────────────────────────────
+// Having the next buffer decoded is NOT enough to be gapless. Starting it from
+// `onended` means the audio has already stopped by the time JS runs, and the
+// new source then starts at `currentTime + headroom` — so every track boundary
+// cost ~20ms plus whatever the main thread was busy with, audible as a hiccup
+// in a continuous DJ mix. Instead schedule the next source WHILE the current
+// one is still playing, at the exact time the current buffer ends: the Web
+// Audio clock performs the join, and JS only does the bookkeeping afterwards.
+function _waCancelScheduled() {
+  if (_WA.schedSource) {
+    try { _WA.schedSource.onended = null; _WA.schedSource.stop(0); } catch {}
+  }
+  _WA.schedSource = null;
+  _WA.schedBuffer = null;
+  _WA.schedItem   = null;
+  _WA.schedIdx    = -1;
+}
+
+function _waScheduleNext() {
+  if (_WA._seeking) return;   // не планировать в окне перестройки seek (двойной трек)
+  if (!_WA.ctx || !_WA.curSource || !_WA.curBuffer) return;
+  if (!_WA.nextBuffer || _WA.schedSource) return;
+  const nextIdx = Preview.idx + 1;
+  if (nextIdx >= Preview.queue.length || Preview.queue[nextIdx] !== _WA.nextItem) return;
+
+  // Real end time of the current source. curStartT is a rate-1 virtual origin,
+  // so recover the true start (curStartT + curOffset) and scale what is left.
+  const rate  = _WA.curSource.playbackRate?.value || 1;
+  const endAt = (_WA.curStartT + _WA.curOffset)
+              + (_WA.curBuffer.duration - _WA.curOffset) / rate;
+  // Already past it (tab was backgrounded, huge stall) — let onended do the
+  // ordinary reactive advance rather than scheduling into the past.
+  if (endAt <= _WA.ctx.currentTime) return;
+
+  const src = _WA.ctx.createBufferSource();
+  src.buffer = _WA.nextBuffer;
+  src.playbackRate.value = rate;
+  src.connect(_WA.gain);
+  src.start(endAt);
+  _WA.schedSource = src;
+  _WA.schedBuffer = _WA.nextBuffer;
+  _WA.schedItem   = _WA.nextItem;
+  _WA.schedIdx    = nextIdx;
+  _WA.schedStartT = endAt;
+}
+
+// Название, артист и обложка в НИЖНЕЙ панели (и в развёрнутом виде).
+//
+// Вынесено отдельно 23.08.2026. Эти шесть присваиваний жили только внутри
+// `_playAt`, то есть срабатывали, когда трек запускают. При бесшовном стыке
+// трек НЕ запускают — звук уже играет, меняется только учёт, — поэтому нижняя
+// панель оставалась на первом треке, пока из колонок шёл третий. Ровно то же
+// уже случилось с подсветкой в очереди, и лечилось тем же: у перехода два
+// входа, а обновление стояло на одном.
+function _ppSyncNowPlaying(item, idx) {
+  if (!item) return;
+  const sub = _ppArtistSub(item);
+  const set = (id, txt) => { const el = document.getElementById(id); if (el) el.textContent = txt; };
+  set('pp-title',      item.title || '—');
+  set('pp-artist',     sub);
+  set('pp-title-big',  item.title || '—');
+  set('pp-artist-big', sub);
+  const html = item.cover
+    ? `<img src="${esc(item.cover)}" data-cover onload="this.classList.add('loaded')" style="width:100%;height:100%;object-fit:cover"/>`
+    : '♪';
+  ['pp-art', 'pp-art-big'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.innerHTML = html;
+  });
+  const prev = document.getElementById('pp-prev');
+  const next = document.getElementById('pp-next');
+  if (prev) prev.disabled = (idx <= 0);
+  if (next) next.disabled = (idx >= Preview.queue.length - 1);
+  if (typeof _updateMediaSession === 'function') _updateMediaSession(item, sub);
+}
+
+// The scheduled source is already audible by the time this runs — this only
+// moves the bookkeeping and UI onto it.
+function _waPromoteScheduled() {
+  try { _stevEnded(true); } catch (_) {}     // предыдущий трек станции доигран до границы стыка
+  const src = _WA.schedSource, buf = _WA.schedBuffer;
+  const item = _WA.schedItem, idx = _WA.schedIdx, startT = _WA.schedStartT;
+  _WA.schedSource = null; _WA.schedBuffer = null; _WA.schedItem = null; _WA.schedIdx = -1;
+  _WA.curSource = src;  _WA.curBuffer = buf;  _WA.curItem = item;
+  _WA.curStartT = startT; _WA.curOffset = 0;
+  _WA.nextBuffer = null;  _WA.nextItem = null;
+  Preview.idx = idx;
+  const durStr = fmtDur(Math.floor(buf.duration));
+  ['pp-dur','pp-dur-big','fp-dur'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = durStr;
+  });
+  _waAttachEnded(src, idx);
+  // Нижняя панель. Без этой строки она показывала предыдущий трек до тех пор,
+  // пока человек не нажмёт что-нибудь руками.
+  _ppSyncNowPlaying(item, idx);
+  if (typeof fpSyncMeta === 'function') fpSyncMeta(item);
+  try { _syncAlbumPlayBtns?.(); } catch {}
+
+  // Сообщить всем, что играет уже ДРУГОЙ трек.
+  //
+  // Событие шлёт `_playPreviewAt`, и там написано «единственная точка, через
+  // которую проходит любой запуск трека». С появлением бесшовного стыка это
+  // перестало быть правдой: здесь звук УЖЕ играет, меняется только учёт, и
+  // `_playPreviewAt` не вызывается вовсе. Поэтому панель очереди подсвечивала
+  // предыдущий трек — переход слышен, а список стоит на месте.
+  try {
+    document.dispatchEvent(new CustomEvent('ripster:track-start',
+                                           { detail: { idx, item, gapless: true } }));
+  } catch (e) { /* старый движок без CustomEvent — не повод ломать переход */ }
+
+  _waPreloadNext();
+}
+
+function _waAttachEnded(src, idx) {
+  src.onended = () => {
+    // Browsers fire onended on .stop() too — ignore if we replaced manually.
+    if (_WA.curSource !== src) return;
+    if (_WA.schedSource) { _waPromoteScheduled(); return; }
+    if (idx + 1 < Preview.queue.length) {
+      try { _stevEnded(); } catch (_) {}     // трек станции доиграл; дальше — обычный добор
+      _waPlay(idx + 1, 0);
+    }
+    else if (!_stevExtendQueue()) _WA.curSource = null;
+  };
+}
+/* ══ СВОЙ ТРАКТ ДЛЯ ЛОКАЛЬНЫХ ФАЙЛОВ ═══════════════════════════════════════
+ *
+ * До 12.09.2026 маршруты `/api/audio/*` умели играть, но их не звал НИКТО:
+ * экран настройки показывал устройства и состояние, а звук всё равно шёл через
+ * браузер, то есть через общий микшер Windows. Настройка была честная, провод
+ * к ней — не подключён; ровно то, что в проекте называется «декоративный
+ * движок».
+ *
+ * Здесь этот провод. Правила, по которым тракт вообще берётся за трек:
+ *   • только локальный файл с диска (`/api/library/file?p=…`). `/api/localmix/flac`
+ *     — транскод на лету, файла под ним нет, и путь из него взять неоткуда;
+ *   • только lossless-контейнер: libsndfile читает FLAC/WAV/AIFF, а bit-perfect
+ *     для mp3 — обещание без смысла;
+ *   • только если человек включил это сам (`audio-native-local`). Эксклюзивный
+ *     режим отбирает звук у всей системы — включать такое молча нельзя.
+ * Всё остальное играет как играло.
+ */
+const _NA = { active: false, idx: -1, dur: 0, cur: 0, paused: false, timer: null };
+const _NA_LOSSLESS = /\.(flac|wav|aiff?|w64)$/i;
+
+function _naEnabled() { return !!(S.config?.['audio-native-local']); }
+
+/** Физический путь файла, если этот трек тракту по зубам. Иначе пустая строка. */
+function _naPathOf(item) {
+  if (!item || !item.url) return '';
+  let u;
+  try { u = new URL(item.url, location.origin); } catch { return ''; }
+  if (u.origin !== location.origin) return '';
+  if (u.pathname !== '/api/library/file') return '';
+  const p = u.searchParams.get('p') || '';
+  return _NA_LOSSLESS.test(p) ? p : '';
+}
+
+function _naSyncPlayBtns(paused) {
+  ['pp-play', 'pp-play-big', 'fp-play'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = paused ? '▶' : '⏸';
+  });
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = paused ? 'paused' : 'playing';
+}
+
+/** Начать через свой тракт. `false` — не взялись, зовущий играет как обычно. */
+async function _naPlay(idx) {
+  const item = Preview.queue[idx];
+  const path = _naPathOf(item);
+  if (!path) return false;
+  try { _waStopIfPlaying?.(); } catch (_) {}
+  try { _plainStopIfPlaying?.(); } catch (_) {}
+  const dev = String(S.config?.['audio-device'] ?? '');
+  let st;
+  try {
+    st = await api('POST', '/api/audio/play', {
+      path,
+      exclusive: S.config?.['audio-exclusive'] !== false,
+      device: dev === '' ? null : Number(dev),
+    });
+  } catch (e) {
+    toast(t('aeng.na_failed') + ': ' + String(e), 'var(--orange)', '', 5000);
+    return false;
+  }
+  if (!st || st.error) {
+    // Отказ НЕ проглатывается: человек включил свой тракт, и подмена его
+    // браузером за спиной обесценивает всю настройку. Говорим причину вслух и
+    // только потом играем обычным путём — иначе он останется в тишине.
+    toast(t('aeng.na_failed') + ': ' + String(st?.error || '?'), 'var(--orange)', '', 6000);
+    return false;
+  }
+  _NA.active = true; _NA.idx = idx; _NA.paused = false;
+  _NA.dur = st.duration || 0; _NA.cur = st.position || 0;
+  Preview.idx = idx;
+  const bar = document.getElementById('preview-player');
+  const main = document.querySelector('.main');
+  if (bar) bar.classList.add('visible');
+  if (main) {
+    const isExpanded = document.getElementById('pp-expanded')?.style.display !== 'none';
+    main.removeAttribute('data-preview-open');
+    main.removeAttribute('data-preview-expanded');
+    main.setAttribute(isExpanded ? 'data-preview-expanded' : 'data-preview-open', '1');
+  }
+  _ppSyncNowPlaying(item, idx);
+  const durStr = fmtDur(Math.floor(_NA.dur));
+  ['pp-dur', 'pp-dur-big', 'fp-dur'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = durStr;
+  });
+  _naSyncPlayBtns(false);
+  _naStartTick();
+  return true;
+}
+
+async function _naPause()  { if (!_NA.active) return; _NA.paused = true;  _naSyncPlayBtns(true);  try { await api('POST', '/api/audio/pause'); } catch (_) {} }
+async function _naResume() { if (!_NA.active) return; _NA.paused = false; _naSyncPlayBtns(false); try { await api('POST', '/api/audio/resume'); } catch (_) {} }
+async function _naSeek(sec) {
+  if (!_NA.active) return;
+  _NA.cur = Math.max(0, sec);          // полоса не должна ждать ответа сервера
+  try { await api('POST', '/api/audio/seek', { sec }); } catch (_) {}
+}
+async function _naStop() {
+  if (!_NA.active) return;
+  _NA.active = false;
+  clearInterval(_NA.timer); _NA.timer = null;
+  try { await api('POST', '/api/audio/stop'); } catch (_) {}
+}
+
+/** Опрос состояния: у своего тракта нет событий, спрашивать приходится нам. */
+function _naStartTick() {
+  clearInterval(_NA.timer);
+  _NA.timer = setInterval(async () => {
+    if (!_NA.active) return;
+    let s;
+    try { s = await api('GET', '/api/audio/state'); } catch (_) { return; }
+    _NA.cur = s.position || 0;
+    _NA.dur = s.duration || _NA.dur;
+    _NA.paused = !!s.paused;
+    const item = Preview.queue[_NA.idx];
+    if (item) _mixPosSave?.(item.posKey, _NA.cur, _NA.dur);
+    try { _lrcSyncTick?.(_NA.cur); } catch (_) {}
+    if (!_seekDragging) {
+      const pct = _NA.dur ? (_NA.cur / _NA.dur * 100) : 0;
+      const tt = `${Math.floor(_NA.cur / 60)}:${String(Math.floor(_NA.cur % 60)).padStart(2, '0')}`;
+      ['pp-fill', 'pp-fill-big', 'fp-fill'].forEach(id => { const el = document.getElementById(id); if (el) el.style.width = pct + '%'; });
+      ['pp-cur-big', 'fp-cur'].forEach(id => { const el = document.getElementById(id); if (el) el.textContent = tt; });
+      const thumb = document.getElementById('fp-thumb'); if (thumb) thumb.style.setProperty('--x-pct', _fpThumbPx(pct));
+    }
+    // «Доиграл сам» ≠ «остановили»: следующий трек включается только по первому,
+    // иначе нажатие «стоп» проматывало бы очередь дальше.
+    if (s.finished) {
+      _NA.active = false;
+      clearInterval(_NA.timer); _NA.timer = null;
+      if (_NA.idx + 1 < Preview.queue.length) _playPreviewAt(_NA.idx + 1);
+      else _naSyncPlayBtns(true);
+    }
+  }, 250);
+}
+
+function _waPause() {
+  if (_WA.ctx && _WA.curSource) {
+    _WA.suspendedAt = _WA.ctx.currentTime - _WA.curStartT;
+    _WA.ctx.suspend();
+    ['pp-play','pp-play-big','fp-play'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.textContent = '▶';
+    });
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    _waStopKeepalive();
+    try { _syncAlbumPlayBtns?.(); } catch {}
+  }
+}
+async function _waResume() {
+  if (_WA.ctx) {
+    await _WA.ctx.resume();
+    ['pp-play','pp-play-big','fp-play'].forEach(id => {
+      const el = document.getElementById(id); if (el) el.textContent = '⏸';
+    });
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    _waStartKeepalive();
+    try { _syncAlbumPlayBtns?.(); } catch {}
+  }
+}
+function _waIsPaused() {
+  return _WA.ctx?.state === 'suspended';
+}
+function _waCurrentTime() {
+  if (!_WA.ctx || !_WA.curSource) return 0;
+  if (_waIsPaused()) return _WA.suspendedAt;
+  return _WA.ctx.currentTime - _WA.curStartT;
+}
+function _waDuration() {
+  return _WA.curBuffer?.duration || 0;
+}
+async function _waSeek(sec) {
+  // Seek WITHIN the current track by restarting a BufferSource from the already
+  // decoded buffer — no re-fetch/re-decode (the old code called _waPlay, which
+  // re-downloaded the whole track on every seek → seek felt dead on long mixes).
+  if (!_WA.ctx || !_WA.curBuffer) return;
+  const off = Math.max(0, Math.min(sec, _WA.curBuffer.duration - 0.2));
+  // Гонка двойного трека: между `await ctx.resume()` ниже и обновлением
+  // curStartT 250мс-тик успевал запланировать стык со СТАРЫМ таймингом — источник
+  // стартовал не в тот момент и накладывался («фоном пошёл другой трек, каша»).
+  // Флаг замораживает планировщик на время перестройки, а повторный
+  // _waCancelScheduled перед re-aim гасит всё, что могло проскочить в окне await.
+  _WA._seeking = true;
+  // Seeking moves the end of this track, so the pending hand-over is now aimed
+  // at the wrong instant — drop it and re-aim below.
+  _waCancelScheduled();
+  if (_WA.curSource) { try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch {} }
+  if (_WA.ctx.state === 'suspended') { try { await _WA.ctx.resume(); } catch {} }
+  const src = _WA.ctx.createBufferSource();
+  src.buffer = _WA.curBuffer;
+  src.playbackRate.value = (S.config?.['player-speed'] ?? 1);
+  src.connect(_WA.gain);
+  const startedAt = _WA.ctx.currentTime + 0.01;
+  src.start(startedAt, off);
+  _WA.curSource = src;
+  _WA.curStartT = startedAt - off;
+  _WA.curOffset = off;
+  _waAttachEnded(src, Preview.idx);
+  _waCancelScheduled();       // гасим стык, если тик проскочил в окне await
+  _WA._seeking = false;       // планировщик снова активен
+  _waScheduleNext();          // re-aim the hand-over at the new end time
+  ['pp-play','pp-play-big','fp-play'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.textContent = '⏸';
+  });
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+}
+function _waSetVolume(v) {
+  if (_WA.gain) _WA.gain.gain.value = Math.max(0, Math.min(1, v));
+}
+
+// Periodic UI tick for Web Audio (it has no `timeupdate` event).
+setInterval(() => {
+  if (!_waEnabled() || !_WA.curSource || _waIsPaused()) return;
+  const cur = _waCurrentTime(), dur = _waDuration();
+  if (_WA.curItem) _mixPosSave?.(_WA.curItem.posKey, cur, dur);
+  try { _lrcSyncTick?.(cur); } catch {}
+  // Держим look-ahead горизонт заполненным: пока играет длинный трек, короткие
+  // следующие успевают подгрузиться заранее, и стык остаётся бесшовным даже на
+  // DJ-миксе с 37-секундными сегментами. Идемпотентно и последовательно внутри.
+  _waPruneAhead();
+  if (!_WA._aheadRunning) _waPreloadAhead();
+  // Ближайший сосед готов в кэше, но стык ещё не запланирован — запланировать.
+  const _ni = Preview.idx + 1;
+  if (!_WA.schedSource && _WA.ahead.has(_ni) && _WA.aheadItem.get(_ni) === Preview.queue[_ni]) {
+    _WA.nextBuffer = _WA.ahead.get(_ni);
+    _WA.nextItem   = _WA.aheadItem.get(_ni);
+    _waScheduleNext();
+  }
+  if (_seekDragging) return;          // don't snap visuals while user drags
+  const pct = dur ? (cur / dur * 100) : 0;
+  const t   = `${Math.floor(cur/60)}:${String(Math.floor(cur%60)).padStart(2,'0')}`;
+  try { _updateBuffered(); _updateCurrentChapter(cur); } catch (_) {}
+  ['pp-fill','pp-fill-big','fp-fill'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = pct + '%'; });
+  // #pp-cur excluded: the rAF ms-loop (_ppMsLoop, already reads _WA) exclusively
+  // owns it so it always shows M:SS.mmm — see the <audio> timeupdate fix for
+  // the full explanation of why writing plain M:SS here caused layout shift.
+  ['pp-cur-big','fp-cur'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = t; });
+  const thumb = document.getElementById('fp-thumb'); if (thumb) thumb.style.setProperty('--x-pct', _fpThumbPx(pct));
+  if ('mediaSession' in navigator && dur > 0) {
+    try { navigator.mediaSession.setPositionState({duration: dur, playbackRate: 1, position: Math.min(cur, dur)}); } catch {}
+  }
+  _floatSyncFn?.();
+}, 250);
+
+// ── Seek-bar thumb positioning ─────────────────────────────────────────────
+// `transform: translate3d(<pct>%, ...)` resolves a percentage against the
+// TRANSFORMED ELEMENT'S OWN box, not its containing block (unlike `width:%`
+// or `left:%`) — per the CSS Transforms spec, percentages in translate are
+// relative to the reference box of the element being transformed. #fp-thumb
+// is a 10px circle, so `--x-pct: 45%` moved it ~4.5px regardless of the
+// actual seek-bar width, drifting out of sync with the (correctly-scaling)
+// %-width fill bar — worse the wider the bar, hence "sometimes wider,
+// sometimes narrower" depending on window/layout width. Fix: compute the
+// real pixel offset against the track's rendered width instead; --x-pct
+// still drives a pure `transform` (GPU-composited, no layout) either way.
+function _fpThumbPx(fracPct){
+  const track = document.getElementById('fp-progress');
+  const w = track ? track.clientWidth : 0;
+  return (w * (fracPct/100)) + 'px';
+}
+
+// ── AIMP-style millisecond readout for the mini-bar current time ──────────────
+// Additive: a rAF loop owns #pp-cur and renders M:SS.mmm smoothly. The 250ms
+// ticks above still set pp-cur-big / fp-cur (M:SS) — this just overwrites the
+// mini box ~16ms later, so there's no fight and no risk to the tick logic.
+function fmtDurMs(sec){
+  if(!isFinite(sec)||sec<0) sec=0;
+  const m=Math.floor(sec/60), s=Math.floor(sec%60), ms=Math.floor((sec-Math.floor(sec))*1000);
+  return m+':'+String(s).padStart(2,'0')+'.'+String(ms).padStart(3,'0');
+}
+function _ppNowTime(){
+  // Only an ACTIVELY PLAYING source owns #pp-cur. Critically, BBC plays through a
+  // separate <audio id="bbc-audio"> (its own ontimeupdate drives the time); if we
+  // read a paused pp-audio with a stale src here we'd overwrite — and freeze — the
+  // BBC clock. The !paused guards prevent that.
+  try{ if(_NA.active && !_NA.paused) return {cur:_NA.cur, loaded:true}; }catch(_){}
+  try{ if(_waEnabled() && _WA && _WA.curSource && !_waIsPaused()) return {cur:_waCurrentTime(), loaded:true}; }catch(_){}
+  try{ const v=Preview&&Preview._fpsEl; if(v && v.src && !v.paused) return {cur:v.currentTime||0, loaded:true}; }catch(_){}
+  const a=document.getElementById('pp-audio'); if(a && a.src && !a.paused) return {cur:a.currentTime||0, loaded:true};
+  return {cur:0, loaded:false};
+}
+function _ppMsLoop(){
+  requestAnimationFrame(_ppMsLoop);
+  const box=document.getElementById('pp-cur'); if(!box) return;
+  const pv=document.getElementById('preview-player');
+  if(!pv || !pv.classList.contains('visible')) return;
+  if(_seekDragging) return;
+  const n=_ppNowTime(); if(!n.loaded) return;
+  // Split the milliseconds into a smaller, dimmer span so the M:SS part stays
+  // large + readable while the rapidly-changing .mmm doesn't turn the whole
+  // readout into an unreadable blur.
+  const s=fmtDurMs(n.cur); const i=s.lastIndexOf('.');
+  box.innerHTML = i>0 ? s.slice(0,i)+'<span class="pp-ms">'+s.slice(i)+'</span>' : s;
+}
+requestAnimationFrame(_ppMsLoop);
+
+// Apply player-toggle changes live (called by Settings → Плеер).
+function _playerCfgChanged() {
+  // Spin toggle is purely CSS — body class flips it.
+  document.body.classList.toggle('no-spin', !(S.config?.['player-spin']));
+}
+
+// ── Draggable seek bars (pointer-capture, click + drag both work) ─────────
+// Previously seek bars were click-only — each `mousemove` registered as a
+// fresh click on its target, ending wherever the finger lifted (often near
+// the left edge → "track restarts"). Now: pointerdown captures, pointermove
+// only updates the visual fill, pointerup commits the seek at the release X.
+// Set while the user is actively dragging ANY seek bar. The audio timeupdate
+// handler skips its own fill-width updates during this window, otherwise it
+// snaps the visual back to current playtime every 250ms — drag feels broken.
+let _seekDragging = false;
+function _wireSeekBar(bar) {
+  if (!bar || bar._dragWired) return;
+  bar._dragWired = true;
+  bar.onclick = null;
+  bar.removeAttribute('onclick');
+  bar.style.touchAction = 'none';
+  const fill = bar.querySelector('[id$="-fill"]');
+  let dragging = false;
+  let lastX    = 0;
+  const showAt = (clientX) => {
+    const rect = bar.getBoundingClientRect();
+    if (!rect.width) return;
+    const frac = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    if (fill) fill.style.width = (frac * 100) + '%';
+    lastX = clientX;
+  };
+  const onMove = (e) => {
+    if (!dragging) return;
+    const x = (e.touches ? e.touches[0]?.clientX : e.clientX);
+    if (typeof x === 'number') showAt(x);
+    e.preventDefault();
+  };
+  const onUp = (e) => {
+    if (!dragging) return;
+    dragging = false;
+    document.removeEventListener('pointermove', onMove);
+    document.removeEventListener('pointerup',   onUp);
+    document.removeEventListener('pointercancel', onUp);
+    let x = e.clientX;
+    if (typeof x !== 'number' || x === 0) x = lastX;
+    previewSeek({currentTarget: bar, clientX: x});
+    // 120ms defer so timeupdate doesn't snap bar back before audio.currentTime
+    // has finished propagating to the new position.
+    setTimeout(() => {
+      _seekDragging = false;
+      if (thumb) thumb.classList.remove('no-glide');
+      if (fill)  fill.classList.remove('no-glide');
+    }, 120);
+  };
+  const thumb = bar.querySelector('[id$="-thumb"]');
+  bar.addEventListener('pointerdown', (e) => {
+    dragging = true; _seekDragging = true;
+    // Track the pointer 1:1 while dragging, no glide lag.
+    if (thumb) thumb.classList.add('no-glide');
+    if (fill)  fill.classList.add('no-glide');
+    showAt(e.clientX);
+    document.addEventListener('pointermove',   onMove);
+    document.addEventListener('pointerup',     onUp);
+    document.addEventListener('pointercancel', onUp);
+    e.preventDefault();
+  });
+  // Kill any residual synthesised click.
+  bar.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); }, true);
+}
+function _wireAllSeekBars() {
+  ['pp-progress', 'pp-progress-big', 'fp-progress'].forEach(id =>
+    _wireSeekBar(document.getElementById(id))
+  );
+  _wireVolumeKeeper();
+}
+// Keep the hover-popup volume slider open for the whole drag. Without this, the
+// first pointermove of a vertical drag leaves the narrow popup, :hover drops,
+// the popup goes display:none and the native drag aborts — so only clicks worked.
+function _wireVolumeKeeper() {
+  const slider = document.getElementById('pp-vol');
+  const wrap   = document.getElementById('pp-vol-wrap');
+  if (!slider || !wrap || slider._volWired) return;
+  slider._volWired = true;
+  slider.style.touchAction = 'none';
+  const release = () => {
+    wrap.classList.remove('vol-active');
+    document.removeEventListener('pointerup', release);
+    document.removeEventListener('pointercancel', release);
+  };
+  slider.addEventListener('pointerdown', () => {
+    wrap.classList.add('vol-active');
+    document.addEventListener('pointerup', release);
+    document.addEventListener('pointercancel', release);
+  });
+}
+// Re-arm at every possible moment — DOMContentLoaded, full load, and again
+// just before the first audio session starts. Idempotent — `_dragWired` flag
+// stops repeated bindings.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', _wireAllSeekBars);
+} else {
+  _wireAllSeekBars();
+}
+window.addEventListener('load', _wireAllSeekBars);
+
+// ── Global cover-art fade-in ──────────────────────────────────────────────
+// Capture-phase listener catches `load` on any img[data-cover] anywhere in
+// the DOM — works for covers set via innerHTML as long as the attribute is
+// present. Immediately marks cached images as loaded too (MutationObserver).
+(function _initCoverFade() {
+  document.addEventListener('load', e => {
+    const img = e.target;
+    if (img && img.tagName === 'IMG' && img.hasAttribute('data-cover')) {
+      img.classList.add('loaded');
+    }
+  }, true);
+  // Handle images that were already complete when inserted (browser cache hit).
+  const obs = new MutationObserver(recs => {
+    recs.forEach(r => r.addedNodes.forEach(n => {
+      if (!n.querySelectorAll) return;
+      n.querySelectorAll('img[data-cover]').forEach(img => {
+        if (img.complete && img.naturalWidth > 0) img.classList.add('loaded');
+      });
+      if (n.tagName === 'IMG' && n.hasAttribute('data-cover') && n.complete && n.naturalWidth > 0) {
+        n.classList.add('loaded');
+      }
+    }));
+  });
+  obs.observe(document.body, { childList: true, subtree: true });
+})();
+
+async function _preloadNext() {
+  const nextIdx = Preview.idx + 1;
+  if (nextIdx >= Preview.queue.length) return;
+  if (_Pre.idx === nextIdx && _Pre.url) return;     // already done
+  if (_Pre.resolving) return;
+  const item = Preview.queue[nextIdx];
+  if (!item) return;
+  // Resolved URL already in queue item — nothing to fetch.
+  if (item.url) {
+    _Pre.idx = nextIdx; _Pre.url = item.url; return;
+  }
+  // Lazy item ({service, id}) — ask backend for the stream URL.
+  const _pSvc = _effSvc(item), _pId = _effId(item);
+  if (!_pSvc || !_pId) return;
+  _Pre.resolving = true;
+  try {
+    const _pqp = _streamQp(_pSvc);
+    const resp = await fetch(
+      `/api/stream/${_pSvc}/${_pId}` +
+      `?name=${encodeURIComponent(item.title || '')}` +
+      `&artist=${encodeURIComponent(item.artist || '')}` +
+      (_pqp ? `&${_pqp}` : ''),
+    );
+    if (!resp.ok) { _Pre.resolving = false; return; }
+    const ct = (resp.headers.get('content-type') || '').toLowerCase();
+    let url = '';
+    if (ct.includes('application/json')) {
+      const r = await resp.json();
+      url = r?.url || '';
+    } else {
+      url = resp.url;     // Deezer returns audio bytes directly
+    }
+    if (url) {
+      _Pre.idx = nextIdx;
+      _Pre.url = url;
+      // Stash on the queue item too so _playPreviewAt(idx+1) skips the fetch.
+      item.url = url;
+    }
+  } catch {}
+  _Pre.resolving = false;
+}
+
+// ── Mix playback-position memory (BBC + SoundCloud) ────────────────────────
+// Saves the play position of long mixes to localStorage so playback resumes
+// from the same spot on return — even after a server restart.
+const _MIXPOS_KEY = 'ripster_mixpos';
+function _mixPosAll() {
+  try { return JSON.parse(localStorage.getItem(_MIXPOS_KEY) || '{}') || {}; }
+  catch { return {}; }
+}
+let _mixPosWriteTs = 0;
+function _mixPosSave(key, pos, dur) {
+  // Save play position for any real track (≥2 min) so resume-after-reload works
+  // for every stream, not just long SoundCloud mixes. The resume PROMPT is still
+  // gated on pos ≥ 30 s in _offerMixResume, so trivial early positions don't nag.
+  // Throttled to ~once per 4.5 s.
+  if (!key || !dur || !isFinite(dur) || dur < 120) return;
+  const now = Date.now();
+  if (now - _mixPosWriteTs < 4500) return;
+  _mixPosWriteTs = now;
+  const all = _mixPosAll();
+  if (pos > 20 && pos < dur - 25) all[key] = { p: Math.floor(pos), d: Math.floor(dur), t: now };
+  else delete all[key];   // near the start or the end → forget it
+  const keys = Object.keys(all);
+  if (keys.length > 120) {
+    keys.sort((a, b) => (all[a].t || 0) - (all[b].t || 0));
+    for (const k of keys.slice(0, keys.length - 120)) delete all[k];
+  }
+  try { localStorage.setItem(_MIXPOS_KEY, JSON.stringify(all)); } catch {}
+}
+function _mixPosGet(key) {
+  const e = key ? _mixPosAll()[key] : null;
+  return (e && e.p) ? e.p : 0;
+}
+
+// Подзаголовок мини-плеера: АРТИСТ первичен, источник (поток) — рядом, вторично.
+// Раньше приоритет был у item.label ("Qobuz · <альбом>") → артист пропадал совсем,
+// а название дублировалось. И логика была ПРОДУБЛИРОВАНА в двух ветках (обычной и
+// WebAudio) — починили одну, вторая продолжала показывать старое. Теперь обе зовут
+// эту функцию: одна правка → одинаковое поведение.
+function _ppArtistSub(item) {
+  const SRC = {qobuz:'Qobuz',apple:'Apple Music',deezer:'Deezer',tidal:'Tidal',
+    soundcloud:'SoundCloud',spotify:'Spotify',bbc:'BBC',yandex:'Яндекс.Музыка',
+    beatport:'Beatport',jiosaavn:'JioSaavn'};
+  const src = SRC[item.service] || (item.service ? item.service.charAt(0).toUpperCase()+item.service.slice(1) : '');
+  if (item.artist) {
+    return item.full ? item.artist + (src ? ' · ' + src : '')
+                     : item.artist + ' · ' + t('player.preview_30');
+  }
+  if (item.label && item.label.trim()) {
+    let lbl = item.label.trim();
+    // не дублировать название трека, если label = "Источник · <трек>"
+    if (item.title && lbl.replace(/\s+/g,' ').endsWith('· ' + item.title)) {
+      lbl = src || lbl.split('·')[0].trim();
+    }
+    return lbl;
+  }
+  return src || t(item.full ? 'p.full_track_cap' : 'p.preview_cap');
+}
+
+function _setupAudioEvents() {
+  // Idempotent re-arm seek-bar drag handlers — by the time we hit play, the
+  // dock has definitely rendered.
+  try { _wireAllSeekBars?.(); } catch {}
+  // Lazy-wire the <audio> element into the Web Audio EQ chain — happens once,
+  // first time audio events bind. Works only for same-origin streams (we
+  // proxy all CDN audio through /api/proxy now, so it does work universally).
+  try { _wireAudioToEQ?.(); } catch {}
+  // One-time keyboard shortcuts wire-up — no-op on subsequent calls.
+  if (!window._kbWired) {
+    window._kbWired = true;
+    document.addEventListener('keydown', (e) => {
+      // Skip when user types in an input / textarea / contenteditable.
+      const t = e.target;
+      const tag = (t.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea' || tag === 'select' || t.isContentEditable) return;
+      // Don't hijack Cmd/Ctrl/Alt combos — leave them for the OS / browser.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const audio = document.getElementById('pp-audio');
+      const hasAudio = audio && audio.src;
+      switch (e.key) {
+        case ' ':
+          if (!hasAudio) return;
+          e.preventDefault();
+          previewToggle();
+          break;
+        case 'ArrowRight':
+          if (!hasAudio) return;
+          e.preventDefault();
+          if (e.shiftKey && audio.duration && isFinite(audio.duration)) {
+            audio.currentTime = Math.min(audio.duration - 0.5, audio.currentTime + 10);
+          } else { previewNext(); }
+          break;
+        case 'ArrowLeft':
+          if (!hasAudio) return;
+          e.preventDefault();
+          if (e.shiftKey && audio.duration && isFinite(audio.duration)) {
+            audio.currentTime = Math.max(0, audio.currentTime - 10);
+          } else { previewPrev(); }
+          break;
+        case 'm': case 'M':
+          if (!hasAudio) return;
+          e.preventDefault();
+          previewMute();
+          break;
+        case 'f': case 'F':
+          e.preventDefault();
+          if (typeof fpOpen === 'function') {
+            if (_FP?.open) fpClose(); else fpOpen();
+          }
+          break;
+        case 'Escape':
+          if (_FP?.open) { e.preventDefault(); fpClose(); }
+          break;
+      }
+    });
+  }
+  if (Preview._bound) return;
+  Preview._bound = true;
+  const audio = document.getElementById('pp-audio');
+  if (!audio) return;
+  // Media Session — gives lockscreen cover + play/pause/next/prev on mobile.
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.setActionHandler('play',  () => {
+        if (_NA.active) { _naResume(); return; }
+        if (_waEnabled() && _WA.curSource) {
+          _waResume();
+        } else {
+          if (_WA.ctx && _WA.ctx.state === 'suspended') _WA.ctx.resume().catch(() => {});
+          audio.play().catch(() => {});
+        }
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        if (_NA.active) { _naPause(); return; }
+        if (_waEnabled() && _WA.curSource) _waPause(); else audio.pause();
+      });
+      navigator.mediaSession.setActionHandler('previoustrack',  () => previewPrev());
+      navigator.mediaSession.setActionHandler('nexttrack',      () => previewNext());
+      navigator.mediaSession.setActionHandler('seekbackward',   (e) => {
+        const offset = (e && e.seekOffset) || 10;
+        if (_NA.active) { _naSeek(Math.max(0, _NA.cur - offset)); return; }
+        if (_waEnabled() && _WA.curSource) { _waSeek(Math.max(0, _waCurrentTime() - offset)); return; }
+        const a = document.getElementById('pp-audio'); if (!a) return;
+        a.currentTime = Math.max(0, a.currentTime - offset);
+      });
+      navigator.mediaSession.setActionHandler('seekforward',    (e) => {
+        const offset = (e && e.seekOffset) || 10;
+        if (_NA.active) { _naSeek(Math.min(_NA.dur, _NA.cur + offset)); return; }
+        if (_waEnabled() && _WA.curSource) { _waSeek(Math.min(_waDuration(), _waCurrentTime() + offset)); return; }
+        const a = document.getElementById('pp-audio'); if (!a) return;
+        a.currentTime = Math.min(a.duration || 0, a.currentTime + offset);
+      });
+      navigator.mediaSession.setActionHandler('seekto',         (e) => {
+        if (!e || e.seekTime == null) return;
+        if (_NA.active) { _naSeek(e.seekTime); return; }
+        if (_waEnabled() && _WA.curSource) { _waSeek(e.seekTime); return; }
+        const a = document.getElementById('pp-audio'); if (!a) return;
+        try { a.currentTime = e.seekTime; } catch {}
+      });
+    } catch {}
+  }
+  audio.addEventListener('play',  () => {
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
+    try { _vizStart?.(); } catch {}
+  });
+  audio.addEventListener('pause', () => {
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+    try { _vizStop?.(); } catch {}
+  });
+  audio.addEventListener('ended', () => { try { _vizStop?.(); } catch {} });
+  audio.addEventListener('timeupdate', () => {
+    if (audio.duration && audio.duration - audio.currentTime < 15) {
+      _preloadNext();
+    }
+    const _it = Preview.queue[Preview.idx];
+    if (_it) _mixPosSave(_it.posKey, audio.currentTime, audio.duration);
+    try { _lrcSyncTick?.(audio.currentTime); } catch {}
+    try { _updateBuffered(); _updateCurrentChapter(audio.currentTime); } catch (_) {}
+    // While the user drags the seek bar, never let timeupdate snap the visual
+    // fill back to live playtime — the drag would feel broken.
+    if (_seekDragging) return;
+    const pct = audio.duration ? (audio.currentTime / audio.duration * 100) + '%' : '0%';
+    const timeStr = fmtDur(Math.floor(audio.currentTime));
+    const fill = document.getElementById('pp-fill');
+    // #pp-cur is exclusively owned by the rAF ms-loop (_ppMsLoop) so it always
+    // reads M:SS.mmm — writing the plain M:SS format here too raced it and won
+    // right at pause/play, snapping the fractional part away and reflowing the
+    // player controls next to it (no more .mmm digits = narrower box).
+    if (fill) fill.style.width = pct;
+    const fillB = document.getElementById('pp-fill-big');
+    const curB  = document.getElementById('pp-cur-big');
+    if (fillB) fillB.style.width = pct;
+    if (curB)  curB.textContent  = timeStr;
+    const fillF = document.getElementById('fp-fill');
+    const curF  = document.getElementById('fp-cur');
+    const thumb = document.getElementById('fp-thumb');
+    if (fillF) fillF.style.width = pct;
+    if (curF)  curF.textContent  = timeStr;
+    if (thumb) thumb.style.setProperty('--x-pct', _fpThumbPx(parseFloat(pct)));
+  });
+  audio.addEventListener('durationchange', () => {
+    if (!audio.duration || !isFinite(audio.duration)) return;
+    const durStr = fmtDur(Math.floor(audio.duration));
+    const dur  = document.getElementById('pp-dur');
+    const durB = document.getElementById('pp-dur-big');
+    const durF = document.getElementById('fp-dur');
+    if (dur)  dur.textContent  = durStr;
+    if (durB) durB.textContent = durStr;
+    if (durF) durF.textContent = durStr;
+    try { _renderChapterTicks(); _updateBuffered(); } catch (_) {}
+  });
+  audio.addEventListener('progress', () => { try { _updateBuffered(); } catch (_) {} });
+  audio.addEventListener('play', () => {
+    // Real playback started — safe to allow ended/error events again.
+    clearTimeout(Preview._suppressEndedTimer);
+    Preview._suppressEnded = false;
+    const b = document.getElementById('pp-play'); if(b) b.textContent = '⏸';
+    const bB = document.getElementById('pp-play-big'); if(bB) bB.textContent = '⏸';
+    const bF = document.getElementById('fp-play'); if(bF) bF.textContent = '⏸';
+    const art = document.getElementById('fp-art'); if (art && art.querySelector('img')) art.classList.add('playing');
+    // Persist last-playing track so we can offer resume on next page load.
+    const _lpt = Preview.queue[Preview.idx];
+    if (_lpt && _lpt.posKey) {
+      // Persist the WHOLE queue, not just the current track. Saving one track
+      // meant that hitting play on an album and reloading the page resumed that
+      // single track and then fell silent — the album context was thrown away.
+      try {
+        const _slim = (Preview.queue || []).slice(0, 200).map(x => ({
+          service: x.service || '', id: String(x.id || ''), title: x.title || '',
+          artist: x.artist || '', cover: x.cover || '', posKey: x.posKey || '',
+          full: x.full !== false, url: x.url || '', label: x.label || '',
+        }));
+        localStorage.setItem('ripster_last_track', JSON.stringify({
+          service: _lpt.service || '', id: _lpt.id || '', title: _lpt.title || '',
+          artist: _lpt.artist || '', cover: _lpt.cover || '', posKey: _lpt.posKey,
+          ts: Date.now(),
+          queue: _slim, idx: Preview.idx | 0,
+          ctx: Preview.contextTitle || Preview.albumTitle || '',
+        }));
+      } catch {}
+    }
+    try { _syncAlbumPlayBtns?.(); } catch {}
+  });
+  audio.addEventListener('pause', () => {
+    const b = document.getElementById('pp-play'); if(b) b.textContent = '▶';
+    const bB = document.getElementById('pp-play-big'); if(bB) bB.textContent = '▶';
+    const bF = document.getElementById('fp-play'); if(bF) bF.textContent = '▶';
+    const art = document.getElementById('fp-art'); if (art) art.classList.remove('playing');
+    try { _syncAlbumPlayBtns?.(); } catch {}
+  });
+  audio.addEventListener('ended', () => {
+    // Ignore stale `ended` fired by HLS.destroy() or a failed DRM play() during
+    // track transitions — set by _playPreviewAt for 250 ms around each switch.
+    if (Preview._suppressEnded) return;
+    // Only auto-advance if the track GENUINELY played to its end. A broken/empty
+    // stream fires `ended` at time ~0 with no real duration — treating that as
+    // "finished" made the player skip-cascade through the whole album. Require
+    // that we actually reached the end before moving on.
+    if (!(audio.duration > 0 && isFinite(audio.duration) &&
+          audio.currentTime >= audio.duration - 5)) {
+      return;
+    }
+    try { _stevEnded(); } catch (_) {}       // трек станции доигран до конца
+    // Sleep timer "end of track" mode — pause and stop
+    if (_FP && _FP.sleepEndOfTrack) {
+      _FP.sleepEndOfTrack = false;
+      const lbl = document.getElementById('fp-sleep-val'); if (lbl) lbl.textContent = t('p.sleep_word');
+      const btn = document.getElementById('fp-sleep-btn'); if (btn) btn.classList.remove('active');
+      toast(t('p.sleep'), 'var(--muted)');
+      return;   // don't auto-advance
+    }
+    if (Preview.idx >= 0 && Preview.idx < Preview.queue.length - 1) previewNext(1);
+    else if (!_stevExtendQueue()) closePreview();
+  });
+  audio.addEventListener('error', () => {
+    // MEDIA_ERR_ABORTED (code 1) = we changed src ourselves (a track switch). Never
+    // a real failure.
+    if (audio.error && audio.error.code === 1) return;
+    // Debounce everything else: swapping src on a track switch aborts the previous
+    // load and can fire a spurious 'error' BEFORE the new track loads. Only report
+    // if, after a beat, we're STILL on the same track + same src, the element is
+    // still in an error state, and it never started playing — i.e. a genuine,
+    // persistent load failure rather than a switch artifact.
+    const errIdx = Preview.idx;
+    const errSrc = audio.currentSrc || audio.src || '';
+    clearTimeout(Preview._errDebounce);
+    Preview._errDebounce = setTimeout(() => {
+      if (Preview.idx !== errIdx) return;                          // moved to another track
+      if ((audio.currentSrc || audio.src || '') !== errSrc) return; // src changed under us
+      if (!audio.error || audio.error.code === 1) return;          // recovered / abort
+      if (!audio.paused || audio.currentTime > 0.5) return;        // actually playing
+      const item = Preview.queue[Preview.idx];
+      if (!item) return;
+      const svcHints = {
+        '/api/stream/deezer/': t('p.hint_deezer'),
+        '/api/stream/tidal/':  t('p.hint_tidal'),
+        '/api/stream/qobuz/':  t('p.hint_qobuz'),
+      };
+      const hint = Object.entries(svcHints).find(([k]) => (item.url || '').includes(k));
+      toast(hint ? hint[1] : t('p.audio_err'), 'var(--red)', 5000);
+      const btn = document.getElementById('pp-play'); if(btn) btn.textContent = '▶';
+      const btnB = document.getElementById('pp-play-big'); if(btnB) btnB.textContent = '▶';
+    }, 900);
+  });
+}
+
+async function _playPreviewAt(idx) {
+  const item  = Preview.queue[idx];
+  // Событие «пошёл новый трек». Его СЛУШАЮТ трек-лист (подсветить и прокрутить
+  // к играющему) и радио (добрать треков, если переход случился не через
+  // previewNext — обрыв потока, пропуск DRM-трека). Раньше слушателей было двое,
+  // а отправителя ни одного: панель показывала старую позицию после
+  // переключения, и это выглядело как «трек сменился, а список не двигается»
+  // (02.08.2026). Шлём отсюда — через эту точку проходит любой ОБЫЧНЫЙ запуск
+  // трека. Бесшовный стык идёт мимо (звук уже играет, меняется только учёт),
+  // поэтому там событие шлётся отдельно — см. _waPromoteScheduled.
+  try {
+    document.dispatchEvent(new CustomEvent('ripster:track-start',
+                                           { detail: { idx, item } }));
+  } catch (e) { /* старый движок без CustomEvent — не повод не играть */ }
+  console.log('[_playAt]', idx, {hasItem: !!item, hasUrl: !!item?.url, svc: item?.service, id: item?.id});
+  if (!item) return;
+  // Play-generation guard: resolving a stream URL is async (await fetch). If the
+  // user CLOSES the player (or switches tracks) DURING that await, the old code
+  // still ran audio.play() when the fetch resolved → "closed the player but the
+  // Tidal track keeps playing". Bump the generation on every start; closePreview
+  // bumps it too. After each await we bail if a newer play/close superseded us.
+  Preview._playGen = (Preview._playGen || 0) + 1;
+  const _gen = Preview._playGen;
+  // Refresh the in-bar quality pill for this track's service (options + label).
+  try { _updateQualityPill(item); } catch (_) {}
+  // Suppress stale `ended`/`error` events that some browsers fire when HLS.js
+  // is destroyed or when a DRM play() call fails — they would trigger previewNext()
+  // concurrently with the new track we're about to start.
+  Preview._suppressEnded = true;
+  clearTimeout(Preview._suppressEndedTimer);
+  Preview._suppressEndedTimer = setTimeout(() => { Preview._suppressEnded = false; }, 250);
+  // Гасим ЛЮБОЙ чужой звук до развилки движков. Это тот же единственный
+  //chokepoint, что зовёт BBC: раньше `_playPreviewAt` глушил BBC только в
+  // обычном <audio>-пути ниже, а WA- и _na-ветки возвращались раньше и оставляли
+  // радио играть. `keep:'main'` — значит «оставь главный плеер в покое, он сам
+  // перезапустит свой источник», «заглуши остальное» (BBC).
+  _silenceAllBut('main');
+  // Kill any SC DRM stream immediately — must happen before WA/audio path branching
+  // so HLS.js / FairPlay video don't keep playing in parallel with the new track.
+  if (Preview._hls) { Preview._hls.destroy(); Preview._hls = null; }
+  if (Preview._fpsEl) { Preview._fpsEl.pause(); Preview._fpsEl.src = ''; Preview._fpsEl = null; }
+  // Per-track chapters + service colour. _playPreviewAt is the play path for the
+  // queue/release flow, which previously left the PREVIOUS track's tracklist
+  // stuck in the player (e.g. playing a PROFF release still showed the Anjunadeep
+  // tracklist). Refresh them for THIS item: SC mixes with timecodes get ticks +
+  // tracklist; everything else clears them.
+  try {
+    if (typeof _applyServiceColor === 'function') _applyServiceColor(item.service);
+    if (item.service === 'soundcloud' && typeof _scChaptersFor === 'function') {
+      _playerSetChapters(_scChaptersFor(item.id));
+      const _ytFallback = () => {
+        if (!(Preview._chapters || []).length && typeof _scFetchYtTimecodes === 'function') {
+          _scFetchYtTimecodes(item.id, () => { try { _playerSetChapters(_scChaptersFor(item.id)); } catch (_) {} });
+        }
+      };
+      if (typeof _scFetch1001 === 'function') {
+        _scFetch1001(item.id, () => { try { _playerSetChapters(_scChaptersFor(item.id)); } catch (_) {} _ytFallback(); });
+      } else { _ytFallback(); }
+    } else if (typeof _playerSetChapters === 'function') {
+      _playerSetChapters([]);
+    }
+  } catch (_) {}
+  // Свой тракт — ПЕРВЫМ, до Web Audio: если человек его включил и трек ему по
+  // зубам (локальный lossless с диска), играть должен он. Не взялся — честно
+  // сказал причину и пропустил ход дальше, к обычным путям.
+  if (_naEnabled()) {
+    if (await _naPlay(idx)) return;
+  }
+  if (_NA.active) await _naStop();   // уходим с тракта на обычный путь — отпустить устройство
+  // Gapless Web Audio path — only for same-origin URLs (cross-origin CDNs
+  // block decodeAudioData by missing CORS headers).
+  if (_waEnabled() && _waCanPlay(item)) {
+    console.log('[_playAt] WA path');
+    Preview.idx = idx;
+    _setupAudioEvents();
+    // Show bar + set data-preview-open so content padding kicks in
+    const bar  = document.getElementById('preview-player');
+    const main = document.querySelector('.main');
+    if (bar) bar.classList.add('visible');
+    if (main) {
+      const isExpanded = document.getElementById('pp-expanded')?.style.display !== 'none';
+      main.removeAttribute('data-preview-open');
+      main.removeAttribute('data-preview-expanded');
+      main.setAttribute(isExpanded ? 'data-preview-expanded' : 'data-preview-open', '1');
+    }
+    // Тот же помощник, что и у бесшовного стыка: два входа в переход должны
+    // обновлять панель ОДНИМ кодом, иначе они снова разойдутся.
+    _ppSyncNowPlaying(item, idx);
+    await _waPlay(idx, 0);
+    return;
+  }
+  if (_waEnabled() && !_waCanPlay(item)) {
+    console.log('[_playAt] WA blocked (cross-origin) — falling back to <audio>');
+  }
+  // Invalidate any preload that points elsewhere — we're jumping.
+  if (_Pre.idx !== idx + 1) { _Pre.idx = -1; _Pre.url = ''; }
+  const audio = document.getElementById('pp-audio');
+  const bar   = document.getElementById('preview-player');
+  const main  = document.querySelector('.main');
+  if (!audio || !bar) return;
+
+  // BBC здесь больше не глушим — это делает `_silenceAllBut('main')` в начале
+  // функции, до развилки движков. Две точки «остановить радио» однажды бы
+  // разошлись, и WA-ветка снова оставила бы её без присмотра.
+
+  ['pp-fill','pp-fill-big'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = '0%'; });
+  ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = (id==='pp-cur') ? '0:00.000' : '0:00'; });
+  ['pp-dur','pp-dur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = '0:00'; });
+
+  // Show ⏸ immediately — don't wait for play event (autoplay might block)
+  const playBtn  = document.getElementById('pp-play');
+  const playBtnB = document.getElementById('pp-play-big');
+  if (playBtn)  playBtn.textContent  = '⏸';
+  if (playBtnB) playBtnB.textContent = '⏸';
+
+  // Lazy URL resolution — playlist queue items only carry {service, id} until
+  // we actually reach them. This avoids resolving 50 stream URLs upfront.
+  if (!item.url && item.service && item.id) {
+    // SC fast path: check prewarm cache (populated by hover/render prewarm in sc.js).
+    // A cache hit means instant play — no network round-trip at all.
+    if (item.service === 'soundcloud' && typeof _scCacheGet === 'function') {
+      const _sc = _scCacheGet(item.id);
+      if (_sc) {
+        item.url           = _sc.url;
+        item.format        = _sc.format || '';
+        item.license_token = _sc.license_token || '';
+        if (_sc.cover && !item.cover) item.cover = _sc.cover;
+        console.log('[_playAt] SC cache hit → instant play', item.format);
+      }
+    }
+    // Deezer: build the same-origin proxy URL directly and let <audio> stream it.
+    // No resolve-fetch (which would download the whole track just to read resp.url,
+    // then the browser fetches it AGAIN for playback — a double download + stall).
+    if (_effSvc(item) === 'deezer') {
+      const _dqp = _streamQp('deezer');
+      item.url = `/api/stream/deezer/${_effId(item)}` +
+        `?name=${encodeURIComponent(item.title || '')}` +
+        `&artist=${encodeURIComponent(item.artist || '')}` +
+        (_dqp ? `&${_dqp}` : '');
+      item.format = 'mp3';
+    }
+  }
+  if (!item.url && _effSvc(item) && _effId(item)) {
+    try {
+      const _qp = _streamQp(_effSvc(item));
+      const resp = await fetch(
+        `/api/stream/${_effSvc(item)}/${_effId(item)}` +
+        `?name=${encodeURIComponent(item.title || '')}` +
+        `&artist=${encodeURIComponent(item.artist || '')}` +
+        (_qp ? `&${_qp}` : ''),
+      );
+      if (!resp.ok) {
+        let detail = resp.statusText;
+        try { const j = await resp.clone().json(); if (j?.detail) detail = j.detail; } catch {}
+        // 451 = DRM/paid track (no Go+ subscription). Skip silently to next;
+        // at the END of the queue offer a one-click download via Lucida which
+        // can decrypt SC's encrypted streams server-side.
+        if (resp.status === 451 || resp.status === 404) {
+          _FP._drmHits = (_FP._drmHits || 0) + 1;
+          if (idx < Preview.queue.length - 1) { Preview.idx = idx + 1; return _playPreviewAt(idx + 1); }
+          const n = _FP._drmHits;
+          _FP._drmHits = 0;
+          if (item.service === 'soundcloud') {
+            toast(ti('p.sc_paid_skipped',{n:n}), 'var(--orange)', '', 6000);
+          } else {
+            toast(ti('p.drm_skipped',{n:n}),
+                  'var(--orange)', '', 6000);
+          }
+          return;
+        }
+        toast(ti('p.stream_svc',{svc:item.service,st:detail}), 'var(--red)');
+        if (idx < Preview.queue.length - 1) { Preview.idx = idx + 1; return _playPreviewAt(idx + 1); }
+        return;
+      }
+      // Deezer returns binary audio — keep the same URL (browser streams it)
+      const ct = (resp.headers.get('content-type') || '').toLowerCase();
+      if (ct.includes('application/json')) {
+        const r = await resp.json();
+        if (!r.url) { toast(t('p.no_stream'), 'var(--red)'); return; }
+        item.url           = r.url;
+        item.format        = r.format || item.format;
+        item.license_token = r.license_token || '';
+        if (r.artwork && !item.cover) item.cover = r.artwork;
+        // Also populate SC cache so the next track switch doesn't re-fetch.
+        if (item.service === 'soundcloud' && typeof _scCacheSet === 'function') {
+          _scCacheSet(item.id, { url: r.url, format: r.format || '', license_token: r.license_token || '', cover: r.artwork || '' });
+        }
+      } else {
+        item.url    = resp.url;
+        item.format = 'mp3';
+      }
+    } catch (e) {
+      toast(t('p.stream_c') + e.message, 'var(--red)');
+      return;
+    }
+  }
+
+  // The player was closed or another track started while we were resolving the
+  // stream URL — do NOT start this (superseded) playback. Prevents the "closed
+  // the player but a Tidal track still plays" race.
+  if (_gen !== Preview._playGen) return;
+
+  // Заглушить ВТОРОЙ движок воспроизведения. У плеера их два: Web Audio для
+  // однодоменных потоков (наш прокси Deezer и библиотека) и обычный <audio> для
+  // остальных. Каждый останавливал только сам себя, поэтому переход между
+  // треками РАЗНЫХ движков оставлял оба играть одновременно — Tidal поверх
+  // Deezer. Смена src у <audio> глушит только <audio>.
+  _waStopIfPlaying();
+
+  if (item.format === 'drm-hls-cbc' || item.format === 'drm-hls-ctr') {
+    _scDrmHls(audio, item, playBtn, playBtnB);
+  } else if (item.format === 'hls' && !_audioHasNativeHls(audio)) {
+    await _playPlainHls(audio, item, playBtn, playBtnB);
+  } else {
+    audio.src = _proxyAudioUrl(item.url);
+    audio._stevItem = item;   // метка «в элементе загружен ЭТОТ трек» — для _stevLen
+    // Auto-resume from a saved position ONLY for long mixes (>10 min). Clicking a
+    // normal track always starts from 0 — otherwise it'd silently jump to wherever
+    // you last scrolled it, which feels like a bug. (Resume of any track after a
+    // page reload is still offered, explicitly, by _offerMixResume.)
+    const _resumeAt = _mixPosGet(item.posKey);
+    if (_resumeAt > 0) {
+      audio.addEventListener('loadedmetadata', function _seek() {
+        audio.removeEventListener('loadedmetadata', _seek);
+        if (audio.duration && audio.duration > 600 && _resumeAt < audio.duration - 20) {
+          try { audio.currentTime = _resumeAt; } catch(_) {}
+          toast(ti('p.resume_from',{t:fmtDur(_resumeAt)}), 'var(--muted)', 2600);
+        }
+      });
+    }
+    // Unlock AudioContext before play — on mobile the EQ wire suspends the ctx.
+    if (_WA.ctx && _WA.ctx.state === 'suspended') _WA.ctx.resume().catch(() => {});
+    const p = audio.play();
+    if (p) p.catch(e => {
+      console.warn('preview autoplay blocked:', e.message);
+      if (playBtn)  playBtn.textContent  = '▶';
+      if (playBtnB) playBtnB.textContent = '▶';
+    });
+  }
+
+  // Название, артист и обложка — ОДНОЙ функцией, не вторым набором присваиваний.
+  //
+  // Здесь стояли те же шесть присваиваний, что и в `_ppSyncNowPlaying`, хотя эта
+  // же функция её уже вызывала выше (после разрешения источника). Дубль ничего
+  // не давал: между двумя точками название, артист и обложка не меняются —
+  // меняется только `item.format`. Зато он гарантировал возвращение бага: седьмое
+  // поле добавили бы в одно место из двух, и нижняя панель снова показывала бы
+  // не то. Ровно так 23.08 она и застревала на первом треке при бесшовном стыке —
+  // у перехода было два входа, а обновление стояло на одном.
+  _ppSyncNowPlaying(item, idx);
+  bar.classList.add('visible');
+  if (main) {
+    const isExpanded = document.getElementById('pp-expanded')?.style.display !== 'none';
+    main.removeAttribute('data-preview-open');
+    main.removeAttribute('data-preview-expanded');
+    main.setAttribute(isExpanded ? 'data-preview-expanded' : 'data-preview-open', '1');
+  }
+
+  // Обложка, развёрнутая панель и системные органы управления — всё это уже сделал
+  // `_ppSyncNowPlaying` выше. Второго набора здесь нет намеренно.
+  // Update fullscreen player meta (sync UI even if not currently open)
+  if (typeof fpSyncMeta === 'function') fpSyncMeta(item);
+  // If the lyrics panel is open, fetch fresh lines for the new track.
+  if (_LRC?.open) { try { fpFetchLyrics?.(); } catch {} }
+  // Restore saved playback speed for the new audio element src
+  if (_FP && _FP.speed && audio) audio.playbackRate = _FP.speed;
+
+  // prev/next тоже выставляет `_ppSyncNowPlaying` — второй набор убран.
+  // Он вдобавок расходился с первым: здесь было `idx === 0`, там `idx <= 0`.
+  // Расхождение безобидное ровно до первого отрицательного индекса, и такие
+  // «почти одинаковые» копии и есть способ, которым баг возвращается.
+  Preview.idx = idx;
+}
+
+// Apple 30-sec previews are direct cross-origin iTunes URLs. The <audio> element
+// is wired into the Web Audio EQ graph (createMediaElementSource), and browsers
+// output SILENCE for cross-origin media routed through Web Audio (no CORS). So
+// route iTunes/mzstatic previews through our same-origin /api/proxy → sound + EQ.
+function _proxyAudioUrl(url) {
+  // 30.09 (владелец): шкала уровня обязана жить на ЛЮБОМ потоке, включая сервисы,
+  // о которых Рипстер ещё не знает. Браузер отдаёт Web Audio нули для чужого звука
+  // без CORS, поэтому ВСЁ, что пришло с другого сайта по http(s), идёт через свой
+  // /api/proxy. Список хостов больше не нужен: неизвестные сервер пускает только
+  // после проверки (публичный адрес, каждый редирект, это действительно звук).
+  // Свой адрес, blob: и data: не трогаем.
+  try {
+    const u = new URL(url, location.origin);
+    if (u.origin === location.origin) return url;
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return url;
+    const h = u.hostname;
+    const svc = /(^|\.)itunes\.apple\.com$|(^|\.)mzstatic\.com$/.test(h) ? 'apple'
+              : /(^|\.)qobuz\.com$|(^|\.)akamaized\.net$/.test(h) ? 'qobuz' : 'any';
+    const path = u.pathname.toLowerCase();
+    const mime = svc === 'apple' || /\.(m4a|mp4|aac)$/.test(path) ? 'audio/mp4'
+               : /\.flac$/.test(path) ? 'audio/flac'
+               : /\.(ogg|oga|opus)$/.test(path) ? 'audio/ogg'
+               : /\.wav$/.test(path) ? 'audio/wav' : 'audio/mpeg';
+    // btoa понимает только Latin-1: кириллица в адресе уронила бы весь помощник.
+    const b64 = btoa(unescape(encodeURIComponent(url)))
+      .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return `/api/proxy?u=${b64}&svc=${svc}&mime=${encodeURIComponent(mime)}`;
+  } catch (_) {}
+  return url;
+}
+
+function playPreview(url, title, artist, cover) {
+  _setupAudioEvents();
+  // Pass cover so the player shows artwork + info (it reads item.cover); without
+  // it the 30-sec preview played with a blank player.
+  Preview.queue = [{url, title, artist, cover: cover || '', service: 'apple'}];
+  Preview.idx   = 0;
+  _playPreviewAt(0);
+}
+
+// Full-length streaming via /api/stream/{service}/{trackId}
+async function playStreamTrack(service, trackId, title, artist, cover) {
+  const svcLabels = {qobuz:'Qobuz · ' + t('player.full_track'), tidal:'Tidal · ' + t('player.full_track'), deezer:'Deezer · ' + t('player.full_track'), soundcloud:'SoundCloud'};
+  const svcLabel  = svcLabels[service] || t('player.full_track');
+
+  // If a Web Audio context already exists (e.g. a prior gapless track), resume it
+  // inside this click gesture so playback isn't silent. Do NOT create one here —
+  // SC plays via plain <audio> (_waCanPlay=false), and creating a fresh suspended
+  // ctx would route SC audio through it and mute it.
+  try {
+    if (_WA.ctx && _WA.ctx.state === 'suspended') _WA.ctx.resume().catch(() => {});
+  } catch (_) {}
+
+  try {
+    let streamUrl, format, licenseToken = '';
+
+    if(service === 'deezer') {
+      // Deezer returns StreamingResponse (audio bytes), not JSON.
+      // Set audio.src directly — browser streams+plays as data arrives.
+      const dqp = _streamQp('deezer');
+      streamUrl = `/api/stream/deezer/${trackId}?name=${encodeURIComponent(title||'')}&artist=${encodeURIComponent(artist||'')}${dqp ? '&'+dqp : ''}`;
+      format    = 'mp3';
+    } else {
+      // SC fast path: prewarm cache populated on hover/render → skip network call entirely.
+      if (service === 'soundcloud' && typeof _scCacheGet === 'function') {
+        const _sc = _scCacheGet(trackId);
+        if (_sc && _sc.url) {
+          streamUrl    = _sc.url;
+          format       = _sc.format || '';
+          licenseToken = _sc.license_token || '';
+          console.log('[playStreamTrack] SC cache hit:', format);
+        }
+      }
+      if (!streamUrl) {
+        // Qobuz / Tidal / SC cache-miss — fetch JSON {url, format} from backend.
+        const loadingLabel = document.getElementById('pp-artist');
+        if(loadingLabel) loadingLabel.textContent = t('player.loading');
+        // Show dock early so user sees feedback
+        const bar  = document.getElementById('preview-player');
+        const main = document.querySelector('.main');
+        if(bar)  bar.classList.add('visible');
+        if(main) { const isExpanded = document.getElementById('pp-expanded')?.style.display !== 'none'; main.setAttribute(isExpanded ? 'data-preview-expanded' : 'data-preview-open', '1'); }
+
+        const sqp = _streamQp(service);
+        const resp = await fetch(`/api/stream/${service}/${trackId}?name=${encodeURIComponent(title||'')}&artist=${encodeURIComponent(artist||'')}${sqp ? '&'+sqp : ''}`);
+        if(!resp.ok) {
+          const err = await resp.json().catch(() => ({}));
+          if (resp.status === 451) {
+            toast(`${service === 'soundcloud' ? 'SC' : service}: ${t('player.paid_content')}`, 'var(--orange)', '', 6000);
+          } else {
+            toast(t('player.stream_error') + (err.detail || resp.statusText), 'var(--red)');
+          }
+          if(bar)  bar.classList.remove('visible');
+          if(main) { main.removeAttribute('data-preview-open'); main.removeAttribute('data-preview-expanded'); }
+          return;
+        }
+        const r = await resp.json();
+        if(!r.url) {
+          toast(t('p.no_stream_c') + (r.detail || r.error || '?'), 'var(--red)');
+          return;
+        }
+        streamUrl    = r.url;
+        format       = r.format || '';
+        licenseToken = r.license_token || '';
+        // Populate SC cache so subsequent plays (e.g. after queue switch) are instant.
+        if (service === 'soundcloud' && typeof _scCacheSet === 'function') {
+          _scCacheSet(trackId, { url: r.url, format: r.format || '', license_token: r.license_token || '', cover: r.artwork || '' });
+        }
+      }
+    }
+
+    _setupAudioEvents();
+    Preview.queue = [{url: streamUrl, title, artist, full: true, format, label: svcLabel,
+                      cover: cover || '', posKey: service + ':' + trackId,
+                      service, id: String(trackId), license_token: licenseToken}];
+    Preview.idx   = 0;
+    // Per-service progress colour + YouTube-style chapters (SC mixes w/ timecodes).
+    try {
+      _applyServiceColor(service);
+      if (service === 'soundcloud' && typeof _scChaptersFor === 'function') {
+        _playerSetChapters(_scChaptersFor(trackId));
+        const _ytFb = () => {
+          if (!(Preview._chapters || []).length && typeof _scFetchYtTimecodes === 'function') {
+            _scFetchYtTimecodes(trackId, () => { try { _playerSetChapters(_scChaptersFor(trackId)); } catch (_) {} });
+          }
+        };
+        if (typeof _scFetch1001 === 'function') {
+          _scFetch1001(trackId, () => { try { _playerSetChapters(_scChaptersFor(trackId)); } catch (_) {} _ytFb(); });
+        } else { _ytFb(); }
+      } else {
+        _playerSetChapters([]);
+      }
+    } catch (_) {}
+    _playPreviewAt(0);
+    setTimeout(() => _syncAlbumPlayBtns?.(), 150);
+
+  } catch(e) {
+    toast(t('p.stream_err') + e.message, 'var(--red)');
+  }
+}
+
+function playAlbumTrackPreview(idx) {
+  _setupAudioEvents();
+  Preview.queue = window._albumPreviews || [];
+  Preview.idx   = idx;
+  _playPreviewAt(idx);
+}
+
+function previewToggle() {
+  if (Preview.mode === 'bbc') { bbcTogglePlay(); return; }
+  if (_NA.active) {
+    if (_NA.paused) _naResume(); else _naPause();
+    setTimeout(() => _syncAlbumPlayBtns?.(), 50);
+    return;
+  }
+  if (_waEnabled() && _WA.curSource) {
+    if (_waIsPaused()) _waResume(); else _waPause();
+    setTimeout(() => _syncAlbumPlayBtns?.(), 50);
+    return;
+  }
+  if (Preview._fpsEl) {
+    if (Preview._fpsEl.paused) Preview._fpsEl.play().catch(() => {});
+    else Preview._fpsEl.pause();
+    setTimeout(() => _syncAlbumPlayBtns?.(), 50);
+    return;
+  }
+  const audio = document.getElementById('pp-audio');
+  if (!audio) return;
+  if (audio.paused) {
+    if (_WA.ctx && _WA.ctx.state === 'suspended') _WA.ctx.resume().catch(() => {});
+    audio.play().catch(() => {});
+  } else {
+    audio.pause();
+  }
+  setTimeout(() => _syncAlbumPlayBtns?.(), 50);
+}
+
+function previewNext(auto) {
+  if (Preview.mode === 'bbc') return;
+  if (Preview.idx < Preview.queue.length - 1) {
+    if (!auto) { try { _stevSkip('skip_forward'); } catch (_) {} }
+    Preview.idx++;
+    _playPreviewAt(Preview.idx);
+  } else if (!auto) {
+    // «Дальше» на последнем треке станции — не тишина, а дозаказ: трек
+    // оборвали (это skip), эфира больше нет (просим пачку).
+    try { _stevSkip('skip_forward'); } catch (_) {}
+    _stevExtendQueue();
+  }
+}
+
+function previewPrev() {
+  if (Preview.mode === 'bbc') return;
+  const _ct = Preview._fpsEl ? Preview._fpsEl.currentTime : document.getElementById('pp-audio')?.currentTime;
+  if (_ct > 3) {
+    if (Preview._fpsEl) Preview._fpsEl.currentTime = 0;
+    else { const a = document.getElementById('pp-audio'); if (a) a.currentTime = 0; }
+    return;
+  }
+  if (Preview.idx > 0) {
+    try { _stevSkip('skip_back'); } catch (_) {}
+    Preview.idx--;
+    _playPreviewAt(Preview.idx);
+  }
+}
+
+function previewSeek(event) {
+  const bar  = event.currentTarget || document.getElementById('pp-progress');
+  if (!bar) return;
+  const rect = bar.getBoundingClientRect();
+  const frac = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+  if (Preview.mode === 'bbc') {
+    const audio = document.getElementById('bbc-audio');
+    if (audio && audio.duration) audio.currentTime = frac * audio.duration;
+    return;
+  }
+  if (_NA.active && _NA.dur) { _naSeek(frac * _NA.dur); return; }
+  if (_waEnabled() && _WA.curBuffer) { _waSeek(frac * _waDuration()); return; }
+  if (Preview._fpsEl && Preview._fpsEl.duration && isFinite(Preview._fpsEl.duration)) {
+    try { Preview._fpsEl.currentTime = frac * Preview._fpsEl.duration; } catch (_) {}
+    return;
+  }
+  const audio = document.getElementById('pp-audio');
+  if (!audio) return;
+  // Перемотка была МЁРТВА молча: если <audio> ещё не знал длительности (поток с
+  // Accept-Ranges:none, HLS-лайв, метаданные не успели разрезолвиться), старый код
+  // делал `if (!isFinite(duration)) return;` и клик по полосе просто пропадал —
+  // «перетаскиваю, а ничего не происходит». Берём длину из того же источника,
+  // которым живёт сама полоса (`_stevLen`: метаданные очереди или движок,
+  // играющий ЭТОТ трек) и мотаем по ней; если и так нечем — честно говорим
+  // причину вместо немого возврата.
+  let dur = (isFinite(audio.duration) && audio.duration) ? audio.duration : null;
+  if (!dur) dur = _stevLen(Preview.queue[Preview.idx]);
+  if (!dur) { _seekUnsupported(); return; }
+  try { audio.currentTime = frac * dur; }
+  catch (e) { console.warn('seek failed:', e.message); _seekUnsupported(); }
+}
+
+// Одно сообщение на серию кликов: поток без Range-поддержки перемотать нельзя,
+// и молча игнорировать полосу — хуже, чем сказать это вслух.
+let _seekUnsupportedAt = 0;
+function _seekUnsupported() {
+  const now = Date.now();
+  if (now - _seekUnsupportedAt < 3000) return;
+  _seekUnsupportedAt = now;
+  try { toast(t('pp.seek_unsupported'), 'var(--orange)', '', 4000); } catch (_) {}
+}
+
+// ── YouTube-style chapters + buffered (cache) bar + per-service progress colour ──
+function _playerSvcColor(svc) {
+  try {
+    const ov = (typeof S !== 'undefined' && S.config && S.config['service-colors']) || {};
+    if (svc && ov[svc]) return ov[svc];
+    if (svc && typeof _svcColor === 'function') { const c = _svcColor(svc); if (c) return c; }
+  } catch (_) {}
+  return 'var(--red)';
+}
+
+// Paint the PLAYED fills in the current service's colour. The buffered/cache bar
+// keeps one neutral colour everywhere (set in markup).
+function _applyServiceColor(svc) {
+  const col = _playerSvcColor(svc);
+  ['pp-fill', 'pp-fill-big', 'fp-fill'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.style.background = col;
+  });
+  // Drive the played-line glow + thumb ring colour via a CSS variable.
+  try { document.documentElement.style.setProperty('--pp-svc', col); } catch (_) {}
+  Preview._svcColor = col;
+}
+
+// Buffered-ahead ("cache") bar from <audio>.buffered — YouTube-style.
+function _updateBuffered() {
+  const audio = Preview._fpsEl || document.getElementById('pp-audio');
+  let pct = 0;
+  try {
+    if (audio && isFinite(audio.duration) && audio.duration && audio.buffered && audio.buffered.length) {
+      pct = Math.min(100, audio.buffered.end(audio.buffered.length - 1) / audio.duration * 100);
+    } else if (_waEnabled() && _WA.curBuffer) {
+      pct = 100;  // gapless WA decodes the whole track up front
+    }
+  } catch (_) {}
+  const w = pct.toFixed(1) + '%';
+  ['pp-buffered', 'pp-buffered-big', 'fp-buffered'].forEach(id => {
+    const el = document.getElementById(id); if (el) el.style.width = w;
+  });
+}
+
+function _fmtChapTs(sec) {
+  sec = Math.max(0, Math.floor(sec || 0));
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h ? `${h}:${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`
+           : `${m}:${String(s).padStart(2,'0')}`;
+}
+
+function _playerDuration() {
+  if (_waEnabled() && _WA.curBuffer) { try { return _waDuration(); } catch (_) {} }
+  if (Preview.mode === 'bbc') {
+    const b = document.getElementById('bbc-audio');
+    if (b && isFinite(b.duration)) return b.duration;
+    return (typeof BBC !== 'undefined' && BBC.duration) || 0;
+  }
+  const a = Preview._fpsEl || document.getElementById('pp-audio');
+  return (a && isFinite(a.duration)) ? a.duration : 0;
+}
+
+// Attach chapters: [{seconds,label}] (sorted). Empty array = hide the UI.
+function _playerSetChapters(chapters) {
+  Preview._chapters = Array.isArray(chapters) ? chapters : [];
+  Preview._curChap  = -1;
+  const wrap = document.getElementById('pp-chapters-wrap');
+  const list = document.getElementById('pp-chapters');
+  const cnt  = document.getElementById('pp-chapter-count');
+  const has  = Preview._chapters.length > 0;
+  if (wrap) wrap.style.display = has ? '' : 'none';
+  if (cnt)  cnt.textContent = has ? Preview._chapters.length + ' ' + t('p.trk_abbr') : '';
+  if (list) {
+    list.innerHTML = has ? Preview._chapters.map((ch, i) =>
+      `<div class="pp-chap" data-i="${i}" onclick="previewSeekTo(${ch.seconds})"
+         style="display:flex;gap:10px;align-items:baseline;padding:5px 8px;border-radius:6px;cursor:pointer">
+         <span style="color:var(--blue);font-family:var(--mono);font-size:10px;flex:0 0 auto;min-width:40px">${_fmtChapTs(ch.seconds)}</span>
+         <span style="flex:1;min-width:0;color:var(--muted);font-size:12px;line-height:1.4;word-break:break-word">${esc(ch.label)}</span>
+       </div>`).join('') : '';
+  }
+  _renderChapterTicks();
+}
+
+// Tick marks at chapter boundaries on every seek bar (needs known duration).
+// Трек-лист показывает эти же метки под играющим миксом — держим его в
+// согласии с плеером, иначе подсветка «где мы внутри микса» отстаёт.
+function _pqSyncChapters() {
+  if (typeof _ppRenderQueue === 'function' && document.getElementById('pp-queue')) {
+    _ppRenderQueue();
+  }
+}
+
+// ── Контраст меток глав (#9011) ─────────────────────────────────────────────
+// Полоса проигрывания — слоёная: `--player-bg` дока, поверх — пустой рельс
+// `--pp-track` и сыгранная полоса `--pp-svc` при 24%. Раньше метка красилась
+// хардкодным `rgba(0,0,0,.55)`: на тёмных темах это читалось, а на светлых и
+// сепии чёрный по чёрноподобному фону пропадал. Метка маленькая и не несёт
+// текста, поэтому требуем WCAG 3:1 (UI-components), подобранную ВСЕГДУ по двум
+// подложкам — пустому рельсу и сыгранной полосе.
+function _stParseColor(str) {
+  if (!str) return null;
+  str = String(str).trim();
+  let m = /^rgba?\(([^)]+)\)$/i.exec(str);
+  if (m) {
+    const p = m[1].split(/[,\s/]+/).filter(Boolean).map(parseFloat);
+    return { r: p[0] || 0, g: p[1] || 0, b: p[2] || 0, a: p.length > 3 ? p[3] : 1 };
+  }
+  m = /^#([0-9a-f]{3,8})$/i.exec(str);
+  if (m) {
+    let h = m[1];
+    if (h.length === 3 || h.length === 4) h = h.replace(/./g, c => c + c);
+    const n = parseInt(h.slice(0, 6), 16);
+    const a = h.length === 8 ? parseInt(h.slice(6, 8), 16) / 255 : 1;
+    return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255, a };
+  }
+  return null;
+}
+function _stOver(fg, bg) {           // foreground над подложкой — итоговый RGB
+  const a = fg.a == null ? 1 : fg.a;
+  return { r: fg.r * a + bg.r * (1 - a), g: fg.g * a + bg.g * (1 - a), b: fg.b * a + bg.b * (1 - a) };
+}
+function _stLum(c) {
+  const f = v => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+  return 0.2126 * f(c.r) + 0.7152 * f(c.g) + 0.0722 * f(c.b);
+}
+function _stCR(a, b) {
+  const la = _stLum(a), lb = _stLum(b), hi = Math.max(la, lb), lo = Math.min(la, lb);
+  return (hi + 0.05) / (lo + 0.05);
+}
+function _stMix(a, b, p) {           // color-mix(in srgb, A P%, B)
+  return { r: a.r + (b.r - a.r) * p, g: a.g + (b.g - a.g) * p, b: a.b + (b.b - a.b) * p,
+           a: a.a + (b.a - a.a) * p };
+}
+
+/** Цвет метки главы, подобранный под ТЕКУЩУЮ тему. Возвращает CSS-цвет. */
+function _stTickColor(bar) {
+  try {
+    const rootStyle = getComputedStyle(document.documentElement);
+    const tok = n => _stParseColor(rootStyle.getPropertyValue(n)) ||
+                    _stParseColor(getComputedStyle(bar).backgroundColor);
+    // Прозрачность проверяется у ПЕРЕДНЕГО цвета, а не у подложки. С обратной
+    // проверкой `over(--text, dock)` возвращал цвет дока вместо цвета текста,
+    // из-за чего мягкие кандидаты («текст», «приглушённый») схлопывались в фон,
+    // проваливали порог контраста, и всегда побеждал чистый белый или чёрный —
+    // замер показывал 18–21:1 вместо нужных ~3–6.
+    const over = (c, bg) => (c.a == null || c.a >= 0.999 ? c : _stOver(c, bg));
+    const raw = n => _stParseColor(rootStyle.getPropertyValue(n));
+    const dock = over(tok('--player-bg'), tok('--bg'));
+    const empty = over(tok('--pp-track'), dock);
+    // `--pp-svc` ставится только когда что-то играет (_applyServiceColor).
+    // Пока её нет, ВЫДУМЫВАТЬ проигранную полосу нельзя: подставной цвет
+    // отравлял выбор и метка получалась белой на светлой теме. Нет цвета —
+    // считаем по одному пустому рельсу, и это честно.
+    const svc = raw('--pp-svc');
+    const backs = [empty];
+    if (svc) {
+      backs.push(over(_stMix(over(svc, dock),
+                             { r: dock.r, g: dock.g, b: dock.b, a: 1 }, 0.76), dock));
+    }
+    const cands = [
+      _stParseColor('#ffffff'), _stParseColor('#000000'),
+      over(tok('--text'), dock), over(tok('--muted'), dock),
+      // Полутона между текстом и рельсом: именно из них обычно выходит мягкая
+      // метка на 3–6:1, которой не хватало в списке.
+      _stMix(over(tok('--text'), dock), empty, 0.35),
+      _stMix(over(tok('--text'), dock), empty, 0.55),
+      _stMix(over(tok('--muted'), dock), empty, 0.4),
+    ].filter(Boolean);
+    // Берём САМОГО МЯГКОГО из проходящих порог, а не самого контрастного.
+    // Максимизация всегда выдавала чистый белый (тёмные темы) или чистый
+    // чёрный (светлые) — замер показал 18–21:1, и тонкая метка превращалась в
+    // жёсткую полосу поперёк шкалы, которую владелец назвал идеальной. Порог
+    // 3:1 (WCAG для элементов интерфейса) — это то, что нужно ВЫПОЛНИТЬ, а не
+    // то, что нужно перекрыть втрое.
+    const NEED = 3.0;
+    let best = null, fallback = null;
+    cands.forEach(c => {
+      const worst = Math.min.apply(null, backs.map(b => _stCR(c, b)));
+      if (!fallback || worst > fallback.worst) fallback = { c: c, worst: worst };
+      if (worst >= NEED && (!best || worst < best.worst)) best = { c: c, worst: worst };
+    });
+    // Ни один кандидат не дотянул — тогда уже берём самый контрастный: лучше
+    // резкая метка, чем невидимая.
+    best = best || fallback;
+    if (!best) return 'rgba(0,0,0,.55)';
+    const hex = '#' + [best.c.r, best.c.g, best.c.b]
+      .map(v => Math.round(Math.max(0, Math.min(255, v))).toString(16).padStart(2, '0')).join('');
+    return hex;
+  } catch (_) { return 'rgba(0,0,0,.55)'; }
+}
+
+function _renderChapterTicks() {
+  const chapters = Preview._chapters || [];
+  const dur = _playerDuration();
+  ['pp-progress', 'pp-progress-big', 'fp-progress'].forEach(barId => {
+    const bar = document.getElementById(barId); if (!bar) return;
+    bar.querySelectorAll('.pp-tick').forEach(t => t.remove());
+    if (!dur || !chapters.length) return;
+    const tickColor = _stTickColor(bar);   // theme-aware; было rgba(0,0,0,.55) — невидим на светлых темах
+    chapters.forEach(ch => {
+      if (ch.seconds <= 0 || ch.seconds >= dur) return;
+      const d = document.createElement('div');
+      d.className = 'pp-tick';
+      // Thin centred marker (not full-height) so the seek bar stays a clean line
+      // instead of a row of tall blocks on the fullscreen player.
+      d.style.cssText = `position:absolute;top:50%;transform:translateY(-50%);height:10px;width:2px;left:${(ch.seconds/dur*100).toFixed(2)}%;background:${tickColor};pointer-events:none;z-index:2`;
+      bar.appendChild(d);
+    });
+  });
+}
+
+// Highlight the chapter for the current playback time + show "now playing" track.
+function _updateCurrentChapter(curSec) {
+  const chapters = Preview._chapters || [];
+  if (!chapters.length) return;
+  let idx = -1;
+  for (let i = 0; i < chapters.length; i++) {
+    if (chapters[i].seconds <= curSec + 0.5) idx = i; else break;
+  }
+  if (idx === Preview._curChap) return;
+  Preview._curChap = idx;
+  // Трек-лист показывает эти же метки под играющим миксом — без этого его
+  // подсветка «где мы внутри микса» отставала бы от плеера.
+  _pqSyncChapters();
+  const list = document.getElementById('pp-chapters');
+  if (list) {
+    list.querySelectorAll('.pp-chap').forEach(el => {
+      const on = (+el.dataset.i === idx);
+      el.style.background = on ? 'rgba(255,255,255,.07)' : '';
+      const nm = el.children[1]; if (nm) nm.style.color = on ? 'var(--text)' : 'var(--muted)';
+      if (on) try { el.scrollIntoView({ block: 'nearest' }); } catch (_) {}
+    });
+  }
+  if (idx >= 0) {
+    const label = '▸ ' + chapters[idx].label;
+    const a1 = document.getElementById('pp-artist');     if (a1) a1.textContent = label;
+    const a2 = document.getElementById('pp-artist-big');  if (a2) a2.textContent = label;
+  }
+}
+
+function previewSeekTo(seconds) {
+  if (!isFinite(seconds) || seconds < 0) return;
+  if (Preview.mode === 'bbc') { const a = document.getElementById('bbc-audio'); if (a && isFinite(a.duration)) a.currentTime = seconds; return; }
+  if (_waEnabled() && _WA.curBuffer) { _waSeek(seconds); return; }
+  if (Preview._fpsEl && isFinite(Preview._fpsEl.duration)) { try { Preview._fpsEl.currentTime = seconds; } catch (_) {} return; }
+  const a = document.getElementById('pp-audio');
+  // Цель уже задана в секундах (клик по треку списка), так что известная
+  // длительность для вычисления не нужна — нужен только сам элемент. Старый
+  // `isFinite(duration)` молча отбрасывал переход по главам на HLS/лайв-потоках,
+  // где duration === Infinity, но currentTime писать можно. Пишем и глушим
+  // ошибку честным тостом, а не пустотой.
+  if (a) { try { a.currentTime = seconds; } catch (_) { _seekUnsupported(); } }
+}
+
+function previewMute() {
+  const audioId = Preview.mode === 'bbc' ? 'bbc-audio' : 'pp-audio';
+  const audio   = document.getElementById(audioId);
+  if (!audio) return;
+  audio.muted = !audio.muted;
+  const icon = audio.muted ? '🔇' : '🔊';
+  const vol  = audio.muted ? 0 : audio.volume;
+  ['pp-mute','pp-mute-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = icon; });
+  ['pp-vol','pp-vol-big'].forEach(id => { const el = document.getElementById(id); if(el) el.value = vol; });
+}
+
+// Громкость, выставленная В ПЛЕЕРЕ, должна пережить следующий трек.
+// 12.09.2026, владелец: «громкость постоянно сбрасывается с той позиции,
+// которую я выставил, на ту, что ставит сам Ripster». Так и было: ползунок
+// плеера двигал звук и НИЧЕГО не сохранял, а `_waInit` при каждой сборке
+// звукового графа ставит усиление из `player-volume` — то есть возвращал
+// значение из настроек. Сохранял только ползунок в Настройках, куда никто не
+// ходит ради громкости.
+// Пишем с задержкой: тянуть ползунок — это десятки событий в секунду, и слать
+// столько же запросов в конфиг незачем.
+let _volSaveT = null;
+
+function previewVolume(val) {
+  const v = parseFloat(val);
+  if (Preview.mode === 'bbc') { bbcVol(v); return; }
+  clearTimeout(_volSaveT);
+  _volSaveT = setTimeout(() => {
+    // Ноль — это «выключил звук», а не выбранная громкость: сохранив его, мы
+    // открыли бы плеер в тишине и человек решил бы, что звук сломан.
+    if (v > 0) { try { saveSetting('player-volume', v); } catch (_) {} }
+  }, 400);
+  if (Preview._fpsEl) { Preview._fpsEl.volume = v; Preview._fpsEl.muted = (v === 0); }
+  const audio = document.getElementById('pp-audio');
+  if (_WA._audioSourceNode || (_waEnabled() && _WA.curSource)) {
+    // Audio is routed through the WA graph — use gain node as the sole volume knob.
+    // If audio.volume were also < 1, the two would multiply and give wrong levels.
+    _waSetVolume(v);
+    if (audio) { audio.volume = 1.0; audio.muted = (v === 0); }
+  } else {
+    if (!audio) return;
+    audio.volume = v;
+    audio.muted  = (v === 0);
+  }
+  const icon = (v === 0) ? '🔇' : (v < 0.5 ? '🔉' : '🔊');
+  ['pp-mute','pp-mute-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = icon; });
+  ['pp-vol','pp-vol-big'].forEach(id => { const el = document.getElementById(id); if(el) el.value = v; });
+}
+
+function togglePlayerExpanded() {
+  // On mobile go fullscreen by default (unless user opted out in settings).
+  const mobileFsOn = (S.config?.['player-mobile-fs'] !== false);
+  if (mobileFsOn && window.matchMedia && window.matchMedia('(max-width:699px)').matches) {
+    fpOpen();
+    return;
+  }
+  const bar = document.getElementById('preview-player');
+  const exp = document.getElementById('pp-expanded');
+  const btn = document.getElementById('pp-expand-btn');
+  const main = document.querySelector('.main');
+  if (!bar || !exp) return;
+  // The dock has backdrop-filter, which (in Chromium) traps position:fixed
+  // descendants. Re-parent the drawer to <body> so it docks to the viewport.
+  if (exp.parentElement !== document.body) document.body.appendChild(exp);
+  const opening = exp.style.display === 'none';
+  exp.style.display = opening ? '' : 'none';
+  if (btn) btn.classList.toggle('expanded', opening);
+  // Desktop: expanded view becomes an AIMP-style vertical panel docked on the
+  // left border between the nav sidebar and the content (CSS body.pp-side).
+  document.body.classList.toggle('pp-side', opening);
+  const bd = document.getElementById('pp-backdrop');
+  if (bd) bd.style.display = opening ? 'block' : 'none';
+  if (main) {
+    if (opening) {
+      main.removeAttribute('data-preview-open');
+      main.setAttribute('data-preview-expanded', '1');
+    } else {
+      main.removeAttribute('data-preview-expanded');
+      main.setAttribute('data-preview-open', '1');
+    }
+  }
+}
+
+// ── Floating PC player (Document Picture-in-Picture API) ───────────────────
+// Opens a real OS-level always-on-top window with the player UI. Works even
+// when the browser is minimised — perfect for desktop "DJ-mode" listening
+// while doing other things. Chrome / Edge 116+ have Document PiP; for
+// everything else we fall back to a window.open() popup.
+let _floatWin = null;
+let _floatSyncFn = null;  // set by _renderFloatPlayer; called from WA tick for gapless sync
+
+async function floatPlayer() {
+  // Already floating? Close and bring focus back.
+  if (_floatWin && !_floatWin.closed) {
+    try { _floatWin.close(); } catch {}
+    _floatWin = null;
+    return;
+  }
+
+  // Pull current state so the float window opens with the right cover/title.
+  const item = Preview.queue[Preview.idx] || {};
+  const audio = document.getElementById('pp-audio');
+
+  // Prefer the real Document Picture-in-Picture API — true always-on-top OS window.
+  if (typeof documentPictureInPicture !== 'undefined') {
+    try {
+      _floatWin = await documentPictureInPicture.requestWindow({width: 380, height: 180});
+      _renderFloatPlayer(_floatWin, item, audio);
+      _floatWin.addEventListener('pagehide', () => { _floatWin = null; });
+      return;
+    } catch (e) {
+      // User denied or feature blocked — fall through to popup.
+      console.warn('Document PiP failed:', e.message);
+    }
+  }
+
+  // Fallback: a regular popup. Not always-on-top but better than nothing.
+  _floatWin = window.open('', 'ripster-float', 'width=380,height=180,resizable=yes,toolbar=no,location=no,menubar=no');
+  if (!_floatWin) {
+    toast(t('p.popup'), 'var(--orange)');
+    return;
+  }
+  _renderFloatPlayer(_floatWin, item, audio);
+  _floatWin.addEventListener('beforeunload', () => { _floatWin = null; });
+}
+
+function _renderFloatPlayer(win, item, audio) {
+  const doc = win.document;
+  const fmt = (s) => {
+    s = Math.max(0, Math.floor(s||0));
+    const m = Math.floor(s/60), sec = s%60;
+    return `${m}:${String(sec).padStart(2,'0')}`;
+  };
+  // Chrome's PiP chrome shows the source URL, not the title — that's a
+  // browser policy, can't be overridden. We compensate by making the in-window
+  // track title big enough to read at a glance.
+  doc.title = item.title || 'Ripster';
+  doc.head.innerHTML = `
+    <meta charset="utf-8"/>
+    <title>${esc(item.title || 'Ripster')}</title>
+    <style>
+      *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+      html,body{height:100%;background:linear-gradient(180deg,#1a1c24 0%,#0e0f14 100%);color:#fff;
+        font-family:-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;overflow:hidden;user-select:none}
+      .wrap{display:flex;flex-direction:column;height:100%;padding:10px 12px 0}
+      .row1{display:flex;align-items:center;gap:10px;margin-bottom:8px;min-height:0}
+      .art{width:56px;height:56px;border-radius:8px;background:#1c1e2a center/cover no-repeat;
+        flex-shrink:0;box-shadow:0 4px 14px rgba(0,0,0,.55)}
+      .meta{flex:1;min-width:0}
+      .title{font-size:14px;font-weight:700;line-height:1.2;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .artist{font-size:11px;color:rgba(255,255,255,.55);margin-top:3px;
+        white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+      .row2{display:flex;align-items:center;gap:6px;margin-bottom:6px}
+      .ctrls{display:flex;gap:4px;align-items:center;flex-shrink:0}
+      button{background:rgba(255,255,255,.08);border:none;color:#fff;cursor:pointer;
+        border-radius:50%;width:30px;height:30px;font-size:12px;
+        transition:transform .12s cubic-bezier(.3,1.5,.6,1),background .12s;
+        box-shadow:inset 0 1px 0 rgba(255,255,255,.06),0 1px 2px rgba(0,0,0,.2)}
+      button:hover{background:rgba(255,255,255,.18)}
+      button:active{transform:scale(.88)}
+      .play{width:38px;height:38px;background:#fff;color:#111;font-size:14px}
+      .play:hover{background:#fff;filter:brightness(.96)}
+      .vol-wrap{flex:1;display:flex;align-items:center;gap:6px;margin-left:8px}
+      input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:3px;
+        background:rgba(255,255,255,.18);border-radius:2px;outline:none;cursor:pointer;margin:0}
+      input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;
+        width:11px;height:11px;border-radius:50%;background:#fff;cursor:pointer;
+        box-shadow:0 1px 3px rgba(0,0,0,.5)}
+      input[type=range]::-moz-range-thumb{width:11px;height:11px;border-radius:50%;
+        background:#fff;border:none;cursor:pointer;box-shadow:0 1px 3px rgba(0,0,0,.5)}
+      .row3{display:flex;align-items:center;gap:7px;padding-bottom:8px}
+      .time{font-size:10px;color:rgba(255,255,255,.5);font-family:'SF Mono',monospace;
+        flex-shrink:0;min-width:32px;text-align:center}
+      .seek{flex:1;height:18px;cursor:pointer;display:flex;align-items:center;position:relative}
+      .seek::before{content:"";position:absolute;left:0;right:0;height:4px;background:rgba(255,255,255,.15);border-radius:2px}
+      .fill{position:absolute;left:0;height:4px;background:linear-gradient(90deg,#c084a0,#e58cad);
+        border-radius:2px;width:0%;pointer-events:none}
+    </style>
+  `;
+  doc.body.innerHTML = `
+    <div class="wrap">
+      <div class="row1">
+        <div class="art" id="fw-art" style="${item.cover ? `background-image:url('${esc(item.cover)}')` : ''}"></div>
+        <div class="meta">
+          <div class="title" id="fw-title">${esc(item.title || '—')}</div>
+          <div class="artist" id="fw-artist">${esc(item.artist || '')}</div>
+        </div>
+      </div>
+      <div class="row2">
+        <div class="ctrls">
+          <button id="fw-prev" title="Prev">⏮</button>
+          <button id="fw-play" class="play" title="Play/Pause">${audio && !audio.paused ? '⏸' : '▶'}</button>
+          <button id="fw-next" title="Next">⏭</button>
+        </div>
+        <div class="vol-wrap">
+          <span style="font-size:11px;opacity:.6">🔊</span>
+          <input type="range" id="fw-vol" min="0" max="1" step="0.01" value="${audio?.volume ?? 1}"/>
+        </div>
+      </div>
+      <div class="row3">
+        <span class="time" id="fw-cur">0:00</span>
+        <div class="seek" id="fw-seek"><div class="fill" id="fw-fill"></div></div>
+        <span class="time" id="fw-dur">0:00</span>
+      </div>
+    </div>
+  `;
+
+  // Wire controls — call back into the main document's functions.
+  const main = window;
+  doc.getElementById('fw-prev').onclick = () => main.previewPrev?.();
+  doc.getElementById('fw-next').onclick = () => main.previewNext?.();
+  doc.getElementById('fw-play').onclick = () => main.previewToggle?.();
+  doc.getElementById('fw-vol').oninput = (e) => {
+    if (audio) audio.volume = parseFloat(e.target.value);
+    // Mirror back to the main dock slider too.
+    const m = main.document.getElementById('pp-vol');
+    if (m) m.value = e.target.value;
+    const mb = main.document.getElementById('pp-vol-big');
+    if (mb) mb.value = e.target.value;
+  };
+  doc.getElementById('fw-seek').onclick = (e) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const frac = (e.clientX - r.left) / r.width;
+    if (audio && audio.duration) audio.currentTime = frac * audio.duration;
+  };
+
+  // Live-sync from the main audio element (or WA gapless state).
+  const sync = () => {
+    if (!_floatWin || _floatWin.closed) return;
+    const it = Preview.queue[Preview.idx] || {};
+    doc.title = it.title || 'Ripster';
+    const titleEl = doc.getElementById('fw-title');
+    if (titleEl) titleEl.textContent  = it.title  || '—';
+    const artistEl = doc.getElementById('fw-artist');
+    if (artistEl) artistEl.textContent = it.artist || '';
+    const art = doc.getElementById('fw-art');
+    if (art) art.style.backgroundImage = it.cover ? `url('${it.cover}')` : '';
+
+    let curSec, durSec, paused;
+    if (_waEnabled() && _WA.curSource) {
+      curSec = _waCurrentTime();
+      durSec = _waDuration();
+      paused = _waIsPaused();
+    } else {
+      curSec = audio?.currentTime || 0;
+      durSec = audio?.duration   || 0;
+      paused = !audio || audio.paused;
+    }
+
+    const playBtn = doc.getElementById('fw-play');
+    if (playBtn) playBtn.textContent = paused ? '▶' : '⏸';
+    const pct = durSec ? (curSec / durSec * 100) : 0;
+    const fill = doc.getElementById('fw-fill');
+    if (fill) fill.style.width = pct + '%';
+    const curEl = doc.getElementById('fw-cur');
+    if (curEl) curEl.textContent = fmt(curSec);
+    const durEl = doc.getElementById('fw-dur');
+    if (durEl) durEl.textContent = fmt(durSec);
+    const vol = doc.getElementById('fw-vol');
+    if (vol && audio) vol.value = audio.volume;
+  };
+  _floatSyncFn = sync;
+  if (audio) {
+    audio.addEventListener('timeupdate', sync);
+    audio.addEventListener('play',       sync);
+    audio.addEventListener('pause',      sync);
+    audio.addEventListener('durationchange', sync);
+    audio.addEventListener('volumechange',   sync);
+  }
+  win.addEventListener('pagehide', () => {
+    _floatSyncFn = null;
+    if (!audio) return;
+    audio.removeEventListener('timeupdate', sync);
+    audio.removeEventListener('play',       sync);
+    audio.removeEventListener('pause',      sync);
+    audio.removeEventListener('durationchange', sync);
+    audio.removeEventListener('volumechange',   sync);
+  });
+  sync();
+}
+
+// ── Fullscreen player (mobile + opt-in desktop) ─────────────────────────────
+const _FP = { open:false, speed:1, sleepMs:0, sleepTimer:null, startY:0, startX:0, dragging:false };
+const _FP_SPEEDS = [1, 1.25, 1.5, 1.75, 2];
+
+function fpOpen() {
+  const el = document.getElementById('fullscreen-player');
+  if (!el) return;
+  _FP.open = true;
+  el.classList.add('open');
+  el.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('fp-open');
+  fpSyncFromState();
+  _haptic(8);
+  try { _vizStart?.(); } catch {}
+}
+function fpClose() {
+  const el = document.getElementById('fullscreen-player');
+  if (!el) return;
+  _FP.open = false;
+  el.classList.remove('open');
+  el.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('fp-open');
+  _haptic(6);
+  try { _vizStop?.(); } catch {}
+}
+function _haptic(ms) {
+  if (navigator.vibrate) { try { navigator.vibrate(ms); } catch {} }
+}
+
+// Sync FP UI from the current Preview state
+function fpSyncFromState() {
+  // BBC играет ВНЕ Preview.queue (свой <audio id="bbc-audio">), иначе плеер
+  // открывался бы с «♪» и пустой подложкой на только что запущенном эфире.
+  // bbc.js загружается после player.js — отсюда и проверка на живую функцию.
+  const bbc  = (typeof _bbcFpItem === 'function') && Preview.mode === 'bbc';
+  const item = bbc ? _bbcFpItem() : (Preview.queue[Preview.idx] || {});
+  fpSyncMeta(item);
+  // Restore play/pause icon from the engine that is REALLY making sound:
+  // pp-audio is idle in gapless mode, so reading it here drew ▶ over a playing
+  // mix (same source of truth as the external player).
+  const playEl = document.getElementById('fp-play');
+  if (playEl) playEl.textContent = ripsterIsPaused() ? '▶' : '⏸';
+}
+function fpSyncMeta(item) {
+  const art    = document.getElementById('fp-art');
+  const title  = document.getElementById('fp-title');
+  const artist = document.getElementById('fp-artist');
+  const bg     = document.getElementById('fp-bg');
+  const src    = document.getElementById('fp-source');
+  if (title)  title.textContent  = item.title  || '—';
+  if (artist) artist.textContent = item.artist || (item.label || '');
+  if (src)    src.textContent    = item.label  || t('player.now_playing');
+  // Формат — той же функцией, что подписывает трек-лист и нижний плеер.
+  // Своя догадка по битрейту уже разъезжалась с ними (FLAC против 320),
+  // поэтому источник правды один. Нет подписи — прячем строку целиком.
+  const fmt = document.getElementById('fp-fmt');
+  if (fmt) {
+    const lab = (typeof _pqQuality === 'function') ? _pqQuality(item) : '';
+    fmt.textContent = lab || '';
+    fmt.hidden = !lab;
+  }
+  if (art) {
+    // Crossfade: preload the new image, then swap into place. The old <img>
+    // fades to 0 over the same span. Skips work if the URL hasn't changed —
+    // otherwise a no-op cover-replace would flash.
+    const cur = art.querySelector('img[data-cover]');
+    const sameSrc = cur && item.cover && cur.getAttribute('src') === item.cover;
+    if (item.cover && !sameSrc) {
+      const next = document.createElement('img');
+      next.setAttribute('data-cover', '');
+      next.alt = '';
+      next.draggable = false;
+      next.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity .22s ease';
+      next.onload = () => {
+        requestAnimationFrame(() => {
+          next.style.opacity = '1';
+          if (cur) cur.style.opacity = '0';
+          // Drop the old <img> after the fade completes
+          setTimeout(() => { try { cur && cur.remove(); } catch {} }, 280);
+        });
+      };
+      next.src = item.cover;
+      // Make sure the container can host the absolute-positioned children
+      if (getComputedStyle(art).position === 'static') art.style.position = 'relative';
+      art.appendChild(next);
+    } else if (!item.cover) {
+      art.innerHTML = '♪';
+    }
+  }
+  if (bg && item.cover) {
+    bg.style.backgroundImage = `url("${item.cover}")`;
+  } else if (bg) {
+    bg.style.backgroundImage = '';
+  }
+}
+
+// Speed control: cycle through preset speeds
+function fpCycleSpeed() {
+  const audio = document.getElementById('pp-audio');
+  const i = _FP_SPEEDS.indexOf(_FP.speed);
+  _FP.speed = _FP_SPEEDS[(i + 1) % _FP_SPEEDS.length];
+  if (audio) audio.playbackRate = _FP.speed;
+  const lbl = document.getElementById('fp-speed-val');
+  if (lbl) lbl.textContent = (_FP.speed === 1 ? '1' : _FP.speed) + '×';
+  const btn = document.getElementById('fp-speed-btn');
+  if (btn) btn.classList.toggle('active', _FP.speed !== 1);
+  try { localStorage.setItem('ripster_playback_speed', String(_FP.speed)); } catch {}
+  _haptic(6);
+}
+
+// Sleep timer: pop a menu of presets
+function fpToggleSleepMenu(ev) {
+  ev?.stopPropagation();
+  const pop = document.getElementById('fp-sleep-pop');
+  if (!pop) return;
+  if (pop.style.display !== 'none') { pop.style.display = 'none'; return; }
+  pop.innerHTML = [
+    [0,  t('sleep.off')],
+    [15, t('sleep.15m')],
+    [30, t('sleep.30m')],
+    [45, t('sleep.45m')],
+    [60, t('sleep.1h')],
+    [-1, t('sleep.end_track')],
+  ].map(([m, lbl]) =>
+    `<div onclick="fpSetSleep(${m})" style="padding:10px 14px;cursor:pointer;border-radius:8px;font-size:13px;color:#fff" onmouseover="this.style.background='rgba(255,255,255,.08)'" onmouseout="this.style.background=''">  ${lbl}</div>`
+  ).join('');
+  pop.style.display = 'block';
+  // position near the sleep button
+  const btn = document.getElementById('fp-sleep-btn');
+  if (btn) {
+    const r = btn.getBoundingClientRect();
+    pop.style.left = Math.max(12, Math.min(window.innerWidth - 200, r.left)) + 'px';
+    pop.style.top  = Math.max(60, r.top - pop.offsetHeight - 8) + 'px';
+  }
+  // outside-click closes
+  setTimeout(() => {
+    const off = (e) => {
+      if (!pop.contains(e.target) && e.target !== btn) {
+        pop.style.display = 'none';
+        document.removeEventListener('click', off, true);
+      }
+    };
+    document.addEventListener('click', off, true);
+  }, 0);
+}
+function fpSetSleep(minutes) {
+  const pop = document.getElementById('fp-sleep-pop'); if (pop) pop.style.display = 'none';
+  const lbl = document.getElementById('fp-sleep-val');
+  const btn = document.getElementById('fp-sleep-btn');
+  if (_FP.sleepTimer) { clearTimeout(_FP.sleepTimer); _FP.sleepTimer = null; }
+  if (minutes === 0) {
+    if (lbl) lbl.textContent = t('sleep.label');
+    if (btn) btn.classList.remove('active');
+    return;
+  }
+  if (minutes === -1) {
+    if (lbl) lbl.textContent = t('sleep.active_end');
+    if (btn) btn.classList.add('active');
+    _FP.sleepEndOfTrack = true;
+    return;
+  }
+  const ms = minutes * 60 * 1000;
+  if (lbl) lbl.textContent = `⌛ ${minutes} ${t('sleep.30m').split(' ')[1] || 'min'}`;
+  if (btn) btn.classList.add('active');
+  _FP.sleepTimer = setTimeout(() => {
+    const a = document.getElementById('pp-audio'); if (a) a.pause();
+    if (lbl) lbl.textContent = t('sleep.label');
+    if (btn) btn.classList.remove('active');
+    toast(t('sleep.toast_fired'), 'var(--muted)');
+  }, ms);
+  _haptic(8);
+  toast(`${t('sleep.label')}: ${minutes} ${t('sleep.30m').split(' ')[1] || 'min'}`, 'var(--green)', '', 2500);
+}
+
+// ── Lyrics (LRCLIB) — slide-up panel with synced line scrolling ───────────
+const _LRC = { lines: [], words: [], plain: '', activeIdx: -1, wordKey: '', fetchKey: '', open: false };
+function fpToggleLyrics() {
+  const panel = document.getElementById('fp-lyrics');
+  if (!panel) return;
+  _LRC.open = !_LRC.open;
+  if (_LRC.open) {
+    panel.style.display = 'block';
+    requestAnimationFrame(() => panel.style.transform = 'translateY(0)');
+    fpFetchLyrics();
+  } else {
+    panel.style.transform = 'translateY(100%)';
+    setTimeout(() => { panel.style.display = 'none'; }, 320);
+  }
+  const btn = document.getElementById('fp-lyrics-btn');
+  if (btn) btn.classList.toggle('active', _LRC.open);
+}
+async function fpFetchLyrics() {
+  const item = Preview.queue[Preview.idx];
+  if (!item) return;
+  const key = `${item.artist}::${item.title}`;
+  const status = document.getElementById('fp-lyrics-status');
+  const body   = document.getElementById('fp-lyrics-body');
+  if (_LRC.fetchKey === key) { _renderLrcBody(); return; }
+  _LRC.fetchKey = key; _LRC.lines = []; _LRC.words = []; _LRC.plain = ''; _LRC.activeIdx = -1; _LRC.wordKey = '';
+  if (status) status.textContent = t('player.loading');
+  if (body)   body.innerHTML = '';
+  if (!item.artist || !item.title) {
+    if (status) status.textContent = t('p.no_track_meta');
+    return;
+  }
+  try {
+    const audio = document.getElementById('pp-audio');
+    const dur = audio?.duration && isFinite(audio.duration) ? Math.round(audio.duration) : 0;
+    const params = new URLSearchParams({artist: item.artist, track: item.title});
+    if (dur) params.set('duration', String(dur));
+    // Точные ключи — важнее строкового поиска. Для локального файла текст лежит
+    // в его собственном теге; для трека Apple — берётся по ID. Поиск по
+    // «артист + название» оставляем последним: у миксов и коллабов он мажет
+    // («anamē & Above & Beyond — Gratitude (feat. …) [Mixed]» не находится).
+    try {
+        const u = String(item.url || '');
+        const m = u.match(/[?&]p=([^&]+)/);
+        if (m && /\/api\/library\/file/.test(u)) params.set('path', decodeURIComponent(m[1]));
+    } catch (e) {}
+    const aid = item.appleId || (item.service === 'apple' ? item.id : '');
+    if (aid) params.set('apple_id', String(aid));
+    const r = await fetch('/api/lyrics?' + params.toString());
+    const d = await r.json();
+    if (Array.isArray(d.words) && d.words.length) {
+      // Пословное караоке (Apple syllable-lyrics): строки для скролла + слова
+      // с таймингами (мс) для подсветки. Строчный синк остаётся фолбэком.
+      _LRC.words = d.words;
+      _LRC.lines = d.synced ? _lrcParse(d.synced) : d.words.map(ln => ({
+        t: (ln.s || 0) / 1000,
+        text: (ln.words || []).map(w => w.w + (w.sp ? ' ' : '')).join('').trim()
+      }));
+      if (status) status.textContent = ti('p.lrc_words',{n:_LRC.words.length});
+    } else if (d.synced) {
+      _LRC.lines = _lrcParse(d.synced);
+      if (status) status.textContent = ti('p.lrc_lines',{n:_LRC.lines.length});
+    } else if (d.plain) {
+      _LRC.plain = d.plain;
+      if (status) status.textContent = t('p.lrc_plain');
+    } else {
+      if (status) status.textContent = t('p.lrc_none');
+    }
+    _renderLrcBody();
+  } catch (e) {
+    if (status) status.textContent = '✗ ' + e.message;
+  }
+}
+function _lrcParse(lrc) {
+  const out = [];
+  const re = /^\[(\d{1,2}):(\d{2})(?:\.(\d{1,3}))?\](.*)$/gm;
+  let m;
+  while ((m = re.exec(lrc)) !== null) {
+    const t = parseInt(m[1]) * 60 + parseInt(m[2]) + parseInt(m[3] || '0') / 1000;
+    out.push({ t, text: m[4].trim() });
+  }
+  out.sort((a, b) => a.t - b.t);
+  return out;
+}
+function _renderLrcBody() {
+  const body = document.getElementById('fp-lyrics-body');
+  if (!body) return;
+  if (_LRC.words.length) {
+    body.innerHTML = _LRC.words.map((ln, i) => {
+      const inner = (ln.words || []).map((w, j) =>
+        `<span class="lrc-w" data-li="${i}" data-wi="${j}" style="transition:color .12s ease-out">${esc(w.w)}</span>${w.sp ? ' ' : ''}`
+      ).join('') || '·';
+      return `<div class="lrc-line" data-i="${i}" style="padding:6px 0;color:rgba(255,255,255,.45);transition:opacity .25s,transform .25s">${inner}</div>`;
+    }).join('');
+  } else if (_LRC.lines.length) {
+    body.innerHTML = _LRC.lines.map((l, i) =>
+      `<div class="lrc-line" data-i="${i}" style="padding:6px 0;transition:opacity .25s,transform .25s,color .25s">${esc(l.text || '·')}</div>`
+    ).join('');
+  } else if (_LRC.plain) {
+    body.innerHTML = `<div style="white-space:pre-wrap;text-align:left">${esc(_LRC.plain)}</div>`;
+  } else {
+    body.innerHTML = '<div style="color:rgba(255,255,255,.35);padding:24px 0">…</div>';
+  }
+}
+function _lrcSyncTick(currentTime) {
+  if (!_LRC.open) return;
+  if (_LRC.words.length) { _lrcWordTick(currentTime); return; }
+  if (!_LRC.lines.length) return;
+  let idx = -1;
+  for (let i = 0; i < _LRC.lines.length; i++) {
+    if (_LRC.lines[i].t <= currentTime) idx = i; else break;
+  }
+  if (idx === _LRC.activeIdx) return;
+  _LRC.activeIdx = idx;
+  const body = document.getElementById('fp-lyrics-body');
+  if (!body) return;
+  const lines = body.querySelectorAll('.lrc-line');
+  lines.forEach((el, i) => {
+    if (i === idx) {
+      el.style.color = '#fff';
+      el.style.fontSize = '18px';
+      el.style.transform = 'scale(1.05)';
+      el.style.opacity = '1';
+      el.scrollIntoView({behavior: 'smooth', block: 'center'});
+    } else {
+      el.style.color = 'rgba(255,255,255,.45)';
+      el.style.fontSize = '15px';
+      el.style.transform = 'scale(1)';
+    }
+  });
+}
+// Пословное караоке: спетые слова белым, текущее — акцентом, будущие тусклые.
+// Тайминги слов в МС, currentTime в секундах. Строка масштабируется как активная.
+function _lrcWordTick(currentTime) {
+  const ms = currentTime * 1000;
+  let idx = -1;
+  for (let i = 0; i < _LRC.words.length; i++) {
+    if ((_LRC.words[i].s || 0) <= ms) idx = i; else break;
+  }
+  const body = document.getElementById('fp-lyrics-body');
+  if (!body) return;
+  // Ключ = активная строка + грубый шаг времени (250мс), чтобы не трогать DOM
+  // на каждый timeupdate без изменений.
+  const key = idx + ':' + Math.floor(ms / 120);
+  if (key === _LRC.wordKey) return;
+  _LRC.wordKey = key;
+  if (idx !== _LRC.activeIdx) {
+    _LRC.activeIdx = idx;
+    const lines = body.querySelectorAll('.lrc-line');
+    lines.forEach((el, i) => {
+      const on = i === idx;
+      el.style.fontSize = on ? '18px' : '15px';
+      el.style.transform = on ? 'scale(1.04)' : 'scale(1)';
+      el.style.opacity = on ? '1' : '.6';
+      if (on) el.scrollIntoView({behavior: 'smooth', block: 'center'});
+    });
+  }
+  const active = body.querySelector(`.lrc-line[data-i="${idx}"]`);
+  if (!active) return;
+  const ws = active.querySelectorAll('.lrc-w');
+  const wl = _LRC.words[idx].words || [];
+  ws.forEach((el, j) => {
+    const w = wl[j]; if (!w) return;
+    const end = (w.t || 0) + (w.d || 0);
+    if (ms >= end) el.style.color = '#fff';
+    else if (ms >= (w.t || 0)) el.style.color = 'var(--accent, #ff6b8b)';
+    else el.style.color = 'rgba(255,255,255,.4)';
+  });
+}
+
+// Share — copy current item URL (or the service link)
+function fpShare() {
+  const item = Preview.queue[Preview.idx];
+  const link = item?.shareUrl || item?.url || location.href;
+  if (navigator.share) {
+    navigator.share({ title: item?.title || 'Ripster', url: link }).catch(() => {});
+  } else {
+    try {
+      navigator.clipboard.writeText(link);
+      toast(t('p.link_copied'), 'var(--green)', '', 2000);
+    } catch {
+      toast(t('t.copy_fail'), 'var(--red)');
+    }
+  }
+  _haptic(6);
+}
+
+function fpMenu(ev) {
+  // Minimal menu — for now just open share. Future: queue, lyrics, etc.
+  fpShare();
+}
+
+// Ripple on tap — gives "physical" press feedback
+function _fpAttachRipples() {
+  const el = document.getElementById('fullscreen-player');
+  if (!el) return;
+  el.addEventListener('pointerdown', (e) => {
+    const t = e.target.closest('.fp-icon-btn,.fp-ctrl,.fp-pill');
+    if (!t) return;
+    const r = t.getBoundingClientRect();
+    const dot = document.createElement('span');
+    dot.className = 'fp-ripple';
+    const size = 10;
+    dot.style.width = size + 'px';
+    dot.style.height = size + 'px';
+    dot.style.left = (e.clientX - r.left - size / 2) + 'px';
+    dot.style.top  = (e.clientY - r.top  - size / 2) + 'px';
+    t.style.position = t.style.position || 'relative';
+    t.style.overflow = 'hidden';
+    t.appendChild(dot);
+    setTimeout(() => dot.remove(), 560);
+    _haptic(4);
+  });
+}
+
+// Telegram-style swipe-down to dismiss + horizontal swipe → prev/next.
+// Velocity-aware: a quick flick dismisses even at small distance. Panel fades
+// out as it travels — that's the perceptual cue that makes the gesture feel
+// 1:1 with the finger rather than a binary "passed threshold? snap".
+function _fpAttachGestures() {
+  const el = document.getElementById('fullscreen-player');
+  if (!el) return;
+  let sy = 0, sx = 0, dy = 0, dx = 0, active = false;
+  let lastT = 0, lastY = 0, velY = 0;
+  let lockedAxis = null;        // 'y' | 'x' | null — set after small move
+  let raf = 0, pendingDy = 0;
+
+  const applyDrag = (dyPx) => {
+    // GPU-only update via translate3d. Opacity scales linearly from 1→.45
+    // over the first 320px of travel — Telegram's exact feel.
+    const h = el.clientHeight || 800;
+    const fade = Math.max(.45, 1 - Math.min(dyPx, 320) / 580);
+    el.style.transform = `translate3d(0, ${dyPx}px, 0)`;
+    el.style.opacity   = String(fade);
+  };
+  const flush = () => {
+    raf = 0;
+    applyDrag(pendingDy);
+  };
+
+  el.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) return;
+    sy = lastY = e.touches[0].clientY; sx = e.touches[0].clientX;
+    lastT = performance.now();
+    dy = 0; dx = 0; velY = 0; lockedAxis = null; active = true;
+    el.classList.add('dragging');
+  }, { passive: true });
+
+  el.addEventListener('touchmove', (e) => {
+    if (!active || e.touches.length !== 1) return;
+    const y = e.touches[0].clientY;
+    const x = e.touches[0].clientX;
+    dy = y - sy; dx = x - sx;
+
+    // Decide axis after first ~8px of movement so a vertical scroll inside
+    // the panel (e.g. lyrics) doesn't get hijacked by the drag.
+    if (lockedAxis === null) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      lockedAxis = Math.abs(dx) > Math.abs(dy) ? 'x' : 'y';
+    }
+
+    // Velocity in px/ms — exponential smoothing
+    const now = performance.now();
+    const dt  = Math.max(1, now - lastT);
+    velY = velY * 0.6 + ((y - lastY) / dt) * 0.4;
+    lastT = now; lastY = y;
+
+    if (lockedAxis === 'y' && dy > 0) {
+      pendingDy = dy;
+      if (!raf) raf = requestAnimationFrame(flush);
+    }
+  }, { passive: true });
+
+  el.addEventListener('touchend', () => {
+    el.classList.remove('dragging');
+    if (!active) return;
+    active = false;
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+
+    const DIST = 120;     // px to commit by distance alone
+    const VEL  = 0.7;     // px/ms to commit by flick
+    const HORIZ = 90;
+
+    if (lockedAxis === 'y' && (dy > DIST || velY > VEL)) {
+      // Dismissed — let CSS finish the slide out, then close. Translating to
+      // the panel's own height keeps the motion in sync with the open
+      // transition (same curve, same axis).
+      const h = el.clientHeight || window.innerHeight;
+      el.style.transition = 'transform .26s cubic-bezier(.4,0,1,1), opacity .2s ease';
+      el.style.transform  = `translate3d(0, ${h}px, 0)`;
+      el.style.opacity    = '0';
+      setTimeout(() => {
+        el.style.transition = '';
+        el.style.transform = '';
+        el.style.opacity   = '';
+        fpClose();
+      }, 230);
+    } else if (lockedAxis === 'x' && Math.abs(dx) > HORIZ) {
+      el.style.transform = '';
+      el.style.opacity   = '';
+      if (dx < 0) previewNext(); else previewPrev();
+    } else {
+      // Snap back — same spring as the open transition for visual consistency
+      el.style.transition = 'transform .28s cubic-bezier(.22,1.05,.36,1), opacity .2s ease';
+      el.style.transform  = '';
+      el.style.opacity    = '';
+      setTimeout(() => { el.style.transition = ''; }, 280);
+    }
+  });
+
+  // Cancel/abort restores cleanly — iOS sometimes fires touchcancel during
+  // scroll fights or notification UI taking focus.
+  el.addEventListener('touchcancel', () => {
+    el.classList.remove('dragging');
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }
+    el.style.transform = '';
+    el.style.opacity   = '';
+    active = false;
+  });
+}
+
+// Init FP behaviors once the DOM is ready
+window.addEventListener('load', () => {
+  _fpAttachRipples();
+  _fpAttachGestures();
+  // Restore saved speed
+  try {
+    const s = parseFloat(localStorage.getItem('ripster_playback_speed') || '1');
+    if (!isNaN(s) && s > 0) {
+      _FP.speed = s;
+      const a = document.getElementById('pp-audio'); if (a) a.playbackRate = s;
+      const lbl = document.getElementById('fp-speed-val');
+      if (lbl) lbl.textContent = (s === 1 ? '1' : s) + '×';
+      const btn = document.getElementById('fp-speed-btn');
+      if (btn) btn.classList.toggle('active', s !== 1);
+    }
+  } catch {}
+});
+
+function closePreview() {
+  // Станция кончилась вместе с плеером — закрываем сессию ДО сброса очереди.
+  try { _stevStationStop({ reason: 'closed' }); } catch (_) {}
+  // Invalidate any in-flight _playPreviewAt (a stream URL still resolving) so it
+  // can't start playback after we've closed — the "closed but still playing" bug.
+  Preview._playGen = (Preview._playGen || 0) + 1;
+  if (Preview.mode === 'bbc') { bbcStop(); return; }
+  const audio = document.getElementById('pp-audio');
+  const bar   = document.getElementById('preview-player');
+  const main  = document.querySelector('.main');
+  const exp   = document.getElementById('pp-expanded');
+  const btn   = document.getElementById('pp-expand-btn');
+  if (audio) { audio.pause(); audio.removeAttribute('src'); audio.load(); }
+  if (_WA.curSource) { try { _WA.curSource.onended = null; _WA.curSource.stop(0); } catch {} _WA.curSource = null; }
+  // Свой тракт держит устройство эксклюзивно — закрыть панель и оставить его
+  // играющим значит отобрать звук у системы у человека за спиной.
+  if (_NA.active) { try { _naStop(); } catch (_) {} }
+  _waStopKeepalive();
+  if (bar)   bar.classList.remove('visible');
+  if (exp)   exp.style.display = 'none';
+  if (btn)   btn.classList.remove('expanded');
+  document.body.classList.remove('pp-side');
+  { const bd = document.getElementById('pp-backdrop'); if (bd) bd.style.display = 'none'; }
+  if (main)  { main.removeAttribute('data-preview-open'); main.removeAttribute('data-preview-expanded'); }
+  // Also close fullscreen player if open
+  if (typeof fpClose === 'function' && _FP && _FP.open) fpClose();
+  ['pp-fill','pp-fill-big'].forEach(id => { const el = document.getElementById(id); if(el) el.style.width = '0%'; });
+  ['pp-cur','pp-cur-big'].forEach(id => { const el = document.getElementById(id); if(el) el.textContent = (id==='pp-cur') ? '0:00.000' : '0:00'; });
+  const playBtn  = document.getElementById('pp-play');     if(playBtn)  playBtn.textContent  = '▶';
+  const playBtnB = document.getElementById('pp-play-big'); if(playBtnB) playBtnB.textContent = '▶';
+  const prevBtn  = document.getElementById('pp-prev');     if(prevBtn)  prevBtn.disabled = true;
+  const nextBtn  = document.getElementById('pp-next');     if(nextBtn)  nextBtn.disabled = true;
+  Preview.queue = [];
+  Preview.idx   = -1;
+}
+
+// ── Local file playback ────────────────────────────────────────────────────────
+// Called from the 📂 button in the player bar. Works on mobile (file picker
+// shows local storage / Downloads folder). No server round-trip needed.
+function playLocalFile(file) {
+  if (!file) return;
+  // Revoke any previous local object URL to avoid leaks
+  if (playLocalFile._objUrl) {
+    URL.revokeObjectURL(playLocalFile._objUrl);
+    playLocalFile._objUrl = null;
+  }
+  const url = URL.createObjectURL(file);
+  playLocalFile._objUrl = url;
+
+  // Strip extension from name for a cleaner title
+  const title = file.name.replace(/\.[^.]+$/, '');
+  _setupAudioEvents();
+  Preview.queue = [{
+    url,
+    title,
+    artist:  t('player.local_file'),
+    cover:   '',
+    label:   t('player.local_file'),
+    posKey:  'local:' + file.name,
+    local:   true,
+  }];
+  Preview.idx = 0;
+  _playPreviewAt(0);
+}
+
+
+
+// ── Mix auto-resume on page reload ────────────────────────────────────────
+// Offers to continue a long mix from where the user left off.
+// Called from app.js handleMessage('init') with a 2s delay so the UI is ready.
+let _resumeOffered = false;
+function _offerMixResume() {
+  if (_resumeOffered) return;
+  _resumeOffered = true;
+  try {
+    const lt = JSON.parse(localStorage.getItem('ripster_last_track') || 'null');
+    if (!lt || !lt.posKey || (Date.now() - lt.ts) > 86400000) return;
+    const pos = _mixPosGet(lt.posKey);
+    if (!pos || pos < 30) return;
+    const mm = Math.floor(pos / 60), ss = Math.floor(pos % 60);
+    const durStr = mm + ':' + String(ss).padStart(2, '0');
+    window._resumeLastTrack = () => {
+      try { localStorage.removeItem('ripster_last_track'); } catch {}
+      if (!lt.service || !lt.id) return;
+      _setupAudioEvents();
+      // Restore the full queue when we have it, so the album keeps playing after
+      // the resumed track instead of stopping dead.
+      if (Array.isArray(lt.queue) && lt.queue.length) {
+        Preview.queue = lt.queue.map(x => ({ ...x, full: x.full !== false }));
+        let i = Math.min(Math.max(lt.idx | 0, 0), Preview.queue.length - 1);
+        // Prefer the track we actually stopped on, even if the index drifted.
+        const byKey = Preview.queue.findIndex(x => x.posKey && x.posKey === lt.posKey);
+        if (byKey >= 0) i = byKey;
+        Preview.idx = i;
+        _playPreviewAt(i);
+        return;
+      }
+      Preview.queue = [{
+        service: lt.service, id: String(lt.id), title: lt.title || '—',
+        artist: lt.artist || '', cover: lt.cover || '', full: true,
+        label: (lt.service === 'soundcloud' ? 'SoundCloud' : lt.service) + ' · ' + t('player.continuation'),
+        posKey: lt.posKey,
+      }];
+      Preview.idx = 0;
+      _playPreviewAt(0);
+    };
+    const safeName = (lt.title || t('p.mix_word')).replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0, 40);
+    // When a whole release was playing, say so — "продолжить трек" on album
+    // playback is what made it look like Ripster had forgotten the context.
+    const _qn = Array.isArray(lt.queue) ? lt.queue.length : 0;
+    const _rest = _qn > 1 ? ' <span style="opacity:.75">(' + (lt.ctx ? String(lt.ctx).slice(0, 28) + ', ' : '')
+                          + (_qn - (lt.idx | 0) - 1) + ' ' + t('p.tracks_left') + ')</span>' : '';
+    toast(
+      '<span>▶ «' + safeName + '» — ' + t('p.resume_q') + ' ' + durStr + '?' + _rest + '</span>' +
+      '<button onclick="event.stopPropagation();_resumeLastTrack()" style="margin-left:8px;padding:2px 9px;border-radius:5px;font-size:11px;font-weight:700;background:rgba(192,132,160,.18);border:1px solid rgba(192,132,160,.3);color:var(--red);cursor:pointer;font-family:var(--font)">'+t('player.resume_toast_btn')+'</button>',
+      'var(--muted)', '', 9000
+    );
+  } catch {}
+}
+
+// ══ Волна вместо полосы перемотки ═══════════════════════════════════════════
+// Форма и отрисовка живут в static/js/player_wave.js (rwBars / rwDraw /
+// rwPalette / rwBarCount). Здесь — ТОЛЬКО связь с плеером, и связь
+// односторонняя: волна читает то, что уже нарисовано, и сама ничего не двигает.
+//
+// ПОЧЕМУ СВОЕЙ ПЕРЕМОТКИ ТУТ НЕТ. Холст лежит ВНУТРИ существующих полос
+// #fp-progress / #pp-progress и накрыт pointer-events:none. Клик, протяжка
+// (_wireSeekBar), метки глав (_renderChapterTicks), previewSeek и стрелки на
+// клавиатуре остаются ровно теми же — меняется только то, ЧЕМ полоса
+// нарисована. Второй обработчик здесь означал бы два расчёта позиции, которые
+// однажды разойдутся, и «перемотка мажет» без видимой причины.
+//
+// ОТКУДА ПОЗИЦИЯ: из ширины УЖЕ СУЩЕСТВУЮЩЕЙ заливки (#fp-fill / #pp-fill)
+// через getComputedStyle. Это не второй источник правды, а тот же самый:
+// заливку двигают пять мест (player.js, player_fps.js, bbc.js) и протяжка
+// полосы; читая её, волна наследует их все — включая CSS-переход width .25s,
+// поэтому getComputedStyle отдаёт АНИМИРУЕМОЕ значение и волна едет так же
+// плавно, как ехала полоса.
+const _RW_TARGETS = [
+  // Полноэкранный плеер: волна во всю дорожку, столбик потолще, свечение сильнее.
+  { cv: 'fp-wave', bar: 'fp-progress', fill: 'fp-fill', buf: 'fp-buffered',
+    bw: 3, gap: 2, pad: 3, glow: 6, soft: 0.05,
+    open: () => { const e = document.getElementById('fullscreen-player');
+                  return !!(e && e.classList.contains('open')); } },
+  // Мини-док: ТА ЖЕ rwDraw, другие размеры. Второй реализации нет и не будет.
+  // anchor — строка кнопок: #pp-progress растянут на весь плеер (вместе с
+  // раскрытой панелью), и без якоря волна села бы в центр этой панели, а не на
+  // строку, которую человек и считает мини-плеером.
+  { cv: 'pp-wave', bar: 'pp-progress', fill: 'pp-fill', buf: 'pp-buffered',
+    anchor: 'pp-bar', bw: 2, gap: 1.5, pad: 2, glow: 3, band: 30, soft: 0.06,
+    open: () => { const e = document.getElementById('preview-player');
+                  return !!(e && e.classList.contains('visible')); } }
+];
+const _RW_STATE = new Map();
+let _RW_PAL = null, _RW_PAL_AT = 0, _RW_RUNNING = false;
+
+// Тема и цвет сервиса меняются редко — читать переменные каждый кадр значит
+// дёргать getComputedStyle на <html> без всякой нужды.
+function _rwPal() {
+  const now = Date.now();
+  if (!_RW_PAL || now - _RW_PAL_AT > 900) { _RW_PAL = rwPalette(); _RW_PAL_AT = now; }
+  return _RW_PAL;
+}
+
+// Трек для сида. Берём поля ОЧЕРЕДИ, а не подписи из DOM: у #pp-artist подпись
+// по умолчанию переведена ('Предпрослушка' / 'Preview'), и сид поехал бы от
+// смены языка — один трек давал бы разные волны в русском и английском
+// интерфейсе. Это ровно тот случай, который решение владельца запрещает.
+function _rwTrack() {
+  let item = {};
+  try { item = (Preview && Preview.queue && Preview.queue[Preview.idx]) || {}; } catch (_) {}
+  let dur = 0;
+  try { dur = _playerDuration() || 0; } catch (_) {}
+  if (!isFinite(dur) || dur < 0) dur = 0;
+  return {
+    artist: String(item.artist || item.label || ''),
+    title:  String(item.title || ''),
+    duration: Math.round(dur)
+  };
+}
+
+// Доля 0..1 из ширины элемента внутри полосы.
+function _rwFracOf(id, barEl) {
+  const el = document.getElementById(id);
+  if (!el || !barEl) return 0;
+  const w = barEl.clientWidth || 0;
+  if (!w) return 0;
+  const px = parseFloat(getComputedStyle(el).width) || 0;
+  return Math.max(0, Math.min(1, px / w));
+}
+
+function _rwFrame() {
+  requestAnimationFrame(_rwFrame);
+  if (typeof rwDraw !== 'function' || typeof rwBarCount !== 'function') return;
+  const tr = _rwTrack();
+  const pal = _rwPal();
+  const dpr = Math.max(1, Math.min(3, window.devicePixelRatio || 1));
+  for (let k = 0; k < _RW_TARGETS.length; k++) {
+    const cfg = _RW_TARGETS[k];
+    if (cfg.open && !cfg.open()) continue;          // экран закрыт — не жжём кадры
+    const cv = document.getElementById(cfg.cv);
+    const bar = document.getElementById(cfg.bar);
+    if (!cv || !bar) continue;
+    const w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) continue;
+
+    const prog = _rwFracOf(cfg.fill, bar);
+    const buffered = _rwFracOf(cfg.buf, bar);
+
+    let centerY = null;
+    if (cfg.anchor) {
+      const a = document.getElementById(cfg.anchor);
+      if (a) {
+        const ra = a.getBoundingClientRect(), rc = cv.getBoundingClientRect();
+        if (ra.height) centerY = (ra.top - rc.top) + ra.height / 2;
+      }
+    }
+
+    // Перерисовываем не каждый кадр, а когда МЕНЯЕТСЯ КАРТИНКА: сдвинулся
+    // столбик под курсором, изменилась ширина/плотность пикселей, поехал буфер,
+    // сменился трек или тема. Иначе 150 заливок со свечением крутились бы 60
+    // раз в секунду впустую.
+    const n = rwBarCount(w, cfg.bw, cfg.gap);
+    const sig = [w, h, Math.round(dpr * 100), n,
+                 Math.round(prog * n), Math.round(buffered * n),
+                 centerY == null ? -1 : Math.round(centerY),
+                 tr.artist, tr.title, tr.duration,
+                 pal.a, pal.b, pal.c, pal.idle].join('');
+    if (_RW_STATE.get(cfg.cv) === sig) continue;
+    _RW_STATE.set(cfg.cv, sig);
+
+    rwDraw(cv, {
+      artist: tr.artist, title: tr.title, duration: tr.duration,
+      progress: prog, buffered: buffered, palette: pal,
+      barWidth: cfg.bw, barGap: cfg.gap, pad: cfg.pad, glow: cfg.glow,
+      soft: cfg.soft, band: cfg.band, centerY: centerY, dpr: dpr
+    });
+  }
+}
+
+// Класс rw-on ставится ТОЛЬКО если ядро волны загрузилось. Не загрузилось (404,
+// чужой кэш, вырезанный из сборки файл) — класса нет, CSS не прячет старую
+// полосу, и человек видит рабочую полосу перемотки, а не пустое место.
+function _rwInit() {
+  if (typeof rwDraw !== 'function') return;
+  // ⚠️ ВОЛНА ВЫКЛЮЧЕНА. Решение владельца 16.08.2026: «раз уж нет волны, то и
+  // нехер мудрить — никакой волны у потока, волна у скачанного допустима».
+  //
+  // Форма волны — утверждение о звуке. Пока пики берутся из хэша метаданных, а
+  // не из самого файла, эта форма выдумана, и владелец распознал подделку с
+  // первого взгляда. Оставить её включённой «до лучших времён» значит держать
+  // враньё в интерфейсе; поэтому выключено здесь, а не спрятано под настройку.
+  //
+  // Отрисовка (rwDraw, холсты, привязка к позиции) НЕ удалена намеренно: она
+  // умеет рисовать любые пики, в том числе настоящие. Включать обратно ТОЛЬКО
+  // когда появятся пики скачанного файла, посчитанные ffmpeg при скачивании, и
+  // ТОЛЬКО для таких треков. Правила и ловушки — скилл ripster-waveform-sources.
+  if (!window.RW_REAL_PEAKS) return;
+  let any = false;
+  for (let k = 0; k < _RW_TARGETS.length; k++) {
+    const cfg = _RW_TARGETS[k];
+    const bar = document.getElementById(cfg.bar);
+    const cv = document.getElementById(cfg.cv);
+    if (!bar || !cv) continue;
+    bar.classList.add('rw-on');
+    any = true;
+  }
+  if (any && !_RW_RUNNING) { _RW_RUNNING = true; requestAnimationFrame(_rwFrame); }
+}
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _rwInit);
+else _rwInit();
+
+
+/* ══ АУДИОДВИЖОК ПК (настройки → Плеер) ══════════════════════════════════════
+ *
+ * Маршруты `/api/audio/*` существовали давно, а интерфейса к ним не было ни
+ * одного — движок нельзя было ни выбрать, ни увидеть его состояние. Здесь он
+ * появляется там же, где на телефоне: в настройках плеера.
+ *
+ * Экран показывает ТОЛЬКО измеренное. `bit_perfect` приходит с сервера как
+ * факт вывода (какую частоту запросили и какую устройство выдало), а не как
+ * обещание режима: эксклюзивный режим можно попросить и не получить.
+ */
+async function audioEngineInit() {
+  const box = document.getElementById('aeng-body');
+  if (!box) return;
+  box.innerHTML = `<div class="toggle-sub">${esc(t('aeng.loading'))}</div>`;
+  let d = null;
+  try { d = await api('GET', '/api/audio/devices'); }
+  catch (e) {
+    box.innerHTML = `<div class="toggle-sub">${esc(t('aeng.failed'))}: ${esc(String(e))}</div>`;
+    return;
+  }
+  if (!d || !d.available) {
+    // Честная причина вместо пустого списка: движок есть не на всякой машине.
+    box.innerHTML = `<div class="toggle-sub">${esc(t('aeng.unavailable'))}</div>`;
+    return;
+  }
+  const saved = String(S.config?.['audio-device'] ?? '');
+  const opts = (d.devices || []).map(x =>
+    `<option value="${x.index}"${String(x.index) === saved ? ' selected' : ''}>` +
+    `${esc(x.name)} — ${x.default_rate} Hz</option>`).join('');
+  // Текст подставляем через t() ПРЯМО ЗДЕСЬ, а не пишем по-русски в расчёте
+  // на повторный проход переводчика. Первая версия звала `applyI18n()` —
+  // функции с таким именем в проекте нет вовсе (она называется `applyLang`),
+  // то есть блок остался бы русским навсегда, при любом языке интерфейса.
+  // Владелец увидел это сразу. `data-i18n` оставлены, чтобы блок пережил
+  // переключение языка без перерисовки.
+  box.innerHTML = `
+    <div class="settings-grid">
+      <div class="field-group">
+        <label class="lbl" data-i18n="aeng.device">${esc(t('aeng.device'))}</label>
+        <select id="aeng-device" onchange="saveSetting('audio-device', this.value)">${opts}</select>
+      </div>
+    </div>
+    <div class="toggle-row mt4">
+      <div class="toggle-info">
+        <div class="toggle-label" data-i18n="aeng.exclusive">${esc(t('aeng.exclusive'))}</div>
+        <div class="toggle-sub" data-i18n="aeng.exclusive_sub">${esc(t('aeng.exclusive_sub'))}</div>
+      </div>
+      <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="aeng-exclusive"
+        ${S.config?.['audio-exclusive'] === false ? '' : 'checked'}
+        onchange="saveSetting('audio-exclusive', this.checked)"><div class="toggle-slider"></div></label>
+    </div>
+    <div class="toggle-row mt4">
+      <div class="toggle-info">
+        <div class="toggle-label" data-i18n="aeng.native">${esc(t('aeng.native'))}</div>
+        <div class="toggle-sub" data-i18n="aeng.native_sub">${esc(t('aeng.native_sub'))}</div>
+      </div>
+      <label class="toggle-wrap"><input type="checkbox" class="toggle-inp" id="aeng-native"
+        ${S.config?.['audio-native-local'] ? 'checked' : ''}
+        onchange="saveSetting('audio-native-local', this.checked)"><div class="toggle-slider"></div></label>
+    </div>
+    <div id="aeng-state" class="toggle-sub mt8"></div>`;
+  audioEngineState();
+}
+
+/** Что тракт делает ПРЯМО СЕЙЧАС. Молчит, когда не играет, — врать нечем. */
+async function audioEngineState() {
+  const el = document.getElementById('aeng-state');
+  if (!el) return;
+  let s = null;
+  try { s = await api('GET', '/api/audio/state'); } catch (_) { return; }
+  if (!s || !s.playing) { el.textContent = t('aeng.idle'); return; }
+  const bp = s.bit_perfect ? t('aeng.bp_yes') : t('aeng.bp_no');
+  el.textContent = `${s.file_rate} Hz -> ${s.granted_rate} Hz · ${s.bits} bit · ${s.channels}ch · ${bp}`;
+}

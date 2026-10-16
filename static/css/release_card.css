@@ -1,0 +1,242 @@
+/* release_card.css — карточка релиза в радаре (задача 065).
+   Все значения через токены; никаких inline-стилей в разметке карточки.
+   Динамические цвета (сервис, граница новинки) — через CSS-свойства,
+   которые JS выставляет на корне карточки (--svc-clr, --base-border). */
+
+/* ── Карточка-обёртка ─────────────────────────────────────────────────────── */
+.rel-card{
+  --svc-clr:var(--muted);
+  --base-border:var(--border);
+  background:var(--surface);
+  border:1px solid var(--base-border);
+  border-radius:10px;
+  overflow:hidden;
+  transition:border-color .15s,box-shadow .22s ease;
+  content-visibility:auto;
+  contain-intrinsic-size:auto 300px;
+  display:flex;flex-direction:column;height:100%;
+  box-sizing:border-box;
+}
+.rel-card-mix{contain-intrinsic-size:auto 280px}
+.rel-card:hover{border-color:var(--svc-clr)}
+
+/* «Новое» — зелёное свечение. */
+.rel-card-new{box-shadow:0 0 0 1px rgba(62,207,170,.22),0 4px 18px rgba(62,207,170,.14)}
+
+/* ── Обложка ──────────────────────────────────────────────────────────────── */
+.rel-cover-wrap{position:relative}
+.rel-cover{width:100%;aspect-ratio:1;object-fit:cover;display:block;cursor:zoom-in;background:var(--surface2)}
+.rel-cover-fallback{
+  width:100%;aspect-ratio:1;background:rgba(255,255,255,.04);
+  display:flex;align-items:center;justify-content:center;
+  font-size:32px;color:var(--muted);
+}
+.rel-card img.rel-cover{contain:paint}
+
+/* ── Кнопка воспроизведения на обложке ──────────────────────────────────────
+   SVG-треугольник центрируется геометрически; смещение на 1px вправо —
+   оптическая компенсация. */
+.rel-play{
+  position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+  width:40px;height:40px;border-radius:50%;background:rgba(0,0,0,.48);
+  border:1.5px solid rgba(255,255,255,.8);cursor:pointer;padding:0;z-index:2;
+  display:flex;align-items:center;justify-content:center;
+  backdrop-filter:blur(3px);transition:transform .12s,background .12s,border-color .12s;
+}
+.rel-play svg{width:16px;height:16px;fill:#fff;margin-left:1px}
+.rel-play:hover{transform:translate(-50%,-50%) scale(1.1);background:rgba(0,0,0,.68);border-color:#fff}
+.rel-play:focus-visible{outline:2px solid var(--red);outline-offset:2px}
+
+/* ── Бейджи на обложке ────────────────────────────────────────────────────── */
+.rel-badge-corner{position:absolute}
+.rel-badge-corner--tl{top:6px;left:6px}
+.rel-badge-corner--tr{top:6px;right:6px}
+.rel-badge-corner--bl{bottom:6px;left:6px}
+.rel-badge-corner--br{bottom:6px;right:6px}
+
+.rel-badge{
+  font-size:9px;padding:2px 5px;border-radius:4px;
+  background:rgba(0,0,0,.72);font-weight:700;
+  line-height:1.3;
+}
+.rel-badge--svc{color:var(--svc-clr)}
+.rel-badge--type{color:var(--type-clr,var(--muted2))}
+.rel-badge--new{
+  font-size:8px;padding:2px 6px;border-radius:4px;
+  background:var(--green);color:#06281f;font-weight:800;letter-spacing:.4px;
+}
+.rel-badge--hires{
+  font-size:8px;padding:1px 4px;border-radius:3px;
+  background:rgba(255,214,10,.15);color:#ffd60a;font-weight:700;margin-left:3px;
+}
+.rel-badge--dur{
+  background:rgba(0,0,0,.72);border-radius:4px;
+  font-size:10px;color:#fff;padding:2px 5px;font-family:var(--mono);
+}
+
+/* Live-пульс. */
+.rel-live-badge{
+  display:inline-flex;align-items:center;gap:4px;font-size:8px;padding:2px 6px;
+  border-radius:4px;background:rgba(0,0,0,.72);color:#c4b5fd;font-weight:800;
+  letter-spacing:.3px;backdrop-filter:blur(4px);
+}
+.rel-live-dot{
+  width:5px;height:5px;border-radius:50%;background:#a78bfa;
+  animation:pulse-live 1.8s infinite;
+}
+@keyframes pulse-live{0%,100%{box-shadow:0 0 0 0 rgba(167,139,250,.55)}50%{box-shadow:0 0 0 4px rgba(167,139,250,0)}}
+
+/* ── Тело карточки ────────────────────────────────────────────────────────── */
+.rel-body{padding:8px 10px;display:flex;flex-direction:column}
+/* Нижний блок прижат к низу — строки действий в ряду на одной высоте. */
+.rel-body{margin-top:auto}
+
+.rel-title{
+  font-size:12px;font-weight:600;color:var(--text);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  cursor:pointer;transition:color .12s;
+}
+.rel-title:hover{color:var(--red)}
+
+.rel-artist{
+  font-size:11px;color:var(--muted);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.rel-artist--clickable{cursor:pointer}
+.rel-artist--clickable:hover{text-decoration:underline}
+
+.rel-featured{
+  font-size:10px;color:var(--muted2);margin-top:1px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+
+.rel-label{
+  font-size:10px;color:var(--muted);margin-top:1px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  opacity:.7;cursor:pointer;transition:opacity .12s;
+}
+.rel-label:hover{text-decoration:underline}
+.rel-label--via{color:var(--green);opacity:1}
+
+.rel-meta{font-size:10px;color:var(--muted);margin-top:2px}
+
+/* Причина скрытия (режим «Скрытое»). */
+.rel-reason{
+  font-size:10px;color:var(--orange);margin-top:3px;line-height:1.45;
+  overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+}
+
+/* ── Выбор качества ───────────────────────────────────────────────────────── */
+.rel-q-select{
+  width:100%;margin-top:6px;padding:3px 6px;
+  background:var(--surface2);border:1px solid var(--border);border-radius:6px;
+  font-size:10px;color:var(--muted);cursor:pointer;outline:none;
+  font-family:var(--font);
+}
+
+/* ── Переключатель «тексты» ───────────────────────────────────────────────── */
+.rel-lyrics-toggle{
+  display:flex;align-items:center;gap:5px;margin-top:6px;
+  font-size:10px;color:var(--muted);cursor:pointer;user-select:none;
+}
+.rel-lyrics-chk{width:13px;height:13px;accent-color:var(--red);cursor:pointer}
+
+/* ── Проверка доступности ─────────────────────────────────────────────────── */
+.rel-avail{margin-top:6px;font-size:10px;line-height:1.5}
+.rel-avail-btn{
+  padding:3px 7px;background:transparent;border:1px dashed var(--border);
+  border-radius:6px;font-size:10px;color:var(--muted);cursor:pointer;
+  font-family:var(--font);
+}
+.rel-avail-btn:hover{border-color:var(--muted);color:var(--text)}
+
+/* ── Кнопка скачивания ────────────────────────────────────────────────────── */
+.rel-dl-btn{
+  display:block;width:100%;box-sizing:border-box;margin-top:7px;
+  padding:5px 4px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  background:rgba(192,132,160,.12);border:1px solid rgba(192,132,160,.2);
+  border-radius:7px;font-size:10px;font-weight:700;color:var(--red);
+  cursor:pointer;font-family:var(--font);
+}
+.rel-dl-btn--mix{
+  background:transparent;
+}
+
+/* ── Ряд действий ───────────────────────────────────────────────────────────
+   Сетка равных колонок: перенос невозможен по построению. */
+.rel-act-row{
+  display:grid;grid-auto-flow:column;grid-auto-columns:minmax(0,1fr);
+  gap:5px;margin-top:5px;
+}
+.rel-act-row > *{
+  min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  display:flex;align-items:center;justify-content:center;
+  padding:5px 2px;box-sizing:border-box;
+}
+.rel-act-btn{
+  background:transparent;border:1px solid var(--border);border-radius:7px;
+  font-size:11px;color:var(--muted);cursor:pointer;font-family:var(--font);
+  text-decoration:none;display:flex;align-items:center;justify-content:center;
+  transition:color .12s,border-color .12s;
+}
+.rel-act-btn:hover{color:var(--text);border-color:var(--muted)}
+.rel-act-btn--fav-on{border-color:var(--orange);color:var(--orange)}
+.rel-act-btn--smart{border-color:rgba(255,214,10,.35);color:#ffd60a}
+.rel-act-btn--smart:hover{border-color:rgba(255,214,10,.6)}
+
+/* ── Цвет обложки на карточке (кольцо) ──────────────────────────────────────
+   Перенесено из main.css: --tint/--tint-glow живут на карточке. */
+.rel-card{--tint:transparent;--tint-glow:transparent}
+.rel-card.tinted{
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--tint-glow) 85%,transparent),
+             0 6px 22px color-mix(in srgb,var(--tint-glow) 12%,transparent);
+}
+.rel-card.tinted:hover{
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--tint) 75%,transparent),
+             0 10px 30px color-mix(in srgb,var(--tint-glow) 20%,transparent);
+}
+@supports not (color:color-mix(in srgb,red 50%,blue)){
+  .rel-card.tinted{box-shadow:0 0 0 2px var(--tint-glow)}
+}
+
+/* ── Прокрутка к секциям/карточкам ────────────────────────────────────────── */
+.rel-sec,.rel-sec .rel-card{scroll-margin-top:78px}
+
+/* ── Скины: переопределения ───────────────────────────────────────────────── */
+html[data-skin="neon"] .rel-card,
+html[data-skin="console"] .rel-card,
+html[data-skin="oled"] .rel-card{
+  background:var(--k-card)!important;
+  border-color:var(--k-line)!important;
+  border-radius:var(--k-radius)!important;
+}
+html[data-skin="neon"] .rel-card,
+html[data-skin="neon"] .block,
+html[data-skin="neon"] .qi{
+  backdrop-filter:var(--k-blur);-webkit-backdrop-filter:var(--k-blur);
+}
+html[data-skin="neon"] .rel-card:hover{border-color:var(--k-line2)!important}
+html[data-skin="neon"] .rel-dl-btn{box-shadow:0 4px 18px color-mix(in srgb, var(--k-accent) 45%, transparent)}
+
+html[data-skin="console"] .rel-card{border-color:var(--k-line2)!important}
+html[data-skin="console"] .rel-dl-btn{
+  font-family:var(--mono);text-transform:uppercase;letter-spacing:.5px;
+}
+
+html[data-skin="oled"] .rel-card{box-shadow:none}
+
+/* Общая часть: радиус малых контролов и строка действий. */
+html[data-skin="neon"] .rel-dl-btn,
+html[data-skin="console"] .rel-dl-btn,
+html[data-skin="oled"] .rel-dl-btn,
+html[data-skin="neon"] .rel-act-row > *,
+html[data-skin="console"] .rel-act-row > *,
+html[data-skin="oled"] .rel-act-row > *{
+  border-radius:calc(var(--k-radius-sm)* .7)!important;
+}
+
+/* ── Уменьшенное движение ─────────────────────────────────────────────────── */
+@media (prefers-reduced-motion:reduce){
+  .rel-card,.rel-play,.rel-title,.rel-label,.rel-act-btn{transition:none}
+  .rel-live-dot{animation:none}
+}

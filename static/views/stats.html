@@ -1,0 +1,70 @@
+      <div style="padding:16px 24px">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap">
+          <div style="font-size:17px;font-weight:800;color:var(--text)">📈 <span data-i18n="nav.stats">Статистика</span></div>
+          <div style="display:flex;gap:4px;margin-left:auto" id="stats-period-tabs">
+            <button class="stab" data-p="day"   onclick="loadStats('day')"   data-i18n="st.day">День</button>
+            <button class="stab" data-p="week"  onclick="loadStats('week')"  data-i18n="st.week">Неделя</button>
+            <button class="stab" data-p="month" onclick="loadStats('month')" data-i18n="st.month">Месяц</button>
+            <button class="stab" data-p="year"  onclick="loadStats('year')"  data-i18n="st.year">Год</button>
+            <button class="stab" data-p="all"   onclick="loadStats('all')"   data-i18n="st.all">Всё время</button>
+          </div>
+        </div>
+
+        <!-- Hero summary -->
+        <div id="stats-hero" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(155px,1fr));gap:12px;margin-bottom:18px"></div>
+
+        <!-- Listening block -->
+        <div class="card" style="padding:16px;margin-bottom:16px">
+          <div class="block-title" style="display:flex;align-items:baseline;gap:8px">🎧 <span data-i18n="st.listening">Прослушивания</span>
+            <span style="font-size:10px;color:var(--muted2);font-weight:400" data-i18n="st.listening_sub">превью треков и BBC Sounds</span></div>
+          <div id="stats-listen-split" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:10px;margin:12px 0 16px"></div>
+          <div id="stats-listen-top"></div>
+          <div id="stats-listen-recent" style="margin-top:14px"></div>
+        </div>
+
+        <!-- Downloads: service + quality -->
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:16px">
+          <div class="card" style="padding:14px">
+            <div class="block-title" data-i18n="stats.by_svc">По сервису</div>
+            <div id="stats-by-service"></div>
+          </div>
+          <div class="card" style="padding:14px">
+            <div class="block-title" data-i18n="stats.by_quality">По качеству</div>
+            <div id="stats-by-quality"></div>
+          </div>
+        </div>
+
+        <!-- Top artists -->
+        <div class="card" style="padding:14px;margin-bottom:16px">
+          <div class="block-title" data-i18n="st.top_artists">Топ артистов · загрузки</div>
+          <div id="stats-by-artist" style="display:grid;grid-template-columns:1fr 1fr;gap:2px 24px"></div>
+        </div>
+
+        <!-- Timeline -->
+        <div class="card" style="padding:14px;margin-bottom:16px">
+          <div class="block-title" data-i18n="st.by_day">Активность по дням</div>
+          <div id="stats-timeline" style="display:flex;align-items:flex-end;gap:3px;height:80px;overflow-x:auto"></div>
+          <div id="stats-tl-labels" style="display:flex;gap:3px;margin-top:4px;font-size:9px;color:var(--muted2);overflow-x:auto"></div>
+        </div>
+
+        <!-- Hour + weekday -->
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:14px;margin-bottom:16px">
+          <div class="card" style="padding:14px">
+            <div class="block-title" data-i18n="st.by_hour">По часу суток</div>
+            <div id="stats-by-hour" style="display:flex;align-items:flex-end;gap:2px;height:64px"></div>
+            <div id="stats-hour-labels" style="display:flex;gap:2px;margin-top:3px;font-size:9px;color:var(--muted2)"></div>
+          </div>
+          <div class="card" style="padding:14px">
+            <div class="block-title" data-i18n="st.by_weekday">По дню недели</div>
+            <div id="stats-by-weekday"></div>
+          </div>
+        </div>
+
+        <!-- Guests -->
+        <div class="card" style="padding:14px;margin-bottom:16px">
+          <div class="block-title" data-i18n="st.guests">Гостевая активность</div>
+          <div id="stats-guests"></div>
+        </div>
+
+        <div style="font-size:10px;color:var(--muted2);text-align:center;padding-bottom:20px" id="stats-footer"></div>
+      </div>

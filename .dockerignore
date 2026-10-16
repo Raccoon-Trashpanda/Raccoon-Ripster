@@ -1,0 +1,23 @@
+# Windows-only / Go artifacts (won't run in the Linux image)
+*.exe
+run.bat
+
+# Python bytecode & caches
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Local runtime state — never bake into the image
+logs/
+downloads/
+tokens/
+backups/
+
+# Tests & docs aren't needed at runtime
+tests/
+*.md
+
+# VCS
+.git/
+.github/
+.gitignore

@@ -1,0 +1,1859 @@
+#!/usr/bin/env python3
+"""
+Ripster
+Universal music downloader · Apple Music · Qobuz · Deezer · Tidal
+Run:  python app.py
+Open: http://127.0.0.1:7799
+      (not http://localhost — Spotify OAuth rejects localhost since April 2025)
+"""
+
+import asyncio, os, sys, time
+import platform
+
+# Belt-and-suspenders sys.path setup. The bundled installer ships an embeddable
+# Python whose python3xx._pth already puts the app dir (`..`) AND bundled
+# site-packages on sys.path natively at startup — that's the primary fix. This
+# runtime insert covers the OTHER launch modes that have no ._pth (from-source
+# .venv, IDE/double-click run from a foreign cwd): add the app dir (for
+# `import ripster`) and bundled site-packages (for `import uvicorn` etc.), as
+# absolute paths so it works regardless of cwd.
+_APPDIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _APPDIR)
+_BUNDLED_SP = os.path.join(_APPDIR, "python", "Lib", "site-packages")
+if os.path.isdir(_BUNDLED_SP):
+    sys.path.insert(0, _BUNDLED_SP)
+
+# Put two dirs on PATH that the embeddable Python otherwise hides, so engines and
+# their child processes can find their tools:
+#   • <python>\Scripts — pip console-scripts (deemix, rip/streamrip, gamdl). Without
+#     this shutil.which("deemix"/"rip") → None → download dies "[WinError 2]".
+#   • <app>\tools — Setup-installed binaries (ffmpeg, mp4decrypt, N_m3u8DL-RE …).
+#     Apple-движки зовут bare `ffmpeg`; без него задача "дешифрует", но файл
+#     не пишет. tools/ на PATH — чтобы shutil.which("ffmpeg") его нашёл.
+for _pdir in (os.path.join(os.path.dirname(sys.executable), "Scripts"),
+              os.path.join(_APPDIR, "tools"),
+              os.path.join(_APPDIR, "tools", "node")):       # portable Node for SoundCloud/Lucida
+    if os.path.isdir(_pdir) and _pdir.lower() not in os.environ.get("PATH", "").lower():
+        os.environ["PATH"] = _pdir + os.pathsep + os.environ.get("PATH", "")
+
+# Ensure UTF-8 output on Windows (avoids cp1251 crash on box-drawing chars)
+if sys.stdout and hasattr(sys.stdout, 'reconfigure'):
+    try: sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+    except Exception: pass
+if sys.stderr and hasattr(sys.stderr, 'reconfigure'):
+    try: sys.stderr.reconfigure(encoding='utf-8', errors='replace')
+    except Exception: pass
+
+from pathlib import Path
+from datetime import datetime
+
+IS_WINDOWS = platform.system() == "Windows"
+
+
+def _resolve_real_home() -> str:
+    """Find the REAL user-profile dir even when the launcher stripped the env.
+
+    The PyQt/detached launcher can start this process with USERPROFILE/HOME/APPDATA/
+    USERNAME all missing — so a naive ``C:\\Users\\%USERNAME%`` guess lands on
+    ``C:\\Users\\Default`` (a read-only system profile → streamrip "Access denied").
+    Resolve it reliably: env → derive from APPDATA/TEMP → Win32 token profile dir."""
+    # 1) Direct env vars (only if they point at a real dir)
+    for v in (os.environ.get("USERPROFILE"), os.environ.get("HOME")):
+        if v and os.path.isdir(v):
+            return v
+    hd, hp = os.environ.get("HOMEDRIVE", ""), os.environ.get("HOMEPATH", "")
+    if hd and hp and os.path.isdir(hd + hp):
+        return hd + hp
+    # 2) Derive from any AppData/Temp var that survived
+    for v, suffix in ((os.environ.get("APPDATA"),      r"\AppData\Roaming"),
+                      (os.environ.get("LOCALAPPDATA"), r"\AppData\Local"),
+                      (os.environ.get("TEMP"),         r"\AppData\Local\Temp"),
+                      (os.environ.get("TMP"),          r"\AppData\Local\Temp")):
+        if v and v.rstrip("\\").lower().endswith(suffix.lower()):
+            h = v.rstrip("\\")[: -len(suffix)]
+            if h and os.path.isdir(h):
+                return h
+    # 3) Win32: the profile dir of the user actually running this process
+    if IS_WINDOWS:
+        try:
+            import ctypes
+            from ctypes import wintypes
+            k32, adv, uenv = ctypes.windll.kernel32, ctypes.windll.advapi32, ctypes.windll.userenv
+            # Set types so the GetCurrentProcess pseudo-handle (-1) isn't truncated
+            # on 64-bit — without this OpenProcessToken fails.
+            k32.GetCurrentProcess.restype = wintypes.HANDLE
+            adv.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
+                                             ctypes.POINTER(wintypes.HANDLE)]
+            adv.OpenProcessToken.restype = wintypes.BOOL
+            uenv.GetUserProfileDirectoryW.argtypes = [wintypes.HANDLE, wintypes.LPWSTR,
+                                                      ctypes.POINTER(wintypes.DWORD)]
+            uenv.GetUserProfileDirectoryW.restype = wintypes.BOOL
+            tok = wintypes.HANDLE()
+            if adv.OpenProcessToken(k32.GetCurrentProcess(), 0x0008, ctypes.byref(tok)):
+                sz = wintypes.DWORD(0)
+                uenv.GetUserProfileDirectoryW(tok, None, ctypes.byref(sz))
+                buf = ctypes.create_unicode_buffer(sz.value or 260)
+                if uenv.GetUserProfileDirectoryW(tok, buf, ctypes.byref(sz)) and buf.value:
+                    if os.path.isdir(buf.value):
+                        return buf.value
+        except Exception:
+            pass
+    # 4) expanduser as a last resort
+    h = os.path.expanduser("~")
+    return h if h and h != "~" and os.path.isdir(h) else ""
+
+
+def _repair_home_env() -> None:
+    """Ensure USERPROFILE/HOME/APPDATA exist so streamrip/deezer (which call
+    Path.home()/read APPDATA at import) and every child process have a valid home.
+    See _resolve_real_home for why a naive guess is unsafe."""
+    home = _resolve_real_home()
+    if not home:
+        return  # couldn't determine — better to leave env alone than point at Default
+    # Override (not setdefault) USERPROFILE/HOME/APPDATA: a bogus value from an
+    # earlier broken run must be corrected, not preserved.
+    os.environ["USERPROFILE"] = home
+    os.environ["HOME"] = home
+    if IS_WINDOWS:
+        drive, path = os.path.splitdrive(home)
+        if drive:
+            os.environ["HOMEDRIVE"] = drive
+            os.environ["HOMEPATH"] = path or "\\"
+        roaming = os.path.join(home, "AppData", "Roaming")
+        local   = os.path.join(home, "AppData", "Local")
+        # Only fix APPDATA if missing or pointing outside the resolved home.
+        if not os.environ.get("APPDATA", "").lower().startswith(home.lower()):
+            os.environ["APPDATA"] = roaming
+        if not os.environ.get("LOCALAPPDATA", "").lower().startswith(home.lower()):
+            os.environ["LOCALAPPDATA"] = local
+
+
+_repair_home_env()
+
+try:
+    import httpx
+except ImportError:
+    print("\n" + "=" * 68, file=sys.stderr)
+    print("  RIPSTER: httpx is not installed.", file=sys.stderr)
+    print("  Run:  pip install -r requirements.txt", file=sys.stderr)
+    print("=" * 68 + "\n", file=sys.stderr)
+    raise SystemExit(1)
+
+import uvicorn
+from contextlib import asynccontextmanager
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import JSONResponse, Response
+from urllib.parse import urlparse
+from starlette.datastructures import Headers
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+# Ensure the script directory is on sys.path so ``ripster`` resolves
+# even when cwd is somewhere else (common on Windows double-click / IDE runs).
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+
+# ── Protobuf runtime guard — kills the recurring "wrapper doesn't download" bug ──
+# Protobuf's rule is: runtime version must be >= the gencode version of every
+# loaded _pb2 module. We load modules from several generators:
+#   • OrpheusDL desktop_api / extendedmetadata — gencode 6.33.4
+#   • pywidevine — needs >= 6.33
+# So the correct floor is 6.33.4. Движок `amd` со своими 6.31-стабами выпилен
+# 25.09.2026 (gRPC-транспорт wm.wol.moe снят 02.09.2026). The OLD guard
+# force-pinned 6.31.1, which broke orpheus's
+# 6.33 gencode (VersionError on lyrics/metadata) AND silently reverted every
+# manual bump on each restart. We now only repair when protobuf is BELOW the
+# floor (e.g. a stray `pip install` dragged it down), never downgrade. Read the
+# installed dist version via importlib.metadata WITHOUT importing protobuf, so a
+# repair in this run is picked up by the later real import.
+_PB_FLOOR = "6.33.4"
+
+
+def _ver_tuple(v: str) -> tuple:
+    out = []
+    for p in (v or "").split("."):
+        try:
+            out.append(int(p))
+        except Exception:
+            break
+    return tuple(out)
+
+
+def _ensure_protobuf_runtime() -> None:
+    try:
+        from importlib.metadata import version as _pbver
+        ver = _pbver("protobuf")
+    except Exception:
+        return
+    if _ver_tuple(ver) >= _ver_tuple(_PB_FLOOR):
+        return
+    print(f"[startup] ⚠ protobuf {ver} < {_PB_FLOOR} — orpheus/pywidevine need ≥{_PB_FLOOR}; auto-repairing…",
+          flush=True)
+    try:
+        import subprocess
+        subprocess.run([sys.executable, "-m", "pip", "install", "-q", f"protobuf=={_PB_FLOOR}"],
+                       timeout=180, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        from importlib.metadata import version as _pbver2
+        new = _pbver2("protobuf")
+        ok = _ver_tuple(new) >= _ver_tuple(_PB_FLOOR)
+        print(f"[startup] {'✓ protobuf repaired → ' + new if ok else '✗ protobuf still ' + new + ' — run: pip install protobuf==' + _PB_FLOOR}",
+              flush=True)
+    except Exception as e:
+        print(f"[startup] ✗ protobuf auto-repair failed ({e}); run: pip install protobuf=={_PB_FLOOR}",
+              flush=True)
+
+
+_ensure_protobuf_runtime()
+
+# ── Ripster service layer ──────────────────────────────────────────────────────
+try:
+    from ripster.engines import get_engine
+    from ripster.task_state import (
+        TaskStatus, advance as _advance_task, try_advance as _try_advance_task,
+        current as _task_status,
+    )
+    import ripster.metadata as _metadata
+    import ripster.setup as _setup
+    import ripster.amd as _amd
+
+    # Auto-discover engines
+    import pkgutil
+    import ripster.engines as _engines_pkg
+    _SKIP_MODULES = {"base", "registry", "__init__", "streamrip_utils"}
+    for _mod_info in pkgutil.iter_modules(_engines_pkg.__path__):
+        if _mod_info.name in _SKIP_MODULES:
+            continue
+        __import__(f"ripster.engines.{_mod_info.name}")
+except ModuleNotFoundError as _e:
+    # Distinguish the THREE real failure modes instead of always blaming a
+    # missing 'ripster' package (the old message lied: it printed "не нашёл
+    # ripster" even when ripster was present but an inner dependency — or a
+    # broken bundled-Python path — was the real culprit). ALWAYS surface the
+    # actual exception + a full traceback so the cause is diagnosable on a user's
+    # machine without code spelunking.
+    import traceback as _tb
+    _has_pkg = (_SCRIPT_DIR / "ripster" / "__init__.py").exists()
+    _missing = (getattr(_e, "name", "") or "").split(".")[0]
+    _dep_problem = _has_pkg and _missing and _missing != "ripster"
+    print("\n" + "=" * 68, file=sys.stderr)
+    if _dep_problem:
+        print(f"  RIPSTER: пакет 'ripster' на месте, но НЕ ХВАТАЕТ зависимости '{_missing}'", file=sys.stderr)
+    else:
+        print("  RIPSTER: не нашёл пакет 'ripster' рядом с app.py", file=sys.stderr)
+    print("=" * 68, file=sys.stderr)
+    print(f"  Точная ошибка: {type(_e).__name__}: {_e}", file=sys.stderr)
+    print(f"  Script dir:    {_SCRIPT_DIR}", file=sys.stderr)
+    print(f"  Python:        {sys.executable}", file=sys.stderr)
+    print(f"  ripster/__init__.py есть: {_has_pkg}", file=sys.stderr)
+    if _dep_problem:
+        print(f"\n  Зависимость '{_missing}' не установлена в ЭТОТ интерпретатор.", file=sys.stderr)
+        print("  Доустанови зависимости именно в него:", file=sys.stderr)
+        print(f'    "{sys.executable}" -m pip install -r requirements.txt', file=sys.stderr)
+        print(f'  или только её:  "{sys.executable}" -m pip install {_missing}', file=sys.stderr)
+    elif not _has_pkg:
+        print("\n  Похоже, при распаковке архива не извлеклись подпапки.", file=sys.stderr)
+        print("  Рядом с app.py должны лежать:", file=sys.stderr)
+        print("    ripster/__init__.py", file=sys.stderr)
+        print("    ripster/auth.py", file=sys.stderr)
+        print("    ripster/engines/*.py", file=sys.stderr)
+        print("    ripster/routes/*.py", file=sys.stderr)
+        print("    static/index.html", file=sys.stderr)
+        print("\n  Перераспакуй архив (через 7-Zip / WinRAR, а не 'Extract' из", file=sys.stderr)
+        print("  Проводника — он иногда пропускает вложенные папки).", file=sys.stderr)
+    else:
+        # ripster present AND the unresolved name IS 'ripster' → the interpreter
+        # can't see its own app dir. On bundled-Python that's a broken ._pth
+        # (missing 'import site' or 'Lib\\site-packages').
+        print("\n  Пакет на месте, но интерпретатор его не видит — обычно битый", file=sys.stderr)
+        print("  bundled-Python: в python\\python3xx._pth нет строки 'import site'", file=sys.stderr)
+        print("  или 'Lib\\site-packages'. Пересобери бандл build_embedded_python.ps1.", file=sys.stderr)
+    print("\n  ── полная трасса ──", file=sys.stderr)
+    _tb.print_exc()
+    print("=" * 68 + "\n", file=sys.stderr)
+    raise SystemExit(1)
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+BASE_DIR       = Path(__file__).parent
+CONFIG_FILE    = BASE_DIR / "config.yaml"
+TOKENS_DIR     = BASE_DIR / "tokens"
+HISTORY_FILE   = BASE_DIR / "history.json"
+QUEUE_FILE     = BASE_DIR / "queue_pending.json"
+WATCHLIST_FILE = BASE_DIR / "watchlist.json"
+
+APP_VERSION = "3.0.0"
+# Distributable release tag — what the self-updater compares against GitHub release
+# tags (e.g. "1.0.6"). Kept separate from the internal APP_VERSION (3.x) so the two
+# version lines don't collide. MUST be bumped together with
+# github_setup/installer/ripster.iss AppVersion on every packaged build.
+RELEASE_VERSION = "3.9.1"
+try:
+    import hashlib as _hlib
+    APP_BUILD = _hlib.sha256(open(__file__, "rb").read()).hexdigest()[:8]
+except Exception:
+    APP_BUILD = datetime.now().strftime("%Y-%m-%d")
+APP_AUTHORS = "Universal Music Downloader"
+APP_REPO    = ""
+
+# ── Config / persistence ───────────────────────────────────────────────────────
+from ripster.config_service import (
+    ConfigService,
+    load_config   as _load_config,
+    save_config   as _save_config_fn,
+    write_downloader_config,
+)
+from ripster.persistence import (
+    load_history,        save_history        as _save_history_fn,
+    load_pending_queue,  save_pending_queue  as _save_pending_fn,
+    load_watchlist,      save_watchlist      as _save_watchlist_fn,
+)
+
+config           = ConfigService(_load_config(CONFIG_FILE, TOKENS_DIR))
+# ffmpeg/ffprobe в PATH ПРОЦЕССА — до того, как их позовёт хоть один роут или
+# движок. Иначе всё зависит от того, КТО запустил app (лончер/PowerShell/nohup),
+# и спектрограммы/Coder/транскод плавающе падают «ffmpeg не найден» (18.09.2026).
+from ripster.ffmpeg_path import ensure_ffmpeg_on_path as _ensure_ffmpeg
+_ensure_ffmpeg(config)
+download_history = load_history(HISTORY_FILE)
+watchlist        = load_watchlist(WATCHLIST_FILE)
+
+def save_config(cfg):
+    _save_config_fn(cfg, CONFIG_FILE, TOKENS_DIR)
+
+def save_history(h: list):
+    _save_history_fn(h, HISTORY_FILE)
+
+def save_watchlist(w: list):
+    _save_watchlist_fn(w, WATCHLIST_FILE)
+
+def save_pending_queue():
+    _save_pending_fn(queue, QUEUE_FILE)
+
+# ── Quality helper ─────────────────────────────────────────────────────────────
+def get_qualities() -> list:
+    e = config.get("engine", "zhaarey")
+    if e in ("gamdl", "zhaarey", "lite"):
+        try:
+            return get_engine(e).qualities()
+        except KeyError:
+            pass
+    return get_engine("zhaarey").qualities()
+
+# ── Global mutable state ───────────────────────────────────────────────────────
+queue        = []
+ws_clients   = set()
+_ws_guest_sids: dict = {}
+# ws -> paired-phone marker. Present ⇒ this socket is the owner's phone (paired
+# via /api/pair). broadcast() honours the pair's fan-out mode for these sockets:
+#   mirror   → phone sees everything the desktop sees
+#   initiator→ same visibility; only "who initiated" differs (queue layer)
+#   isolation→ phone gets nothing over /ws, runs on its own local state
+_ws_paired_phones: dict = {}
+
+from ripster.queue_manager import QueueManager
+_qs         = QueueManager()
+_queue_lock = _qs.lock
+
+# ── Service layer ──────────────────────────────────────────────────────────────
+from ripster import service_layer as _svc_layer
+_svc_layer.install(config)
+_validate_url              = _svc_layer.validate_url
+_detect_service            = _svc_layer.detect_service
+_default_quality_for_service = _svc_layer.default_quality
+_engine_for_service        = _svc_layer.engine_for_svc
+
+# ── Broadcast ─────────────────────────────────────────────────────────────────
+from ripster.security import GUEST_BLOCKED_WS_TYPES as _GUEST_BLOCKED_TYPES
+from ripster.security import GUEST_BLOCKED_PATHS    as _GUEST_BLOCKED
+
+
+def _guest_queue_view(sid: str) -> list:
+    return [
+        {k: v for k, v in t.items() if k not in ("log", "session_id")}
+        for t in queue
+        if t.get("session_id") == sid
+    ]
+
+
+def _guest_owns_task(task_id: str, sid: str) -> bool:
+    return any(
+        t.get("id") == task_id and t.get("session_id") == sid
+        for t in queue
+    )
+
+
+from ripster.ws_broker import WebSocketBroker
+_ws_broker = WebSocketBroker()
+
+# Relay-транспорт мобильной панели (трекер #37): окно панели (?transport=relay)
+# и главная страница говорят через этот сервер, сообщения — те же {rp:1,…}.
+# Логика маршрутизации — чистый класс в ripster/rp_relay.py, здесь только
+# подключение к приёмному циклу /ws.
+from ripster.rp_relay import RpRelay
+_rp_relay = RpRelay()
+
+
+def _ws_dead(ws) -> None:
+    """Called by the broker when a client's socket dies — drop our bookkeeping."""
+    ws_clients.discard(ws)
+    _ws_guest_sids.pop(ws, None)
+    _ws_paired_phones.pop(ws, None)
+
+
+_ws_broker.set_dead_handler(_ws_dead)
+
+
+# ── Stdout tee → WS broadcast ──────────────────────────────────────────────
+# Every print() in the codebase gets mirrored to the in-UI console (with the
+# `[service]` prefix extracted so the frontend can filter by service). The
+# original stdout still receives the line, so run.bat keeps printing as before.
+import sys as _sys, collections as _collections, re as _re
+
+_LOG_TAIL: "_collections.deque[tuple[str, str]]" = _collections.deque(maxlen=4000)
+# Persistent ring buffer for the admin console — never popped, only appended.
+# _LOG_TAIL is a transient queue that _stdout_pump drains every 0.4s, so it
+# can't be used as a "show me the last N lines" source. _LOG_HISTORY is the
+# authoritative read-only view for /api/admin/system-log.
+_LOG_HISTORY: "_collections.deque[tuple[float, str, str]]" = _collections.deque(maxlen=4000)
+_SVC_RE = _re.compile(r'^\s*\[([a-z][a-z0-9:_-]+)\]', _re.IGNORECASE)
+_KNOWN_SERVICES = (
+    "apple", "qobuz", "tidal", "deezer", "spotify", "soundcloud",
+    "bbc", "lucida", "orpheus", "gamdl", "zhaarey", "beatport", "jiosaavn",
+    "wrapper", "lite", "watchlist", "release", "guest", "stats", "tunnel",
+    "ngrok", "tokens", "startup", "queue", "meta", "isrc", "csrf",
+)
+
+
+def _svc_of(line: str) -> str:
+    m = _SVC_RE.match(line)
+    if not m:
+        return ""
+    name = m.group(1).lower().split(":", 1)[0]
+    return name if name in _KNOWN_SERVICES else ""
+
+
+# ── Persistent console log → logs/console.log (rotating) ──────────────────────
+# broadcast() is the single chokepoint EVERY console line passes through (stdout
+# tee → _stdout_pump → broadcast, plus direct ilog/log/engine-event broadcasts),
+# so tee-ing "log" messages to disk here captures the FULL real-time console
+# stream. This is what a remote tester sends us — the in-memory buffers (_LOG_TAIL,
+# the browser ring buffer) die with the window, so without this we're blind to
+# anything that scrolled off or happened before a screenshot.
+import logging as _logging
+from logging.handlers import RotatingFileHandler as _RotatingFileHandler
+
+_CONSOLE_LOG_PATH = BASE_DIR / "logs" / "console.log"
+_console_file_logger = None
+
+
+def _init_console_file_logger():
+    global _console_file_logger
+    try:
+        (BASE_DIR / "logs").mkdir(parents=True, exist_ok=True)
+        lg = _logging.getLogger("ripster.console")
+        lg.setLevel(_logging.DEBUG)
+        lg.propagate = False
+        if not lg.handlers:
+            h = _RotatingFileHandler(_CONSOLE_LOG_PATH, maxBytes=5_000_000,
+                                     backupCount=3, encoding="utf-8")
+            h.setFormatter(_logging.Formatter("%(message)s"))
+            lg.addHandler(h)
+        _console_file_logger = lg
+        lg.info(f"\n===== console log opened {datetime.now():%Y-%m-%d %H:%M:%S} "
+                f"| Ripster {RELEASE_VERSION} =====")
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[startup] console file logger init failed: {e}", flush=True)
+
+
+_init_console_file_logger()
+
+
+def _console_file_write(msg: dict) -> None:
+    """Append one console line to logs/console.log. Best-effort, never raises."""
+    lg = _console_file_logger
+    if lg is None:
+        return
+    try:
+        ts   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        svc  = msg.get("service") or ""
+        lvl  = (msg.get("level") or "info").upper()
+        text = msg.get("text") or msg.get("msg") or ""
+        lg.info(f"{ts} {lvl:<5} {('['+svc+'] ') if svc else ''}{text}")
+    except Exception:
+        pass
+
+
+class _StdoutTee:
+    """Mirror stdout writes line-by-line into a bounded deque AND the real tty."""
+    def __init__(self, original):
+        self._orig = original
+        self._buf  = ""
+
+    def write(self, s):
+        if self._orig is not None:
+            try: self._orig.write(s)
+            except Exception: pass
+        if not isinstance(s, str):
+            return len(s) if s is not None else 0
+        self._buf += s
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            line = line.rstrip("\r")
+            if line.strip():
+                svc = _svc_of(line)
+                _LOG_TAIL.append((svc, line))
+                _LOG_HISTORY.append((time.time(), svc, line))
+        return len(s)
+
+    def flush(self):
+        try:
+            if self._orig is not None: self._orig.flush()
+        except Exception: pass
+
+    def isatty(self):
+        return bool(self._orig and getattr(self._orig, "isatty", lambda: False)())
+
+    def __getattr__(self, name):
+        # Pass-through unknown attribute lookups to the real stdout — uvicorn /
+        # libraries occasionally peek at fileno(), buffer, encoding etc.
+        return getattr(self._orig, name)
+
+
+if not isinstance(_sys.stdout, _StdoutTee):
+    _sys.stdout = _StdoutTee(_sys.stdout)
+
+
+async def _stdout_pump():
+    """Drain captured stdout lines and broadcast each to all WS clients."""
+    while True:
+        try:
+            await asyncio.sleep(0.4)
+            n = 0
+            while _LOG_TAIL and n < 120:        # cap per-tick burst
+                svc, text = _LOG_TAIL.popleft()
+                lvl = "error" if "error" in text.lower() or "✗" in text \
+                      else "warn" if "warn" in text.lower() or "⚠" in text \
+                      else "info"
+                try:
+                    await broadcast({
+                        "type":    "log",
+                        "level":   lvl,
+                        "service": svc,
+                        "text":    text,
+                    })
+                except Exception:
+                    pass
+                n += 1
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            # Never let the pump die — it's the only path stdout→UI.
+            await asyncio.sleep(1.0)
+
+
+async def _ws_heartbeat():
+    """Emit a tiny periodic ping to every WS client.
+
+    The client's health watchdog (static/js/app.js) treats an OPEN socket that
+    has been SILENT for >45 s as half-open and force-cycles it. When the app is
+    idle — or stuck in a long silent decrypt/tagging window — no
+    events flow, so without this the status flaps Connected↔Disconnected every
+    ~45 s (and the queue UI churns mid-download). A 20 s ping keeps the
+    watchdog's last-message clock fresh on healthy sockets, so it only ever
+    fires on a genuinely dead connection. `type: "ping"` is ignored by the
+    client switch (and not persisted/logged by broadcast)."""
+    while True:
+        try:
+            await asyncio.sleep(20)
+            if _ws_broker.clients:
+                await broadcast({"type": "ping"})
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            await asyncio.sleep(5)
+
+
+async def broadcast(msg: dict):
+    """Fan a message out to every WS client through the broker. Per-client
+    queues mean a slow client never blocks the others — see ws_broker.py.
+    Guest clients get a filtered/owned-only view."""
+    if msg.get("type") == "log":
+        if "text" not in msg and "msg" in msg:
+            msg = {**msg, "text": msg["msg"]}
+        # SECRET-REDACT at the single chokepoint → covers the live WS console, the
+        # persistent console.log AND telemetry in one place. Engines (e.g. streamrip
+        # DEBUG) can echo a Qobuz user_auth_token / ARL / bearer into a log line;
+        # redact() strips them here so they never reach a screen, disk or owner.
+        try:
+            from ripster import telemetry as _tlm
+            msg = {k: (_tlm.redact(v) if k in ("text", "msg") and isinstance(v, str) else v)
+                   for k, v in msg.items()}
+        except Exception:
+            pass
+        _console_file_write(msg)               # persist the full stream to disk
+        try:                                   # forward warn/error to the owner (tester builds)
+            from ripster import telemetry as _tlm
+            _tlm.record(msg.get("level", "info"), msg.get("text", ""))
+        except Exception:
+            pass
+    if msg.get("type") == "queue_update":
+        save_pending_queue()
+    msg_type = msg.get("type", "")
+    _pair_mode = None
+    if _ws_paired_phones:
+        try:
+            from ripster.routes import pairing as _pr
+            _pair_mode = _pr._state.get("mode", "mirror")
+        except Exception:
+            _pair_mode = "mirror"
+    for ws in _ws_broker.clients:
+        if ws in _ws_paired_phones:
+            # Paired phone — fan-out governed by the pair's mode.
+            # `pair_mode` always reaches it so the phone can reflect a switch
+            # made from the desktop side.
+            if msg_type == "pair_mode" or _pair_mode in ("mirror", "initiator"):
+                _ws_broker.enqueue(ws, msg)
+            # isolation → phone gets nothing else over /ws
+            continue
+        sid = _ws_guest_sids.get(ws)
+        if sid is None:
+            _ws_broker.enqueue(ws, msg)
+            continue
+        # Guest client — filtered, own-tasks-only, ALLOWLIST by default (see
+        # security.py for why: a blocklist leaks every new owner-sensitive
+        # event type until someone remembers to add it here).
+        if msg_type in _GUEST_BLOCKED_TYPES:
+            continue
+        if msg_type == "queue_update":
+            _ws_broker.enqueue(ws, {**msg, "queue": _guest_queue_view(sid)})
+        elif msg_type in ("log", "progress", "dl_counter"):
+            task_id = msg.get("task_id") or msg.get("id")
+            if task_id and _guest_owns_task(task_id, sid):
+                _ws_broker.enqueue(ws, msg)
+        elif msg_type == "sc_fallback_added":
+            task_id = msg.get("origin_task_id") or msg.get("new_task_id")
+            if task_id and _guest_owns_task(task_id, sid):
+                _ws_broker.enqueue(ws, msg)
+        elif msg_type in ("bbc_dl_start", "bbc_dl_progress", "bbc_dl_done"):
+            # These run outside the task queue (ad-hoc subprocess, no task_id),
+            # so ownership is stamped directly on the message by the route
+            # that started the download (see ripster/routes/bbc.py). Never
+            # forward one whose session_id is "" (owner-triggered) or belongs
+            # to a different guest.
+            if msg.get("session_id") == sid:
+                _ws_broker.enqueue(ws, {k: v for k, v in msg.items() if k != "session_id"})
+        elif msg_type == "guest_link_revoked":
+            try:
+                from ripster.guest_manager import get_manager as _gm_fn
+                link = _gm_fn().get_session(sid)
+                if link and link.get("token") == msg.get("token"):
+                    _ws_broker.enqueue(ws, {"type": "session_revoked"})
+            except Exception:
+                pass
+        elif msg_type in ("queue_done", "ping"):
+            # No payload, nothing user- or owner-specific — safe to fan out as-is.
+            _ws_broker.enqueue(ws, msg)
+        # Everything else (new/unlisted types) is DENIED by default — add an
+        # explicit branch above if a future feature needs guests to see it.
+
+
+async def log(text: str, level: str = "info"):
+    ts = datetime.now().strftime("%H:%M:%S")
+    await broadcast({"type": "log", "text": f"[{ts}] {text}", "level": level})
+
+
+def queue_snapshot():
+    """Очередь так, как её видит человек.
+
+    Запланированная запись BBC-эфира ЗДЕСЬ НЕ ПОКАЗЫВАЕТСЯ. Она не качается и
+    не ждёт своей очереди — она ждёт своего ЧАСА, иногда несколько суток, и
+    висеть всё это время среди работающих задач ей незачем: запланируй пять
+    эфиров на неделю, и очередь превратится в доску объявлений.
+
+    Задача при этом продолжает существовать — её просто не видно. Когда час
+    настанет, `bbc_schedule.fire()` переведёт её в обычное состояние, и она
+    появится здесь сама, с прогрессом, историей и отдачей в бот, ничем не
+    отличаясь от остальных. Живёт и отменяется она на вкладке BBC, где её и
+    планировали; там же остаётся честный вердикт «пропущен», если машина
+    стояла в её час (см. `bbc_schedule._miss`).
+    """
+    from ripster.task_view import public_task
+    return [public_task(t) for t in queue if t.get("status") != TaskStatus.SCHEDULED.value]
+
+
+
+# ── FastAPI ────────────────────────────────────────────────────────────────────
+_STATIC_DIR = BASE_DIR / "static"
+_INDEX_HTML = _STATIC_DIR / "index.html"
+_HTML_FALLBACK = (
+    "<!DOCTYPE html><html><body style=\"font-family:system-ui;padding:40px;max-width:600px;margin:0 auto\">"
+    "<h1 style=\"color:#fc3c44\">Ripster UI</h1>"
+    "<p>Frontend file <code>static/index.html</code> is missing.</p>"
+    "</body></html>"
+)
+
+def _load_html_page() -> str:
+    if _INDEX_HTML.exists():
+        try:
+            return _INDEX_HTML.read_text(encoding="utf-8")
+        except Exception as _e:
+            print(f"[html] cannot read {_INDEX_HTML}: {_e}", flush=True)
+    return _HTML_FALLBACK
+
+HTML_PAGE = _load_html_page()
+
+
+async def _startup_sync_orpheus() -> None:
+    try:
+        from ripster.routes.setup import _sync_orpheus_username
+        await _sync_orpheus_username()
+        print("[startup] OrpheusDL username sync done", flush=True)
+    except Exception as _e:
+        print(f"[startup] OrpheusDL username sync skipped: {_e}", flush=True)
+
+
+async def _apple_bearer_keeper() -> None:
+    """Keep config's Apple developer bearer (authorization-token) a WORKING one.
+
+    Two independent things can leave a dead bearer in config.yaml:
+      · Apple rotates the public music.apple.com dev token — the value the
+        browser extension harvests (iss M62YD85FTQ) gets revoked globally, and
+        the extension keeps pushing that same dead token back via `token_update`;
+      · `_harvest_wrapper_token()` only runs when Ripster itself STARTS the
+        wrapper container, so an already-running wrapper never refreshes it.
+    The Go downloader (apple-music-downloader.exe) reads authorization-token
+    straight from config.yaml, so a dead one there = every Apple download 401s
+    with a silent "Failed to get album response" (03.09.2026 outage).
+
+    This keeper probes the current bearer against the catalog API; if it fails,
+    it pulls the wrapper's user-scoped MusicKit token (iss UDK28SN10P — survives
+    the public rotation) from :30020 into config and persists. Cheap: one probe
+    every 30 min, a sync only when the probe fails."""
+    try:
+        from ripster.routes import apple_auth as _aa
+    except Exception as _e:
+        print(f"[apple-bearer] keeper not started: {_e}", flush=True)
+        return
+    loop = asyncio.get_event_loop()
+    first = True
+    while True:
+        await asyncio.sleep(6 if first else 1800)
+        first = False
+        try:
+            bearer = (config.get("authorization-token") or "").strip()
+            if await loop.run_in_executor(None, _apple_bearer_ok, bearer):
+                continue                       # current token still works
+            await loop.run_in_executor(None, _aa.sync_mut_from_wrapper)
+            new_bearer = (config.get("authorization-token") or "").strip()
+            if new_bearer != bearer and await loop.run_in_executor(None, _apple_bearer_ok, new_bearer):
+                print("[apple-bearer] config token was rejected by Apple — "
+                      "replaced with the wrapper's MusicKit token", flush=True)
+                if 'broadcast' in globals():
+                    try:
+                        await broadcast({"type": "wrapper_log",
+                                         "text": "🍎 Apple bearer обновлён из враппера — загрузки снова работают"})
+                    except Exception:
+                        pass
+            elif not new_bearer or new_bearer == bearer:
+                print("[apple-bearer] config token rejected AND wrapper gave no "
+                      "usable replacement (wrapper down / not logged in)", flush=True)
+        except Exception as _e:
+            print(f"[apple-bearer] keeper tick failed: {type(_e).__name__}: {_e}", flush=True)
+
+
+def _apple_bearer_ok(bearer: str) -> bool:
+    """True if `bearer` is accepted by the Apple catalog API (cheap HEAD-ish GET)."""
+    if not bearer or len(bearer) < 100:
+        return False
+    try:
+        import httpx
+        r = httpx.get("https://amp-api.music.apple.com/v1/catalog/us/albums/1440857781",
+                      headers={"Authorization": f"Bearer {bearer}",
+                               "Origin": "https://music.apple.com"},
+                      timeout=8.0)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _watchlist_check_task
+    _metadata.install(
+        config, broadcast, save_config, _detect_service,
+        spotify_token_getter=_spotify.get_access_token,
+        queue_snapshot_fn=queue_snapshot,
+    )
+    _setup.install(config, broadcast, save_config, BASE_DIR, IS_WINDOWS)
+    _amd.install(config, broadcast, save_config, BASE_DIR, IS_WINDOWS)
+    _watchlist_check_task = asyncio.create_task(_watchlist_loop())
+
+    saved = load_pending_queue(QUEUE_FILE)
+    if saved:
+        queue.extend(saved)
+        # deemix-style: the list keeps finished tasks too (for the record), so only
+        # spin up the runner when there's actually something queued to resume —
+        # a list of only-done tasks should restore silently, not restart the queue.
+        _n_resume = sum(1 for t in saved if t.get("status") == "queued")
+        print(f"[queue] restored {len(saved)} task(s) from previous session "
+              f"({_n_resume} to resume)", flush=True)
+        if _n_resume:
+            _qs.start()
+            asyncio.create_task(process_queue())
+
+    # Отложенные записи BBC: у каждого живого плана обязана быть карточка в
+    # очереди (файл планов переживает и перезапуск, и чистку очереди), и должен
+    # жить цикл, который переводит наступившие планы в queued.
+    try:
+        _n_sched = await _bbc_sched.restore()
+        if _n_sched:
+            print(f"[bbc-schedule] restored {_n_sched} scheduled recording(s)", flush=True)
+        asyncio.create_task(_bbc_sched.run_loop())
+    except Exception as _e:
+        print(f"[bbc-schedule] wiring error: {type(_e).__name__}: {_e}", flush=True)
+
+    # Предзаказы: планы «докачать после выхода» живут в preorder_waits.json и
+    # переживают перезапуск (та же форма, что у bbc_schedule: карточек в
+    # очереди нет, наступивший план цикл сам ставит обычной задачей).
+    # Проспанные за простой окна не теряются — первый тик снимает их в очередь.
+    try:
+        asyncio.create_task(_preorder_waits.run_loop())
+    except Exception as _e:
+        print(f"[preorder] wiring error: {_e}", flush=True)
+
+    asyncio.create_task(_startup_sync_orpheus())
+    asyncio.create_task(_apple_bearer_keeper())
+    asyncio.create_task(_soundcloud_routes._prewarm_client_id())
+    # Внешнее окно плеера: если хозяйская кука окна села, панель поднимает
+    # файл-флаг «reauth» — сервер отвечает новым разовым пропуском. Без этого
+    # окно с истёкшим допуском молчит до перезапуска Рипстера.
+    try:
+        _player_window_routes.start_reauth_watcher()
+    except Exception as _e:
+        print(f"[player-window] reauth watcher wiring error: {_e}", flush=True)
+    # Сторож: поднимает упавший сервис сам. Первая проверка через 10 с,
+    # попыток мало и они дорожают, а при причине, которую перезапуск не
+    # лечит (лимит устройств Apple), не трогает вовсе — ripster/watchdog.py.
+    try:
+        from ripster import watchdog as _wd
+        _wd.install(config, broadcast)
+        asyncio.create_task(_wd.run())
+    except Exception as _e:
+        print(f'[сторож] не запущен: {type(_e).__name__}: {_e}', flush=True)
+    # Auto-start the serveo tunnel when remote access is enabled (no-op otherwise).
+    try:
+        asyncio.create_task(_guest_routes.auto_start_tunnel())
+    except Exception as _e:
+        print(f"[tunnel] auto-start wiring error: {_e}", flush=True)
+    # Start the stdout→WS pump so every print() reaches the UI console.
+    asyncio.create_task(_stdout_pump())
+    # Periodic WS heartbeat so the client watchdog doesn't false-trip on an idle
+    # or silently-downloading socket (status flapping Connected↔Disconnected).
+    asyncio.create_task(_ws_heartbeat())
+    # Diagnostics telemetry forwarder (tester builds → owner). No-op when disabled.
+    try:
+        asyncio.create_task(_telemetry.run_forwarder())
+    except Exception as _e:
+        print(f"[telemetry] forwarder wiring error: {_e}", flush=True)
+
+    # Time-based disk cleanup: delete finished release folders N minutes after
+    # completion (auto-delete-minutes config, 0 = off). Keeps the disk from
+    # filling up — cache-channel copies on Telegram are unaffected.
+    try:
+        from ripster import auto_cleanup as _auto_cleanup
+        asyncio.create_task(_auto_cleanup.run(config))
+    except Exception as _e:
+        print(f"[autodelete] wiring error: {_e}", flush=True)
+
+    # Autonomous Spotify Bearer keeper: mints a fresh web-player token from the
+    # durable librespot blob when the browser extension is idle (overnight), so
+    # OGG downloads stop dying with "token expired (401)". No-op without a blob.
+    try:
+        from ripster import spotify_token_keeper as _sp_keeper
+        asyncio.create_task(_sp_keeper.run(config, BASE_DIR))
+    except Exception as _e:
+        print(f"[sp-keeper] wiring error: {_e}", flush=True)
+
+    # Периодический обход учёток. Пробы живости существовали для каждого
+    # сервиса, но запускались только по кнопке — то есть обхода не было вовсе.
+    # Из-за этого про кончившуюся подписку узнавали в момент падения загрузки.
+    try:
+        from ripster import accounts_watch as _acc_watch
+        asyncio.create_task(_acc_watch.run(config, BASE_DIR))
+    except Exception as _e:
+        print(f"[accounts-watch] wiring error: {_e}", flush=True)
+
+    # Download canary: раз в 3 часа КАЧАЕТ по одному короткому треку каждого
+    # настроенного сервиса через собственный путь задач (runner.run_task) и
+    # проверяет файл. 24.09.2026 Apple 12 часов отвечала Invalid CKC на всё —
+    # службы «отвечали», а скачать было нельзя ничего; probe-all это пропускает,
+    # canary — нет. Часы (последний проход) живут в C:\dev\LOG, поэтому
+    # рестарт не обнуляет расписание (урок 09.08 с watchlist).
+    try:
+        from tools import download_canary as _canary
+        asyncio.create_task(_canary.run_loop(config, BASE_DIR))
+    except Exception as _e:
+        print(f"[canary] wiring error: {_e}", flush=True)
+
+    # Самоаудит однофамильцев: раз в сутки (и сразу, если правила с прошлого
+    # запуска менялись) перебрать весь склад текущими доказательствами —
+    # спрятать то, что теперь не проходит, и ВЕРНУТЬ то, что прежнее правило
+    # спрятало по ошибке. Дверь судит при чтении, но отметка «скрыто» с подписки
+    # сама не снимается: без этого прогона «вылечили алгоритм» не означает, что
+    # залеченные раньше релизы вернулись.
+    try:
+        from ripster import namesake_audit as _ns_audit
+        _ns_audit.configure(BASE_DIR)
+        asyncio.create_task(_ns_audit.run_loop(watchlist, save_watchlist, BASE_DIR))
+    except Exception as _e:
+        print(f"[namesake] wiring error: {_e}", flush=True)
+
+    # Предзаказы Bandcamp/Beatport по watched-лейблам: круговой обход по
+    # несколько имён за проход, складывает найденное в тот же склад
+    # `upcoming_store.json`, что читает радар грядущего. В ответ радара сбор не
+    # вынесен — страница Bandcamp медленная, а правило вежливости (не чаще
+    # запроса в 2 с) превратило бы открытие вкладки в получасовое ожидание.
+    try:
+        from ripster import upcoming_watch as _upw
+        asyncio.create_task(_upw.run_loop(config, BASE_DIR, watchlist))
+    except Exception as _e:
+        print(f"[preorders] wiring error: {_e}", flush=True)
+
+    # Deferred "restart when guests idle" watcher (no-op until staged via
+    # /api/admin/restart-when-idle).
+    try:
+        asyncio.create_task(_idle_restart_watcher())
+    except Exception as _e:
+        print(f"[idle-restart] wiring error: {_e}", flush=True)
+
+    # Stats DB init + import existing history
+    try:
+        from ripster import stats_collector as _sc
+        _sc.init_db()
+        _sc.import_history(download_history)
+        print(f"[stats] DB ready, imported {len(download_history)} history entries", flush=True)
+    except Exception as _e:
+        print(f"[stats] init error: {_e}", flush=True)
+
+    yield
+    if _watchlist_check_task:
+        _watchlist_check_task.cancel()
+    # Штатное выключение (Ctrl+C, сигнал) — единственный путь, который сюда
+    # доходит: перезапуски уходят через os._exit и гасят туннель у себя.
+    try:
+        from ripster.routes.guest import stop_for_restart as _stop_tunnel
+        _stop_tunnel()
+    except Exception:
+        pass
+
+
+app = FastAPI(title="Ripster", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:7799", "http://127.0.0.1:7799"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# Defense in depth against DNS-rebinding for side-effect GETs that don't go
+# through the CORS/CSRF Origin check (that check only guards mutations and
+# cross-site response reads). A plain Starlette TrustedHostMiddleware can't
+# cover this: besides serveo/cloudflared (static wildcard suffixes below),
+# guest.py also supports ngrok (ngrok-auto defaults True — see
+# ripster/ngrok_service.py) whose free-tier domain we CAN wildcard, but whose
+# paid `--domain` mode points at an arbitrary owner-chosen hostname read from
+# config["public-url"] at runtime — no static suffix can match that. So this
+# checks the static list first, then falls back to comparing Host against
+# the CURRENT public-url's hostname, read live from config on every request
+# (cheap — no I/O) so it tracks tunnel restarts/reconfiguration without an
+# app restart.
+_TRUSTED_HOST_STATIC   = {"127.0.0.1", "localhost"}
+_TRUSTED_HOST_SUFFIXES = (
+    "serveousercontent.com", "serveo.net", "trycloudflare.com",
+    "ngrok-free.app", "ngrok.app", "ngrok.io",
+)
+
+def _host_is_trusted(host: str) -> bool:
+    host = (host or "").split(":")[0].lower()   # strip port, same as TrustedHostMiddleware
+    if not host:
+        return False
+    if host in _TRUSTED_HOST_STATIC:
+        return True
+    # Private-range / loopback IP literals. The PC↔phone pairing bridge needs the
+    # phone to reach this box by its LAN address (or 10.0.2.2, the Android
+    # emulator's alias for the host loopback) — none of which are "trusted
+    # names". Safe: the server binds loopback/LAN only, so a public attacker
+    # can't present these as a genuine Host, and 127.0.0.1 was already trusted.
+    try:
+        import ipaddress
+        _ip = ipaddress.ip_address(host)
+        if _ip.is_private or _ip.is_loopback or _ip.is_link_local:
+            return True
+    except ValueError:
+        pass
+    if any(host == s or host.endswith("." + s) for s in _TRUSTED_HOST_SUFFIXES):
+        return True
+    pub = (config.get("public-url") or "").strip()
+    if pub:
+        pub_host = urlparse(pub if "://" in pub else f"https://{pub}").hostname
+        if pub_host and host == pub_host.lower():
+            return True
+    return False
+
+class _TrustedHostASGIMiddleware:
+    """Raw ASGI (not BaseHTTPMiddleware) so it covers "websocket" scope too —
+    BaseHTTPMiddleware only intercepts "http", which would leave /ws
+    completely unchecked. Mirrors starlette.middleware.trustedhost's own
+    scope-type handling, just with a dynamic host check instead of a fixed list."""
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        headers = Headers(scope=scope)
+        if _host_is_trusted(headers.get("host", "")):
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+        else:
+            response = Response("Invalid host header", status_code=400)
+            await response(scope, receive, send)
+
+app.add_middleware(_TrustedHostASGIMiddleware)
+if _STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
+
+from ripster import auth as _app_auth
+_app_auth.install(app, config, save_config)
+
+from ripster.guest_manager import get_manager as _get_guest_manager
+_guest_mgr = _get_guest_manager()
+_app_auth.set_guest_checker(lambda r: _guest_mgr.is_guest_request(r))
+_app_auth.add_public_path("/api/session-info")
+_app_auth.add_public_path("/api/ping")
+# Перечитывание конфига с диска. Пароль тут не защита, а помеха: зовёт его
+# сторож здоровья из СОСЕДНЕГО процесса, у которого пароля владельца нет и
+# быть не должно. Сам маршрут пускает только петлю (см. routes/core.py), то
+# есть доступ к нему равносилен доступу к машине.
+_app_auth.add_public_path("/api/config/reload")
+
+
+# Unauthenticated liveness/identity probe. The launcher hits this to tell OUR
+# server apart from a foreign app squatting the port (so it can pick a free port
+# instead of opening a window onto the wrong app). Returns no secrets.
+@app.get("/api/ping")
+async def _ping():
+    return {"app": "ripster", "version": RELEASE_VERSION}
+
+
+@app.get("/api/selfcheck")
+async def _selfcheck(force: int = 0):
+    """Результат самопроверки связей — тот же, что печатается в консоль при
+    запуске. Интерфейс показывает его в своей консоли: отчёт, который видит
+    только тот, кто запускал из терминала, половине пользователей недоступен."""
+    from ripster import selfcheck as _sc
+    res = _sc.run(verbose=False) if force else (_sc.last() or _sc.run(verbose=False))
+    return {"ok": all(ok for _, ok, _ in res),
+            "checks": [{"name": n, "ok": ok, "detail": d} for n, ok, d in res]}
+
+
+@app.get("/api/logs/download")
+async def _logs_download():
+    """Owner-gated: bundle the diagnostic logs into one zip the user can hand us.
+    NOT a public path (logs may contain URLs/tokens), so the app's auth gate
+    requires a valid session. Skips the huge bot.log; includes console + errors +
+    launcher + rotated console backups."""
+    import io as _io, zipfile as _zip
+    logs_dir = BASE_DIR / "logs"
+    wanted = ["console.log", "console.log.1", "console.log.2", "console.log.3",
+              "errors.log", "launcher.log", "app_err.log"]
+    buf = _io.BytesIO()
+    with _zip.ZipFile(buf, "w", _zip.ZIP_DEFLATED) as zf:
+        # errors.log lives at the repo root (runner.py writes it there), not logs/
+        for p in [BASE_DIR / "errors.log"] + [logs_dir / n for n in wanted]:
+            try:
+                if p.exists() and p.stat().st_size > 0:
+                    zf.write(p, p.name)
+            except Exception:
+                pass
+        zf.writestr("_meta.txt",
+                    f"Ripster {RELEASE_VERSION}\ngenerated {datetime.now():%Y-%m-%d %H:%M:%S}\n")
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="ripster-logs-{stamp}.zip"'},
+    )
+
+
+@app.middleware("http")
+async def _no_cache_js(request: Request, call_next):
+    response = await call_next(request)
+    path = request.url.path
+    ctype = response.headers.get("content-type", "")
+    # Never cache the JS bundles OR the HTML document. index.html itself is NOT
+    # ?v-busted, so if the browser caches it the asset version bumps inside it
+    # never take effect — the stale HTML keeps requesting the OLD ?v= and fixes
+    # appear "not applied" until a manual hard-reload. Forcing revalidation on the
+    # document means a normal reload always pulls fresh CSS/JS.
+    if path.startswith("/static/js/") and path.endswith(".js"):
+        # JS bundles are cache-busted via ?v=N in index.html, so they're safe to
+        # cache hard — this makes a normal reload INSTANT (no ~630KB re-download
+        # of all scripts every refresh, which `no-store` was forcing). A version
+        # bump changes the URL → the new file is fetched; a forgotten bump
+        # self-heals within the hour.
+        response.headers["Cache-Control"] = "public, max-age=3600"
+    elif path == "/" or "text/html" in ctype:
+        # The HTML document is NOT ?v-busted, so it MUST revalidate or stale HTML
+        # keeps requesting old ?v= and fixes appear "not applied".
+        response.headers["Cache-Control"] = "no-store, must-revalidate"
+        response.headers["Pragma"] = "no-cache"
+    return response
+
+
+# ── Rate-limit middleware (задача 088, пункт 5) ─────────────────────────────
+import time as _time_module
+from collections import defaultdict
+
+_RATE_LIMIT_BUCKETS: dict = {}
+_RATE_LIMIT_CFG = {"rate": 120.0, "burst": 40.0}
+
+def _refill_bucket(bucket: dict, now: float) -> None:
+    elapsed = now - bucket["last"]
+    bucket["tokens"] = min(_RATE_LIMIT_CFG["burst"],
+                           bucket["tokens"] + elapsed * (_RATE_LIMIT_CFG["rate"] / 60.0))
+    bucket["last"] = now
+
+@app.middleware("http")
+async def _rate_limit(request: Request, call_next):
+    client = request.client
+    if client and client.host in ("127.0.0.1", "::1", "localhost"):
+        return await call_next(request)
+    path = request.url.path
+    if path.startswith("/static/") or path == "/api/ping":
+        return await call_next(request)
+    ip = client.host if client else "unknown"
+    now = _time_module.time()
+    if ip not in _RATE_LIMIT_BUCKETS:
+        _RATE_LIMIT_BUCKETS[ip] = {"tokens": _RATE_LIMIT_CFG["burst"], "last": now}
+    bucket = _RATE_LIMIT_BUCKETS[ip]
+    _refill_bucket(bucket, now)
+    if bucket["tokens"] < 1.0:
+        from fastapi.responses import JSONResponse
+        return JSONResponse({"error": "rate_limit"}, status_code=429,
+                           headers={"Retry-After": "1"})
+    bucket["tokens"] -= 1.0
+    return await call_next(request)
+
+
+# ── Body size limit middleware (задача 088, пункт 5) ────────────────────────
+_MAX_BODY_SIZE = 2 * 1024 * 1024
+_BODY_LIMIT_EXEMPT = {"/api/upload-cookies", "/api/apple/cookies", "/api/proxy",
+                      "/api/telemetry/ingest", "/api/telemetry/crash"}
+
+@app.middleware("http")
+async def _body_size_limit(request: Request, call_next):
+    if request.method not in ("POST", "PUT", "PATCH"):
+        return await call_next(request)
+    path = request.url.path
+    if path in _BODY_LIMIT_EXEMPT or path.startswith("/api/upload"):
+        return await call_next(request)
+    cl = request.headers.get("content-length")
+    if cl:
+        try:
+            if int(cl) > _MAX_BODY_SIZE:
+                from fastapi.responses import JSONResponse
+                return JSONResponse({"error": "body_too_large"}, status_code=413)
+        except ValueError:
+            pass
+    return await call_next(request)
+
+
+@app.middleware("http")
+async def _security_headers(request: Request, call_next):
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    csp_parts = [
+        "default-src 'self'",
+        "script-src 'self' 'unsafe-inline'",
+        "style-src 'self' 'unsafe-inline'",
+        "img-src 'self' data: blob: https:",
+        "font-src 'self' data:",
+        "media-src 'self' blob: data: https:",
+        "worker-src 'self' blob:",
+        "connect-src 'self' https: ws: wss:",
+        "frame-ancestors 'none'",
+        "object-src 'none'",
+        "base-uri 'self'",
+    ]
+    response.headers["Content-Security-Policy"] = "; ".join(csp_parts)
+    if "server" in response.headers:
+        del response.headers["server"]
+    return response
+
+
+@app.middleware("http")
+async def _guest_guard(request: Request, call_next):
+    path = request.url.path
+    if _guest_mgr.is_guest_request(request):
+        if any(path == p or path.startswith(p) for p in _GUEST_BLOCKED):
+            return JSONResponse(
+                {"error": "forbidden", "detail": "Not available for guests"},
+                status_code=403,
+            )
+        if request.method in ("POST", "PUT", "PATCH", "DELETE") and path == "/api/config":
+            return JSONResponse({"error": "forbidden"}, status_code=403)
+        # Least-privilege: a guest may VIEW history but must never WIPE or delete
+        # from the owner's download log (/api/history, /api/history/{id}). Mutation
+        # methods on the history routes are owner-only. (GET stays allowed.)
+        if request.method == "DELETE" and path.startswith("/api/history"):
+            return JSONResponse({"error": "forbidden",
+                                 "detail": "Not available for guests"}, status_code=403)
+    return await call_next(request)
+
+
+# ── Runner ─────────────────────────────────────────────────────────────────────
+import ripster.runner as _runner
+from ripster.app_context import AppContext
+
+_ctx = AppContext(
+    config            = config,
+    save_config       = save_config,
+    queue             = queue,
+    queue_manager     = _qs,
+    download_history  = download_history,
+    save_history      = save_history,
+    broadcast         = broadcast,
+    detect_service    = _detect_service,
+    base_dir          = BASE_DIR,
+    is_windows        = IS_WINDOWS,
+    watchlist         = watchlist,
+    save_watchlist    = save_watchlist,
+    owner_auth_fn     = _app_auth.verify_session_cookie,
+    fetch_meta        = _metadata.fetch_meta_any,
+    get_engine        = get_engine,
+    get_qualities     = get_qualities,
+    auto_fetch_bearer = _metadata.auto_fetch_bearer,
+    load_html         = _load_html_page,
+    app_info          = {"version": RELEASE_VERSION, "build": APP_BUILD,
+                         "name": "Ripster", "authors": APP_AUTHORS, "repo": APP_REPO},
+    queue_snapshot    = queue_snapshot,
+    validate_url      = _validate_url,
+    enrich_meta       = _metadata.enrich_meta,
+    default_quality   = _default_quality_for_service,
+    engine_for_svc    = _engine_for_service,
+    process_queue     = None,
+)
+_runner.install(_ctx)
+process_queue      = _runner.process_queue
+_ctx.process_queue = process_queue
+
+# ── Route modules ──────────────────────────────────────────────────────────────
+from ripster.routes import history    as _history
+from ripster.routes import watchlist  as _watchlist
+from ripster.routes import radar      as _radar
+from ripster.routes import spotify    as _spotify
+from ripster.routes import discovery  as _discovery
+from ripster.routes import premium    as _premium_routes
+from ripster.routes import releases   as _releases
+from ripster.routes import setup      as _setup_routes
+from ripster.routes import streaming  as _streaming
+from ripster.routes import auth       as _auth_routes
+from ripster.routes import core       as _core_routes
+from ripster.routes import queue      as _queue_routes
+from ripster.routes import apple_auth as _apple_auth
+from ripster.routes import bbc        as _bbc
+from ripster.routes import spectrogram as _spectrogram
+from ripster.routes import isrc        as _isrc
+from ripster.routes import guest       as _guest_routes
+from ripster.routes import download    as _download_routes
+from ripster.routes import beatport    as _beatport_routes
+from ripster.routes import stats       as _stats_routes
+from ripster.routes import soundcloud  as _soundcloud_routes
+from ripster.routes import library     as _library_routes
+from ripster.routes import admin       as _admin_routes
+from ripster.routes import ripster_coder as _coder_routes
+from ripster.routes import tagger_routes as _tagger_routes
+from ripster.routes import telemetry    as _telemetry_routes
+from ripster.routes import service_login as _service_login_routes
+from ripster.routes import digs         as _digs_routes
+from ripster.routes import pairing      as _pairing_routes
+from ripster.routes import upcoming     as _upcoming_routes
+from ripster.routes import audio        as _audio_routes
+from ripster.routes import stations     as _stations_routes
+from ripster.routes import featurefm    as _featurefm_routes
+from ripster.routes import accounts     as _accounts_routes
+from ripster import telemetry as _telemetry
+from ripster import tl1001 as _tl1001
+
+_tl1001.install(config)          # 1001Tracklists source (login optional, disk-cached)
+_history.install(app, _ctx)
+_watchlist.install(app, _ctx)
+_radar.install(app, _ctx)
+_discovery.install(app, _ctx)
+_premium_routes.install(app, _ctx)
+_digs_routes.install(app, _ctx)
+_spotify.install(app, _ctx)
+_releases.install(app, _ctx)
+_setup_routes.install(app, _ctx)
+_streaming.install(app, _ctx)
+_auth_routes.install(app, _ctx)
+_core_routes.install(app, _ctx)
+_redact_config = _core_routes._redact_config
+_queue_routes.install(app, _ctx)
+_apple_auth.install(app, _ctx)
+_bbc.install(app, _ctx)
+# Отложенная запись BBC-эфиров: хранилище планов + цикл, который поднимает
+# наступившие. Планировщик кладёт в общую очередь карточку «запланировано на …»
+# и в момент эфира переводит её в queued — дальше задачу ведёт обычный
+# process_queue, поэтому история, манифест и доставка ничем не отличаются.
+from ripster import bbc_schedule as _bbc_sched
+from ripster.bbc_schedule import ScheduledStore as _ScheduledStore
+from ripster.routes import queue as _queue_mod
+BBC_SCHEDULE_FILE = BASE_DIR / "bbc_scheduled.json"
+_bbc_sched.install(
+    store=_ScheduledStore(BBC_SCHEDULE_FILE),
+    queue=queue, qs=_qs, config=config, broadcast=broadcast,
+    process_queue=process_queue, queue_snapshot=queue_snapshot,
+    make_task=lambda *a, **k: _queue_mod._make_task(*a, **k),
+)
+from ripster import preorder_waits as _preorder_waits
+_preorder_waits.install(
+    path=BASE_DIR / "preorder_waits.json",
+    queue=queue, qs=_qs, config=config, broadcast=broadcast,
+    process_queue=process_queue, queue_snapshot=queue_snapshot,
+    make_task=lambda *a, **k: _queue_mod._make_task(*a, **k),
+)
+_spectrogram.install(app)
+_isrc.install(app, _ctx)
+_stations_routes.install(app, _ctx)
+_guest_routes.install(app, _ctx)
+_download_routes.install(app, _ctx)
+_beatport_routes.install(app, _ctx)
+_stats_routes.install(app, config, ws_clients_ref=ws_clients)
+_soundcloud_routes.install(app, _ctx)
+_library_routes.install(app, _ctx)
+_admin_routes.install(app, _ctx)
+# Несносимая история гостевых загрузок + owner-only вкладка «Гости» в админке.
+# Только в домашней сборке (в публичной нет гостей/админки) — отсюда try.
+try:
+    from ripster.routes import guest_audit as _guest_audit_routes
+    _guest_audit_routes.install(app, _ctx)
+except Exception as _e:
+    print(f"[guest-history] not installed: {_e}", flush=True)
+# Локальный Agent Tracker (C:\dev\agent-tracker, 127.0.0.1:7801) — owner-only
+# прокси /tracker для просмотра с телефона через туннель. Только в домашней
+# сборке (публичная трекер не несёт) — отсюда try.
+try:
+    from ripster.routes import tracker_proxy as _tracker_proxy_routes
+    _tracker_proxy_routes.install(app, _ctx)
+except Exception as _e:
+    print(f"[tracker-proxy] not installed: {_e}", flush=True)
+# События прослушивания станций (скипы/дослушивания/лайки/скачивания) — на них
+# станция подстраивается под вкус. Своя база stations.db, наружу ничего не шлёт.
+from ripster.routes import station_events as _station_event_routes
+_station_event_routes.install(app, _ctx)
+_coder_routes.install(app, _ctx)
+_tagger_routes.install(app, _ctx)
+_telemetry_routes.install(app, _ctx)
+# Единый вход в сервисы: кнопка открывает окно входа и сама забирает токен,
+# вместо «открой DevTools и скопируй куку» (SoundCloud/Deezer/Apple/Яндекс).
+_service_login_routes.install(app, _ctx)
+# PC↔phone pairing: handshake + service-credential handoff to the mobile app.
+_pairing_routes.install(app, _ctx)
+# Радар ГРЯДУЩЕГО: релизы, которые объявлены в прессе, но ещё не вышли.
+# Обычный радар их не видит — в каталогах сервисов их пока нет.
+_upcoming_routes.install(app, _ctx)
+_featurefm_routes.install(app, _ctx)
+_accounts_routes.install(app, _ctx)
+# Свои ключи (24.09.2026, docs/OWN_KEY_RELAY.md): /relay/* — wm.wol.moe-
+# совместимый API на хозяйских учётках; ключевая авторизация внутри самого
+# роута (публичный префикс "/relay/"), админка /api/relay/admin/* — под обычным
+# сессионным замком. По умолчанию выключено (relay-enabled).
+from ripster.routes import relay as _relay_routes
+_relay_routes.install(app, _ctx)
+# Кнопка «Открыть внешний плеер» (трекер #37): OS-окно с панелью из ЛЮБОЙ
+# вкладки — фокус живого окна, просьба лаунчеру или standalone-процесс.
+from ripster.routes import player_window as _player_window_routes
+_player_window_routes.install(app, _ctx)
+# Диагностика моста (GET /api/player-window/relay-status) смотрит в тот же
+# ретранслятор, через который живёт окно панели.
+_player_window_routes.set_relay(_rp_relay)
+# Кнопка «поднять Android-эмулятор» для хозяина: он смотрит на него с телефона
+# по удалённому доступу и раньше каждый раз звал на помощь оркестратора.
+# Только домашняя сборка (публичная SDK не несёт) — отсюда try.
+try:
+    from ripster.routes import emulator as _emulator_routes
+except Exception as _e:
+    print(f"[emulator] import failed: {_e}", flush=True)
+    _emulator_routes = None
+try:
+    _emulator_routes.install(app, _ctx)
+except Exception as _e:
+    print(f"[emulator] not installed: {_e}", flush=True)
+# Свой аудиотракт ПК: вывод локального lossless мимо микшера Windows.
+# Замер 05.09.2026: WASAPI exclusive берёт 44.1/48/96 кГц, shared — только 48,
+# то есть web-плеер физически не может отдать частоту файла без пересчёта.
+_audio_routes.install(app, _ctx)
+# Diagnostics telemetry: tester builds forward warn/error to the owner. configure()
+# mints an anon instance id; the ingest endpoint is PUBLIC (token-gated) so tester
+# builds can reach it over the tunnel. The forwarder task is started in startup.
+config["_release_version"] = RELEASE_VERSION
+_telemetry.configure(config, save_config, BASE_DIR)
+# Матрица доступности релиза по сервисам: кэш на диске, чтобы не опрашивать
+# витрины заново после каждого перезапуска.
+from ripster import availability as _availability
+_availability.configure(config, BASE_DIR)
+# Odesli — последний ход за идентификатором релиза по ссылке площадки, которую
+# наш резолвер не разбирает (YouTube, Amazon, Яндекс…). Ключ `odesli-lookup:
+# false` в конфиге выключает походы наружу целиком.
+from ripster import odesli as _odesli
+_odesli.configure(BASE_DIR, enabled=config.get("odesli-lookup", True) is not False)
+_app_auth.add_public_path("/api/telemetry/ingest")
+# Полный архив логов, который пользователь отправляет кнопкой. Тоже публичный и
+# token-gated: он приходит с чужой машины, сессии у неё быть не может.
+_app_auth.add_public_path("/api/telemetry/report")
+# Аварийные отчёты мобилки: тот же публичный ярус и те же лимиты, но ключа в
+# клиенте нет вовсе — APK тестера распаковывается дешевле, чем чинится.
+_app_auth.add_public_path("/api/telemetry/crash")
+
+# ── Hot-restart ────────────────────────────────────────────────────────────────
+def _spawn_restart(delay: float = 0.4) -> None:
+    """Restart the server. Shared by the manual restart endpoint and the idle
+    watcher.
+
+    Under the standalone launcher (Ripster.exe / ripster_launcher sets
+    RIPSTER_LAUNCHER=1) the launcher SUPERVISES us — we must ONLY exit cleanly and
+    let it respawn the server windowless. Spawning our own replacement here would
+    duel the launcher's respawn over the port → the "cmd windows keep popping"
+    loop. Standalone (dev `python app.py`) we spawn a fresh detached replacement."""
+    import subprocess, threading
+    def _do_restart():
+        time.sleep(delay)   # let any in-flight HTTP response arrive first
+        # Туннель гасим ДО выхода — почему именно так, см. guest.stop_for_restart.
+        try:
+            from ripster.routes.guest import stop_for_restart as _stop_tunnel
+            _stop_tunnel()
+        except Exception:
+            pass
+        if os.environ.get("RIPSTER_LAUNCHER") == "1":
+            os._exit(0)     # launcher respawns us (single owner, no console flash)
+            return
+        restart_env = {**os.environ, "RIPSTER_IS_RESTART": "1"}
+        # БЕЗ DETACHED_PROCESS. По документации Windows он ОТМЕНЯЕТ
+        # CREATE_NO_WINDOW: процесс остаётся вовсе без консоли. А sys.executable
+        # в венве — это перенаправитель .venv\Scripts\python.exe, который сам
+        # запускает настоящий python.exe; тому консоль наследовать не от кого,
+        # и он заводит новую ВИДИМУЮ — чёрное окно на каждый рестарт (22.09.2026
+        # их висело семь). С одним CREATE_NO_WINDOW у перенаправителя появляется
+        # консоль без окна, и её унаследуют и настоящий интерпретатор, и всё, что
+        # он потом запускает (ffmpeg, Go, OrpheusDL) — окон нет нигде.
+        subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve())] + sys.argv[1:],
+            cwd=str(BASE_DIR),
+            env=restart_env,
+            creationflags=(subprocess.CREATE_NEW_PROCESS_GROUP
+                           | getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            if IS_WINDOWS else 0,
+        )
+        os._exit(0)
+    threading.Thread(target=_do_restart, daemon=True).start()
+
+
+# When the owner stages a batch of changes but guests are mid-download, they can
+# ask for a DEFERRED restart: a watcher applies it the moment guests go idle, so
+# nobody is cut off. None = not pending.
+_restart_when_idle: bool = False
+
+
+def _guests_idle() -> bool:
+    """Safe-to-restart: no live guest sessions AND the queue isn't processing."""
+    try:
+        if _qs.is_running:
+            return False
+        if any(t.get("status") in ("running", "downloading", "queued") for t in queue):
+            return False
+        return _guest_mgr.active_session_count() == 0
+    except Exception:
+        return False
+
+
+async def _idle_restart_watcher():
+    """Apply a deferred restart as soon as guests are idle (see _restart_when_idle)."""
+    global _restart_when_idle
+    while True:
+        await asyncio.sleep(20)
+        if _restart_when_idle and _guests_idle():
+            print("[idle-restart] guests idle → applying deferred restart", flush=True)
+            _restart_when_idle = False
+            _spawn_restart()
+            return
+
+
+def _check_owner(request: Request) -> bool:
+    from ripster.auth import is_owner_request
+    from ripster.auth import is_enabled as _auth_enabled
+    if is_owner_request(request):
+        return True
+    try:
+        return not _auth_enabled()
+    except Exception:
+        return False
+
+
+@app.post("/api/admin/restart")
+async def admin_restart(request: Request):
+    if not _check_owner(request):
+        raise HTTPException(403, "Not authorized")
+    _spawn_restart()
+    return {"ok": True}
+
+
+@app.post("/api/admin/restart-when-idle")
+async def admin_restart_when_idle(request: Request, body: dict = None):
+    """Stage (or cancel) a deferred restart applied at the next guest-idle window.
+    body {cancel:true} clears it. If guests are ALREADY idle, restart right now."""
+    global _restart_when_idle
+    if not _check_owner(request):
+        raise HTTPException(403, "Not authorized")
+    if (body or {}).get("cancel"):
+        _restart_when_idle = False
+        return {"ok": True, "pending": False}
+    if _guests_idle():
+        _spawn_restart()
+        return {"ok": True, "pending": False, "restarting": True}
+    _restart_when_idle = True
+    sessions = _guest_mgr.active_session_count()
+    return {"ok": True, "pending": True,
+            "sessions": sessions, "queue_running": _qs.is_running}
+
+# ── Services status (used by search selector to hide unconfigured services) ───
+@app.get("/api/services/status")
+async def services_status(request: Request):
+    """Returns which services have credentials configured — no values exposed."""
+    eff = {}
+    try:
+        sid = _guest_mgr.get_session_id_from_request(request)
+        if sid:
+            eff = _guest_mgr.get_effective_tokens(sid, config) or {}
+    except Exception:
+        pass
+
+    def _has(key: str) -> bool:
+        return bool((eff.get(key) or config.get(key) or "").strip())
+
+    # Spotify used to be gated on `spotify-client-id` — a Developer-App key that
+    # is not involved in a single Spotify download. So a user who had signed in
+    # properly still saw Spotify as unavailable and was told to go create a
+    # Developer App (which Spotify then refuses without Premium). What actually
+    # makes Spotify usable is the librespot session; sp_dc/client-id only ever
+    # helped the legacy release scan. Checked in that order (found 31.07.2026).
+    def _spotify_available() -> bool:
+        try:
+            from ripster.engines.orpheus_spotify import is_authenticated as _sp_authed
+            if _sp_authed():
+                return True
+        except Exception:
+            pass
+        return _has("spotify-sp-dc") or _has("spotify-client-id")
+
+    own = {
+        "apple":      True,   # iTunes public API — always searchable
+        "qobuz":      _has("qobuz-auth-token"),
+        "deezer":     _has("deezer-arl"),
+        "tidal":      _has("tidal-token"),
+        "spotify":    _spotify_available(),
+        "beatport":   _has("beatport-username"),
+        "soundcloud": _has("soundcloud-oauth-token"),
+        "yandex":     _has("yandex-token"),
+        "bbc":        True,   # BBC Sounds public API — no credentials needed
+        "jiosaavn":   True,   # JioSaavn public web API — no login at all
+    }
+    # Режим источника (свои ключи / Премиум / оба): см. ripster/source_mode.py.
+    from ripster import source_mode as _sm
+    mode = _sm.effective_mode(config.get(_sm.CONFIG_KEY), own)
+    return _sm.apply_mode(mode, own, _sm.flex_active())
+
+
+# ── Watchlist periodic check ───────────────────────────────────────────────────
+_watchlist_check_task = None
+
+async def _watchlist_loop():
+    # Schedule, persistence (watchlist_schedule.json) and the opt-in NZ-Friday
+    # pass (`watchlist-nz-early`) live in watchlist.run_loop(). The first pass
+    # still resumes the clock from the last real pass instead of restarting it —
+    # otherwise a restart every few minutes means the watchlist is never checked.
+    await _watchlist.run_loop(config, lambda: watchlist)
+
+
+# ── WebSocket ──────────────────────────────────────────────────────────────────
+@app.websocket("/ws")
+async def websocket_endpoint(ws: WebSocket):
+    # Paired phone: authenticates with its device token (?pair=<token>), not the
+    # owner cookie — so /ws works from the phone even when a password is set.
+    _pair_tok = ws.query_params.get("pair", "")
+    _is_paired_phone = False
+    if _pair_tok:
+        try:
+            from ripster.routes import pairing as _pr
+            _is_paired_phone = _pr._token_valid(_pair_tok)
+        except Exception:
+            _is_paired_phone = False
+
+    if not _is_paired_phone and not _app_auth.ws_allowed(ws):
+        await ws.close(code=1008)
+        return
+    await ws.accept()
+    ws_clients.add(ws)
+    if _is_paired_phone:
+        try:
+            from ripster.routes import pairing as _pr
+            _ws_paired_phones[ws] = _pr._pc_id()
+        except Exception:
+            _ws_paired_phones[ws] = "1"
+
+    _ws_guest_sid = None if _is_paired_phone else _guest_mgr.get_session_id_from_request(ws)
+    _ws_session   = _guest_mgr.get_session(_ws_guest_sid) if _ws_guest_sid else None
+    # Only a real GUEST-mode share session gets the filtered guest queue view. An
+    # owner-mode share session — or a stale `ripster-guest` cookie the owner picked
+    # up by opening one of his own share links — must NOT downgrade the owner to the
+    # empty guest queue: that made the queue blink empty on every WS reconnect
+    # (the ongoing queue_update broadcasts carry the real queue, so it flickered
+    # gone-on-init / back-on-update, amplified by the serveo tunnel reconnecting).
+    _ws_is_guest  = bool(_ws_session and _ws_session.get("token_mode") == "guest")
+    # …UNLESS this very browser is the authenticated OWNER. Opening one of your own
+    # GUEST-mode share links leaves a `ripster-guest` cookie that otherwise
+    # downgrades the real owner to the (empty) guest queue — exactly the "bot adds
+    # a task but it never shows in Ripster" bug. A valid owner `ripster-session`
+    # always wins over a stale guest cookie.
+    if _ws_is_guest and _app_auth.is_enabled() and \
+       _app_auth.verify_session_cookie(ws.cookies.get("ripster-session", "")):
+        _ws_is_guest = False
+    if _ws_is_guest:
+        _ws_guest_sids[ws] = _ws_guest_sid
+
+    _ws_stat_row = 0
+    try:
+        from ripster import stats_collector as _sc
+        _client_ip = (ws.headers.get("x-forwarded-for") or "").split(",")[0].strip() or \
+                     (ws.client.host if ws.client else "")
+        _ws_stat_row = _sc.record_ws_connect(
+            session_id=_ws_guest_sid or "",
+            client_ip=_client_ip,
+            is_guest=_ws_is_guest,
+        )
+    except Exception:
+        _ws_stat_row = 0
+
+    def _ws_queue_snapshot():
+        if _ws_is_guest:
+            return _guest_queue_view(_ws_guest_sid)
+        return queue_snapshot()
+
+    try:
+        init_payload = {
+            "type":    "init",
+            "queue":   _ws_queue_snapshot(),
+            "running": _qs.is_running,
+            "paused":  _qs.is_paused,
+        }
+        if _ws_is_guest:
+            init_payload["config"] = {
+                "engine":     config.get("engine", "zhaarey"),
+                "quality":    config.get("quality", "alac"),
+                "storefront": config.get("storefront", "gb"),
+            }
+        else:
+            init_payload["config"] = _redact_config(config)
+        await ws.send_json(init_payload)
+        _ws_broker.register(ws)   # ongoing fan-out goes through the broker
+        # Окно панели в relay-режиме (трекер #37): представляется ролью,
+        # дальше сервер просто перекладывает rp-сообщения панель↔главная.
+        while True:
+            data = await ws.receive_json()
+            t = data.get("type")
+            if t == "rp-role":
+                if not _ws_is_guest and not _is_paired_phone:
+                    if _rp_relay.register(ws, data.get("role")):
+                        # Новый хост при живом окне: сервер сам сообщает ему про
+                        # панель и про то, активен ли он (иначе вкладка молчала
+                        # бы, пока панель не поздоровается — см. исправление 24.09).
+                        for target, payload in _rp_relay.on_register(ws):
+                            _ws_broker.enqueue(target, payload)
+                continue
+            if t == "rp":
+                if _rp_relay.role(ws) is not None:
+                    for target, payload in _rp_relay.route(ws, data.get("msg")):
+                        _ws_broker.enqueue(target, payload)
+                continue
+            if data.get("type") == "token_update" and not _ws_is_guest:
+                b = data.get("bearer")
+                m = data.get("mut")
+                if isinstance(b, str) and not b.startswith("••"):
+                    config["authorization-token"] = b
+                if isinstance(m, str) and not m.startswith("••"):
+                    config["media-user-token"] = m
+                save_config(config)
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        print(f"[ws] client dropped: {type(e).__name__}: {e}", flush=True)
+    finally:
+        # Relay-панель/хост отвалились — предупредить того, кто на них смотрел
+        # (иначе хост вечно крутит цикл «ready», а панель притворяется мостом).
+        for target, payload in _rp_relay.drop(ws):
+            _ws_broker.enqueue(target, payload)
+        _ws_broker.unregister(ws)
+        ws_clients.discard(ws)
+        _ws_guest_sids.pop(ws, None)
+        _ws_paired_phones.pop(ws, None)
+        try:
+            if _ws_stat_row:
+                from ripster import stats_collector as _sc
+                _sc.record_ws_disconnect(_ws_stat_row)
+        except Exception:
+            pass
+
+
+def _takeover_stale_server(host: str, port: int) -> bool:
+    """Make sure THIS interpreter can bind `port`, taking it over from a STALE
+    Ripster if needed.
+
+    The frozen Ripster.exe launcher (a pre-built binary, NOT shipped by self-update)
+    just *attaches* to whatever already answers on the port — so after an overlay
+    update the user kept seeing the OLD version: the previous server lingered in the
+    background (a detached restart successor, or a browser-fallback close that never
+    terminated it) and the launcher reopened onto it. This server-side guard fixes
+    that for installs that already have the old exe:
+
+      • port free                       → bind (normal first start)
+      • held by a foreign app           → leave it (uvicorn fails loudly, as before)
+      • held by an OLDER Ripster        → kill it, wait for the port, then bind
+                                          (the just-overlaid newer code wins)
+      • held by a SAME/NEWER Ripster    → stand down (a sibling won the restart race)
+
+    Returns True if the caller should proceed to bind, False if it should exit."""
+    import socket, time, json, subprocess
+    from urllib.request import urlopen
+    if host not in ("127.0.0.1", "localhost"):
+        return True                       # container 0.0.0.0 etc. — don't interfere
+
+    def _can_bind() -> bool:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            s.bind((host, port)); return True
+        except OSError:
+            return False
+        finally:
+            s.close()
+
+    if _can_bind():
+        return True
+
+    try:
+        with urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=2) as r:
+            j = json.loads(r.read() or b"{}")
+    except Exception:
+        return True                       # not answering / unknown — let uvicorn try
+    if j.get("app") != "ripster":
+        return True                       # foreign app on our port — don't touch it
+
+    other = str(j.get("version") or "")
+    try:
+        from ripster.updater import is_newer
+        newer_or_same = (other == RELEASE_VERSION) or is_newer(other, RELEASE_VERSION)
+    except Exception:
+        newer_or_same = (other == RELEASE_VERSION)
+    if newer_or_same:
+        print(f"  ↪ Ripster v{other} already live on {port} — stepping aside.", flush=True)
+        return False                      # a same/newer sibling owns it → exit cleanly
+
+    # An OLDER Ripster is squatting the port (stale after an update). Kill whatever
+    # holds it so this newer code can bind.
+    print(f"  ⟳ Replacing stale Ripster v{other} on {port} with v{RELEASE_VERSION}…", flush=True)
+    _CNW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        if os.name == "nt":
+            out = subprocess.run(["netstat", "-ano", "-p", "tcp"],
+                                 capture_output=True, text=True, creationflags=_CNW).stdout
+            pids = set()
+            for line in out.splitlines():
+                u = line.upper()
+                if f"127.0.0.1:{port} " in line and "LISTENING" in u:
+                    parts = line.split()
+                    if parts and parts[-1].isdigit():
+                        pids.add(parts[-1])
+            for pid in pids:
+                subprocess.run(["taskkill", "/F", "/T", "/PID", pid],
+                               capture_output=True, creationflags=_CNW)
+        else:
+            subprocess.run(["bash", "-c", f"fuser -k {port}/tcp"], capture_output=True)
+    except Exception as e:                                            # noqa: BLE001
+        print(f"  ⚠ could not kill stale server: {e}", flush=True)
+    for _ in range(40):                   # up to ~10 s for the port to free
+        if _can_bind():
+            return True
+        time.sleep(0.25)
+    return True                           # bind anyway; uvicorn will report if still busy
+
+
+# ── Entry point ────────────────────────────────────────────────────────────────
+if __name__ == "__main__":
+    # Host/port are env-overridable (RIPSTER_HOST / RIPSTER_PORT) so a container
+    # binds 0.0.0.0 without a code change; CLI --host/--port still take priority.
+    try:
+        port = int(os.environ.get("RIPSTER_PORT") or 7799)
+    except (TypeError, ValueError):
+        port = 7799
+    host = os.environ.get("RIPSTER_HOST") or "127.0.0.1"
+    for i, arg in enumerate(sys.argv):
+        if arg == "--host" and i + 1 < len(sys.argv):
+            host = sys.argv[i + 1]
+        if arg == "--port" and i + 1 < len(sys.argv):
+            try:
+                port = int(sys.argv[i + 1])
+            except ValueError:
+                pass
+
+    # Refuse a non-localhost bind without a password — EXCEPT inside a container,
+    # where 0.0.0.0 is the isolated container interface and the operator controls
+    # exposure via `-p 127.0.0.1:7799:7799`. A password is still strongly advised
+    # (the warning below still prints).
+    _in_docker = os.path.exists("/.dockerenv")
+    if host != "127.0.0.1" and not _app_auth.is_enabled() and not _in_docker:
+        print("─" * 68, file=sys.stderr)
+        print(f"  Refusing to bind to {host} without an app password set.", file=sys.stderr)
+        print("  Open Ripster locally first, go to Settings → Security,", file=sys.stderr)
+        print("  set a password, then restart with --host " + host + ".", file=sys.stderr)
+        print("─" * 68, file=sys.stderr)
+        sys.exit(1)
+
+    print("─" * 52)
+    print("  🎵  Ripster")
+    print(f"  ➜   http://{host}:{port}")
+    if _app_auth.is_enabled():
+        print("  🔒  Password protection: ON")
+    elif host != "127.0.0.1":
+        print("  ⚠️  Open to LAN without a password — BAD idea.")
+    print("─" * 52)
+    Path(config.get("save-path", "downloads")).mkdir(parents=True, exist_ok=True)
+    save_config(config)
+    # Самопроверка связей: ловит «всё на месте, но не соединено» — переключатель
+    # без права записи, скрипт с чужого CDN, сервис, который умеет искать и не
+    # предлагается. Работает по файлам, в сеть не ходит, занимает миллисекунды.
+    # На первом же прогоне нашла три таких расхождения (02.08.2026).
+    try:
+        from ripster import selfcheck as _sc
+        _sc.run(verbose=True)
+    except Exception as _e:
+        print(f"[самопроверка] не выполнилась: {type(_e).__name__}: {_e}", flush=True)
+    if not _takeover_stale_server(host, port):
+        sys.exit(0)                       # a same/newer Ripster already owns the port
+    uvicorn.run(app, host=host, port=port, log_level="warning")

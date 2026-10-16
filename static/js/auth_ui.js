@@ -1,0 +1,1631 @@
+// ======================================================================
+// Service login UIs + token probe + Tidal import
+// Extracted from app.js (mechanical split — same global functions, no behaviour
+// change). Loaded AFTER app.js in index.html, so it sees S/api/toast/etc.
+// ======================================================================
+
+// ── Yandex Music token — automated OAuth device flow ──────────────────────
+// Backend gets a short device code from Yandex, we show it + open ya.ru/device,
+// then poll until the user confirms; the token is saved to config server-side.
+async function yandexGetToken() {
+  const hint = document.getElementById('yandex-token-hint');
+  const set = (h) => { if (hint) hint.innerHTML = h; };
+  set(t('ya.requesting'));
+  const r = await api('POST', '/api/yandex/auth/start', {});
+  if (!r || !r.ok) { set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((r && r.error) || '?')}</span>`); return; }
+  // here:false — код подтверждения показан здесь же, уводить это окно нельзя.
+  openAuthPage(r.verification_url, t('sl.login_ya'), {here: false});
+  set(ti('dlg.enter_code', {url: esc(r.verification_url)})
+    + `<b style="font-size:15px;letter-spacing:2px;color:#ffcc00">${esc(r.user_code)}</b>`
+    + ` <span style="opacity:.7">${t('dlg.waiting')}</span>`);
+  const deadline = Date.now() + (r.expires_in || 300) * 1000;
+  const iv = Math.max(3, (r.interval || 5)) * 1000;
+  const poll = async () => {
+    if (Date.now() > deadline) { set(`<span style="color:var(--red)">${t('ya.code_expired')}</span>`); return; }
+    const p = await api('POST', '/api/yandex/auth/poll', { device_code: r.device_code });
+    if (p && p.ok && p.saved) {
+      set(`<span style="color:var(--green)">${t('ya.token_saved')}</span> ${t('ya.checking_lossless')}`);
+      if (S.config) S.config['yandex-token'] = '••••••';
+      _setSecret('s-yandex-token', '••••••');
+      // Сразу честный вердикт: даёт ли свежий токен FLAC (проба реально просит
+      // lossless у чартового трека). Иначе AAC выяснялся бы только на загрузке.
+      if (typeof testAuth === 'function') testAuth('yandex');
+      return;
+    }
+    if (p && p.ok && p.pending) { setTimeout(poll, iv); return; }
+    set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((p && p.error) || '?')}</span>`);
+  };
+  setTimeout(poll, iv);
+}
+
+// ── Tidal TV device-flow login (link.tidal.com) ───────────────────────────
+// Tidal has NO password API — only the TV device-code flow. Backend fetches a
+// device+user code, we show it + open link.tidal.com, then poll until the user
+// confirms; the session is saved server-side into OrpheusDL's loginstorage.bin.
+// Works on a fresh clone (built-in TV creds) → Tidal authenticates out of the box.
+async function tidalTvLogin() {
+  const hint = document.getElementById('tidal-tv-hint');
+  const btn = document.getElementById('tidal-tv-btn');
+  const set = (h) => { if (hint) hint.innerHTML = h; };
+  if (btn) btn.disabled = true;
+  set(t('td.requesting'));
+  const r = await api('POST', '/api/tidal/auth/start', {});
+  if (!r || !r.ok) { set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((r && r.error) || '?')}</span>`); if (btn) btn.disabled = false; return; }
+  // here:false — device-flow: код подтверждения показан здесь, окно уводить нельзя.
+  openAuthPage(r.verification_url, 'Tidal', {here: false});
+  set(ti('dlg.enter_code', {url: esc(r.verification_url)})
+    + `<b style="font-size:15px;letter-spacing:2px;color:#00d4b3">${esc(r.user_code)}</b>`
+    + ` <span style="opacity:.7">${t('dlg.waiting')}</span>`);
+  const deadline = Date.now() + (r.expires_in || 300) * 1000;
+  const iv = Math.max(2, (r.interval || 2)) * 1000;
+  const poll = async () => {
+    if (Date.now() > deadline) { set(`<span style="color:var(--red)">${t('td.code_expired')}</span>`); if (btn) btn.disabled = false; return; }
+    const p = await api('POST', '/api/tidal/auth/poll', { device_code: r.device_code });
+    if (p && p.ok && p.saved) {
+      set(`<span style="color:var(--green)">${t('td.signed_in_pre')}${p.country ? ' (' + esc(p.country) + ')' : ''}${t('td.signed_in_post')}</span>`);
+      if (btn) btn.disabled = false;
+      return;
+    }
+    if (p && p.ok && p.pending) { setTimeout(poll, iv); return; }
+    set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((p && p.error) || '?')}</span>`);
+    if (btn) btn.disabled = false;
+  };
+  setTimeout(poll, iv);
+}
+
+// ── Spotify out-of-box OGG login (librespot PKCE OAuth) ────────────────────
+// Backend runs librespot's browser OAuth flow which saves the durable blob
+// (reusable_credentials.json) the keeper + orpheus use. One click, no extension,
+// no token paste → Spotify downloads work on a fresh clone. Separate from the
+// dev-API "Подключить" (release radar) above.
+async function spotifyOggLogin() {
+  const hint = document.getElementById('sp-ogg-hint');
+  const btn = document.getElementById('sp-ogg-btn');
+  const set = (h) => { if (hint) hint.innerHTML = h; };
+  if (btn) btn.disabled = true;
+  set(t('sp.ogg_starting'));
+  const r = await api('POST', '/api/spotify/auth/start', {});
+  if (!r || !r.ok) { set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((r && r.error) || '?')}</span>`); if (btn) btn.disabled = false; return; }
+  // Ask HOW to open instead of firing a popup that WebView2 (Ripster.exe) drops
+  // silently — see openAuthPage. "Здесь" navigates away and the helper's
+  // callback page brings the browser back to Ripster, so there is nothing left
+  // to poll in this page.
+  const how = await openAuthPage(r.auth_url, t('sp.ogg_login'));
+  if (how === 'here') return;
+  if (!how) { set(t('sl.cancelled')); if (btn) btn.disabled = false; return; }
+  set(t('sp.ogg_page_opened'));
+  const deadline = Date.now() + 180 * 1000;
+  const poll = async () => {
+    if (Date.now() > deadline) { set(`<span style="color:var(--red)">${t('sp.ogg_timeout')}</span>`); if (btn) btn.disabled = false; return; }
+    const p = await api('POST', '/api/spotify/auth/status', {});
+    if (p && p.ok && p.done) { set(`<span style="color:var(--green)">${t('sp.ogg_signed_in')}</span>`); if (btn) btn.disabled = false; return; }
+    if (p && p.ok && p.pending) { setTimeout(poll, 2500); return; }
+    set(`<span style="color:var(--red)">${t('dlg.err')}: ${esc((p && p.error) || '?')}</span>`); if (btn) btn.disabled = false;
+  };
+  setTimeout(poll, 3000);
+}
+
+// Alternative: browser (implicit) OAuth — opens Yandex login; after sign-in the
+// page redirects to music.yandex.ru with the token in the URL fragment. The user
+// copies the whole URL into the paste box; yandexSaveToken extracts the token.
+function yandexBrowserToken() {
+  const url = 'https://oauth.yandex.ru/authorize?response_type=token'
+            + '&client_id=23cabbbdc6cd418abb4b39c32c41195d';
+  // here:false — после входа Яндекс отдаёт токен во фрагменте адреса, и его
+  // надо вставить обратно в поле здесь; уводить это окно нельзя.
+  openAuthPage(url, t('sl.login_ya'), {here: false});
+  const hint = document.getElementById('yandex-token-hint');
+  if (hint) hint.innerHTML = t('ya.browser_hint');
+}
+
+// Accept a pasted redirect URL / fragment / raw token → extract access_token,
+// save it server-side and reflect it in the masked token field.
+function yandexSaveToken(raw) {
+  raw = (raw || '').trim();
+  if (!raw) return;
+  let tok = '';
+  const m = raw.match(/access_token=([^&\s#]+)/i);
+  if (m) tok = decodeURIComponent(m[1]);
+  else if (!/[\s/]/.test(raw)) tok = raw;   // looks like a bare token
+  if (!tok || tok.length < 12) return;      // wait for a full paste
+  saveSetting('yandex-token', tok);
+  _setSecret('s-yandex-token', '••••••');
+  if (S.config) S.config['yandex-token'] = '••••••';
+  const hint = document.getElementById('yandex-token-hint');
+  if (hint) hint.innerHTML = `<span style="color:var(--green)">${t('ya.token_accepted')}</span>`;
+  const box = document.getElementById('s-yandex-paste');
+  if (box) box.value = '';
+}
+
+// ── Guest service info — what Ripster is + which services are available ───────
+async function showGuestServiceInfo() {
+  let status = {};
+  try { status = await (await fetch('/api/services/status')).json(); } catch(e){}
+  const names = {apple:'Apple Music',qobuz:'Qobuz',deezer:'Deezer',tidal:'Tidal',
+                 spotify:'Spotify',soundcloud:'SoundCloud',beatport:'Beatport',yandex:t('svc.yandex'),
+                 jiosaavn:'JioSaavn'};
+  const avail = Object.keys(names).filter(k => status[k]);
+  const q = ((S.config && S.config.quality) || '—');
+  const badges = avail.map(k => `<span style="font-size:11px;padding:3px 9px;border-radius:20px;background:${_svcColor(k)}22;color:${_svcColor(k)};border:1px solid ${_svcColor(k)}55">${esc(names[k])}</span>`).join(' ');
+  const ov = document.createElement('div');
+  ov.id = 'guest-info-overlay';
+  ov.style.cssText = 'position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:20px';
+  ov.onclick = () => ov.remove();
+  ov.innerHTML = `<div onclick="event.stopPropagation()" style="max-width:420px;width:100%;background:var(--surface,#15151a);border:1px solid var(--border);border-radius:14px;padding:22px 24px;box-shadow:0 20px 60px rgba(0,0,0,.55)">
+      <div style="font-family:var(--display);font-size:20px;font-weight:800;margin-bottom:10px">Raccoon <span style="color:var(--red)">Ripster</span></div>
+      <div style="font-size:13px;color:var(--muted);line-height:1.7;margin-bottom:14px">${t('au.guest_intro')}</div>
+      <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">${t('au.svc_avail')}</div>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px">${badges || '<span style="color:var(--muted)">—</span>'}</div>
+      <div style="font-size:12px;color:var(--muted)">${t('au.default_quality')} <span style="color:var(--text);font-weight:600">${esc(String(q).toUpperCase())}</span></div>
+      <button onclick="document.getElementById('guest-info-overlay').remove()" style="margin-top:16px;width:100%;padding:9px;background:var(--red);color:#fff;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--font)">${t('au.got_it')}</button>
+    </div>`;
+  document.body.appendChild(ov);
+}
+
+// Сообщение пробы на языке интерфейса.
+//
+// `auth.py` отвечает парой: `error`/`note` — готовый русский текст (его читают
+// телеграм-бот и healthcheck, они живут в русской среде) и `error_key`/`note_key`
+// с аргументами. Интерфейсу нужен ключ; русский текст остаётся запасным путём для
+// старого бэкенда и для ключа, которого ещё нет в словаре — `ti()` в этом случае
+// возвращает сам ключ, и показывать человеку `pr.qb_401` вместо фразы нельзя.
+// Аргумент сам может быть ключом: «расшифровка недоступна: {why}», где {why} —
+// отдельная фраза («локальный wrapper не отвечает…»). Без разворота переведён
+// был бы только каркас, а суть осталась бы русской.
+function _probeMsg(d, field){
+  const key = d && d[field + '_key'];
+  if (key) {
+    const args = Object.assign({}, d[field + '_args'] || {});
+    for (const k of Object.keys(args)) {
+      if (!k.endsWith('_key')) continue;
+      const base = k.slice(0, -4);
+      const sub = ti(args[k], args[base + '_args'] || {});
+      if (sub && sub !== args[k]) args[base] = sub;
+      delete args[k]; delete args[base + '_args'];
+    }
+    const s = ti(key, args);
+    if (s && s !== key) return s;
+  }
+  return (d && d[field]) || '';
+}
+
+// ── Token probe: show live auth status for Qobuz/Tidal/Deezer ─────────────
+async function testAuth(service){
+  // Apple и Spotify показывают результат пробы в ДВУХ местах (внутри блока
+  // токенов и в нижней строке «Сохранить / Проверить»). Раньше оба <div> носили
+  // один и тот же id, а getElementById возвращает только первый — у Spotify это
+  // блок внутри свёрнутой секции, поэтому человек жал «Проверить» внизу и не
+  // видел вообще ничего. Пишем во все блоки сервиса.
+  const outs = Array.from(document.querySelectorAll('.test-auth-out[data-svc="' + service + '"]'));
+  const out = outs.length ? {
+    set textContent(v){ outs.forEach(e => e.textContent = v); },
+    set innerHTML(v){ outs.forEach(e => e.innerHTML = v); },
+    get style(){ return { set color(v){ outs.forEach(e => e.style.color = v); } }; },
+  } : document.getElementById('test-auth-' + service);
+  // Tidal's real "is it connected" signal belongs in the prominent Quick Login
+  // box (#tidal-tok-expiry), not just the collapsed "manual tokens" fallback
+  // that most people using device-flow login never open — mirror the same
+  // result into both.
+  const liveOut = service === 'tidal' ? document.getElementById('tidal-tok-expiry') : null;
+  if(out){ out.textContent = t('s.checking'); out.style.color = 'var(--muted)'; }
+  if(liveOut){ liveOut.textContent = t('s.checking'); liveOut.style.color = 'var(--muted)'; }
+  try {
+    const r = await fetch('/api/test-auth/' + service, {method: 'POST'});
+    const d = await r.json().catch(()=>({ok:false,error:t('s.bad_response')}));
+    if(d.ok) {
+      const u = d.user || {};
+      // Tidal's country is auto-detected live from the account — no reason to
+      // make the user type it in by hand; keep the field (and config) in sync.
+      if(service === 'tidal' && u.country) {
+        const cc = String(u.country).toUpperCase();
+        const ccInput = document.getElementById('s-tidal-country');
+        if(ccInput && ccInput.value !== cc) ccInput.value = cc;
+        if(S.config && S.config['tidal-country'] !== cc) saveSetting('tidal-country', cc);
+      }
+      const parts = [];
+      if(u.country) parts.push(`<span style="font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,.08);color:var(--muted);letter-spacing:.5px;vertical-align:middle">${esc(u.country)}</span>`);
+      if(u.hires === true)         parts.push('<span style="color:#ffd60a;font-weight:700">Hi-Res ✓</span>');
+      else if(u.lossless === true) parts.push('<span style="color:var(--green);font-weight:700">Lossless ✓</span>');
+      else if(u.hq === true)       parts.push('<span style="color:var(--orange);font-weight:700">HQ ✓</span>');
+      if(u.expiry) parts.push(`<span style="color:var(--muted)">${ti('s.until',{date:esc(u.expiry)})}</span>`);
+      if(u.sub_offer) parts.push(`<span style="color:var(--muted)">${esc(u.sub_offer)}</span>`);
+      if(u.sub_end){
+        const dl = u.sub_days_left;
+        const col = u.sub_expired ? 'var(--red)' : (dl!=null && dl<=14) ? 'var(--orange)' : 'var(--green)';
+        const left = (dl!=null) ? (u.sub_expired ? ` ${t('s.sub_expired')}` : ` · ${ti('s.sub_days',{n:dl})}`) : '';
+        parts.push(`<span style="color:${col};font-weight:600">${ti('s.sub_until',{date:esc(u.sub_end)})}${left}</span>`);
+      }
+      const _note = _probeMsg(u, 'note');
+      if(_note) parts.push(`<span style="color:var(--muted)">${esc(_note)}</span>`);
+      const tag = parts.length ? ' &nbsp;' + parts.join(' · ') : '';
+      const _lbl = (typeof _svcLabel === 'function' ? _svcLabel(service) : service);
+      const html = `<span style="color:var(--green);font-weight:700">✓ ${esc(_lbl)} ${t('s.works')}</span>` + tag;
+      if(out){ out.innerHTML = html; }
+      if(liveOut){ liveOut.innerHTML = html; }
+    } else {
+      const html = '<span style="color:var(--red)">✗ ' + esc(_probeMsg(d, 'error') || t('s.unknown_error')) + '</span>';
+      if(out){ out.innerHTML = html; }
+      if(liveOut){ liveOut.innerHTML = html; }
+    }
+  } catch(e) {
+    const html = '<span style="color:var(--red)">✗ ' + t('s.net_error') + ': ' + esc(e.message) + '</span>';
+    if(out){ out.innerHTML = html; }
+    if(liveOut){ liveOut.innerHTML = html; }
+  }
+}
+
+// Validate every configured service token at startup so they "take" and show
+// their status without the user opening each settings tab. Staggered so we
+// don't hammer the backend; testAuth() no-ops visually if a tab isn't rendered
+// but the server-side probe (token refresh / promotion) still runs.
+let _autoValidated = false;
+function autoValidateServices() {
+  if(_autoValidated) return;            // once per session
+  _autoValidated = true;
+  const c = S.config || {};
+  const jobs = [];
+  if(c['deezer-arl'])                                        jobs.push('deezer');
+  if(c['qobuz-auth-token'] || (c['qobuz-email'] && c['qobuz-password'])) jobs.push('qobuz');
+  if(c['tidal-token']) {
+    jobs.push('tidal');
+  } else {
+    // No token at all yet (fresh install / never logged in) — the box says
+    // "checking session…" by default, which is misleading when nothing is
+    // actually happening. Say plainly there's nothing to check.
+    const liveOut = document.getElementById('tidal-tok-expiry');
+    if(liveOut) liveOut.innerHTML = `<span style="color:var(--muted)">⚠ ${esc(t('s.tidal_not_connected'))}</span>`;
+  }
+  if(c['media-user-token'] && c['authorization-token'])      jobs.push('apple');
+  if(c['soundcloud-oauth-token'])                            jobs.push('soundcloud');
+  if(c['beatport-username'] && c['beatport-password'])       jobs.push('beatport');
+  if(c['spotify-client-id'] || c['spotify-sp-dc'])           jobs.push('spotify');
+  if(c['yandex-token'])                                      jobs.push('yandex');
+  jobs.forEach((svc, i) => setTimeout(() => { try { testAuth(svc); } catch {} }, i * 600));
+}
+
+async function qobuzPasswordLogin() {
+  const out   = document.getElementById('qobuz-pw-status');
+  const email = (document.getElementById('s-qobuz-email')?.value || '').trim();
+  const pw    = document.getElementById('s-qobuz-pass')?.value || '';
+  if (!email || !pw) {
+    if (out) out.innerHTML = '<span style="color:var(--danger)">' + t('au.fill_email') + '</span>';
+    return;
+  }
+  if (out) { out.textContent = t('au.qobuz_login'); out.style.color = 'var(--muted)'; }
+  // Persist creds first — the server-side probe reads them from config.
+  await saveSetting('qobuz-email', email);
+  await saveSetting('qobuz-password', pw);
+  try {
+    const r = await fetch('/api/test-auth/qobuz', {method:'POST'});
+    const d = await r.json().catch(() => ({ok:false, error:t('au.bad_response')}));
+    if (d.ok) {
+      const u = d.user || {};
+      const tier = u.hires ? 'Hi-Res' : (u.lossless ? 'Lossless' : (u.subscription || ''));
+      if (out) out.innerHTML = '<span style="color:var(--green)">' + t('au.login_ok')
+        + (tier ? ' · ' + esc(tier) : '') + t('au.saved_uid_token') + '</span>';
+      loadTokensToUI();   // probe auto-promoted email/pass → token; refresh fields
+    } else {
+      if (out) out.innerHTML = '<span style="color:var(--danger)">✗ ' + esc(_probeMsg(d, 'error') || t('err.generic')) + '</span>';
+    }
+  } catch(e) {
+    if (out) out.innerHTML = '<span style="color:var(--danger)">' + t('au.net_pfx') + esc(e.message) + '</span>';
+  }
+}
+
+async function saveServiceTab(service) {
+  const g  = id => { const el = document.getElementById(id); return el ? el.value : ''; };
+  // Only include a secret field if the user actually typed something into it
+  // (non-empty value = new input; empty = placeholder state = keep existing).
+  const gs = id => { const v = g(id); return v || undefined; };
+  let cfg = {};
+  if(service === 'qobuz') {
+    cfg = {'qobuz-user-id':g('s-qobuz-userid'),'qobuz-email':g('s-qobuz-email'),
+           'qobuz-app-id':g('s-qobuz-appid'),
+           'qobuz-quality':g('s-qobuz-qual')};
+    // `qobuz-secrets` — СЕКРЕТ: сервер отдаёт его замаскированным, и поле
+    // рисуется ПУСТЫМ (см. tokens_ui.js — маску в input принципиально не
+    // echo-им). Через g() это пустое значение затирало настоящий секрет при
+    // ЛЮБОМ «Сохранить», молча. Шлём только если владелец реально ввёл —
+    // ровно как токен и пароль ниже. 18.09.2026.
+    const sec = gs('s-qobuz-secrets'); if(sec !== undefined) cfg['qobuz-secrets'] = sec;
+    const tok = gs('s-qobuz-authtok'); if(tok !== undefined) cfg['qobuz-auth-token'] = tok;
+    const pw  = gs('s-qobuz-pass');   if(pw  !== undefined) cfg['qobuz-password']    = pw;
+  } else if(service === 'deezer') {
+    cfg = {'deezer-quality':g('s-deezer-qual')};
+    const arl = gs('s-deezer-arl'); if(arl !== undefined) cfg['deezer-arl'] = arl;
+  } else if(service === 'tidal') {
+    cfg = {'tidal-user-id':g('s-tidal-userid'),'tidal-country':g('s-tidal-country'),
+           'tidal-token-expiry':g('s-tidal-expiry'),'tidal-quality':g('s-tidal-qual')};
+    const tok = gs('s-tidal-token');   if(tok !== undefined) cfg['tidal-token']   = tok;
+    const ref = gs('s-tidal-refresh'); if(ref !== undefined) cfg['tidal-refresh'] = ref;
+  } else if(service === 'soundcloud') {
+    cfg = {};
+    const tok = gs('s-sc-oauth'); if(tok !== undefined) cfg['soundcloud-oauth-token'] = tok;
+  } else if(service === 'beatport') {
+    cfg = {'beatport-quality':g('s-bp-quality')};
+    const user = gs('s-bp-user'); if(user !== undefined) cfg['beatport-username'] = user;
+    const pw   = gs('s-bp-pass'); if(pw   !== undefined) cfg['beatport-password']  = pw;
+  } else if(service === 'apple') {
+    // Only the keys that have visible inputs in the Apple panel — never wipe
+    // sibling keys (storefront, amd-instance-url, cookies path) the user set
+    // elsewhere. Empty token fields are NOT persisted (keeps existing value).
+    // Found 2026-07-22 settings audit: these read the WRONG element ids
+    // (s-apple-storefront/s-apple-mut/s-apple-bearer/s-gamdl-cookies-path
+    // don't exist in the DOM — the real ids are t-sf/t-mut/t-bearer/
+    // s-cookies-path) so this button only ever actually saved amd-instance-url.
+    // Tokens still save fine via the separate, correct saveTokens() button.
+    cfg = {};
+    const sf  = g('t-sf');   if(sf)  cfg['storefront'] = sf;
+    const mut = gs('t-mut');         if(mut !== undefined) cfg['media-user-token'] = mut;
+    const bea = gs('t-bearer');      if(bea !== undefined) cfg['authorization-token'] = bea;
+    const cp  = g('s-cookies-path'); if(cp) cfg['gamdl-cookies-path'] = cp;
+    const ai  = g('s-amd-instance');       if(ai) cfg['amd-instance-url'] = ai;
+  } else if(service === 'spotify') {
+    cfg = {};
+    const cid = g('s-sp-cid');   if(cid) cfg['spotify-client-id'] = cid;
+    const sec = gs('s-sp-csecret'); if(sec !== undefined) cfg['spotify-client-secret'] = sec;
+    const dc  = gs('s-sp-dc');   if(dc  !== undefined) cfg['spotify-sp-dc'] = dc;
+    const oq  = g('s-orp-quality'); if(oq) cfg['orpheus-quality'] = oq;
+  } else if(service === 'yandex') {
+    cfg = {'yandex-quality':g('s-yandex-qual')};
+    const tok = gs('s-yandex-token'); if(tok !== undefined && !tok.startsWith('••')) cfg['yandex-token'] = tok;
+  }
+  Object.assign(S.config, cfg);
+  try { await api('POST','/api/config',cfg); toast(t('t.saved_ok'),'var(--green)'); }
+  catch(e) { toast('✗ '+e.message,'var(--red)'); }
+}
+
+async function saveAndTestAuth(service) {
+  await saveServiceTab(service);
+  await testAuth(service);
+}
+
+// ── Tidal: import token.json from tidal-dl-ng / tidalapi ──────────────────
+function toggleTidalImport(){
+  const p = document.getElementById('tidal-import-panel');
+  if(!p) return;
+  const showing = p.style.display !== 'none';
+  p.style.display = showing ? 'none' : '';
+  if(!showing) {
+    // Focus textarea when opening for quick paste
+    setTimeout(() => document.getElementById('tidal-import-json')?.focus(), 50);
+  }
+}
+
+async function importTidalToken(){
+  const ta  = document.getElementById('tidal-import-json');
+  const msg = document.getElementById('tidal-import-msg');
+  const raw = (ta?.value || '').trim();
+  if(!raw) {
+    if(msg){ msg.innerHTML = '<span style="color:var(--red)">' + t('au.empty_field') + '</span>'; }
+    return;
+  }
+  if(msg){ msg.innerHTML = '<span style="color:var(--muted)">' + t('au.importing') + '</span>'; }
+  try {
+    const r = await fetch('/api/import-token/tidal', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({content: raw}),
+    });
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok) {
+      if(msg){ msg.innerHTML = '<span style="color:var(--red)">✗ ' + esc(d.detail || ('HTTP ' + r.status)) + '</span>'; }
+      return;
+    }
+    const imp = d.imported || {};
+    // Update S.config so UI fields reflect the new state
+    if(S && S.config) {
+      S.config['tidal-token']         = '••••••••';   // masked on server; show mask locally
+      S.config['tidal-refresh']       = '••••••••';
+      S.config['tidal-user-id']       = imp.user_id || '';
+      S.config['tidal-country']       = imp.country || '';
+      S.config['tidal-token-expiry']  = imp.expiry_unix || '';
+    }
+    // Re-populate the Tidal tab fields
+    showStab('tidal', document.querySelector('.stab[data-stab="tidal"]'));
+    if(msg){
+      const parts = [];
+      if(imp.user_id) parts.push('user_id=' + esc(imp.user_id));
+      if(imp.country) parts.push('country=' + esc(imp.country));
+      msg.innerHTML = '<span style="color:var(--green)">' + t('au.imported') + '</span>' + (parts.length ? ' · ' + parts.join(' · ') : '');
+    }
+    // Auto-test after 500ms so user sees it works
+    setTimeout(() => testAuth('tidal'), 500);
+    // Clear textarea
+    if(ta) ta.value = '';
+  } catch(e) {
+    if(msg){ msg.innerHTML = '<span style="color:var(--red)">✗ ' + esc(e.message) + '</span>'; }
+  }
+}
+
+// ══ SPOTIFY STATUS ════════════════════════════════════════════════
+
+// Show / hide "saved conversion target" row + reset handler.
+function _renderSpotifySavedTarget() {
+  const row     = document.getElementById('sp-saved-target-row');
+  const nameEl  = document.getElementById('sp-saved-target-name');
+  const target  = (S.config && S.config['spotify-default-target']) || '';
+  if(!row) return;
+  if(target && ['apple','deezer','qobuz'].includes(target)) {
+    row.style.display = '';
+    if(nameEl) {
+      nameEl.textContent = _svcLabel(target);
+      nameEl.style.color = _svcColor(target);
+    }
+  } else {
+    row.style.display = 'none';
+  }
+}
+
+async function resetSpotifyDefaultTarget() {
+  try {
+    await api('POST','/api/config', { 'spotify-default-target': '' });
+    if(S.config) S.config['spotify-default-target'] = '';
+    _renderSpotifySavedTarget();
+    toast(t('au.reset_ask'), 'var(--muted)');
+  } catch(e) {
+    toast(t('au.reset_fail')+e.message, 'var(--red)');
+  }
+}
+
+async function refreshAppleAuthStatus() {
+  try {
+    const r = await api('GET', '/api/apple/auth-status');
+    const el      = document.getElementById('apple-auth-status-text');
+    const loginBtn = document.getElementById('btn-apple-login');
+    if (!el) return;
+    if (r.mut_set) {
+      el.textContent = ti('as.token_set', {n: r.mut_length});
+      el.style.color = 'var(--green)';
+      if(loginBtn) loginBtn.style.display = 'none';
+      const inp = document.getElementById('t-mut');
+      if (inp && !inp.value && S.config && S.config['media-user-token']) {
+        inp.value = S.config['media-user-token'];
+      }
+    } else {
+      el.textContent = t('as.token_not_set');
+      el.style.color = 'var(--muted)';
+      if(loginBtn) loginBtn.style.display = '';
+    }
+  } catch(e) {
+    const el = document.getElementById('apple-auth-status-text');
+    if (el) el.textContent = '';
+  }
+}
+
+async function loadSpotifyStatus() {
+  const r = await api('GET','/api/spotify/status');
+  S._spStatus = r;  // cache for _syncReleasesSettingsTab
+  const nameEl  = document.getElementById('sp-name');
+  const emailEl = document.getElementById('sp-email');
+  const logBtn  = document.getElementById('sp-logout-btn');
+  const relBtn  = document.getElementById('rel-sp-btn');
+  if(r.connected) {
+    if(nameEl)  nameEl.textContent  = r.sp_dc_mode ? 'sp_dc (cookie)' : (r.display_name || 'Spotify');
+    if(emailEl) emailEl.textContent = r.sp_dc_mode ? t('sp.auth_spdc') : (r.email || '');
+    if(logBtn)  logBtn.style.display = r.sp_dc_mode ? 'none' : '';
+    if(relBtn)  relBtn.style.display = 'none';
+  } else {
+    const err403   = r.error && r.error.toLowerCase().includes('not registered');
+    const errSpDc  = r.sp_dc_expired;
+    if(nameEl)  nameEl.textContent = errSpDc ? t('sp.spdc_expired')
+      : err403 ? t('sp.not_registered') : t('sp.not_connected');
+    if(emailEl) emailEl.textContent = errSpDc
+      ? t('sp.spdc_refresh_hint')
+      : err403 ? t('sp.not_registered_hint')
+      : '';
+    if(logBtn)  logBtn.style.display = 'none';
+    if(relBtn)  relBtn.style.display = '';
+  }
+}
+
+async function spotifyLogout() {
+  await api('POST','/api/spotify/logout');
+  loadSpotifyStatus();
+  toast(t('sp.disconnected'));
+}
+
+// Отдельная учётка радара релизов: сервер отдаёт только флаги и ИМЕНА ключей,
+// сами секреты сюда не приходят (в поля они попадают замаскированными через _setSecret).
+async function loadSpotifyRadarStatus() {
+  const el = document.getElementById('sp-radar-status');
+  if(!el) return;
+  let r;
+  try { r = await api('GET','/api/spotify/radar/status'); } catch { return; }
+  const own = r.radar_sp_dc_set || r.radar_app_set;
+  el.textContent = !own ? t('sp.radar_shared')
+    : r.needs_login ? t('sp.radar_needs_login')
+    : r.radar_authorized ? t('sp.radar_ok_oauth')
+    : t('sp.radar_ok_web');
+  el.style.color = !own ? 'var(--muted)' : r.needs_login ? 'var(--orange,#ff9f0a)' : '#1db954';
+  const out = document.getElementById('sp-radar-logout');
+  if(out) out.style.display = r.radar_authorized ? '' : 'none';
+}
+
+async function spotifyRadarLogout() {
+  await api('POST','/api/spotify/radar/logout');
+  loadSpotifyRadarStatus();
+  toast(t('sp.disconnected'));
+}
+
+async function autoExtractSpDc() {
+  const btn    = document.getElementById('sp-dc-auto-btn');
+  const status = document.getElementById('sp-dc-auto-status');
+  const input  = document.getElementById('s-sp-dc');
+  if(btn) { btn.disabled = true; btn.textContent = t('sp.searching_btn'); }
+  if(status) { status.textContent = t('sp.searching'); status.style.color = 'var(--muted)'; }
+  try {
+    const r = await api('GET', '/api/spotify/extract-sp-dc');
+    if(r.ok && r.value) {
+      if(input) input.value = r.value;
+      await api('POST', '/api/config', {'spotify-sp-dc': r.value});
+      if(S.config) S.config['spotify-sp-dc'] = r.value;
+      const _where = r.browser + (r.profile && r.profile!=='Default' ? ' ('+r.profile+')' : '');
+      if(status) { status.textContent = ti('sp.found_saved', {where: _where}); status.style.color = 'var(--green)'; }
+      loadSpotifyStatus();
+      toast(ti('sp.spdc_updated', {browser: r.browser}), 'var(--green)');
+    } else {
+      // sp_dc — httpOnly, из document.cookie не читается. Показываем Application tab.
+      if(status) {
+        status.innerHTML = t('sp.spdc_manual_html');
+        status.style.color = 'var(--muted)';
+      }
+    }
+  } catch(e) {
+    if(status) { status.textContent = '✗ ' + e.message; status.style.color = 'var(--red)'; }
+  } finally {
+    if(btn) { btn.disabled = false; btn.textContent = t('sp.auto_btn'); }
+  }
+}
+
+// ── Deezer multi-account pool (load-balanced ARLs) ──────────────────────────
+async function loadDeezerAccounts() {
+  const list = document.getElementById('deezer-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/deezer/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = _acctSorted(accs).map(a => `
+      <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        ${acctDragHandle()}
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
+        ${acctPrefCtl('deezer', a)}
+        ${a.primary ? '' : `<button onclick="removeDeezerAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`).join('');
+    acctDndWire('deezer', list);
+  } catch(e) { list.innerHTML = ''; }
+}
+
+// ── Tidal multi-account pool (несколько refresh-токенов) ────────────────────
+function _tidalRenderRows(list, accs, probe) {
+  const byslot = {};
+  (probe || []).forEach(p => { byslot[p.slot] = p; });
+  list.innerHTML = _acctSorted(accs).map(a => {
+    // Свежая проба (`?probe=1`) важнее, но строка пула приходит уже с
+    // ПОСЛЕДНИМ измерением (`measured`) — тот же кэш, по которому очередь
+    // расставляет порядок. Без этой второй опоры панель после входа с телефона
+    // висела бы серой до ближайшей фоновой пробы.
+    const p = byslot[a.slot] || (a.measured ? a : null);
+    // Точка статуса единообразно с Deezer/Qobuz, но по ЗДОРОВЬЮ: зелёная —
+    // жив и отдаёт lossless; оранжевая — жив, но без lossless; красная —
+    // отвергнут; серая — ещё не спросили / «не знаю».
+    let dot = 'var(--muted2)';
+    if (p) {
+      if (p.alive === false) dot = 'var(--red)';
+      else if (p.alive === true) dot = p.lossless ? 'var(--green)' : 'var(--orange)';
+    }
+    const cc = ((p && p.country) || a.country || '').trim().toUpperCase();
+    const plan = (p && (p.plan || p.quality)) || '';
+    const meta = [cc, plan].filter(Boolean).join(' · ');
+    return `<div data-acct-slot="${a.slot}" data-acct-label="${escapeHtml(_acctLabel(a))}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+      ${acctDragHandle()}
+      <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}"></span>
+      <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${meta?` <span style="color:var(--muted)">· ${escapeHtml(meta)}</span>`:''}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
+      ${acctPrefCtl('tidal', a)}
+      ${a.primary ? '' : `<button onclick="setTidalPrimary(${a.slot})" title="${escapeHtml(t('acc.make_primary'))}" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:#00d4b3;font-family:var(--font)">${escapeHtml(t('acc.make_primary'))}</button>
+      <button onclick="removeTidalAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+    </div>`;
+  }).join('');
+  acctDndWire('tidal', list);
+}
+
+async function loadTidalAccounts() {
+  const list = document.getElementById('tidal-accounts-list');
+  if(!list) return;
+  try {
+    // Сначала быстро — список без пробы (серые точки), чтобы панель не висла.
+    const r = await api('GET', '/api/tidal/accounts');
+    const accs = r.pool || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    _tidalRenderRows(list, accs, null);
+    // Затем в фоне спрашиваем здоровье каждой и красим точки — «что работает».
+    try {
+      const rp = await api('GET', '/api/tidal/accounts?probe=1');
+      _tidalRenderRows(list, rp.pool || accs, rp.probe || []);
+    } catch(_) {}
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addTidalAccount() {
+  const refEl = document.getElementById('s-tidal-pool-refresh');
+  const ccEl  = document.getElementById('s-tidal-pool-country');
+  const lblEl = document.getElementById('s-tidal-pool-label');
+  const refresh = (refEl?.value || '').trim();
+  const country = (ccEl?.value || '').trim();
+  const label   = (lblEl?.value || '').trim();
+  if(!refresh) { toast(t('t.error'), 'var(--red)'); return; }
+  try {
+    const r = await api('POST', '/api/tidal/accounts/add', {refresh, country, label});
+    if(r.ok) {
+      toast(r.msg || t('t.added'), 'var(--green)');
+      if(refEl) refEl.value = '';
+      if(ccEl) ccEl.value = '';
+      if(lblEl) lblEl.value = '';
+      loadTidalAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeTidalAccount(slot) {
+  try {
+    const r = await api('POST', `/api/tidal/accounts/${slot}/remove`, {});
+    toast(r.msg || (r.ok ? t('t.done') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    if(r.ok) loadTidalAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function setTidalPrimary(slot) {
+  // Метку читаем из атрибута строки: `textContent` вернул бы и подпись кнопки,
+  // и страну с тарифом, и confirm показал бы «Сделать «NZ HIFI Сделать
+  // основной ✕» основной учёткой?».
+  const lbl = document.querySelector(`#tidal-accounts-list [data-acct-slot="${slot}"]`)?.dataset.acctLabel || ti('acc.slot', {n: slot});
+  if(!confirm(ti('acc.primary_confirm', {label: lbl}))) return;
+  try {
+    const r = await api('POST', `/api/tidal/accounts/${slot}/primary`, {});
+    toast(r.msg || (r.ok ? t('t.done') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    if(r.ok) loadTidalAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+// ── Tidal: вход ВО ВТОРУЮ учётку по device-link (мульти-акки с телефона) ─────
+// Тот же TV-поток, что у `tidalTvLogin`, но с `target:"pool"`: сервер дописывает
+// вошедшую учётку в `tidal-accounts` и НЕ трогает основную сессию. Отсюда и
+// форма панели: код + ссылка + QR, чтобы открыть их можно было с любого
+// телефона, а не только с того устройства, где стоит Ripster.
+//
+// Перевыпуск кода обязателен: срок жизни кода (~5 мин) короче, чем время, за
+// которое владелец успевает его заметить и ввести, поэтому по истечении просим
+// новый, а не просим нажать кнопку ещё раз. Потолок попыток — чтобы упорный
+// цикл не жёг device_authorization бесконечно, если рядом нет человека.
+const TIDAL_POOL_MAX_RETRY = 3;
+// Состояние ОДНО на всю панель, и поколение `gen` растёт только от действия
+// человека (новый клик, успешный вход). Перевыпуск кода обязан оставаться той
+// же цепочкой. Первая версия брала новый номер на каждом раунде — и старый
+// перевыпуск, дотянувший до кнопки после нового клика, объявлял себя главным:
+// панель продолжала гонять прежний пятиминутный код, кнопка оставалась
+// нажатой, а второй клик не мог её перехватить. Проверено стендом 23.09.
+const _tidalPool = {gen: 0, timer: null, left: 0, attempt: 0, busy: false,
+                    code: '', interval: 2, since: 0};
+
+function _tidalPoolStop() {
+  _tidalPool.gen++;
+  if(_tidalPool.timer) clearTimeout(_tidalPool.timer);
+  _tidalPool.timer = null;
+}
+
+function _tidalPoolBtn(on) {
+  const b = document.getElementById('tidal-pool-login-btn');
+  if(b) b.disabled = !on;
+}
+
+function _tidalPoolSay(html, color) {
+  const el = document.getElementById('tidal-pool-status');
+  if(el) { el.innerHTML = html; el.style.color = color || 'var(--muted)'; }
+}
+
+// Терминальное состояние: цепочка умерла, объяснение показано, кнопка снова
+// работает. Без этого panel остаётся с висящей кнопкой и человек не может
+// попробовать ещё раз — ровно то, за что панель и ругают.
+function _tidalPoolDone(html, color) {
+  _tidalPoolStop();
+  _tidalPoolSay(html, color);
+  _tidalPoolBtn(true);
+}
+
+async function tidalPoolLogin() {
+  const flow = document.getElementById('tidal-pool-flow');
+  if(!flow) return;
+  _tidalPoolStop();                 // прежняя цепочка замолкает
+  flow.style.display = '';
+  _tidalPoolBtn(false);
+  _tidalPool.attempt = 0;
+  await _tidalPoolRound();
+}
+
+async function _tidalPoolRound() {
+  const gen = _tidalPool.gen;
+  _tidalPoolSay(esc(t('s.tidal_pool_starting')));
+  let r = null;
+  try { r = await api('POST', '/api/tidal/auth/start', {}); } catch(e) {}
+  if(gen !== _tidalPool.gen) return;              // панель перехватил новый клик
+  if(!r || !r.ok) {
+    return _tidalPoolDone(`${esc(t('dlg.err'))}: ${esc((r && r.error) || '?')}`, 'var(--red)');
+  }
+  const url = r.verification_url || ('https://link.tidal.com/' + (r.user_code || ''));
+  const codeEl = document.getElementById('tidal-pool-code');
+  const linkEl = document.getElementById('tidal-pool-link');
+  const qrEl = document.getElementById('tidal-pool-qr');
+  if(codeEl) codeEl.textContent = r.user_code || '';
+  if(linkEl) { linkEl.href = url; linkEl.textContent = url; }
+  if(qrEl) {
+    // QR рисуем сами (static/js/qr_min.js): снять картинку с телефона —
+    // единственный способ войти, когда Ripster с этого телефона недоступен.
+    const svg = (typeof qrSvg === 'function') ? qrSvg(url, 168) : '';
+    qrEl.innerHTML = svg || `<div style="font-size:10px;color:#000;max-width:168px">${esc(t('s.tidal_pool_no_qr'))}</div>`;
+  }
+  _tidalPool.code = r.device_code || '';
+  _tidalPool.left = r.expires_in || 300;
+  _tidalPool.interval = Math.max(2, r.interval || 2);
+  _tidalPool.since = 0;
+  _tidalPool.busy = false;
+  _tidalPoolSay(esc(ti('s.tidal_pool_waiting', {n: _tidalPool.left})));
+  _tidalPool.timer = setTimeout(_tidalPoolTick, 1000);
+}
+
+async function _tidalPoolTick() {
+  const gen = _tidalPool.gen;
+  _tidalPool.timer = null;
+  if(gen !== _tidalPool.gen) return;
+  _tidalPool.left--; _tidalPool.since++;
+  if(_tidalPool.left <= 0) {
+    if(_tidalPool.attempt + 1 >= TIDAL_POOL_MAX_RETRY) {
+      return _tidalPoolDone(esc(t('s.tidal_pool_giveup')), 'var(--red)');
+    }
+    _tidalPool.attempt++;
+    _tidalPoolSay(esc(ti('s.tidal_pool_expired',
+                         {n: _tidalPool.attempt + 1, max: TIDAL_POOL_MAX_RETRY})), 'var(--orange)');
+    // Пауза перед новым кодом: без неё сообщение «выдаю новый» перезаписывается
+    // следующим же тиком, и человек видит только мелькнувшую строку.
+    _tidalPool.timer = setTimeout(_tidalPoolRound, 1500);
+    return;
+  }
+  if(!_tidalPool.busy && (_tidalPool.since % _tidalPool.interval) === 0) {
+    _tidalPool.busy = true;
+    let p = null;
+    try { p = await api('POST', '/api/tidal/auth/poll',
+                        {device_code: _tidalPool.code, target: 'pool'}); }
+    catch(e) {}
+    _tidalPool.busy = false;
+    if(gen !== _tidalPool.gen) return;
+    if(p && p.ok && p.saved) {
+      const what = [p.country, p.plan || t('s.tidal_pool_no_plan')].filter(Boolean).join(' · ');
+      _tidalPoolStop();
+      const flow = document.getElementById('tidal-pool-flow');
+      if(flow) flow.style.display = 'none';
+      _tidalPoolBtn(true);
+      toast(ti('s.tidal_pool_added', {label: p.label || 'Tidal', what}), 'var(--green)');
+      loadTidalAccounts();
+      return;
+    }
+    if(!(p && p.ok && p.pending)) {
+      return _tidalPoolDone(`${esc(t('dlg.err'))}: ${esc((p && p.error) || '?')}`, 'var(--red)');
+    }
+  }
+  _tidalPoolSay(esc(ti('s.tidal_pool_waiting', {n: _tidalPool.left})));
+  _tidalPool.timer = setTimeout(_tidalPoolTick, 1000);
+}
+
+function copyTidalPoolLink() {
+  const url = (document.getElementById('tidal-pool-link')?.textContent || '').trim();
+  if(!url) return;
+  const done = () => toast(t('toast.link_copied'), 'var(--green)');
+  // Clipboard API есть не везде (WebView2, http без безопасного контекста),
+  // поэтому временное поле — не запасной вариант для красоты, а рабочий путь.
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = url; document.body.appendChild(ta); ta.select();
+    try { document.execCommand('copy'); done(); } catch(e) { toast(t('t.error'), 'var(--red)'); }
+    document.body.removeChild(ta);
+  };
+  try { navigator.clipboard.writeText(url).then(done).catch(fallback); }
+  catch(e) { fallback(); }
+}
+
+async function addDeezerAccount() {
+  const arlEl   = document.getElementById('s-deezer-pool-arl');
+  const labelEl = document.getElementById('s-deezer-pool-label');
+  const arl   = (arlEl?.value || '').trim();
+  const label = (labelEl?.value || '').trim();
+  if(!arl) { toast(t('t.error'), 'var(--red)'); return; }
+  try {
+    const r = await api('POST', '/api/deezer/accounts/add', {arl, label});
+    if(r.ok) {
+      toast(r.msg || t('t.added'), 'var(--green)');
+      if(arlEl) arlEl.value = '';
+      if(labelEl) labelEl.value = '';
+      loadDeezerAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeDeezerAccount(slot) {
+  if(!confirm(t('dlg.pool_remove'))) return;
+  try {
+    const r = await api('POST', `/api/deezer/accounts/${slot}/remove`);
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadDeezerAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+// ── Spotify multi-account pool (librespot corridors + browser OAuth per slot) ─
+// Отличие от Deezer/Qobuz: токен не вставляется — каждая доп. учётка получает
+// свой коридор и входит отдельным браузерным OAuth. Основной вход (слот 0) при
+// этом не трогается: blob пишется в corridor_blob(slot).
+async function loadSpotifyAccounts() {
+  const list = document.getElementById('spotify-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/spotify/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = accs.map(a => {
+      // Точка по состоянию входа: зелёная — живой blob; красная — известно, что
+      // учётка не отвечает; оранжевая — слот забронирован, вход ещё не пройден.
+      let dot = 'var(--orange)';
+      if (a.has_blob) dot = (a.health === 2 ? 'var(--red)' : 'var(--green)');
+      const meta = [a.login, a.country].filter(Boolean).join(' · ');
+      const pend = a.has_blob ? '' :
+        ` <span style="color:var(--orange)">${escapeHtml(t('sp.acc_pending'))}</span>`;
+      return `<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${meta?` <span style="color:var(--muted)">· ${escapeHtml(meta)}</span>`:''}${a.primary?` <span style="color:var(--muted)">(${escapeHtml(t('s.slot_primary'))})</span>`:''}${pend}</span>
+        ${a.primary ? '' : `<button onclick="removeSpotifyAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`;
+    }).join('');
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addSpotifyAccount() {
+  const labelEl = document.getElementById('s-spotify-pool-label');
+  const hint = document.getElementById('sp-accounts-hint');
+  const setHint = h => { if (hint) hint.innerHTML = h; };
+  const label = (labelEl?.value || '').trim();
+  // 1) бронируем следующий слот (создаётся коридор + запись в конфиге).
+  let slot;
+  try {
+    const r = await api('POST', '/api/spotify/accounts/add', {label});
+    if (!r || !r.ok) { setHint(`<span style="color:var(--red)">${esc((r && r.msg) || t('t.error'))}</span>`); return; }
+    slot = r.slot;
+    if (labelEl) labelEl.value = '';
+  } catch(e) { setHint(`<span style="color:var(--red)">${esc(t('t.error'))}</span>`); return; }
+  // 2) запускаем браузерный вход в именно этот слот.
+  setHint(t('sp.ogg_starting'));
+  const s = await api('POST', '/api/spotify/auth/start', {slot});
+  if (!s || !s.ok) { setHint(`<span style="color:var(--red)">${t('dlg.err')}: ${esc(_probeMsg(s, 'error') || '?')}</span>`); loadSpotifyAccounts(); return; }
+  const how = await openAuthPage(s.auth_url, t('sp.ogg_login'));
+  if (how === 'here') { return; }   // страница уйдёт на Spotify и вернётся с ?spotify_login=ok
+  if (!how) { setHint(t('sl.cancelled')); loadSpotifyAccounts(); return; }
+  setHint(t('sp.ogg_page_opened'));
+  const deadline = Date.now() + 180 * 1000;
+  const poll = async () => {
+    if (Date.now() > deadline) { setHint(`<span style="color:var(--red)">${t('sp.ogg_timeout')}</span>`); loadSpotifyAccounts(); return; }
+    const p = await api('POST', '/api/spotify/auth/status', {slot});
+    if (p && p.ok && p.done) { setHint(`<span style="color:var(--green)">${t('sp.ogg_signed_in')}</span>`); loadSpotifyAccounts(); return; }
+    if (p && p.ok && p.pending) { setTimeout(poll, 2500); return; }
+    // Дубль той же учётки или иная неудача — понятным сообщением на языке UI.
+    setHint(`<span style="color:var(--red)">${esc(_probeMsg(p, 'error') || t('t.error'))}</span>`);
+    loadSpotifyAccounts();
+  };
+  setTimeout(poll, 3000);
+}
+
+async function removeSpotifyAccount(slot) {
+  if(!confirm(t('sp.acc_remove_confirm'))) return;
+  try {
+    const r = await api('POST', `/api/spotify/accounts/${slot}/remove`, {});
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadSpotifyAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+
+// ── Qobuz multi-account pool (load-balanced) ────────────────────────────────
+// ── Приоритет и включение учётки — общий кусок для ВСЕХ сервисов ─────────────
+// Живёт внутри вкладки своего сервиса, отдельной вкладки «учётные записи» нет
+// намеренно: иначе человеку пришлось бы держать в голове соответствие между
+// двумя списками. Разметка одна на всех, чтобы у Deezer и Qobuz правило
+// «меньше число — раньше очередь» не разошлось через месяц.
+function acctPrefCtl(svc, a) {
+  const pr = (a.priority === undefined || a.priority === null) ? a.slot : a.priority;
+  const on = a.enabled !== false;
+  return `
+    <input type="number" step="1" value="${pr}" title="${t('acc.priority_hint')}"
+           onchange="setAcctPref('${svc}',${a.slot},'priority',this.value)"
+           style="width:46px;padding:2px 4px;background:var(--bg);border:1px solid var(--border);
+                  border-radius:5px;font-size:10px;color:var(--text);font-family:var(--mono);text-align:center"/>
+    <button onclick="setAcctPref('${svc}',${a.slot},'enabled',${!on})"
+            title="${on ? t('acc.click_disable') : t('acc.click_enable')}"
+            style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;
+                   font-size:10px;cursor:pointer;font-family:var(--font);
+                   color:${on ? 'var(--green)' : 'var(--muted2)'}">${on ? t('acc.on') : t('acc.off')}</button>`;
+}
+
+async function setAcctPref(svc, slot, field, value) {
+  const item = {slot};
+  item[field] = (field === 'priority') ? Number(value) : value;
+  // У Apple свой маршрут: там слот это контейнер, и приоритет действует внутри
+  // витрины, а не поверх неё.
+  const path = _acctPrefsPath(svc);
+  try {
+    const r = await api('POST', path, {slots: [item]});
+    if (!r || r.ok === false) { toast(t('t.error'), 'var(--red)'); return; }
+    toast(ti('acc.pref_saved', {n: r.changed}), 'var(--green)');
+  } catch (e) { toast(t('t.error'), 'var(--red)'); return; }
+  const reload = _ACCT_RELOAD[svc];
+  if (reload && typeof window[reload] === 'function') window[reload]();
+}
+
+// ── Порядок учёток перетаскиванием ──────────────────────────────────────────
+// Перетаскивание не заводит своей ручки: на сброс пишем в тот же
+// `/api/<svc>/accounts/prefs` приоритет = новая позиция строки (0 — первая),
+// для ВСЕХ строк сразу. Поэтому поле с числом остаётся рабочим и после
+// перетаскивания показывает 0..n-1 — это одна и та же настройка, два способа.
+//
+// Сервисы из `_PREFS_POOLS` (setup.py) + Apple со своей prefs-ручкой; с 19.09.2026
+// GET-список Apple тоже отдаёт priority/enabled, без них строки после сброса
+// «прыгали» бы назад.
+const _ACCT_RELOAD = {qobuz: 'loadQobuzAccounts', deezer: 'loadDeezerAccounts',
+                      soundcloud: 'loadSoundcloudAccounts', yandex: 'loadYandexAccounts',
+                      tidal: 'loadTidalAccounts', apple: 'loadAppleAccounts'};
+
+// У Apple свой маршрут: там слот это контейнер, и приоритет действует внутри
+// витрины, а не поверх неё. Сами записи и контейнеры НЕ переставляются —
+// меняется только очередь опроса, поэтому перелогина перетаскивание не вызывает.
+function _acctPrefsPath(svc) {
+  return (svc === 'apple') ? '/api/wrapper/accounts/prefs' : `/api/${svc}/accounts/prefs`;
+}
+
+// Сортировка по приоритету, а не по `order`: для включённых это одно и то же
+// (order_indices сортирует по тому же ключу), но `order` отправляет ВЫКЛЮЧЕННЫЕ
+// в хвост — и выключенная строка, перетащенная наверх, отскакивала бы обратно.
+function _acctSorted(accs) {
+  const pr = a => { const v = Number(a.priority); return Number.isFinite(v) ? v : a.slot; };
+  return accs.slice().sort((a, b) => (pr(a) - pr(b)) || (a.slot - b.slot));
+}
+
+// Бэкенд описывает подпись учётки парой `label`/`label_key`: русский нужен боту
+// и CLI, а интерфейс обязан брать ПЕРЕВОД ключа. Без этого слоты уезжали в
+// английский интерфейс дословно: «основной», «слот 1», «без метки».
+function _acctLabel(a) {
+  if (!a) return '';
+  const s = (typeof errKeyText === 'function') ? errKeyText(a.label_key, a.label_args) : '';
+  return s || a.label || '';
+}
+
+function acctDragHandle() {
+  return `<span class="acct-drag" tabindex="0" role="button" draggable="false"
+      title="${escapeHtml(t('acc.drag_hint'))}" aria-label="${escapeHtml(t('acc.drag_hint'))}"
+      style="cursor:grab;color:var(--muted);font-size:13px;line-height:1;padding:0 2px;user-select:none;touch-action:none;flex-shrink:0">⋮⋮</span>`;
+}
+
+function _acctRowSlots(list) {
+  return [...list.querySelectorAll(':scope > [data-acct-slot]')].map(el => Number(el.dataset.acctSlot));
+}
+
+async function _acctCommitOrder(svc, list, before, focusSlot) {
+  const after = _acctRowSlots(list);
+  if (after.join(',') === before.join(',')) return;
+  try {
+    const r = await api('POST', _acctPrefsPath(svc),
+                        {slots: after.map((slot, i) => ({slot, priority: i}))});
+    if (!r || r.ok === false) throw new Error((r && r.msg) || 'prefs');
+    toast(t('acc.order_saved'), 'var(--green)');
+  } catch (e) {
+    toast(t('acc.order_failed'), 'var(--red)');
+  }
+  const reload = _ACCT_RELOAD[svc];
+  if (reload && typeof window[reload] === 'function') await window[reload]();
+  if (focusSlot !== undefined) {
+    list.querySelector(`[data-acct-slot="${focusSlot}"] .acct-drag`)?.focus();
+  }
+}
+
+// Куда вставить перетаскиваемую строку при курсоре на высоте y.
+function _acctRowAfter(list, y, dragging) {
+  const rows = [...list.querySelectorAll(':scope > [data-acct-slot]')].filter(el => el !== dragging);
+  for (const el of rows) {
+    const b = el.getBoundingClientRect();
+    if (y < b.top + b.height / 2) return el;
+  }
+  return null;
+}
+
+// Вешается ОДИН раз на контейнер списка (делегирование): innerHTML
+// перерисовывает строки, а сам контейнер остаётся.
+function acctDndWire(svc, list) {
+  if (!list || list.dataset.dndWired) return;
+  list.dataset.dndWired = '1';
+  let dragging = null, before = null;
+
+  const start = row => {
+    dragging = row; before = _acctRowSlots(list);
+    row.style.opacity = '0.45';
+  };
+  const finish = () => {
+    if (!dragging) return;
+    const row = dragging, snap = before;
+    dragging = null; before = null;
+    row.style.opacity = '';
+    row.draggable = false;
+    _acctCommitOrder(svc, list, snap);
+  };
+  const moveTo = y => {
+    const next = _acctRowAfter(list, y, dragging);
+    if (next !== dragging.nextElementSibling || !next) list.insertBefore(dragging, next);
+  };
+
+  // Мышь — родной HTML5 DnD. Строка становится draggable только пока зажата
+  // ручка: иначе поле приоритета внутри строки нельзя было бы выделить мышью.
+  list.addEventListener('mousedown', e => {
+    const h = e.target.closest('.acct-drag');
+    if (h) h.closest('[data-acct-slot]').draggable = true;
+  });
+  list.addEventListener('mouseup', e => {
+    const row = e.target.closest('[data-acct-slot]');
+    if (row && !dragging) row.draggable = false;
+  });
+  list.addEventListener('dragstart', e => {
+    const row = e.target.closest && e.target.closest('[data-acct-slot]');
+    if (!row || !row.draggable) return;
+    start(row);
+    e.dataTransfer.effectAllowed = 'move';
+    try { e.dataTransfer.setData('text/plain', row.dataset.acctSlot); } catch (_) {}
+  });
+  list.addEventListener('dragover', e => {
+    if (!dragging) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    moveTo(e.clientY);
+  });
+  list.addEventListener('drop', e => { if (dragging) e.preventDefault(); });
+  list.addEventListener('dragend', finish);
+
+  // Палец/перо — pointer-события: HTML5 DnD на тач-экранах не срабатывает.
+  list.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'mouse') return;
+    const h = e.target.closest('.acct-drag');
+    if (!h) return;
+    e.preventDefault();
+    start(h.closest('[data-acct-slot]'));
+    try { h.setPointerCapture(e.pointerId); } catch (_) {}
+  });
+  list.addEventListener('pointermove', e => {
+    if (!dragging || e.pointerType === 'mouse') return;
+    e.preventDefault();
+    moveTo(e.clientY);
+  });
+  list.addEventListener('pointerup', e => { if (e.pointerType !== 'mouse') finish(); });
+  list.addEventListener('pointercancel', e => { if (e.pointerType !== 'mouse') finish(); });
+
+  // Клавиатура: фокус на ручке, Alt+↑/↓ двигает строку.
+  list.addEventListener('keydown', e => {
+    const h = e.target.closest && e.target.closest('.acct-drag');
+    if (!h || !e.altKey || (e.key !== 'ArrowUp' && e.key !== 'ArrowDown')) return;
+    e.preventDefault();
+    const row = h.closest('[data-acct-slot]');
+    const snap = _acctRowSlots(list);
+    if (e.key === 'ArrowUp' && row.previousElementSibling) list.insertBefore(row, row.previousElementSibling);
+    else if (e.key === 'ArrowDown' && row.nextElementSibling) list.insertBefore(row.nextElementSibling, row);
+    else return;
+    h.focus();
+    _acctCommitOrder(svc, list, snap, Number(row.dataset.acctSlot));
+  });
+}
+
+async function loadQobuzAccounts() {
+  const list = document.getElementById('qobuz-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/qobuz/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = _acctSorted(accs).map(a => `
+      <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        ${acctDragHandle()}
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
+        ${acctPrefCtl('qobuz', a)}
+        ${a.primary ? '' : `<button onclick="removeQobuzAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`).join('');
+    acctDndWire('qobuz', list);
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addQobuzAccount() {
+  const uidEl   = document.getElementById('s-qobuz-pool-userid');
+  const tokEl   = document.getElementById('s-qobuz-pool-authtok');
+  const emailEl = document.getElementById('s-qobuz-pool-email');
+  const passEl  = document.getElementById('s-qobuz-pool-pass');
+  const labelEl = document.getElementById('s-qobuz-pool-label');
+  const user_id    = (uidEl?.value || '').trim();
+  const auth_token = (tokEl?.value || '').trim();
+  const email      = (emailEl?.value || '').trim();
+  const password   = (passEl?.value || '').trim();
+  const label      = (labelEl?.value || '').trim();
+  if(!((user_id && auth_token) || email)) { toast(t('t.error'), 'var(--red)'); return; }
+  try {
+    const r = await api('POST', '/api/qobuz/accounts/add', {user_id, auth_token, email, password, label});
+    if(r.ok) {
+      toast(r.msg || t('t.added'), 'var(--green)');
+      [uidEl, tokEl, emailEl, passEl, labelEl].forEach(el => { if(el) el.value = ''; });
+      loadQobuzAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeQobuzAccount(slot) {
+  if(!confirm(t('dlg.pool_remove'))) return;
+  try {
+    const r = await api('POST', `/api/qobuz/accounts/${slot}/remove`);
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadQobuzAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+// ── Apple multi-account pool (load-balanced, own Docker wrapper per slot) ──
+// Состояние УЧЁТКИ (поле `state` от /api/wrapper/accounts), а не контейнера.
+// До 24.09.2026 строка «не запущен» скрывала всё сразу: мёртвую учётку, учётку
+// «N из 5 неудач» и ту, которую вообще нечем было проверить. Порог в пять
+// проходов без этой строки не увидеть.
+function _appleLifecycle(a) {
+  const s = a.state;
+  if (!s || s === 'alive') return null;
+  const th = a.threshold || 5;
+  if (s === 'failing') return {txt: ti('acc.st_failing', {streak: a.streak || 0, threshold: th}),
+                               color: 'var(--orange)', why: a.reason};
+  if (s === 'dead')     return {txt: ti('acc.st_dead', {threshold: th}), color: 'var(--red)', why: a.reason};
+  if (s === 'removed')  return {txt: t('acc.st_removed'), color: 'var(--muted2)', why: a.reason};
+  return {txt: t('acc.st_unverified'), color: 'var(--muted2)', why: a.reason};
+}
+
+async function loadAppleAccounts() {
+  const list = document.getElementById('apple-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/wrapper/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = _appleRetiredLine(r.retired); return; }
+    list.innerHTML = _appleRetiredLine(r.retired) + _acctSorted(accs).map(a => {
+      // media-user-token НЕ равно логину: враппер такой слот не поднимает, и
+      // зелёная точка «не запущен» здесь означала бы поломку. Показываем
+      // ограничение строкой, а не молчаливым серым кружком.
+      const token = a.kind === 'token';
+      const lc = _appleLifecycle(a);
+      const dot = lc ? lc.color
+                     : (token ? 'var(--muted2)'
+                              : (a.busy ? 'var(--orange)' : (a.running ? 'var(--green)' : 'var(--muted)')));
+      const state = lc ? lc.txt
+                       : (token ? t('acc.token_only')
+                                : (a.busy ? t('acc.busy') : (a.running ? t('acc.ready') : t('acc.not_started'))));
+      const tip = lc && lc.why ? ` title="${escapeHtml(lc.why)}${a.checked_at ? ' · ' + escapeHtml(a.checked_at) : ''}"` : '';
+      return `
+      <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        ${acctDragHandle()}
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${dot}" title="${state}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}${token&&a.country?' <span style="color:var(--muted)">('+escapeHtml(a.country.toUpperCase())+')</span>':''}</span>
+        <span${tip} style="color:${lc?lc.color:'var(--muted)'};font-size:10px">${state}</span>
+        ${acctPrefCtl('apple', a)}
+        ${a.primary ? '' : `<button onclick="removeAppleAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`;
+    }).join('');
+    acctDndWire('apple', list);
+  } catch(e) { list.innerHTML = ''; }
+}
+
+// Снятые автоматикой учётки. Строка в списке исчезает молча, и владелец читает
+// это как «я такую не заводил», а не «ее убил порог в 5 неудач».
+function _appleRetiredLine(rows) {
+  const gone = (rows || []).filter(r => r && (r.reason || r.at));
+  if(!gone.length) return '';
+  const last = gone[gone.length - 1];
+  return `<div style="padding:4px 10px;margin-bottom:5px;font-size:10px;color:var(--muted2)">`
+    + escapeHtml(ti('acc.st_retired_note', {n: gone.length, reason: last.reason || '', at: last.at || ''}))
+    + `</div>`;
+}
+
+async function addAppleAccount() {
+  const emailEl = document.getElementById('s-apple-pool-email');
+  const passEl  = document.getElementById('s-apple-pool-pass');
+  const labelEl = document.getElementById('s-apple-pool-label');
+  const id       = (emailEl?.value || '').trim();
+  const password = (passEl?.value || '').trim();
+  const label    = (labelEl?.value || '').trim();
+  if(!id || !password) { toast(t('t.error'), 'var(--red)'); return; }
+  // Токен, вставленный в поле Apple ID, врапперу хуже, чем пустая строка:
+  // `-L 0.AsA5…:пароль` для него логин, и каждая неудача сжигает слот
+  // устройства у Apple. Поэтому не добавляем, а перекладываем куда надо.
+  if (/^0\.[A-Za-z0-9+/=]{150,}$/.test(id)) {
+    const tokEl = document.getElementById('s-apple-pool-token');
+    if (tokEl) tokEl.value = id;
+    [emailEl, passEl, labelEl].forEach(el => { if(el) el.value = ''; });
+    toast(t('acc.token_wrong_field'), 'var(--orange)');
+    return;
+  }
+  try {
+    const r = await api('POST', '/api/wrapper/accounts/add', {id, password, label});
+    if(r.ok) {
+      toast(r.msg || t('t.added'), 'var(--green)');
+      [emailEl, passEl, labelEl].forEach(el => { if(el) el.value = ''; });
+      loadAppleAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+// Второй вход — по media-user-token. Сервер проверяет токен у Apple ДО записи в
+// конфиг и отвечает разным текстом на 403 (токен мёртв) и 401 (сломан наш
+// запрос): совет «вставьте свежий токен» при 401 отправил бы человека чинить то,
+// что не сломано.
+async function addAppleTokenAccount() {
+  const tokEl  = document.getElementById('s-apple-pool-token');
+  const ccEl   = document.getElementById('s-apple-pool-token-cc');
+  const token  = (tokEl?.value || '').trim();
+  const country = (ccEl?.value || '').trim().toLowerCase();
+  if(!token) { toast(t('t.error'), 'var(--red)'); return; }
+  toast(t('acc.token_checking'), 'var(--muted)');
+  try {
+    const r = await api('POST', '/api/wrapper/accounts/add', {token, country});
+    if(r.ok) {
+      // Причина целиком — подписью: текст про 403/401 и про «без ALAC» в одну
+      // строку не влезает, а именно он и есть ответ на вопрос «что не так».
+      toast(t('acc.token_saved'), 'var(--green)', r.msg || '', 10000);
+      [tokEl, ccEl].forEach(el => { if(el) el.value = ''; });
+      loadAppleAccounts();
+    } else {
+      const ours = r.state === 'bad_request';
+      toast(t(ours ? 'acc.token_bad_request' : 'acc.token_rejected'),
+            ours ? 'var(--orange)' : 'var(--red)', r.msg || '', 12000);
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeAppleAccount(slot) {
+  if(!confirm(t('acc.remove_confirm'))) return;
+  try {
+    const r = await api('POST', `/api/wrapper/accounts/${slot}/remove`);
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadAppleAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+// ── SoundCloud multi-account pool (load-balanced OAuth tokens) ─────────────
+async function loadSoundcloudAccounts() {
+  const list = document.getElementById('soundcloud-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/soundcloud/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = _acctSorted(accs).map(a => `
+      <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        ${acctDragHandle()}
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
+        ${acctPrefCtl('soundcloud', a)}
+        ${a.primary ? '' : `<button onclick="removeSoundcloudAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`).join('');
+    acctDndWire('soundcloud', list);
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addSoundcloudAccount() {
+  const tokEl   = document.getElementById('s-sc-pool-token');
+  const labelEl = document.getElementById('s-sc-pool-label');
+  const token = (tokEl?.value || '').trim();
+  const label = (labelEl?.value || '').trim();
+  if(!token) { toast(t('t.error'), 'var(--red)'); return; }
+  try {
+    const r = await api('POST', '/api/soundcloud/accounts/add', {token, label});
+    if(r.ok) {
+      toast(r.msg || t('t.added'), 'var(--green)');
+      [tokEl, labelEl].forEach(el => { if(el) el.value = ''; });
+      loadSoundcloudAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeSoundcloudAccount(slot) {
+  if(!confirm(t('dlg.pool_remove'))) return;
+  try {
+    const r = await api('POST', `/api/soundcloud/accounts/${slot}/remove`);
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadSoundcloudAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+// ── Yandex Music multi-account pool (load-balanced OAuth tokens) ───────────
+async function loadYandexAccounts() {
+  const list = document.getElementById('yandex-accounts-list');
+  if(!list) return;
+  try {
+    const r = await api('GET', '/api/yandex/accounts');
+    const accs = r.accounts || [];
+    if(!accs.length) { list.innerHTML = ''; return; }
+    list.innerHTML = _acctSorted(accs).map(a => `
+      <div data-acct-slot="${a.slot}" style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;margin-bottom:5px;font-size:11px">
+        ${acctDragHandle()}
+        <span style="width:8px;height:8px;border-radius:50%;flex-shrink:0;background:${a.busy?'var(--orange)':'var(--green)'}"></span>
+        <span style="flex:1;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(_acctLabel(a))}${a.primary?' <span style="color:var(--muted)">('+escapeHtml(t('s.slot_primary'))+')</span>':''}</span>
+        ${acctPrefCtl('yandex', a)}
+        ${a.primary ? '' : `<button onclick="removeYandexAccount(${a.slot})" style="padding:2px 8px;background:transparent;border:1px solid var(--border);border-radius:6px;font-size:10px;cursor:pointer;color:var(--muted);font-family:var(--font)">✕</button>`}
+      </div>`).join('');
+    acctDndWire('yandex', list);
+  } catch(e) { list.innerHTML = ''; }
+}
+
+async function addYandexAccount() {
+  const tokEl   = document.getElementById('s-yandex-pool-token');
+  const labelEl = document.getElementById('s-yandex-pool-label');
+  const token = (tokEl?.value || '').trim();
+  const label = (labelEl?.value || '').trim();
+  if(!token) { toast(t('t.error'), 'var(--red)'); return; }
+  try {
+    const r = await api('POST', '/api/yandex/accounts/add', {token, label});
+    if(r.ok) {
+      toast(r.msg || t('t.added'), 'var(--green)');
+      [tokEl, labelEl].forEach(el => { if(el) el.value = ''; });
+      loadYandexAccounts();
+    } else {
+      toast(r.msg || t('t.error'), 'var(--red)');
+    }
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+async function removeYandexAccount(slot) {
+  if(!confirm(t('dlg.pool_remove'))) return;
+  try {
+    const r = await api('POST', `/api/yandex/accounts/${slot}/remove`);
+    toast(r.msg || (r.ok ? t('t.removed') : t('t.error')), r.ok ? 'var(--green)' : 'var(--red)');
+    loadYandexAccounts();
+  } catch(e) { toast(t('t.error'), 'var(--red)'); }
+}
+
+
+// ── Возврат из внешнего входа в Spotify ───────────────────────────────────────
+// Оба helper'а входа (librespot на 5588 и PKCE на 4381) после колбэка Spotify
+// уводят браузер обратно сюда с ?spotify_login=ok. Без этого человек оставался
+// на странице helper'а с надписью «Login successful», а Ripster у него всё ещё
+// показывал «не авторизован» — статус обновлялся только при следующем открытии
+// вкладки, поэтому единственным известным лечением был ПЕРЕЗАПУСК приложения
+// (жалоба пользователя 31.07.2026). Теперь возврат сам перепроверяет вход.
+(function _spotifyLoginReturn() {
+  let ok = false;
+  try { ok = new URLSearchParams(location.search).get('spotify_login') === 'ok'; } catch (e) { return; }
+  if (!ok) return;
+  // Убираем параметр из адреса, чтобы перезагрузка страницы не повторяла всё это.
+  try { history.replaceState(null, '', location.pathname + location.hash); } catch (e) {}
+  const run = async () => {
+    try { await loadOrpheusStatus?.(); } catch (e) {}
+    try { await loadSpotifyStatus?.(); } catch (e) {}
+    let authed = false;
+    try { authed = !!(await api('GET', '/api/orpheus/status'))?.authenticated; } catch (e) {}
+    if (window.toast) toast(authed ? t('sp.login_back_ok') : t('sp.login_back_fail'),
+                            authed ? 'var(--green)' : 'var(--orange)', 9000);
+    // Показываем вкладку Spotify — человек вернулся именно за этим.
+    try {
+      const nav = document.querySelector('.nav-item[data-view="settings"]');
+      if (nav && typeof showView === 'function') showView('settings', nav);
+      const tab = document.querySelector('.stab[data-stab="spotify"]');
+      if (typeof showStab === 'function') showStab('spotify', tab);
+    } catch (e) {}
+  };
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', () => setTimeout(run, 1200));
+  else setTimeout(run, 1200);
+})();
+
+// Выход из аккаунта сервиса. Спрашиваем подтверждение: восстановление входа
+// стоит времени (а у Apple ещё и слота устройства), поэтому случайное нажатие
+// не должно ничего стирать.
+async function logoutService(svc, btn) {
+  const name = (typeof _svcLabel === 'function' ? _svcLabel(svc) : svc);
+  if (!confirm(ti('s.logout_confirm', { name }))) return;
+  const old = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; btn.textContent = '…'; }
+  try {
+    const r = await api('POST', '/api/logout/' + encodeURIComponent(svc), {});
+    if (r && r.ok) {
+      toast(ti('s.logout_done', { name, n: (r.cleared || []).length }), 'var(--green)');
+      if (typeof loadTokensToUI === 'function') loadTokensToUI();
+      // Показать новое состояние сразу — иначе рядом висит старое зелёное «✓».
+      if (typeof testAuth === 'function') setTimeout(() => testAuth(svc), 300);
+    } else {
+      toast(t('t.error'), 'var(--red)');
+    }
+  } catch (e) {
+    toast('✗ ' + (e && e.message || e), 'var(--red)');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = old || '🚪'; }
+  }
+}
+
+
+// ── Формат качества одной строкой ────────────────────────────────────────────
+// Потолок считает СЕРВЕР (ripster/quality_tiers.py — рядом с движками); UI
+// только оформляет пару {codec, kbps|bits,khz} в текст. Никаких тарифов и
+// битрейтов, додуманных здесь: две линейки оценок разъезжаются на первом же
+// изменении тарифной сетки. Нужен и строкам аккаунтов, и карточке SoundCloud
+// (sc.js) — отсюда глобальность.
+function qFmtLabel(c) {
+  if (!c) return '';
+  if (c.bits) return ti('q.hires', { codec: c.codec || '', bits: c.bits, khz: c.khz });
+  if (c.kbps != null) return ti('q.kbps', { codec: c.codec ? c.codec + ' ' : '', kbps: c.kbps });
+  return '';
+}
+
+// ── Обзор аккаунтов: страны, часовые пояса, ранняя доступность ───────────────
+// Показывает по каждой настроенной учётке страну и местное время, и КТО входит
+// в новый день раньше — на этом строится ловля ранних релизов (НЗ-Tidal).
+async function renderAccountsOverview() {
+  const box = document.getElementById('accounts-overview');
+  if (!box) return;
+  let d;
+  try {
+    d = await (await fetch('/api/accounts/overview')).json();
+  } catch (e) { box.innerHTML = ''; return; }
+  if (!d || !d.ok) { box.innerHTML = ''; return; }
+  // Страну и подсказку собираем ЗДЕСЬ. Сервер присылает код страны и числа —
+  // готовый русский текст оттуда не переводился и приезжал русским даже в
+  // английский интерфейс.
+  const cname = cc => (cc && t('cc.' + cc) !== 'cc.' + cc) ? t('cc.' + cc) : (cc || '');
+  const flagOf = cc => { cc = String(cc || '').toUpperCase();
+    return /^[A-Z]{2}$/.test(cc)
+      ? String.fromCodePoint(0x1F1E6 + cc.charCodeAt(0) - 65, 0x1F1E6 + cc.charCodeAt(1) - 65)
+      : '🏳'; };
+  const hint = d.hint
+    ? `<div style="background:rgba(0,212,179,.1);border:1px solid rgba(0,212,179,.35);border-radius:8px;padding:8px 11px;font-size:12px;color:#8fe3d4;margin-bottom:8px">⚡ ${esc(ti('s.acc_hint', {
+        flag: d.hint.flag,
+        label: d.hint.account ? `${d.hint.label} · ${d.hint.account}` : d.hint.label,
+        country: cname(d.hint.country),
+        h: d.hint.hours, vs: d.hint.vs}))}</div>`
+    : '';;
+  const rows = (d.accounts || []).map(a => {
+    // СТРАНА и ЧАСОВОЙ ПОЯС — два разных факта. Раньше `known` считалось по
+    // offset'у, и на машине без IANA-базы (Windows без tzdata) строка с
+    // реальной страной превращалась в «страна не определена» — владелец терял
+    // CA у Apple и NZ у Tidal из-за сбоя чужого шага.
+    const ccKnown = !!a.country_known;
+    const tzKnown = !!a.tz_known;
+    const rank = a.early_rank;
+    const badge = rank === 1
+      ? `<span style="font-size:9px;font-weight:700;padding:2px 7px;border-radius:4px;background:rgba(0,212,179,.16);color:#00d4b3;letter-spacing:.4px">${esc(t('s.acc_earliest'))}</span>`
+      : (tzKnown ? `<span style="font-size:11px;color:var(--muted2);font-family:var(--mono)">UTC${a.offset>=0?'+':''}${a.offset}</span>` : '');
+    // У сервиса с пулом страна известна только по ОСНОВНОЙ учётке — остальные
+    // могут стоять в других странах, а на этом держится ранняя доступность.
+    // Молчать нельзя: панель выдала бы страну основной за страну всего пула.
+    const only = (ccKnown && a.country_is_primary_only)
+      ? ` <span style="font-size:10px;color:var(--muted2)" title="${esc(t('s.acc_primary_only_t'))}">${esc(t('s.acc_primary_only'))}</span>` : '';
+    const tzNote = `<span style="font-size:10px;color:var(--orange)" ` +
+      `title="${esc(t('s.acc_tz_unknown_t'))}">${esc(t('s.acc_tz_unknown'))}</span>`;
+    // Причина отсутствия страны приезжает с сервера кодом (`never_probe` /
+    // `no_country_field` / `dead_token` / `probe_failed`): только сервер знает,
+    // ЧТО именно не сработало, и отказ обязан это называть, а не прятаться за
+    // безликим «страна не определена».
+    const reason = a.country_reason || 'unknown';
+    // Разные страны аккаунтов — это НЕ подозрение на ошибку, а главный смысл
+    // панели: релиз появляется там, где раньше наступает пятница.
+    const spread = (a.countries || []).length > 1
+      ? ` <span style="font-size:10px;color:var(--muted2)" title="${esc((a.countries || []).map(cname).join(' · '))}">${esc(ti('s.acc_varies', {n: (a.countries || []).length}))}</span>` : '';
+    const geo = ccKnown
+      ? `<span style="color:var(--text)">${a.flag} ${esc(cname(a.country))}</span>${only}${spread} · ` +
+        (tzKnown ? `<span style="color:var(--muted)">${esc(a.local_time)}</span>` : tzNote)
+      : `<span style="color:var(--muted2)" title="${esc(ti('s.acc_why.' + reason))}">` +
+        `${esc(ti('s.acc_no_country', {why: ti('s.acc_why.' + reason)}))}</span>`;
+    const acc = a.accounts > 1
+      ? ` <span style="font-size:10px;color:var(--muted2)">· ${esc(ti('s.acc_count', {n: a.accounts}))}</span>` : '';
+    // Срок подписки: его знает проба сервиса, и с этого захода он переживает
+    // перезагрузку — раньше жил одной строкой у кнопки «проверить» и пропадал.
+    let sub = '';
+    if (a.sub_active === false) {
+      sub = ` · <span style="color:var(--red)">${esc(t('s.sub_inactive'))}</span>`;
+    } else if (!a.sub_end && a.sub_active === true) {
+      // Apple отвечает только «активна», без даты — показываем что есть.
+      sub = ` · <span style="color:var(--green)">${esc(t('s.sub_active'))}</span>`;
+    }
+    if (a.sub_end) {
+      const dl = a.sub_days_left;
+      const col = (dl != null && dl < 0) ? 'var(--red)'
+                : (dl != null && dl <= 14) ? 'var(--orange)' : 'var(--green)';
+      const left = (dl == null) ? ''
+                 : (dl < 0 ? ' ' + t('s.sub_expired') : ' · ' + ti('s.sub_days', {n: dl}));
+      sub = ` · <span style="color:${col}">${esc(ti('s.sub_until', {date: a.sub_end}) + left)}</span>`;
+    }
+    // Тариф и ПОТОЛОК того, что он покупает: сервер присылает `tier` +
+    // `ceiling`, маппинг — на сервере). Истёкшая/мёртвая учётка читается
+    // сломанной: сервер сам гасит тариф в `tier_hidden`, остаётся назвать
+    // причину. Неизвестный тариф — «не определено», а не смелая догадка.
+    let qual = '';
+    if (a.tier_hidden === 'expired') {
+      qual = ` · <span style="color:var(--red)">${esc(t('s.q_expired'))}</span>`;
+    } else if (a.tier_hidden === 'dead') {
+      qual = ` · <span style="color:var(--red)">${esc(t('s.q_dead'))}</span>`;
+    } else if (a.tier || a.ceiling) {
+      const parts = [];
+      if (a.tier) parts.push(ti('s.q_tier', {tier: a.tier}));
+      parts.push(a.ceiling ? ti('s.q_ceiling', {label: qFmtLabel(a.ceiling)})
+                           : t('s.q_ceil_unknown'));
+      qual = ` · <span style="color:var(--muted)" title="${esc(t('s.q_t_tier'))}">` +
+             `${esc(parts.join(' · '))}</span>`;
+    } else {
+      qual = ` · <span style="color:var(--muted2)" title="${esc(t('s.q_t_unknown'))}">` +
+             `${esc(ti('s.q_tier', {tier: t('s.q_none')}))}</span>`;
+    }
+    const st = a.configured
+      ? `<span style="color:var(--green);font-size:11px">✓</span>`
+      : `<span style="color:var(--red);font-size:11px">✗</span>`;
+    // Дерево ПО КАЖДОМУ аккаунту: клик по строке сервиса разворачивает его слоты
+    // ПРЯМО на месте (владелец 18.09: «по нажатию на акк вижу развёртывание, дерево
+    // у каждого аккаунта», а не отдельной секцией снизу). Слоты уже приходят в
+    // a.slots из /api/accounts/overview — второй запрос не нужен.
+    const slots = Array.isArray(a.slots) ? a.slots : [];
+    const hasTree = slots.length > 0;
+    const tree = slots.map(s => {
+      const bits = [s.plan, s.sub_end ? t('s.slot_until') + ' ' + s.sub_end : '',
+                    (s.lossless ? 'lossless' : '')].filter(Boolean).join(' · ');
+      const alive = s.alive === false
+        ? `<span style="color:var(--muted2);font-size:10px">${esc(t('s.slot_retired'))}</span>`
+        : (s.alive === true ? `<span style="color:var(--green);font-size:10px">✅</span>` : '');
+      // Слот обязан показать свою страну, а не молчать: смысл дерева в том,
+      // что 6 аккаунтов одного сервиса живут в 6 странах, и «нет страны» у
+      // слота — это тоже измерение, которое надо назвать.
+      const slotCc = (s.country || '').toUpperCase();
+      const where = slotCc
+        ? `${esc(flagOf(slotCc))} ${esc(cname(slotCc))} · `
+        : `<span style="color:var(--muted2)">${esc(t('s.slot_no_country'))}</span> · `;
+      const meta = where + (bits || '—');
+      return `<div style="display:flex;align-items:center;gap:8px;padding:5px 10px 5px 30px;font-size:11px">
+        <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
+          <span style="color:var(--text);font-weight:600">${esc((typeof errKeyText === 'function' && errKeyText(s.label_key)) || s.label || '—')}</span>
+          <span style="color:var(--muted2);margin-left:4px">${esc(meta)}</span>
+        </div>${alive}
+      </div>`;
+    }).join('');
+    const caret = hasTree
+      ? `<span class="acc-caret" style="display:inline-block;width:11px;color:var(--muted2);text-align:center">▸</span>`
+      : `<span style="display:inline-block;width:11px"></span>`;
+    const headInner =
+      `${st}
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:600;color:var(--text)">${esc(a.label)}${acc}</div>
+        <div style="font-size:11px;margin-top:1px">${geo}${sub}${qual}</div>
+      </div>
+      ${badge}${caret}`;
+    const rowCss = 'display:flex;align-items:center;gap:10px;padding:7px 10px;background:var(--surface);border:1px solid var(--border);border-radius:8px';
+    if (!hasTree) {
+      return `<div style="${rowCss};margin-bottom:5px">${headInner}</div>`;
+    }
+    return `<details class="acc-node" style="margin-bottom:5px" ` +
+      `ontoggle="var c=this.querySelector('.acc-caret');if(c)c.textContent=this.open?'▾':'▸';">` +
+      `<summary style="${rowCss};list-style:none;cursor:pointer;user-select:none">${headInner}</summary>` +
+      `<div style="background:rgba(255,255,255,.02);border:1px solid var(--border);border-top:none;` +
+        `border-radius:0 0 8px 8px;margin-top:-3px;padding-top:4px;padding-bottom:2px">${tree}</div>` +
+    `</details>`;
+  }).join('');
+  // Слоты каждого сервиса разворачиваются ВНУТРИ его строки (дерево выше) —
+  // отдельной секции снизу больше нет.
+  box.innerHTML = hint + rows +
+    `<div style="font-size:10px;color:var(--muted2);margin-top:4px">${esc(t('s.acc_note'))}</div>`;
+}
+
+// (renderAccountSlots убрана 18.09.2026: слоты теперь разворачиваются деревом
+// внутри каждой строки в renderAccountsOverview — отдельной секции снизу нет.)

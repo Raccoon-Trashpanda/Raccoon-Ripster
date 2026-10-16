@@ -1,0 +1,760 @@
+"""
+Qobuz engine — wraps the `streamrip` CLI.
+
+Streamrip is a Python package (``pip install streamrip``) that provides a
+single ``rip`` command for Qobuz, Tidal, Deezer and SoundCloud. We invoke it
+as a subprocess and parse stdout to report progress back to the UI.
+
+Auth: the user supplies tokens via Settings → Qobuz (same pattern as Deezer
+ARL). Two modes supported:
+
+  * **Token mode**: ``qobuz-user-id`` + ``qobuz-auth-token`` (from play.qobuz.com
+    cookies — look for ``user-id`` and ``user-auth-token``).
+  * **Email + password mode**: ``qobuz-email`` + ``qobuz-password`` (we compute
+    the md5 ourselves before writing streamrip's config).
+
+app_id / secrets are optional — streamrip has a fallback list built in.
+"""
+from __future__ import annotations
+
+import hashlib
+import re
+from pathlib import Path
+
+from .base import EngineBase, EngineResult, title_with_version
+from .registry import register
+from ripster import http_client as _HTTP
+from .streamrip_utils import (
+    COMMON_TOML_SECTIONS,
+    RE_CONFIG_MISMATCH,
+    RE_ERROR,
+    RE_TRACK_DONE,
+    StreamripMixin,
+    classify_line as _classify_line,
+    find_rip,
+    parse_progress as _parse_progress,
+    write_config,
+)
+
+_QOBUZ_DEFAULT_APP_ID = "312369995"
+# Secret PAIRED with the default app_id above (public QobuzDownloaderX-compatible
+# pair). DOWNLOADS sign track/getFileUrl with md5(secret+params+ts); without the
+# matching secret streamrip silently returns 0 tracks even with a valid account
+# (SEARCH needs no secret, which is why search worked but downloads didn't). A
+# user who sets their own qobuz-app-id should also set their own qobuz-secrets.
+_QOBUZ_DEFAULT_SECRET = "e79f8b9be485692b0e5f9dd895826368"
+
+_RE_AUTHFAIL = re.compile(
+    r'auth.*(failed|invalid)|invalid.*(token|credentials)|'
+    r'unauthorized|not\s+logged|login failed|AuthenticationError',
+    re.I,
+)
+
+# Detect actual quality from streamrip output paths: [FLAC] [24B-96.0kHz] etc.
+_RE_QUALITY_FOLDER = re.compile(
+    r'\[(?P<fmt>FLAC|MP3|AAC)\](?:\s*\[(?P<bits>\d+)B-(?P<rate>\d+(?:\.\d+)?)kHz\])?',
+    re.I,
+)
+
+# «Downloading <путь к файлу>» — streamrip печатает путь трека ПОСЛЕ того, как файл
+# лег на диск. Заголовок релиза («---- Downloading Schiller - Metropolis ----») —
+# НЕ завершение трека, поэтому строки с ведущими тире исключены: иначе 9-трековый
+# альбом отчитывался десятком (ночной прогон Qwen).
+_RE_FILE_DONE = re.compile(r'(?im)^(?!-{2,})\s*Downloading\s+\S')
+# Маркер сорванного трека (их может быть несколько за прогон).
+_RE_TRACK_FAILED = re.compile(r'Failed to download|Track \d+ failed', re.I)
+# Сколько треков релиз обещает: «Processing track 3 of 9».
+_RE_TRACK_PLANNED = re.compile(r'Processing track \d+ of (\d+)', re.I)
+
+
+def _detect_actual_quality(log_text: str) -> str:
+    """Parse the actual downloaded quality from streamrip folder/log output.
+    Returns a quality ID matching QobuzEngine._QUALITIES, or "" if unknown.
+    """
+    m = _RE_QUALITY_FOLDER.search(log_text)
+    if not m:
+        return ""
+    fmt = (m.group("fmt") or "").upper()
+    if fmt == "MP3":
+        return "5"
+    bits = int(m.group("bits") or 0)
+    rate = float(m.group("rate") or 0)
+    if bits >= 20:
+        return "27" if rate > 96 else "7"
+    return "6"
+
+
+def _album_identity(album_id: str, app_id: str, token: str = "") -> tuple[str, str]:
+    """(title, version) релиза по /album/get, 3-секундным таймаутом.
+    ''-ы при любой осечке — суффикс тогда подберёт только коллизионный путь."""
+    import httpx as _httpx
+    try:
+        headers = {"X-User-Auth-Token": token} if token else {}
+        with _HTTP.shared(channel="api") as c:
+            r = c.get("https://www.qobuz.com/api.json/0.2/album/get",
+                      params={"album_id": album_id, "app_id": app_id}, headers=headers)
+            if r.status_code != 200:
+                return "", ""
+            d = r.json()
+        return (d.get("title") or ""), (d.get("version") or "")
+    except Exception:
+        return "", ""
+
+
+def _folder_suffix(save_path: str, album_id: str, config: dict,
+                   task_id: str = "") -> str:
+    """Хвост имени папки, отделяющий ЭТОТ релиз от одноимённого другого.
+
+    Два разных релиза могут дать ОДИНАКОВОЕ имя папки: MIXED и UNMIXED
+    «NORTHERN EXPOSURE REDUX» Sasha & John Digweed (qobuz uvxkonsapjsbb и
+    e6r7vcsf378jq) — один артист, тайтл, год и качество. streamrip открывает
+    файл 'wb' без проверки существования — вторая загрузка молча стирает треки
+    первой, а авто-чистка по записи одной задачи сносит всю папку (24.09.2026
+    так потеряли уже скачанный релиз). Поэтому: есть у релиза поле version
+    (Mixed/Unmixed/Deluxe…) — дописываем его ВСЕГДА; нет — только если папка с
+    таким именем уже занята ДРУГИМ релизом (манифест или файлы на диске); в
+    обоих коллизионных случаях различаем коротким идентом « [qobuz-<id>]».
+    Лучево: любая осечка возвращает '' — страховка separate_collided_files
+    разнесёт папки после загрузки."""
+    if not album_id:
+        return ""
+    try:
+        from ripster import release_folders as _rf
+        from ripster import download_manifest as _dm
+        app_id = (config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+        token  = (config.get("qobuz-auth-token") or "").strip()
+        title, version = _album_identity(album_id, app_id, token)
+        if version:
+            return _rf.fmt_suffix("qobuz", "", version)
+        if not title:
+            return ""                       # API недоступен — решит страховка
+        tl = title.lower()
+        rid = _dm.release_id_of(f"https://open.qobuz.com/album/{album_id}") or album_id
+        candidates = {e.get("dir") or "" for e in _dm.all_entries().values()}
+        try:
+            parent = Path(save_path)
+            if parent.is_dir():
+                candidates |= {str(p) for p in parent.iterdir() if p.is_dir()}
+        except Exception:
+            pass
+        foreign = False
+        for raw in candidates:
+            if not raw:
+                continue
+            p = Path(raw)
+            try:
+                if tl not in _rf.base_of(p.name).lower():
+                    continue
+                claimed = bool(_dm.dir_claims(p, exclude_task_id=task_id))
+                if claimed and not _rf.foreign_claims(p, task_id, "qobuz", rid):
+                    return ""               # здесь лежит ОН САМ — повтор/добор
+                has_audio = any(
+                    f.suffix.lower() in _rf._AUDIO
+                    for f in p.iterdir() if f.is_file()) if p.is_dir() else False
+                foreign = foreign or claimed or has_audio
+            except Exception:
+                continue
+        return _rf.fmt_suffix("qobuz", rid, "") if foreign else ""
+    except Exception:
+        return ""
+
+
+def _write_config(user_cfg: dict, save_path: str, cfg_override: str = "",
+                  folder_suffix: str = "") -> Path:
+    """Write a minimal streamrip config.toml with the user's Qobuz creds."""
+    user_id     = str(user_cfg.get("qobuz-user-id")    or "").strip()
+    auth_token  = str(user_cfg.get("qobuz-auth-token") or "").strip()
+    email       = str(user_cfg.get("qobuz-email")      or "").strip()
+    password    = str(user_cfg.get("qobuz-password")   or "").strip()
+    # app_id ↔ secret are a PAIR: the default secret only signs for the default
+    # app_id. If the user set their OWN app_id we must NOT inject the default secret
+    # (mismatch → downloads silently return 0 tracks); use their secret (or none).
+    _app_id_custom = str(user_cfg.get("qobuz-app-id")  or "").strip()
+    _secret_custom = str(user_cfg.get("qobuz-secrets") or "").strip()
+    if _app_id_custom:
+        app_id      = _app_id_custom
+        secrets_raw = _secret_custom            # their app_id → their secret only
+    else:
+        # Default app_id MUST pair with the default secret. A leftover custom secret
+        # (entered for a different app_id) would mismatch → silent 0 tracks. So the
+        # default pair is used as a UNIT — ignore any stray custom secret here.
+        app_id      = _QOBUZ_DEFAULT_APP_ID
+        secrets_raw = _QOBUZ_DEFAULT_SECRET
+
+    if user_id and auth_token:
+        use_token   = "true"
+        email_field = user_id
+        pass_field  = auth_token
+    else:
+        use_token   = "false"
+        email_field = email
+        pass_field  = hashlib.md5(password.encode()).hexdigest() if password else ""
+
+    q_map = {"5": 1, "mp3_320": 1, "6": 2, "flac": 2, "7": 3, "hires": 3, "27": 4, "hires_max": 4}
+    quality_level = q_map.get(
+        user_cfg.get("quality") or user_cfg.get("qobuz-quality") or "7", 3,
+    )
+
+    secrets_toml = "[]"
+    if secrets_raw:
+        parts = [f'"{p.strip()}"' for p in secrets_raw.split(",") if p.strip()]
+        secrets_toml = "[" + ", ".join(parts) + "]"
+
+    safe_save = save_path.replace("\\", "/")
+    # суффикс попадает в TOML только в безопасном алфавите (fmt_suffix режет
+    # кавычки и пути) — на всякий случай фильтр здесь же
+    folder_suffix = re.sub(r'["\\\r\n]', "", folder_suffix or "")
+
+    # Qobuz FLAC has no in-track segments (one file / one GET per track), so speed
+    # comes from downloading more TRACKS at once. streamrip already does this; we
+    # just expose the knob. Default stays 6 — pushing it higher splits the pipe
+    # across more concurrent transfers, and on a huge Hi-Res album (e.g. Yes —
+    # "Tales From Topographic Oceans", 35 tracks @ 24/192) each stream trickles so
+    # slowly that streamrip's OWN aiohttp read-timeout fires and drops tracks. 6 is
+    # the proven-safe value; raise only if your pipe is fat. requests_per_minute is
+    # the 429 guard (learned the hard way on SoundCloud).
+    try:
+        _max_conn = max(1, min(20, int(user_cfg.get("qobuz-max-connections", 6) or 6)))
+    except (TypeError, ValueError):
+        _max_conn = 6
+    try:
+        _rpm = max(10, min(300, int(user_cfg.get("qobuz-requests-per-minute", 60) or 60)))
+    except (TypeError, ValueError):
+        _rpm = 60
+    toml = (
+        '# Auto-generated by Ripster — overwritten on every Qobuz download.\n\n'
+        '[downloads]\n'
+        f'folder = "{safe_save}"\n'
+        'source_subdirectories = false\n'
+        'concurrency = true\n'
+        f'max_connections = {_max_conn}\n'
+        f'requests_per_minute = {_rpm}\n\n'
+        '[qobuz]\n'
+        f'quality = {quality_level}\n'
+        'download_booklets = true\n'
+        f'use_auth_token = {use_token}\n'
+        f'email_or_userid = "{email_field}"\n'
+        f'password_or_token = "{pass_field}"\n'
+        f'app_id = "{app_id}"\n'
+        f'secrets = {secrets_toml}\n\n'
+        '[tidal]\n'
+        'quality = 3\n'
+        'download_videos = false\n'
+        'user_id = ""\n'
+        'country_code = ""\n'
+        'access_token = ""\n'
+        'refresh_token = ""\n'
+        'token_expiry = ""\n\n'
+        + COMMON_TOML_SECTIONS +
+        '\n[filepaths]\n'
+        # true → single-track downloads (per-track expansion sends one track URL
+        # at a time) get their own folder instead of landing loose in the
+        # save-path root, where /api/download-file cannot find them.
+        'add_singles_to_folder = true\n'
+        # `{version}` в streamrip не поддержан, поэтому издание/идент релиза
+        # дописываются в шаблон готовым суффиксом (_folder_suffix) — иначе два
+        # разных релиза пишут в одну папку и затирают друг друга.
+        'folder_format = "{albumartist} - {title} ({year}) [{container}] '
+        '[{bit_depth}B-{sampling_rate}kHz]' + folder_suffix + '"\n'
+        'track_format = "{tracknumber:02}. {artist} - {title}{explicit}"\n'
+        'restrict_characters = false\n'
+        'truncate_to = 120\n\n'
+        '[lastfm]\n'
+        'source = "qobuz"\n'
+        'fallback_source = ""\n'
+    )
+    return write_config(toml, override=cfg_override)
+
+
+def _resolve_upc_to_album_id(upc: str, app_id: str, token: str = "") -> str | None:
+    """Resolve a play.qobuz.com UPC barcode to a real qobuz_id via /album/search.
+
+    streamrip passes UPCs straight to /album/get which returns nothing and hangs.
+    Returns the alphanumeric slug on success, None if resolution failed.
+    Synchronous — 3-second timeout keeps the queue responsive if Qobuz is slow.
+    """
+    import httpx as _httpx
+
+    def _good_id(candidate: str) -> bool:
+        # Qobuz sometimes returns id == upc in search results — that's useless.
+        return bool(candidate) and candidate != upc
+
+    try:
+        headers = {"X-User-Auth-Token": token} if token else {}
+        with _HTTP.shared(channel="api") as c:
+            r = c.get(
+                "https://www.qobuz.com/api.json/0.2/album/search",
+                params={"query": upc, "limit": 5, "app_id": app_id},
+                headers=headers,
+            )
+            if r.status_code != 200:
+                return None
+            data = r.json()
+        items = (data.get("albums") or {}).get("items") or []
+        for item in items:
+            if str(item.get("upc", "") or "") == upc:
+                candidate = str(item.get("id", "") or "")
+                if _good_id(candidate):
+                    return candidate
+        real_items = [it for it in items if _good_id(str(it.get("id", "") or ""))]
+        if len(real_items) == 1:
+            return str(real_items[0].get("id", "")) or None
+        return None
+    except Exception:
+        return None
+
+
+@register
+class QobuzEngine(StreamripMixin, EngineBase):
+    name = "qobuz"
+
+    def __init__(self):
+        StreamripMixin.__init__(self)
+
+    _QUALITIES = [
+        {"id": "27", "label": "Hi-Res 24/192", "sub": "24-bit / up to 192 kHz", "badge": "HI-RES",   "color": "#ffd60a", "bitrate": "3000+ kbps", "ext": "flac", "req": "premium", "flag": "-q 4"},
+        {"id": "7",  "label": "Hi-Res 24/96",  "sub": "24-bit / up to 96 kHz",  "badge": "HI-RES",   "color": "#ffd60a", "bitrate": "~2500 kbps", "ext": "flac", "req": "premium", "flag": "-q 3"},
+        {"id": "6",  "label": "FLAC 16/44.1",  "sub": "CD quality lossless",    "badge": "LOSSLESS", "color": "#3ecfaa", "bitrate": "1411 kbps",  "ext": "flac", "req": "free",    "flag": "-q 2"},
+        {"id": "5",  "label": "MP3 320",       "sub": "Lossy",                  "badge": "LOSSY",    "color": "#EF9F27", "bitrate": "320 kbps",   "ext": "mp3",  "req": "free",    "flag": "-q 1"},
+    ]
+
+    def qualities(self) -> list[dict]:
+        return [{**q, "engine": self.name} for q in self._QUALITIES]
+
+    def build_cmd(self, url: str, quality: str, config: dict) -> list[str]:
+        save_path = config.get("qobuz-save-path") or config.get("save-path") or "downloads"
+        Path(save_path).mkdir(parents=True, exist_ok=True)
+
+        import urllib.parse as _up
+        _parts = [p for p in _up.urlparse(url).path.split("/") if p]
+        if _parts and _parts[-1].isdigit() and len(_parts[-1]) >= 12:
+            upc    = _parts[-1]
+            app_id = (config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+            token  = (config.get("qobuz-auth-token") or "").strip()
+            print(f"[qobuz] Resolving UPC {upc} to album_id...", flush=True)
+            real_id = _resolve_upc_to_album_id(upc, app_id, token)
+            # IMPORTANT: use open.qobuz.com — streamrip's URL parser does NOT match
+            # www.qobuz.com/album/{id} (no slug) and silently downloads 0 tracks
+            # (exit 0). open.qobuz.com/album/{id} parses + downloads correctly.
+            if real_id:
+                url = f"https://open.qobuz.com/album/{real_id}"
+                print(f"[qobuz] ✓ UPC resolved → album_id {real_id}", flush=True)
+            else:
+                url = f"https://open.qobuz.com/album/{upc}"
+                print(f"[qobuz] UPC {upc}: no slug, using id directly (open.qobuz.com)", flush=True)
+        else:
+            # Normalize ANY qobuz album/track/playlist URL to open.qobuz.com/{type}/{id}.
+            # Search results look like www.qobuz.com/fr-fr/album/{slug}/{id} (locale +
+            # slug, id may be alphanumeric). streamrip's parser chokes on that form and
+            # downloads 0 tracks (exit 0). The id is the last path segment.
+            _m = re.search(
+                r'qobuz\.com/(?:[a-z]{2}-[a-z]{2}/)?(album|track|playlist|artist)/(?:[^/]+/)?([A-Za-z0-9]+)/?$',
+                url)
+            if _m:
+                url = f"https://open.qobuz.com/{_m.group(1)}/{_m.group(2)}"
+                print(f"[qobuz] normalized URL → {url}", flush=True)
+
+        cfg_copy = dict(config)
+        cfg_copy["quality"] = quality
+        # Отличаем этот релиз от одноимённого другого ДО старта загрузки:
+        # издание (version) или короткий идент в имени папки.
+        _mab = re.search(r'open\.qobuz\.com/album/([A-Za-z0-9]+)', url)
+        folder_suffix = _folder_suffix(save_path, _mab.group(1) if _mab else "",
+                                       config, config.get("_task_id") or "")
+        if folder_suffix:
+            print(f"[qobuz] folder suffix: {folder_suffix}", flush=True)
+        # `qobuz-*` fields and `_qobuz_cfg_dir` may be overridden per-task by the
+        # multi-account pool dispatch (ripster/runner.py, ripster/qobuz_pool.py) —
+        # a plain single-account setup never sets `_qobuz_cfg_dir`, so this is a
+        # no-op (behaves exactly as before the pool existed).
+        cfg_path = _write_config(cfg_copy, save_path, cfg_override=config.get("_qobuz_cfg_dir") or "",
+                                 folder_suffix=folder_suffix)
+        # Diagnostic: record the credential SHAPE (booleans only, no values) so a
+        # 0-tracks failure can name the real cause via telemetry instead of guessing
+        # — the #1 unknown was "did the tester set token correctly / a custom app_id".
+        _uid = bool((config.get("qobuz-user-id") or "").strip())
+        _tok = bool((config.get("qobuz-auth-token") or "").strip())
+        _eml = bool((config.get("qobuz-email") or "").strip())
+        _cust_app = bool((config.get("qobuz-app-id") or "").strip())
+        _cust_sec = bool((config.get("qobuz-secrets") or "").strip())
+        _mode = "token" if (_uid and _tok) else "email" if _eml else "NONE"
+        self._cfg_diag = (f" [cfg: auth={_mode} uid={'Y' if _uid else 'N'} "
+                          f"tok={'Y' if _tok else 'N'} app_id={'custom' if _cust_app else 'default'} "
+                          f"secret={'custom' if _cust_sec else ('default' if not _cust_app else 'MISSING')}]")
+        # NOTE: do NOT pass --no-progress (streamrip 2.0.6 then prints nothing on a
+        # non-TTY). `-v` makes it emit the real auth/region/API error to stderr (we
+        # capture stderr→stdout) so a silent 0-tracks failure becomes diagnosable.
+        # NO "-v": streamrip's DEBUG verbosity dumps "Request params" / "Login resp"
+        # lines that contain the Qobuz user_auth_token + account email in plaintext
+        # → they leaked into the console/console.log/telemetry. Default verbosity
+        # still prints download paths (quality detection) + ERROR lines we parse.
+        return [*find_rip(), "--config-path", str(cfg_path), "url", url]
+
+    def classify_line(self, line: str) -> str:
+        return _classify_line(line)
+
+    def parse_progress(self, line: str, current: int, total: int) -> tuple[int, int]:
+        return _parse_progress(line, current, total)
+
+    def is_finished(self, log_text: str, rc: int = -1) -> EngineResult:
+        # Windows-only: streamrip crashes with PermissionError while cleaning up
+        # the __artwork temp folder AFTER the track is already downloaded and tagged.
+        if "PermissionError" in log_text and "__artwork" in log_text:
+            ok = RE_TRACK_DONE.findall(log_text)
+            return EngineResult(success=True, tracks_ok=len(ok) or 1)
+
+        m = RE_CONFIG_MISMATCH.search(log_text)
+        if m and _RE_AUTHFAIL.search(log_text):
+            return EngineResult(
+                success=False,
+                error=(f"streamrip config mismatch ({m.group(1)}→{m.group(2)}) + auth fail. "
+                       f"Удали %APPDATA%\\streamrip\\config.toml и попробуй снова."),
+            )
+
+        if "IneligibleError" in log_text or "Free accounts are not eligible" in log_text:
+            return EngineResult(
+                success=False,
+                error="Qobuz: бесплатный аккаунт — скачивание недоступно. Нужна платная подписка Qobuz.",
+            )
+
+        if _RE_AUTHFAIL.search(log_text):
+            # Email/password login failure looks different from a stale cookie
+            # token — streamrip logs the rejected params. Give the right hint.
+            if "Invalid credentials from params" in log_text and "'email'" in log_text:
+                return EngineResult(
+                    success=False,
+                    error="Qobuz: email или пароль отклонены (401). Проверь пароль точь-в-точь; "
+                          "если не помогает — войди на play.qobuz.com в браузере и используй "
+                          "Токен-режим (user-id + user-auth-token из cookies) — он надёжнее.",
+                )
+            return EngineResult(
+                success=False,
+                error="Qobuz: токен недействителен. Обнови qobuz-auth-token и qobuz-user-id "
+                      "в Settings → Qobuz (DevTools → Cookies → play.qobuz.com).",
+            )
+
+        # Гео-/лицензионное ограничение. streamrip логирует «Album X not available
+        # to stream on qobuz» / «Track X not available for stream on qobuz», когда
+        # релиз недоступен для скачивания в этом аккаунте/регионе. Если так упали ВСЕ
+        # треки → 0 файлов, но это НЕ баг Ripster и НЕ проблема токена — аккаунт
+        # просто не имеет прав на этот контент. Раньше это пряталось за общим
+        # «0 треков» (ошибка логируется в середине прогона, а хвост брал последние
+        # строки — мусор от чистки artwork).
+        if re.search(r"not available (?:to|for) stream on", log_text, re.I):
+            n_blocked = len(re.findall(r"not available (?:to|for) stream", log_text, re.I))
+            return EngineResult(
+                success=False,
+                error=("Qobuz: альбом/треки недоступны для скачивания в твоём аккаунте "
+                       f"(гео-/лицензионное ограничение Qobuz, недоступно позиций: {n_blocked}). "
+                       "Это ограничение самого Qobuz, не Ripster — попробуй аккаунт другого "
+                       "региона или поищи релиз на другом сервисе."
+                       + getattr(self, "_cfg_diag", "")),
+            )
+
+        # Неверная пара app_id/secret (свои креды введены с ошибкой или ротировались).
+        # streamrip подписывает getFileUrl через md5(secret+…); плохой секрет → 400 →
+        # InvalidAppSecretError; плохой app_id → InvalidAppIdError.
+        if "InvalidAppSecretError" in log_text or "InvalidAppIdError" in log_text:
+            return EngineResult(
+                success=False,
+                error=("Qobuz: app_id/secret не подошли (подпись запроса отклонена Qobuz). "
+                       "Если ты задавал свои qobuz-app-id и qobuz-secrets — очисти ОБА поля "
+                       "в Настройки → Qobuz (Ripster подставит рабочую пару сам) и повтори."
+                       + getattr(self, "_cfg_diag", "")),
+            )
+
+        # Креды вообще не заданы → streamrip 2.0.5 интерактивно спрашивает
+        # «Enter your Qobuz email» в stdin, который у нас закрыт → Aborted.
+        if "MissingCredentialsError" in log_text or "Enter your Qobuz email" in log_text:
+            return EngineResult(
+                success=False,
+                error="Qobuz: не заданы данные входа. Введи qobuz-user-id + qobuz-auth-token "
+                      "(или email + пароль) в Настройки → Qobuz.",
+            )
+
+        actual_q    = _detect_actual_quality(log_text)
+        last_err    = ""
+        for ln in reversed(log_text.splitlines()):
+            if RE_ERROR.search(ln):
+                last_err = ln.strip()[:300]
+                break
+
+        # ── Вердикт: считаем ТОЛЬКО завершения, а не старты (ночной прогон Qwen,
+        # принципы те же, что в tidal.is_finished).
+        n_text   = len(RE_TRACK_DONE.findall(log_text))      # «✓ Downloaded track»
+        n_paths  = len(_RE_FILE_DONE.findall(log_text))      # путь записанного файла
+        planned  = max((int(x) for x in _RE_TRACK_PLANNED.findall(log_text)), default=0)
+        n_failed = len(_RE_TRACK_FAILED.findall(log_text))
+        # rc == -1 — дефолт сигнатуры («код возврата неизвестен»), None — раннер его
+        # не получил. Только настоящий ненулевой код доказывает, что процесс умер.
+        died = rc not in (0, -1, None)
+        # Путь файла — доказательство завершённости только при живом процессе:
+        # streamrip 2.0.6 с rich-прогрессом не печатает текстовых маркеров вовсе.
+        # При убитом прогоне файл мог не закрыться, поэтому ему не верим.
+        n_ok = n_text or (0 if died else n_paths)
+        # Недобор: явные маркеры провала либо разрыв «обещано − сохранено».
+        shortfall = max(n_failed, planned - n_ok)
+
+        if died and (n_ok or n_paths):
+            # СОРВАННЫЙ ПРОГОН: файлы отдаём (раннер разберётся с недобором и
+            # подберёт с диска), но «готово» не говорим — rc != 0 после
+            # последнего завершения означает, что релиз лег не целиком.
+            return EngineResult(
+                success=False, tracks_ok=n_ok,
+                tracks_err=max(shortfall, planned - n_text, n_paths - n_text, 1),
+                quality_actual=actual_q,
+                error=(f"Qobuz: процесс завершился с кодом rc={rc} — подтверждено "
+                       f"{n_ok} трек(ов) из {planned or '?'}, остаток не докачан."
+                       + (f" {last_err}" if last_err else " Маркеров завершения "
+                                                          "хвоста лога нет.")
+                       + getattr(self, "_cfg_diag", "")))
+        if n_ok:
+            # Частичный успех: один сорванный трек НЕ обнуляет то, что доехало.
+            return EngineResult(
+                success=True, tracks_ok=n_ok, tracks_err=shortfall,
+                quality_actual=actual_q,
+                error=(f"Qobuz: докачано не всё — сохранено {n_ok}, сорвано "
+                       f"{shortfall}: {last_err}" if shortfall and last_err else
+                       (f"Qobuz: сохранено {n_ok}, сорвано {shortfall}" if shortfall
+                        else "")))
+        # rc==0 и ни одного завершения. Настоящая причина (NonStreamable/auth/secret)
+        # логируется СЕРЕДИНЕ прогона, а хвост — мусор чистки artwork, поэтому
+        # ищем ERROR-строку по всему логу, а не последние 4 строки.
+        if _RE_TRACK_FAILED.search(log_text) or re.search(r'\berror:', log_text, re.I):
+            return EngineResult(success=False, error=last_err or "Qobuz: ошибка")
+        # Skipped-because-already-downloaded is a legit success too — но только при
+        # живом процессе: rc != 0 после скипов значит, что умереть было чему.
+        if not died and re.search(r"already exists|Skipping", log_text, re.I):
+            return EngineResult(success=True, quality_actual=actual_q)
+        # rc==0 but streamrip printed NO "Downloading" header and no error = it
+        # parsed nothing / matched no tracks (unrecognised URL, empty album, or a
+        # raw UPC it couldn't resolve). That is the real 0-tracks failure — surface
+        # it instead of a fake "done".
+        # 0 tracks with rc==0 and no markers. Cause is config-specific (bad/partial
+        # token, free account, region, app_id/secret mismatch). DON'T guess — attach
+        # the REAL streamrip error line so telemetry shows the actual reason.
+        # IMPORTANT: prefer a genuine ERROR line from ANYWHERE in the log — the cause
+        # is logged mid-run (NonStreamable/auth/secret), while the LAST lines are just
+        # artwork cleanup ("Removing dirs") that tells the user nothing. The previous
+        # last-4-lines tail surfaced only Ripster's own banner → useless diagnostics.
+        _err_lines = [l.strip() for l in log_text.splitlines()
+                      if re.search(r'\bERROR\b|not available|Could not stream|'
+                                   r'Invalid\w*Error|AuthenticationError|IneligibleError|'
+                                   r'NonStreamable|Aborted', l)]
+        if _err_lines:
+            _tail_s = " | streamrip: " + _err_lines[-1][:300]
+        else:
+            _noise = re.compile(r'^\s*$|rich|Progress|━|■|FutureWarning|DeprecationWarning|'
+                                r'Removing dirs|Showing all debug', re.I)
+            _tail = [l.strip() for l in log_text.splitlines()
+                     if l.strip() and not _noise.search(l)][-4:]
+            _tail_s = (" | streamrip: " + " ⏎ ".join(_tail)) if _tail else ""
+        return EngineResult(
+            success=False,
+            error=("Qobuz: 0 треков. Для СКАЧИВАНИЯ нужна своя платная подписка Qobuz "
+                   "(поиск работает и без неё). Проверь: 1) qobuz-user-id И qobuz-auth-token "
+                   "ОБА заданы и токен не протух; 2) подписка активна; 3) альбом доступен в "
+                   "регионе аккаунта; 4) если задал свой qobuz-app-id — задай и свой "
+                   "qobuz-secrets (дефолтный секрет к чужому app_id не подходит)."
+                   + getattr(self, "_cfg_diag", "") + _tail_s),
+        )
+
+    async def search(self, query: str, search_type: str, limit: int, config: dict) -> list[dict]:
+        import httpx as _httpx
+        app_id = (config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+        token  = (config.get("qobuz-auth-token") or "").strip()
+        ep_url_map = {"album": "album",  "track": "track",  "artist": "artist"}
+        ep_key_map = {"album": "albums", "track": "tracks", "artist": "artists"}
+        ep_url = ep_url_map.get(search_type, "album")
+        ep_key = ep_key_map.get(search_type, "albums")
+        try:
+            async with _HTTP.ashared() as c:
+                r = await c.get(
+                    f"https://www.qobuz.com/api.json/0.2/{ep_url}/search",
+                    params={"query": query, "limit": limit, "app_id": app_id},
+                    headers={"X-User-Auth-Token": token} if token else {},
+                )
+                data = r.json()
+            results = []
+            is_track = search_type == "track"
+            for item in (data.get(ep_key) or {}).get("items") or []:
+                _alb = item.get("album") if isinstance(item.get("album"), dict) else {}
+                # A TRACK has no top-level `artist`/`image`/date — they live in
+                # `performer` and the track's `album`. Fall back so track search
+                # doesn't come back with an empty artist / no cover (the old bug).
+                full_date = (item.get("release_date_original")
+                             or _alb.get("release_date_original") or "")
+                img = item.get("image") or _alb.get("image") or {}
+                artist_obj = ((item.get("artist") if isinstance(item.get("artist"), dict) else None)
+                              or (item.get("performer") if isinstance(item.get("performer"), dict) else None)
+                              or (_alb.get("artist") if isinstance(_alb.get("artist"), dict) else None) or {})
+                artist = artist_obj.get("name", "")
+                url = item.get("url") or (
+                    f"https://www.qobuz.com/track/{item.get('id', '')}" if is_track
+                    else f"https://www.qobuz.com/album/{item.get('id', '')}")
+                results.append({
+                    "id":      str(item.get("id", "")),
+                    "title":   item.get("title") or item.get("name", ""),
+                    "artist":  artist,
+                    "artist_id": str(artist_obj.get("id", "")),
+                    "type":    search_type,
+                    "url":     url,
+                    "cover":   (img.get("small") or img.get("large", "")) if isinstance(img, dict) else "",
+                    "year":    full_date[:4],
+                    "date":    full_date,
+                    "label":   (item.get("label") or {}).get("name", "")
+                               if isinstance(item.get("label"), dict) else "",
+                    "hires":   item.get("hires", False),
+                    # Real per-release tiers: every Qobuz release is at least CD-FLAC;
+                    # Hi-Res only when the API flags it (hires / hires_streamable).
+                    "available": (["HI-RES", "FLAC"]
+                                  if (item.get("hires") or item.get("hires_streamable"))
+                                  else ["FLAC"]),
+                    "tracks":  item.get("tracks_count"),
+                    "service": "qobuz",
+                })
+            return results
+        except Exception:
+            return []
+
+    async def get_artist(self, artist_id: str, types: str, config: dict) -> dict:
+        import httpx as _httpx
+        import asyncio as _aio
+        app_id = (config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+        token  = (config.get("qobuz-auth-token") or "").strip()
+        wanted = {t.strip() for t in types.split(",") if t.strip()}
+        try:
+            async with _HTTP.ashared() as c:
+                headers = {"X-User-Auth-Token": token} if token else {}
+                ar = await c.get("https://www.qobuz.com/api.json/0.2/artist/get", params={
+                    "artist_id": artist_id, "extra": "albums", "limit": 200, "app_id": app_id,
+                }, headers=headers)
+                data = ar.json()
+                if data.get("status") == "error":
+                    return {"error": data.get("message", "Qobuz error"), "releases": []}
+                aname = (data.get("name") or "").strip().lower()
+                artist = {
+                    "id":      str(data.get("id", artist_id)),
+                    "name":    data.get("name", ""),
+                    "picture": (data.get("image") or {}).get("large", "") if isinstance(data.get("image"), dict) else "",
+                    "albums_total": data.get("albums_count"),
+                    "url":     f"https://www.qobuz.com/artist/{artist_id}",
+                    "service": "qobuz",
+                }
+                items = (data.get("albums") or {}).get("items", [])
+
+                def _alb_artist(a: dict) -> str:
+                    v = a.get("artist")
+                    if isinstance(v, dict):
+                        return (v.get("name") or "").strip()
+                    return ""
+
+                # компиляция = release_type compilation ИЛИ альбом кредитован не
+                # на этого артиста → «с этим артистом». Для первых ~20 дотягиваем
+                # какой именно трек артиста в сборнике.
+                def _is_comp(a: dict) -> bool:
+                    if (a.get("release_type") or "").lower() == "compilation":
+                        return True
+                    aa = _alb_artist(a).lower()
+                    return bool(aa) and aa != aname and aa != "various artists" and \
+                        str((a.get("artist") or {}).get("id", "")) != str(artist_id)
+
+                comp_ids = [str(a.get("id", "")) for a in items if a.get("id") and _is_comp(a)][:20]
+
+                async def _who(cid: str):
+                    try:
+                        r = await c.get("https://www.qobuz.com/api.json/0.2/album/get",
+                                        params={"album_id": cid, "app_id": app_id}, headers=headers)
+                        j = r.json()
+                        mine = [t.get("title", "")
+                                for t in (j.get("tracks") or {}).get("items", [])
+                                if aname and aname in (t.get("performer") or {}).get("name", "").lower()
+                                or str((t.get("performer") or {}).get("id", "")) == str(artist_id)
+                                or (aname and aname in (t.get("title", "") or "").lower())]
+                        return cid, "; ".join(dict.fromkeys(x for x in mine if x))
+                    except Exception:
+                        return cid, ""
+                comp_tracks = dict(await _aio.gather(*[_who(i) for i in comp_ids])) if comp_ids else {}
+
+            releases = []
+            for a in items:
+                rtype = (a.get("release_type") or "album").lower()
+                is_comp = _is_comp(a)
+                if is_comp:
+                    rtype = "compilation"
+                row = {
+                    "id":      str(a.get("id", "")),
+                    "title":   a.get("title", ""),
+                    "cover":   (a.get("image") or {}).get("large", "") if isinstance(a.get("image"), dict) else "",
+                    "year":    (a.get("release_date_original") or "")[:4],
+                    "date":    a.get("release_date_original", ""),
+                    "tracks":  a.get("tracks_count"),
+                    "label":   (a.get("label") or {}).get("name", "") if isinstance(a.get("label"), dict) else "",
+                    "type":    rtype,
+                    "url":     a.get("url", "") or f"https://www.qobuz.com/album/{a.get('id', '')}",
+                    "explicit":a.get("parental_warning", False),
+                    "hires":   a.get("hires", False),
+                    "service": "qobuz",
+                }
+                if is_comp:
+                    if _alb_artist(a):
+                        row["album_artist"] = _alb_artist(a)
+                    ap = comp_tracks.get(str(a.get("id", "")), "")
+                    if ap:
+                        row["appears_as"] = ap
+                releases.append(row)
+            if wanted and wanted != {"all"}:
+                releases = [r for r in releases if r["type"] in wanted]
+            releases.sort(key=lambda r: r.get("date", ""), reverse=True)
+            return {"artist": artist, "releases": releases}
+        except Exception as e:
+            return {"error": str(e), "releases": []}
+
+    async def get_album(self, album_id: str, config: dict) -> dict:
+        import httpx as _httpx
+        app_id = (config.get("qobuz-app-id") or "").strip() or _QOBUZ_DEFAULT_APP_ID
+        token  = (config.get("qobuz-auth-token") or "").strip()
+        try:
+            async with _HTTP.ashared() as c:
+                headers = {"X-User-Auth-Token": token} if token else {}
+                # limit: без него Qobuz отдаёт первую страницу (~50) — трёхдисковые
+                # релизы молча теряли хвост треклиста (24.09.2026, NORTHERN EXPOSURE).
+                r = await c.get("https://www.qobuz.com/api.json/0.2/album/get", params={
+                    "album_id": album_id, "app_id": app_id, "limit": 500,
+                }, headers=headers)
+                a = r.json()
+            if a.get("status") == "error":
+                return {"error": a.get("message", "Qobuz error")}
+            tracks = []
+            for t in (a.get("tracks") or {}).get("items", []):
+                tracks.append({
+                    "id":       str(t.get("id", "")),
+                    "title":    title_with_version(t.get("title", ""), t.get("version", "")),
+                    "artist":   (t.get("performer") or {}).get("name", "") if isinstance(t.get("performer"), dict) else "",
+                    "duration": t.get("duration"),
+                    "track_no": t.get("track_number"),
+                    "disc":     t.get("media_number"),
+                    "preview":  "",
+                    "explicit": t.get("parental_warning", False),
+                    "url":      f"https://www.qobuz.com/track/{t.get('id', '')}",
+                })
+            album_real_id = str(a.get("id", album_id))
+            return {
+                "album": {
+                    "id":     album_real_id,
+                    "title":  a.get("title", ""),
+                    "artist": (a.get("artist") or {}).get("name", ""),
+                    "cover":  (a.get("image") or {}).get("large", "") if isinstance(a.get("image"), dict) else "",
+                    "year":   (a.get("release_date_original") or "")[:4],
+                    "date":   a.get("release_date_original", ""),
+                    "label":  (a.get("label") or {}).get("name", "") if isinstance(a.get("label"), dict) else "",
+                    "upc":    a.get("upc", ""),
+                    "genre":  (a.get("genre") or {}).get("name", "") if isinstance(a.get("genre"), dict) else "",
+                    "tracks": a.get("tracks_count"),
+                    "url":    a.get("url", "") or f"https://www.qobuz.com/album/{album_real_id}",
+                    "service":"qobuz",
+                },
+                "tracks": tracks,
+            }
+        except Exception as e:
+            return {"error": str(e)}

@@ -1,0 +1,6075 @@
+"""
+Task runner — executes individual download tasks and manages the queue loop.
+
+Public API:
+    install(ctx: AppContext)
+    run_task(task)
+    process_queue()
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import re as _re
+import time
+from datetime import datetime
+from pathlib import Path
+
+# Errors that are not worth retrying (auth, subscription, missing binary, etc.)
+_RE_NO_RETRY = _re.compile(
+    # Поломка ОКРУЖЕНИЯ, а не сети. 22.08.2026: у человека после переустановки
+    # зависимостей `import pywidevine` падал с `subcon should be a Construct
+    # field`, и Ripster повторил это ТРИЖДЫ — 45 с, потом 120 с ожидания на
+    # ошибку, которая детерминирована и от повтора измениться не может.
+    # Повтор здесь не осторожность, а трата времени человека и маскировка
+    # причины: в консоли три одинаковых трейсбека вместо одного диагноза.
+    r'subcon should be a Construct field|ModuleNotFoundError|'
+    r'ImportError:|No module named|DLL load failed|'
+    r'auth.*fail|invalid.*token|token.*invalid|invalid.*arl|arl.*invalid|'
+    r'unauthorized|not\s+logged|login\s+failed|AuthenticationError|'
+    r'бесплатный\s+аккаунт|free\s+account|IneligibleError|subscription|'
+    r'Не\s+найден\s+исполняемый|binary\s+not\s+found|No\s+such\s+file|'
+    r'токен\s+недействителен|wrapper\s+not\s+responding|ORPHEUS_NOT_AUTHED|'
+    r'-1002|KeyError.*AUDIO-SESSION|codec\s+not\s+found|cookies|'
+    r'\bForbidden\b|запрос\s+отклонён|токен\s+истёк|'
+    # Qobuz "0 tracks" is a permanent no-account / bad-link condition (downloads
+    # need the user's own paid Qobuz login) — retrying it just spins the task for
+    # ~28 min and the tile looks stuck. Fail fast with the clear message instead.
+    r'Qobuz:\s*0\s+треков|'
+    # Qobuz precise diagnostics (geo/licensing lock, wrong custom app_id/secret,
+    # missing creds) are ALL permanent until the user changes something — retrying
+    # just spins the tile. Match their distinctive wording from engines/qobuz.py.
+    r'гео-?/?лицензионное\s+ограничение|app_id/secret\s+не\s+подошли|'
+    r'не\s+заданы\s+данные\s+входа|'
+    # Deezer ARL missing/expired (engines/deezer.py) — permanent until ARL updated.
+    r'ARL\s+не\s+задан|'
+    # SoundCloud engine not installed / no Node (engines/soundcloud.py) — permanent.
+    r'движок\s+не\s+установлен|'
+    # Apple: витрина не отдала по ссылке ни одного трека (engines/zhaarey.py).
+    # Повтор шлёт ТОТ ЖЕ пустой запрос — три прогона вместо одной честной строки.
+    r'в\s+каталоге\s+ничего\s+нет|'
+    # Beatport territory restriction is permanent for this account/region.
+    # Гео-формулировки остальных витрин — тоже постоянные для этой учётки:
+    # Tidal/Deezer «not available in your region/country», Qobuz «not streamable
+    # in your territory», русский вердикт Deezer «закрыт для страны аккаунта».
+    # 24.09.2026: без этих строк постоянный отказ молча крутили три автоповтора,
+    # а фоллбэк заперт условием `_no_retry or _engine_aborted` — без совпадения
+    # он не запускался вовсе.
+    r'Territory\s+Restricted|недоступен\w*\s+в\s+регионе|region\s+locked|'
+    r'not\s+available\s+in\s+your\s+(?:country|region)|'
+    r'not\s+streamable\s+in\s+your\s+territory|'
+    r'закрыт\w*\s+для\s+страны|'
+    # Отказ по правам аккаунта (Beatport/Tidal: «You do not have permission»)
+    # постоянен до смены учётки или тарифа. 09.08.2026 отсечка честно обрывала
+    # прогон на 10-м отказе — но раннер повторял задачу ТРИЖДЫ, и вместо одной
+    # понятной ошибки человек получал три подряд. Повтор нужен для случайных
+    # сбоев, а не для «этому аккаунту сюда нельзя».
+    #
+    # ⚠️ Проверяется против `msg = result.error`, а НЕ против лога движка. Первая
+    # редакция этой строки (09.08.2026, тот же день) ловила только `do not have
+    # permission` (сырой ответ Beatport, остаётся в log_text) и `отказал в правах`
+    # (текст abort_reason, уходит отдельной строкой в консоль) — до `msg` не
+    # доходит ни одно: engines/orpheus_beatport.py:362 переводит 403 в «аккаунту
+    # НЕ ХВАТАЕТ ПРАВ на скачивание». Детектор стоял в коде и не сработал бы ни
+    # разу. Тот же класс, что и мёртвая отсечка враппера 08.08. Якорь — по строке,
+    # которая реально попадает в проверку.
+    r'do\s+not\s+have\s+permission|отказал\s+в\s+правах|не\s+хватает\s+прав|'
+    # Apple: каталог не отдал альбом (нет в этом магазине). Ответ детерминированный
+    # — 08.08.2026 он повторялся ТРИЖДЫ с паузами 15/45/120с, и гость три с
+    # половиной минуты ждал ровно того же «нет». Повтор осмыслен для временных
+    # отказов, а не для «в этом магазине такого релиза не существует».
+    r'каталог\s+не\s+отдал\s+этот\s+релиз|Failed\s+to\s+(get\s+album\s+response|rip\s+album)|'
+    # Мёртвая сессия Tidal. Повторять её бессмысленно ПО ОПРЕДЕЛЕНИЮ: пока человек
+    # не переавторизуется, все три попытки дадут ровно то же. 15.08.2026 альбом на
+    # 33 трека оборвался на 17-м, и задача ушла на три круга по 15/45/120 с.
+    # Якорь — по строкам, которые реально попадают в `msg` (это `result.error`, а
+    # не лог движка): их порождает `engines/tidal.py`.
+    r'сесси\w*\s+(истекла|оборвалась|недействительн)|переавторизуйся|'
+    # Тип ссылки, которого движок не умеет (Tidal video/mix → OrpheusDL печатает
+    # «Unsupported URL» и выходит). Детерминировано по определению: пока ссылка та
+    # же, все три попытки дадут ровно то же. 07.09.2026 ссылка на клип прокрутила
+    # четыре захода за три минуты. Якорь — по строке, которая реально попадает в
+    # `msg` (это `result.error`), её порождает `engines/tidal.py`.
+    r'не\s+поддерживается\s+движком|Unsupported\s+URL|'
+    # Spotify: вход исправен, но треки этой учётке не отдают (регион/лицензия).
+    # 13.09.2026 караоке-альбом на 20 треков прошёл три авто-повтора по 15/45/120 с
+    # — 12 минут и 240 строк ошибок ради того же «недоступно». Сообщение само
+    # говорит «перелогин не поможет»; якорь — по строке `result.error` из
+    # engines/orpheus_spotify.py.
+    r'недоступно\s+для\s+этой\s+учётной\s+записи|'
+    # JioSaavn: релиз по ссылке пуст (удалён/битая ссылка) — детерминировано;
+    # якорь по строке result.error из engines/orpheus_jiosaavn.py. Гео-блок
+    # JioSaavn ловится выше по «недоступен в регионе».
+    r'JioSaavn:\s+релиз\s+не\s+найден|'
+    # Deezer: релиза нет в запрошенном качестве (24.09.2026, «Nightplay» гостя:
+    # deemix на каждый трек «no FLAC here»). Повтор того же качества — верный
+    # повтор: лечит не кружение, а запасной путь (другая витрина → ступень
+    # качества). Без этой строки задача крутила 15/45/120 с и упиралась в
+    # терминал, где фоллбэк заперт условием `_no_retry or _engine_aborted` —
+    # ровно то молчание, из-за которого гость получил ошибку.
+    # Якорь — по фразе engines/deezer.py, реально попадающей в `msg`.
+    # 02.10.2026 (задача 104): Beatport «Requested quality is not available» —
+    # та же природа (качество/тариф), детерминированный отказ. Английская фраза
+    # — сырой ответ API, может просочиться в msg через OrpheusDL Beatport.
+    r'недоступен\w*\s+в\s+выбранном\s+качестве|'
+    r'Requested quality is not available|'
+    # Beatport: у аккаунта нет активной подписки. Английское `subscription` выше
+    # русский вердикт движка не ловит — 14.10.2026 сводка насчитала два прогона
+    # по 15/45/120 с ради того же «Продли подписку». Якорь по строке result.error.
+    r'нет\s+активной\s+подписки',
+    _re.I,
+)
+_MAX_AUTO_RETRIES = 3
+_RETRY_BACKOFF    = [15, 45, 120]   # seconds before each retry attempt
+
+# Transient public-wrapper conditions (wm.wol.moe overloaded / not-ready / no
+# device for region / unreachable / 0 tracks). These are NOT real failures —
+# the wrapper is just busy — so they get many more patient retries (capped at
+# 120s spacing → no hammering), instead of giving up after 3. This is the fix
+# for "downloads silently fail during a wrapper overload window" (and the guest
+# 'directory error' that followed an empty download). A genuine no-lossless
+# asset is matched by _RE_NO_RETRY-style messages and is NOT patient-retried.
+_RE_PATIENT = _re.compile(
+    # NOTE: do NOT match a bare "0 треков" here — that also matches Qobuz's
+    # no-account failure, which is permanent and must NOT be patient-retried (it
+    # spun the tile for ~28 min). The wrapper "0 треков" cases still match via
+    # wm.wol.moe / "не вернул device" / ready=false below.
+    r'wm\.wol\.moe|wrapper-manager unreachable|ready=false|не\s+ready|'
+    r'не\s+вернул device|wrapper\s+не\s+ready|no\s+device',
+    _re.I,
+)
+_MAX_PATIENT_RETRIES = 15   # ~28 min of patient retrying through an overload blip
+
+# Public wrapper is DEAD/UNREACHABLE (not merely busy): wm.wol.moe not resolving/
+# refusing/timing out its manager API. Retrying a server that is DOWN is pure waste
+# — it just makes the tile "hang" for many minutes while the user keeps re-queuing
+# the same release. Fail FAST (one honest retry) with a clear message that names the
+# real cause (public server down → use local ALAC / try later), so the owner does
+# NOT keep pulling the same Hi-Res release. Checked BEFORE _RE_DECRYPT_DOWN /
+# _RE_PATIENT (all three can mention wm.wol.moe).
+# 08.08.2026: этот список НЕ ловил самую частую форму отказа. Публичный враппер
+# чаще всего не «недоступен», а отвечает штатно и говорит, что живых инстансов у
+# него нет: `WrapperManagerException: no healthy and ready instances`. Ни одного
+# ключа отсюда в такой строке нет, поэтому быстрый отказ не срабатывал ни разу —
+# 08.08 в 18:25 один альбом молотил 24 минуты (76 треков × 8 попыток tenacity),
+# дав 830 ERROR-строк и ноль файлов. Ловим и эту форму.
+_RE_WRAPPER_DEAD = _re.compile(
+    r'wrapper-manager unreachable|Wrapper-manager\s+недоступен|Deadline\s+Exceeded|'
+    r'getaddrinfo|Name or service not known|Connection refused|'
+    r'connection refused|Max retries exceeded|Failed to establish a new connection|'
+    r'ConnectError|ConnectTimeout|11001|'
+    r'WrapperManagerException|no healthy and ready',
+    _re.I,
+)
+_MAX_DEAD_RETRIES = 1   # one quick re-check, then stop with clear guidance
+
+# Decrypt gRPC CORE down on the public wrapper (decrypt_init AioRpcError /
+# StatusCode.UNAVAILABLE / "DECRYPT STREAM DOWN"). Движок `amd` выпилена, но
+# эти строки живые: публичный враппер отвечает штатно и пересылает текст своей
+# серверной ошибки через `res.error = f"Публичный wrapper: {st['msg']}"`
+# (engines/wrapper_lite.py), а healthcheck следит за "decrypt stream" именно
+# на этом пути. Это НЕ «враппер занят» — декрипт-ядро перегружено/мертво и за
+# полчаса молотья не healed (наблюдено: 15×120s = 35 мин, всё UNAVAILABLE).
+# Несколько честных попыток — и стоп с ясной подсказкой (локальный docker-враппер
+# / позже / не Hi-Res). Проверяется ДО _RE_PATIENT: строка декрипта содержит
+# "wm.wol.moe", что иначе выдало бы 15 повторов (кросс-ревью 25.09, medium).
+_RE_DECRYPT_DOWN = _re.compile(
+    r'DECRYPT\s+STREAM\s+DOWN|AMD_WRAPPER_DECRYPT_ERROR|ошибку\s+декрипт|'
+    r'decrypt_init|AioRpcError|decrypt.*UNAVAILABLE|внутренн.*ошибку\s+декрипт',
+    _re.I,
+)
+_MAX_DECRYPT_RETRIES = 2   # ~3 min, then stop — decrypt core won't self-heal now
+
+# Apple: «каталог не отдал альбом» — НЕ один диагноз, а целое семейство, и
+# правило «не повторять» верно лишь для ОДНОГО его члена. Строка в _RE_NO_RETRY
+# (`Failed to rip album`) добавлена 08.08.2026 по делу: релиза нет в этом
+# магазине — ответ детерминированный, три повтора по 15/45/120 с дают то же
+# «нет». Но шаблон ловит ВСЁ семейство, не глядя на причину в хвосте, а Apple
+# дописывает туда и заведомо ВРЕМЕННЫЕ отказы:
+#     Failed to rip album: error getting album response: 429 Too Many Requests
+#     Failed to rip album: error getting album response: Get "https://amp-api…" dial tcp …
+# Оба уходили в «постоянные»: ноль повторов, мгновенный отказ — и очередь тут же
+# бралась за следующий трек, попадая в тот же лимит. 05.09.2026 15:01:34–15:02:00
+# так сгорел ОДИН альбом, разложенный на треки: 13 задач за 26 секунд, все 429,
+# ноль файлов. Повторов не было вовсе — не «мало», а ни одного, и пауз тоже, так
+# что мы сами продлевали себе лимит. 04.09 20:50 тем же путём умер сетевой
+# таймаут, и владельцу пришлось ставить альбом заново руками.
+# Поэтому: временный хвост ВОЗВРАЩАЕТ право на обычный повтор с паузой. 404 и
+# ответ без статуса («нет в этом магазине») остаются постоянными, как и были.
+_RE_APPLE_CATALOG = _re.compile(r'(get|rip)\s+album(\s+response)?', _re.I)
+_RE_APPLE_CATALOG_TRANSIENT = _re.compile(
+    # \b429\b, а не голое 429: в сообщении лежит URL с id альбома/трека, и
+    # подстрока «429» встречается внутри длинного числа.
+    r'\b429\b|Too\s+Many\s+Requests|Service\s+Unavailable|Bad\s+Gateway|'
+    r'Gateway\s+Time-?out|dial\s+tcp|i/o\s+timeout|Client\.Timeout|'
+    r'context\s+deadline\s+exceeded|TLS\s+handshake|connection\s+reset|'
+    r'unexpected\s+EOF|no\s+such\s+host',
+    _re.I,
+)
+
+
+def _apple_catalog_transient(msg: str) -> bool:
+    """Apple didn't hand over the album for a reason that CAN change by itself.
+
+    Narrow on purpose: only lifts the no-retry verdict for the Apple catalog
+    family, and only when the tail names a rate-limit or a network fault. A 404
+    or a bare "error getting album response" stays permanent.
+    """
+    return bool(_RE_APPLE_CATALOG.search(msg)
+                and _RE_APPLE_CATALOG_TRANSIENT.search(msg))
+
+
+# ── Partial-download reason classifier (issue #5) ───────────────────────────────
+# When a release comes back short, name WHY in one canonical token so the bot
+# card / web history can show it ("3/5 — region-locked") instead of a vague
+# "some tracks missing". Ordered most-specific → generic; first match wins.
+_PARTIAL_REASON_PATTERNS = [
+    # Сломано ОКРУЖЕНИЕ. Стоит ПЕРВЫМ намеренно: трейсбек про construct/pywidevine
+    # не содержит ни одного слова из паттернов ниже и доезжал до финального
+    # `return "region" if permanent else "postprocess"` — человеку сообщали
+    # «сбой постобработки, повтори», хотя чинить надо pip. 22.08.2026.
+    ("deps",       _re.compile(r"subcon should be a Construct field|"
+                               r"ModuleNotFoundError|No module named|"
+                               r"ImportError:|DLL load failed", _re.I)),
+    ("decryption", _re.compile(r"Decryption is not available|AAC.*wrapper|"
+                               r"-1002|AUDIO-SESSION-KEY", _re.I)),
+    # Отказ ПО ПРАВАМ аккаунта — не гео-лок. Стоит ДО "region" намеренно:
+    # 403-на-потоке Beatport («аккаунту не хватает прав») не совпадает ни с одним
+    # паттерном ниже, доезжал до финального `return "region" if permanent else ...`
+    # — и человек читал «недоступно в регионе» там, где регион ни при чём, и шёл
+    # искать прокси, который прав не добавляет. 14.08.2026: два таких прогона.
+    # «Учётка без подписки» — это тоже отказ ПО ПРАВАМ, и он самый выгодный для
+    # перебора: у владельца три токена Qobuz, и платная подписка есть не у всех.
+    # Раньше такая задача падала на первой же бесплатной учётке, ни разу не
+    # спросив остальные.
+    ("entitlement", _re.compile(r"не\s+хватает\s+прав|do\s+not\s+have\s+permission|"
+                                r"отказал\s+в\s+правах|not\s+entitled|entitlement|"
+                                r"бесплатн\w+\s+аккаунт|нужна\s+(своя\s+)?платная\s+подписка|"
+                                r"нужна\s+подписка\s+Plus", _re.I)),
+    # Сессия сервиса умерла ПОСРЕДИ релиза. Отдельный токен нужен потому, что без
+    # него такой недобор доезжал до финального фоллбэка и получал `postprocess` —
+    # «сбой постобработки, повтори, доберётся». Человеку говорили «повтори» там,
+    # где без переавторизации повтор даст ровно то же. Близнец дефекта 14.08, где
+    # отказ по правам показывался как гео-лок. Стоит ДО "region": строка про
+    # сессию не содержит слова «регион», но зато `unauthorized` из сырого лога
+    # ниже по списку совпало бы с чем угодно.
+    # 04.09.2026: паттерн ловил ровно ОДНУ формулировку из шести. `session` завели
+    # 21.08 специально, чтобы мёртвая учётка уводила задачу на следующую
+    # (ripster/account_fallback.py), но выдавали его только Tidal-строки. Мёртвый
+    # Deezer-ARL, мёртвый токен Qobuz, Yandex и Amazon доезжали до финального
+    # `postprocess` — а `postprocess` не в таблице перебора, значит перебор не
+    # начинался вообще, и пулы из 2 ARL и 3 токенов Qobuz лежали мёртвым грузом
+    # ровно так же, как до правки 21.08. Слово «протух» по всем движкам
+    # встречается ТОЛЬКО про учётные данные, поэтому берём его целиком.
+    ("session",    _re.compile(r"сесси\w*\s+(истекла|оборвалась|недействительн)|"
+                               r"переавторизуйся|TidalAuthError|TIDAL_NOT_AUTHED|"
+                               r"token\s+has\s+expired|протух|"
+                               r"токен\s+недействител\w*|неверный\s+ARL|"
+                               r"ARL\s+не\s+задан",
+                               _re.I)),
+    # Русские вердикты движков (Deezer 19.09.2026: «закрыт для страны аккаунта … гео-блок»)
+    # и фраза deemix «can't stream the track from your current country» раньше сюда не
+    # попадали → причина уходила в no-flac/postprocess, и пул НЕ пробовал учётку из
+    # другой страны. Только точные формулировки: голое «регион» встречается в логах
+    # Apple про витрины и дало бы ложный region.
+    ("region",     _re.compile(r"not available in your country|region|"
+                               r"unavailable in|geo|Territory\s+Restricted|"
+                               r"from your current country|гео-?блок|"
+                               r"not streamable|territor|недоступн\w*\s+в\s+регионе|"
+                               r"закрыт\w*\s+для\s+страны", _re.I)),
+    # 24.09.2026: «no-flac» рождался только из АНГЛИЙСКОЙ строки deemix, а до
+    # классификатора доезжает `msg` — уже переводной вердикт движка
+    # («трек недоступен в выбранном качестве», engines/deezer.py). Без русских
+    # якорей причина уходила в `postprocess`: ни перебора учёток, ни запасного
+    # пути — ровно молчание фоллбэка на «Nightplay».
+    ("no-flac",    _re.compile(r"desired bitrate|no\s+FLAC|not.*available.*bitrate|"
+                               r"недоступен\w*\s+в\s+выбранном\s+качестве|нет\s+FLAC",
+                               _re.I)),
+    ("removed",    _re.compile(r"Resource not found|no longer available|"
+                               r"removed|gone|404", _re.I)),
+    ("unavailable",_re.compile(r"Unavailable|Failed to dl", _re.I)),
+]
+
+
+def _classify_partial_reason(log_text: str, permanent: bool) -> str:
+    """Return a short canonical reason token for a partial download.
+
+    Tokens: deps | decryption | entitlement | session | region | no-flac | removed |
+    unavailable | postprocess.
+
+    Three of them (entitlement, region, session) also decide whether the task gets
+    retried on the NEXT account of the same service — see
+    ripster/account_fallback.RETRY_WITH_NEXT_ACCOUNT. A wording that fails to match
+    here doesn't just show the wrong message: it silently disables the whole
+    account pool for that failure.
+    `permanent` is the runner's existing region/decryption signal — when nothing
+    more specific matches we fall back to it so a known-permanent shortfall never
+    reads as a transient post-processing glitch."""
+    txt = log_text or ""
+    for token, pat in _PARTIAL_REASON_PATTERNS:
+        if pat.search(txt):
+            return token
+    return "region" if permanent else "postprocess"
+
+
+def _disk_completeness(task: dict, fresh_files: list) -> bool:
+    """True when the fresh files on disk cover the release's expected track count.
+
+    Salvage paths find audio files after a non-zero exit. If the count matches
+    the catalog (not the engine's inflated/deflated metadata), the release IS
+    complete — a non-zero rc from post-processing (qobuz-retag, cover art) must
+    NOT flag a bogus "partial". Comparison uses the same sources as the
+    shortfall detector (trackCount / totalTracks / meta.tracks / "have N/M").
+    Tracks the catalog marks streamable:false are excluded from the expected
+    count when the engine reports them (Qobuz album/get).
+    """
+    n_files = len(fresh_files)
+    if n_files == 0:
+        return False
+    meta = task.get("meta") or {}
+    mt = meta.get("tracks")
+    if isinstance(mt, list):
+        mt = len(mt)
+    if not mt and isinstance(task.get("tracks"), list):
+        mt = len(task["tracks"])
+    try:
+        expected = int(meta.get("trackCount") or meta.get("totalTracks") or mt or 0)
+    except (TypeError, ValueError):
+        expected = 0
+    log_text = "\n".join(task.get("log") or [])
+    m_have = _re.search(r"\bhave\s+(\d+)\s*/\s*(\d+)\b", log_text)
+    if m_have:
+        expected = int(m_have.group(2))
+    if expected <= 0:
+        return False
+    return n_files >= expected
+
+
+def _preorder_of(task: dict) -> "dict | None":
+    """Инфо о предзаказе по задаче или None. Вердикт кэшируется в самой задаче:
+    детект — чистая функция по метаданным, а ретраи входят сюда повторно.
+    Предзаказ Means: недостающие треки откроются только после релиза — крутить
+    «дозагрузку» до него бессмысленно (24.09.2026, NORTHERN EXPOSURE: четыре
+    пустых прогона ради одного instant-grat сингла)."""
+    cached = task.get("_preorder")
+    if isinstance(cached, dict):
+        return cached
+    if cached is False:
+        return None
+    try:
+        from ripster import preorder as _pom
+        info = _pom.detect(task, _config)
+    except Exception as _pe:                                     # noqa: BLE001
+        print(f"[preorder] detect skipped: {_pe}", flush=True)
+        info = None
+    task["_preorder"] = info if isinstance(info, dict) else False
+    return info
+
+
+def _preorder_plan(task: dict, info: dict) -> None:
+    """Состояние «ожидает релиза» + план докачки, переживающий перезапуск.
+
+    План живёт в preorder_waits.json (не в очереди): настанет время — обычная
+    задача встанет в очередь сама. Ошибка планировщика не роняет загрузку:
+    худшее — собственник повторит задачу руками, как было до этой правки."""
+    try:
+        from ripster import preorder_waits as _pow
+        _row = _pow.schedule(task, info)
+        if _row:
+            task["_preorder_wait"] = _row["id"]
+        task["_awaits_release"] = info.get("release_utc") or ""
+        task.setdefault("meta", {})["_awaits_release"] = task["_awaits_release"]
+        task["meta"]["_release_cc"] = info.get("cc") or ""
+    except Exception as _pwe:                                    # noqa: BLE001
+        print(f"[preorder] schedule failed: {_pwe}", flush=True)
+
+
+_RELEASE_KEYS = ("streamableAt", "purchasableAt", "releaseDateTime", "isPreRelease",
+                 "date", "releaseDate")
+
+
+async def _ensure_release_meta(task: dict, timeout: float = 10.0) -> None:
+    """Дождаться меты с датой выхода ДО шлюза предзаказа.
+
+    Мету дописывает фоновый `enrich_meta`, а очередь стартует в ту же секунду —
+    14.10.2026 задачи Qobuz на «Nights Like This» (выход 15.10) и «October» (16.10)
+    обгоняли ответ каталога: шлюз видел пустую мету, движок шёл в бой и падал с
+    ложным «гео-ограничением», вместо того чтобы встать в ожидание до полуночи по
+    Новой Зеландии. Здесь, если у задачи поддерживаемого сервиса ещё нет ни одного
+    поля даты, берём мету сами (не дольше `timeout`) и дописываем так же, как
+    enrich_meta: ключи вызывающего (tg_user…) сохраняются."""
+    try:
+        from ripster import preorder as _pom
+        svc = str(task.get("service") or "").lower()
+        if svc not in _pom.SUPPORTED or isinstance(task.get("_preorder"), dict):
+            return
+        meta = task.get("meta") or {}
+        if any(meta.get(k) not in (None, "") for k in _RELEASE_KEYS):
+            return
+        from ripster.metadata import fetch_meta_any
+        got = await asyncio.wait_for(fetch_meta_any(task.get("url", ""), svc), timeout)
+        if isinstance(got, dict) and got:
+            task["meta"] = {**(task.get("meta") or {}), **got}
+            task.pop("_preorder", None)        # прежний вердикт был по пустой мете
+    except Exception as e:                                       # noqa: BLE001
+        print(f"[preorder] release meta not ready: {type(e).__name__}: {e}", flush=True)
+
+
+async def _preorder_gate(task: dict) -> bool:
+    """Шлюз ПЕРЕД движком: релиз ещё не вышел — запускать нечего.
+
+    Прогон по невышедшему предзаказу давал 404, тост и ⛔ владельцу там,
+    где детект уже всё знал (25.09, Polygonia 6807207334). Задача уходит в
+    план preorder_waits (переживает перезапуск), а её карточка остаётся в
+    очереди в честном состоянии «ожидает релиза» (статус scheduled — как у
+    отложенных эфиров BBC: процесс очереди такие карточки ждёт, движок в
+    них не тыкает). Возвращает True — further run_task не нужен.
+    go_now — исключение: у одной живой учётки релиз УЖЕ вышел, ждём нечего."""
+    await _ensure_release_meta(task)
+    info = _preorder_of(task)
+    if not info or info.get("go_now"):
+        return False
+    tid = task.get("id", "")
+    _preorder_plan(task, info)
+    if not task.get("_preorder_wait"):
+        # План не заведён (потолок «релиз отодвигали» / нет URL) — вешать
+        # карточку на вечное ожидание нельзя: пусть движок честно пройдёт
+        # свой путь со своей ошибкой и уведомлением.
+        return False
+    if task.get("status") == "queued":
+        # QUEUED→SCHEDULED — узаконенное ребро (task_state): карточка ждёт
+        # релиза, движок в неё не тыкал и не тыкает.
+        _try_advance_task(task, TaskStatus.SCHEDULED)
+    task["progress"] = 0
+    try:
+        from ripster import preorder as _pom
+        await _broadcast(_i18n.log_event(
+            "console.awaiting_release", level="info", task_id=tid,
+            title=str((task.get("meta") or {}).get("title") or ""),
+            date=_pom.human_date(info.get("release_date") or ""),
+            when=str(info.get("release_utc") or ""),
+            cc=info.get("cc") or "?"))
+    except Exception:                                            # noqa: BLE001
+        pass
+    task.setdefault("log", []).append(_i18n.tr(
+        "console.awaiting_release", title="", date="",
+        when=str(info.get("release_utc") or ""), cc=info.get("cc") or "?"))
+    await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+    print(f"[preorder] задача {str(tid)[:8]} не запускалась: ждём релиз "
+          f"{info.get('release_utc')} UTC (витрина {info.get('cc') or '?'})",
+          flush=True)
+    return True
+
+
+# ── Итог загрузки → матрица доступности ─────────────────────────────────────────
+# Опрос витрины отвечает только «есть ли в каталоге». Скачали мы или нет — знает
+# ОДНА попытка загрузки, и до сих пор этот ответ никуда не записывался: карточка
+# релиза продолжала показывать «✅ можно скачать» на сервисе, который час назад
+# ответил 403. Пишем вердикт туда же, откуда карточка его читает, — и только те
+# вердикты, что говорят о ДОСТУПНОСТИ (фильтр внутри availability.record_outcome:
+# сетевые и врапперные аварии не про витрину и записаны не будут).
+async def _record_availability(task: dict, outcome: str) -> None:
+    """Отдать матрице итог по этой задаче. Ошибка здесь не должна ронять загрузку."""
+    try:
+        from ripster import availability as _av
+        svc = str(task.get("service") or "").strip()
+        if not svc or svc not in _av.SERVICES:
+            return
+        # Ключ должен совпасть с тем, которым спрашивает карточка (upc:/isrc:),
+        # иначе запись ляжет рядом и её никто не найдёт. Резолвим один раз на
+        # задачу: это сетевой запрос.
+        cid = task.get("_content_id")
+        if cid is None:
+            from ripster.routes.discovery import _resolve_release_id
+            cid = await _resolve_release_id(task.get("url") or "")
+            task["_content_id"] = cid
+        upc = cid[4:] if str(cid).startswith("upc:") else ""
+        isrc = cid[5:] if str(cid).startswith("isrc:") else ""
+        meta = task.get("meta") or {}
+        _av.record_outcome(
+            svc, outcome, upc=upc, isrc=isrc,
+            title=str(meta.get("title") or task.get("title") or ""),
+            artist=str(meta.get("artist") or ""),
+            account=str(task.get("_force_slot") or ""))
+    except Exception as e:                                          # noqa: BLE001
+        print(f"[availability] outcome not recorded: {e!r}", flush=True)
+
+
+# ── Per-track failure extractor (issue #5b, phase 1) ────────────────────────────
+# EngineResult only carries COUNTS (tracks_ok/tracks_err), so to tell the user
+# WHICH tracks fell short — not just how many — we scan the engine log for the
+# per-track failure lines that the engines which emit them print. Best-effort and
+# defensive: an engine with no known format simply yields nothing and the card
+# falls back to the aggregate reason. Formats handled now:
+#   • deemix (Deezer):      "[track_<id>_<br>] <Artist - Title> :: <reason>"
+#   • SoundCloud runner:    "[N/M] Failed: <Title> - <reason>"
+# (Apple zhaarey/gamdl + streamrip to be added as their formats are sampled.)
+_FAILED_TRACK_RE = [
+    _re.compile(r"\[track_\d+_\d+\]\s*(?P<track>.+?)\s*::\s*(?P<reason>[^\r\n]*"
+                r"(?:not found|desired bitrate|no alternative|unavailable|"
+                r"removed|region|error|failed)[^\r\n]*)", _re.I),
+    _re.compile(r"\[\d+\s*/\s*\d+\]\s*Failed:\s*(?P<track>[^\r\n]+?)\s*-\s*"
+                r"(?P<reason>[^\r\n]+)", _re.I),
+]
+_MAX_FAILED_TRACKS = 25
+
+
+# ── Последняя миля честности: отказ БЕЗ причины ──────────────────────────────
+# `msg = result.error or f"Exit code {rc}"` — единственное место, где пустой
+# отказ ЛЮБОГО движка превращался в строку, из которой причину узнать
+# невозможно. Хуже того, при rc == 0 человек читал «Exit code 0» и понимал это
+# как «программа отработала успешно», хотя не сохранено ни одного файла (гость
+# 23.08.2026, Atmos-сингл). Точечные заплатки уже стоят в zhaarey.is_finished и
+# в центральном апгрейде выше — здесь ловим ВСЁ, что просочилось мимо них:
+# берём последнюю содержательную строку чужого лога, а если и её нет — говорим
+# прямо, что причина не названа, вместо кода возврата.
+_NOREASON_SKIP = ("completed:", "warnings:", "errors:", "[step]", "[ok]",
+                  "downloading", "progress", "=======", "[salvage]")
+_NOREASON_HIT = ("fail", "error", "unavailable", "warning", "not found",
+                 "no codec", "invalid", "denied", "unable", "cannot",
+                 "не удалось", "недоступ")
+
+
+def _verdict_from_log(task: dict) -> str:
+    """Найти в журнале задачи готовый вердикт движка.
+
+    Движки помечают приговор крестиком: «✗ Apple не выдал ключ…». Такая строка
+    точнее любого обобщения, и если она есть — говорить надо ею.
+
+    Возвращает пустую строку, когда вердикта нет: тогда обобщение законно, это
+    и правда неизвестный случай.
+    """
+    for line in reversed(task.get("log") or []):
+        t = str(line).strip()
+        if t.startswith("✗") and len(t) > 8:
+            return t.lstrip("✗ ").strip()
+    return ""
+
+
+def _no_reason_msg(engine_name: str, rc: int, log_text: str) -> str:
+    """Осмысленный отказ, когда движок не назвал причину вообще."""
+    for raw in reversed((log_text or "").splitlines()):
+        line = raw.strip()
+        if len(line) < 12:
+            continue
+        low = line.lower()
+        if any(k in low for k in _NOREASON_SKIP):
+            continue
+        if any(k in low for k in _NOREASON_HIT):
+            return f"{engine_name}: {line[:220]}"
+    return (f"{engine_name}: загрузка не удалась, файлы не сохранены, а движок не "
+            f"назвал причину (код возврата {rc}) — смотри консоль задачи")
+
+def _extract_failed_tracks(log_text: str) -> list:
+    """Best-effort [{track, reason}] for the tracks that failed, parsed from the
+    engine log. `reason` is a canonical token (via _classify_partial_reason) so
+    the bot/web can render it localised. Deduped by track name, capped. Returns
+    [] when the engine has no recognised per-track format — caller then shows the
+    aggregate reason instead."""
+    out: list = []
+    seen: set = set()
+    for pat in _FAILED_TRACK_RE:
+        for m in pat.finditer(log_text or ""):
+            track = (m.group("track") or "").strip()
+            if not track:
+                continue
+            key = track.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            reason_txt = (m.groupdict().get("reason") or "").strip()
+            out.append({"track": track,
+                        "reason": _classify_partial_reason(reason_txt, False)})
+            if len(out) >= _MAX_FAILED_TRACKS:
+                return out
+    return out
+
+
+async def _canonical_via_resolver(url: str):
+    """Канонический треклист релиза для Apple/Qobuz/Tidal — [{num,title,available}].
+
+    Берём общий `resolver.resolve` (им же строится дерево задачи в очереди), а не
+    пишем по фетчеру на сервис: два списка треков одного релиза рано или поздно
+    разойдутся, и тогда карточка отдачи и дерево будут спорить друг с другом.
+
+    Одиночный трек пропускаем: у недостачи там нет смысла, а resolver отдаёт на
+    такой ссылке запись с пустым названием, по которой ничего не сверишь.
+    """
+    if not url:
+        return None
+    try:
+        from ripster import resolver as _rs
+        items = await _rs.resolve(url)
+    except Exception as e:                       # noqa: BLE001
+        print(f"[shortfall] треклист не получен: {type(e).__name__}: {e}", flush=True)
+        return None
+    if len(items or []) < 2:
+        return None
+    out = [{"num": it.get("track_num") or i,
+            "title": it.get("title") or "",
+            "available": None}                   # знает только Deezer
+           for i, it in enumerate(items, 1)]
+    return out if any(t["title"] for t in out) else None
+
+
+async def _resolve_shortfall_detail(task: dict, reason: str):
+    """#5b Phase 2: AUTHORITATIVE per-track shortfall report.
+
+    Resolves the SOURCE release's canonical tracklist (from its own album API) and
+    diffs it against the delivered files, then routes each missing track via the
+    probe-gate (``release_diff.classify_missing``): cross-service top-up when the
+    source can't give it in the requested form, same-service retry when the source
+    HAS it and the run merely failed. Unlike ``_extract_failed_tracks`` (log-parse,
+    empty for many engines) this works from the API regardless of log format.
+
+    Best-effort: returns None on any failure so it never blocks finalize.
+
+    Deezer keeps its own fetcher: only it reports per-track ``readable``, and that
+    flag is what tells a region-blocked track from a run that merely crashed.
+    Everyone else goes through ``resolver.resolve`` — the SAME tracklist the queue
+    tree shows the owner, so the card and the tree can't disagree about what the
+    release contains. Availability there is genuinely unknown (``None``), and
+    ``classify_missing`` treats unknown as "retry", never as "unavailable".
+    """
+    from ripster import release_diff as _rd
+    url = task.get("url", "") or ""
+    svc = (task.get("service") or "").lower()
+    canonical = None
+    if "deezer.com" in url or svc == "deezer":
+        canonical = await _rd.fetch_deezer_tracklist(url)
+    if not canonical:
+        canonical = await _canonical_via_resolver(url)
+    if not canonical:
+        return None
+    missing = _rd.diff_tracklist(canonical, task.get("_files") or [])
+    if not missing:
+        return None
+    cross, retry = _rd.classify_missing(missing, reason)
+    return {
+        "missing": [{"num": m.get("num"), "title": m.get("title")} for m in missing],
+        "cross_service": [m.get("title") for m in cross],
+        "retry_same": [m.get("title") for m in retry],
+    }
+
+# ── Path redactor ─────────────────────────────────────────────────────────────
+_WIN_PATH_RE = _re.compile(r'[A-Za-z]:\\(?:[^\s"\'<>|*?\r\n\\]+\\)*[^\s"\'<>|*?\r\n\\]*')
+_UNX_PATH_RE = _re.compile(r'/(?:home|root|Users)/[^\s"\'<>|*?\r\n]+')
+
+
+def _strip_paths(msg: str) -> str:
+    """Replace absolute paths with just the last filename component."""
+    def _last(m: _re.Match) -> str:
+        parts = m.group(0).rstrip('/\\').replace('/', '\\').split('\\')
+        return next((p for p in reversed(parts) if p), '[path]')
+    msg = _WIN_PATH_RE.sub(_last, msg)
+    msg = _UNX_PATH_RE.sub(_last, msg)
+    return msg
+
+from ripster.task_state import (
+    TaskStatus,
+    advance     as _advance_task,
+    try_advance as _try_advance_task,
+    current     as _task_state,
+    is_terminal as _task_is_terminal,
+    # Лестница витрин Apple: провал ступени `_run_engine_task` записывает как
+    # ERROR всей задачи, а ERROR терминален. Без возврата в очередь успех
+    # следующей ступени не смог бы вывести задачу из ошибки.
+    revive_for_retry as _revive_task,
+)
+from ripster.engines import get_engine
+from ripster import i18n as _i18n
+import ripster.amd as _amd_mod
+
+# ── Injected by install() ────────────────────────────────────────────────────
+_config: dict           = {}
+_broadcast              = None
+_queue: list            = []
+_qs = None   # QueueManager — set by install()
+_queue_snapshot         = None
+_download_history: list = []
+_save_history           = None
+_detect_service         = None
+_IS_WINDOWS: bool       = False
+_BASE_DIR: Path         = Path(".")
+
+
+def install(ctx) -> None:
+    global _config, _broadcast, _queue, _qs, _queue_snapshot
+    global _download_history, _save_history, _detect_service
+    global _IS_WINDOWS, _BASE_DIR
+    _config           = ctx.config
+    _raw_bc           = ctx.broadcast
+    async def _safe_bc(msg: dict) -> None:
+        if msg.get("type") == "log":
+            if "msg" in msg:
+                msg = {**msg, "msg": _strip_paths(msg["msg"])}
+            # i18n logs carry params the client interpolates into msg_key — strip
+            # absolute paths from those too, else a full path leaks to the client.
+            if isinstance(msg.get("params"), dict):
+                msg = {**msg, "params": {
+                    k: (_strip_paths(v) if isinstance(v, str) else v)
+                    for k, v in msg["params"].items()}}
+        await _raw_bc(msg)
+    _broadcast        = _safe_bc
+    _queue            = ctx.queue
+    _qs               = ctx.queue_manager
+    _queue_snapshot   = ctx.queue_snapshot
+    _download_history = ctx.download_history
+    _save_history     = ctx.save_history
+    _detect_service   = ctx.detect_service
+    _IS_WINDOWS       = ctx.is_windows
+    _BASE_DIR         = ctx.base_dir
+    # Point the download manifest at the app dir — the single source of truth
+    # for "where did this task's files go" (read back by the serving endpoints).
+    try:
+        from ripster import download_manifest as _dm
+        _dm.init(_BASE_DIR)
+    except Exception:
+        pass
+
+
+# Гашение повторов в консоли. Apple качает альбом НЕСКОЛЬКИМИ воркерами сразу
+# (их число равно числу портов расшифровки — сейчас три), и каждый печатает
+# одни и те же строки уровня альбома: «Track already exists locally», «Queue 1
+# of 1: Album», предупреждения враппера. Снаружи это выглядит как троение лога,
+# хотя дублируется вывод, а не работа.
+#
+# Гасим по паре (задача, текст) в коротком окне: одинаковая строка от РАЗНЫХ
+# воркеров приходит в пределах секунды, а настоящий повтор той же строки позже
+# (следующий трек с тем же сообщением) окном не накрывается и пройдёт.
+_LOG_DEDUP_WINDOW = 2.0
+_log_seen: dict[tuple[str, str], float] = {}
+
+
+def _log_is_echo(task_id: str, text: str) -> bool:
+    import time as _t
+    now = _t.monotonic()
+    key = (task_id or "", text)
+    last = _log_seen.get(key, 0.0)
+    _log_seen[key] = now
+    if len(_log_seen) > 2000:                     # не растим словарь бесконечно
+        for k, v in list(_log_seen.items()):
+            if now - v > 30:
+                _log_seen.pop(k, None)
+    return (now - last) < _LOG_DEDUP_WINDOW
+
+
+async def _log_key(key: str, level: str = "info", task_id: str = "", **params) -> None:
+    """Строка в консоль ПО КЛЮЧУ, а не готовым текстом.
+
+    Обычный `_log()` шлёт готовую строку, и она приходит на том языке, на
+    котором написана в коде, независимо от языка интерфейса. Отсюда каша:
+    русские сообщения в английском интерфейсе и наоборот. Клиент переводит
+    только то, у чего есть ключ, поэтому всё, что видит человек, должно идти
+    отсюда.
+    """
+    await _broadcast(_i18n.log_event(key, level=level, task_id=task_id, **params))
+
+
+async def _log(text: str, level: str = "info", task_id: str = "") -> None:
+    if _log_is_echo(task_id, text):
+        return
+    ts = datetime.now().strftime("%H:%M:%S")
+    msg: dict = {"type": "log", "text": f"[{ts}] {text}", "level": level}
+    if task_id:
+        msg["task_id"] = task_id
+    await _broadcast(msg)
+
+
+class _NeedAppleFallback(Exception):
+    """Raised by _run_engine_task when gamdl/zhaarey hits -1002 / Invalid CKC:
+    хендофф в лестницу своих витрин/аккаунтов и (по политике) на публичный wrapper."""
+
+
+class _NeedZhaareyFallback(Exception):
+    """Лосси не прошло (codec unavailable) → retry with zhaarey AAC."""
+    def __init__(self, quality: str = "aac"):
+        self.quality = quality
+
+
+class _NeedRetry(Exception):
+    """Raised to signal a one-shot automatic retry (e.g. OrpheusDL new-settings)."""
+
+
+# gamdl не смог разобрать манифест на лосси-пути (без wrapper'а). Признак именно
+# СТРУКТУРНЫЙ, а не «ошибка вообще»: у выбранного варианта в манифесте Apple нет
+# полей ключей, и повтор того же пути даст ровно тот же отказ.
+_RE_GAMDL_MANIFEST_ERR = _re.compile(
+    r'AUDIO-SESSION-KEY-IDS'
+    r'|KeyError.*variant_id',
+    _re.I,
+)
+
+
+# ── History ──────────────────────────────────────────────────────────────────
+
+# Audio files eligible for post-download transcode (any of these → the target).
+_TRANSCODE_SRC_EXTS = {".flac", ".m4a", ".alac", ".wav", ".aac", ".aiff",
+                       ".mp3", ".ogg", ".opus"}
+
+# target → (output extension, ffmpeg audio-codec name, encode args)
+_TRANSCODE_TARGETS = {
+    "mp3":  (".mp3",  "mp3",  ["-map_metadata", "0", "-id3v2_version", "3",
+                               "-codec:a", "libmp3lame", "-b:a", "320k"]),
+    "flac": (".flac", "flac", ["-map", "0:a", "-map", "0:v?", "-map_metadata", "0",
+                               "-c:v", "copy", "-codec:a", "flac",
+                               "-compression_level", "8"]),
+    "alac": (".m4a",  "alac", ["-map", "0:a", "-map", "0:v?", "-map_metadata", "0",
+                               "-c:v", "copy", "-codec:a", "alac"]),
+}
+
+
+def _ffprobe_for(ffmpeg_path: str) -> str:
+    """Derive the ffprobe path that sits next to the configured ffmpeg binary."""
+    import re as _re
+    return _re.sub(r"ffmpeg(\.exe)?$", lambda m: "ffprobe" + (m.group(1) or ""),
+                   ffmpeg_path) if ffmpeg_path else "ffprobe"
+
+
+def _probe_acodec(ffprobe: str, f) -> str:
+    """Return the first audio stream's codec_name (lower), or '' on any failure."""
+    import subprocess as _sp
+    try:
+        cp = _sp.run([ffprobe, "-v", "error", "-select_streams", "a:0",
+                      "-show_entries", "stream=codec_name", "-of",
+                      "default=nw=1:nk=1", str(f)],
+                     capture_output=True, timeout=30,
+                     creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
+        return (cp.stdout or b"").decode("utf-8", "ignore").strip().lower()
+    except Exception:
+        return ""
+
+
+def _transcode_dir(save_dir: str, target: str = "mp3") -> int:
+    """Optional, service-agnostic: re-encode every downloaded audio file in
+    `save_dir` to a single uniform `target` format ("mp3" 320 / "flac" / "alac")
+    via ffmpeg (metadata + cover carried over). Controlled by Settings key
+    `transcode-format`. Files already in the target codec are skipped. Returns the
+    count converted. Blocking — call via asyncio.to_thread. Originals removed
+    unless `transcode-keep-original`."""
+    import subprocess as _sp
+    import os as _os
+    from pathlib import Path as _P
+    target = (target or "mp3").lower()
+    if target not in _TRANSCODE_TARGETS:
+        return 0
+    out_ext, codec, enc = _TRANSCODE_TARGETS[target]
+    ff = (_config.get("gamdl-ffmpeg-path") or "ffmpeg").strip() or "ffmpeg"
+    fp = _ffprobe_for(ff)
+    keep = bool(_config.get("transcode-keep-original"))
+    n = 0
+    try:
+        for f in _P(save_dir).rglob("*"):
+            if not f.is_file() or f.suffix.lower() not in _TRANSCODE_SRC_EXTS:
+                continue
+            # Lossy → FLAC/ALAC — это ФАЛЬШИВЫЙ lossless: те же потери в большом
+            # контейнере, который выдаёт себя за оригинал. А при выключенном
+            # transcode-keep-original исходник ещё и удалялся. Такие файлы
+            # оставляем как есть и честно пишем почему. 19.09.2026.
+            if codec in ("flac", "alac"):
+                _sfx = f.suffix.lower()
+                if (_sfx in (".mp3", ".ogg", ".opus", ".aac")
+                        or (_sfx == ".m4a" and _probe_acodec(fp, f) == "aac")):
+                    print(f"[transcode] пропуск {f.name}: источник с потерями — "
+                          f"в {target} получился бы фальшивый lossless", flush=True)
+                    continue
+            # Already in the target codec? Extension is decisive except for .m4a,
+            # which may hold either AAC or ALAC — probe to tell them apart.
+            if f.suffix.lower() == out_ext:
+                if out_ext != ".m4a" or _probe_acodec(fp, f) == codec:
+                    continue
+            out_final = f.with_suffix(out_ext)
+            # Encode to a temp file first, then atomically move into place. This
+            # also handles the ALAC-from-AAC case where source and output share
+            # the .m4a extension (out_final == f) by overwriting in one step.
+            tmp = f.with_name(f".__tc__{f.stem}{out_ext}")
+            try:
+                cp = _sp.run([ff, "-y", "-i", str(f), *enc, str(tmp)],
+                             capture_output=True, timeout=600,
+                             creationflags=getattr(_sp, "CREATE_NO_WINDOW", 0))
+                if cp.returncode == 0 and tmp.exists() and tmp.stat().st_size > 0:
+                    _os.replace(str(tmp), str(out_final))   # atomic; may overwrite f
+                    n += 1
+                    if out_final != f and not keep:
+                        try: f.unlink()
+                        except Exception: pass
+                else:
+                    try: tmp.unlink()
+                    except Exception: pass
+                    print(f"[transcode] ffmpeg failed for {f.name}: "
+                          f"{(cp.stderr or b'')[-200:]!r}", flush=True)
+            except Exception as e:
+                try: tmp.unlink()
+                except Exception: pass
+                print(f"[transcode] {f.name}: {type(e).__name__}: {e}", flush=True)
+    except Exception as e:
+        print(f"[transcode] scan error: {e}", flush=True)
+    return n
+
+
+def _transcode_dir_to_mp3(save_dir: str, bitrate: str = "320k") -> int:
+    """Backward-compat shim — see `_transcode_dir`."""
+    return _transcode_dir(save_dir, "mp3")
+
+
+# ── Multi-disc → per-disc subfolders (universal, all services) ────────────────
+_DISC_AUDIO_EXTS = {".m4a", ".mp3", ".flac", ".ogg", ".opus", ".aac", ".wav", ".aiff", ".alac"}
+_RE_DISC_PREFIX  = _re.compile(r"^(\d+)-\d+")   # AMD-именование треков "1-01 Title"
+
+
+def _disc_number(f: "Path") -> int:
+    """Best-effort disc number for a track: tag first (mutagen, format-agnostic
+    via easy=True → 'discnumber' like '1' / '1/2'), then the AMD-style filename prefix
+    'N-NN', else disc 1."""
+    try:
+        from mutagen import File as _MF
+        mf = _MF(str(f), easy=True)
+        if mf is not None:
+            dn = mf.get("discnumber") or mf.get("disc")
+            if dn:
+                s = str(dn[0] if isinstance(dn, (list, tuple)) else dn)
+                m = _re.match(r"\s*(\d+)", s)
+                if m:
+                    return int(m.group(1))
+    except Exception:
+        pass
+    m = _RE_DISC_PREFIX.match(f.name)
+    return int(m.group(1)) if m else 1
+
+
+def _organize_discs(save_dir: str) -> int:
+    """If a release spans multiple discs, move each track into a `CD N/` subfolder
+    — universally, for every service. Reads the disc number from tags (or the AMD-style
+    'N-NN' filename prefix). Operates ONLY on audio sitting directly in the album
+    root: if an engine (deemix/streamrip) already split into CD/Disc subfolders,
+    the root has no loose audio → this is a no-op (no double-nesting). A matching
+    `.lrc` follows its track; cover/.cue stay at the album root. Returns moved
+    count. Blocking — call via asyncio.to_thread."""
+    try:
+        root = Path(save_dir)
+        if not root.is_dir():
+            return 0
+        files = [f for f in root.iterdir()
+                 if f.is_file() and f.suffix.lower() in _DISC_AUDIO_EXTS]
+        if len(files) < 2:
+            return 0
+        discs = {f: _disc_number(f) for f in files}
+        distinct = sorted(set(discs.values()))
+        # Genuinely multi-disc only: ≥2 distinct disc numbers present.
+        if len(distinct) < 2:
+            return 0
+        moved = 0
+        for f, dn in discs.items():
+            sub = root / f"CD {dn}"
+            try:
+                sub.mkdir(parents=True, exist_ok=True)
+                target = sub / f.name
+                if target.resolve() == f.resolve():
+                    continue
+                if target.exists():
+                    # A CD-folder copy is already there (left by an earlier run /
+                    # the engine's own disc split). Don't strand a duplicate in the
+                    # album root: drop the loose root copy when it's identical
+                    # (same size); otherwise leave it untouched to be safe.
+                    try:
+                        if target.stat().st_size == f.stat().st_size:
+                            f.unlink()
+                            moved += 1
+                    except Exception:
+                        pass
+                    continue
+                f.rename(target)
+                moved += 1
+                # carry the sidecar lyrics file with its track
+                lrc = f.with_suffix(".lrc")
+                if lrc.is_file():
+                    try:
+                        lrc.rename(sub / lrc.name)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+        return moved
+    except Exception as e:
+        print(f"[discs] organize error: {e}", flush=True)
+        return 0
+
+
+async def _maybe_auto_mix(task: dict, tid: str) -> None:
+    """If enabled (`coder-auto`) and the release is a "(DJ Mix)", merge its tracks
+    into one continuous file + CUE via Ripster Coder — but only from a LOSSLESS
+    source (gapless requires it). Output goes to the `mixed/` folder."""
+    if not _config.get("coder-auto"):
+        return
+    import re as _re
+    meta  = task.get("meta") or {}
+    album = meta.get("album") or meta.get("title") or ""
+    # Continuous-mix markers in the album title: DJ Mix / Mixed / Continuous /
+    # DJ Set / Megamix / Mixed-Selected-Compiled by … / Live from|at|in ….
+    if not _re.search(
+        r"\b(?:dj[ \-]?mix|continuous(?:\s+mix)?|mixed(?:\s+by)?|dj\s*set|megamix|"
+        r"(?:selected|compiled|presented)\s+by|live\s+(?:from|at|in)\b)",
+        album, _re.I):
+        return
+    d = task.get("_save_dir")
+    if not d:
+        return
+    from pathlib import Path as _P
+    from ripster.routes.download import _find_audio_files as _faf
+    files = _faf(_P(d))
+    if len(files) < 2:
+        return
+    from ripster.mixcue import (build_mixes, clean_mix_name, clean_mix_title,
+                                _probe, _ffprobe_for, _LOSSLESS)
+    ff = (_config.get("gamdl-ffmpeg-path") or "ffmpeg").strip() or "ffmpeg"
+    if _probe(_ffprobe_for(ff), files[0]).get("codec", "") not in _LOSSLESS:
+        await _broadcast(_i18n.log_event("console.automix_skipped_lossy", level="warn", task_id=tid))
+        return
+    artist  = meta.get("artist") or ""
+    fmt     = (_config.get("coder-auto-format") or "source").strip().lower()
+    out_dir = (_config.get("coder-out-dir") or "").strip() or str(_P(_config.get("save-path", "downloads")) / "mixed")
+    name    = clean_mix_name(album, artist)
+    await _broadcast(_i18n.log_event("console.automix_start", level="info", task_id=tid, name=name))
+    res = await asyncio.to_thread(build_mixes, [str(f) for f in files], out_dir, name,
+                                  fmt, ff, clean_mix_title(album, artist), artist)
+    made = [m for m in res.get("mixes", []) if m.get("ok")]
+    if made:
+        names = ", ".join(_P(m["file"]).name for m in made)
+        if res.get("multi"):
+            await _broadcast(_i18n.log_event("console.automix_done_discs", level="success",
+                                             task_id=tid, discs=res["discs"], names=names, out_dir=out_dir))
+        else:
+            await _broadcast(_i18n.log_event("console.automix_done", level="success",
+                                             task_id=tid, names=names, out_dir=out_dir))
+    else:
+        err = next((m.get("error") for m in res.get("mixes", []) if m.get("error")), res.get("error", ""))
+        await _broadcast(_i18n.log_event("console.automix_error", level="error", task_id=tid, err=err))
+
+
+def _add_to_history(task: dict) -> None:
+    """Record a finished (or failed) task in history.json and notify clients."""
+    meta   = task.get("meta") or {}
+    status = task.get("status", "done")
+    if status not in ("done", "error", "cancelled"):
+        return
+    # Canary-проверка удаляет свой файл сразу после замера — карточка
+    # «скачано» без файла в истории враньё; в логе прохода её видно целиком.
+    if task.get("source") == "download_canary":
+        return
+    # Перебор учёток оставляет в задаче текст ПОСЛЕДНЕГО отказавшего слота, и
+    # он доезжал до истории даже когда следующий слот всё скачал: 04.09.2026
+    # запись «done» несла «Deezer: ARL не задан или протух» на 12 успешно
+    # сохранённых треках. Успех с чужой ошибкой в кармане — это не история, это
+    # ложный диагноз, который потом ищут. Причину не выбрасываем: складываем в
+    # `error_recovered`, если понадобится разобрать, почему пришлось перебирать.
+    err_text = (task.get("error") or "")[:2000]
+    err_recovered = ""
+    if status == "done" and err_text and not task.get("_partial"):
+        err_recovered, err_text = err_text, ""
+    entry = {
+        "id":        task.get("id", ""),
+        "url":       task.get("url", ""),
+        "quality":   task.get("quality", ""),
+        "engine":    task.get("engine", _config.get("engine", "zhaarey")),
+        "service":   task.get("service") or (_detect_service(task.get("url", "")) if _detect_service else ""),
+        "title":     meta.get("title",      "") or "",
+        "artist":    meta.get("artist",     "") or "",
+        "album":     meta.get("album",      "") or "",
+        "artworkUrl": meta.get("artworkUrl", "") or "",
+        "tracks":    meta.get("trackCount") or meta.get("totalTracks") or 0,
+        "status":    status,
+        "partial":   bool(task.get("_partial")),          # got fewer tracks than expected
+        "missing":   int(task.get("_missing") or 0),      # how many tracks didn't land
+        "got":       len(task.get("_files") or []) or None,
+        # Точные имена файлов задачи: по ним «уже скачано» отдаёт ровно её файлы
+        # (а не всю папку артиста). Потолок — чтобы история не пухла на огромных
+        # сборниках.
+        "_files":    [str(n) for n in (task.get("_files") or [])][:300],
+        "error":     err_text,                           # captured engine error
+        "error_recovered": err_recovered,                # отказ, который пережили перебором
+        "progress":  task.get("progress", 0),
+        "ts":        datetime.now().isoformat(timespec="seconds"),
+        # Kept for /api/download-file to find output dir after queue is cleared
+        "_base_save_path": task.get("_base_save_path") or _config.get("save-path", "downloads"),
+        "_start_time":     task.get("_start_time", 0.0),
+        "_done_time":      task.get("_done_time",  0.0),
+        "_save_dir":       task.get("_save_dir", ""),
+        # Помечает задачу, завершённую путём «уже скачано». Без этого флага
+        # следующий повтор не может отличить её от настоящей загрузки, а список
+        # файлов у неё — копия списка предыдущей задачи, то есть грязь
+        # наследуется по цепочке (замер Qwen 027, правка 028).
+        "_reused":         bool(task.get("_reused", False)),
+        # Preserved so guests can re-download their own tasks after server restart
+        "session_id":      task.get("session_id", ""),
+        "_guest_token":    task.get("_guest_token", ""),
+        # Download event counters (incremented by download.py on each successful action)
+        "_dl_file":        task.get("_dl_file",   0),
+        "_dl_zip":         task.get("_dl_zip",    0),
+        "_dl_gofile":      task.get("_dl_gofile", 0),
+        "_dl_errors":      task.get("_dl_errors", 0),
+    }
+    _download_history[:] = [h for h in _download_history if h.get("id") != entry["id"]]
+    # ── Честная строка запасного пути ───────────────────────────────────────
+    # Задача, скачанная после отказа другой витрины, обязана говорить, ОТКУДА
+    # она перепрыгнула: «QOBUZ отказала → скачано из TIDAL (FLAC CD 16-44)».
+    # Без этой строки карточка-«error» у исходной задачи так и висит финальным
+    # диагнозом, а успех выглядит чудом. `switched_note_key` + параметры — для
+    # телефона (перевод), `switched_note` — русская строка ПК-истории.
+    fb_from = str(task.get("_fallback_from") or "")
+    fb_note = ""
+    if fb_from and status == "done":
+        try:
+            from ripster.service_config import _quality_folder_name
+            q_label = _quality_folder_name(entry["service"] or "", entry["quality"] or "")
+        except Exception:                                        # noqa: BLE001
+            q_label = entry["quality"] or ""
+        svc_up = (entry["service"] or "").upper()
+        qf_from = str(task.get("_quality_fallback_from") or "")
+        if qf_from:
+            # Та же витрина, ступенью ниже: «отказала → скачано из» про один и
+            # тот же сервис дважды врёт — называем качество прямо.
+            want_lbl = _quality_label(entry["service"] or "", qf_from)
+            entry["switched_wanted"] = want_lbl
+            if task.get("_quality_fallback_elsewhere"):
+                fb_note = f"в {want_lbl} нигде нет — скачано {q_label} с {svc_up}"
+                entry["switched_note_key"] = "history.fb_quality"
+            else:
+                fb_note = (f"на {svc_up} нет {want_lbl} — "
+                           f"скачано {q_label} с того же {svc_up}")
+                entry["switched_note_key"] = "history.fb_quality_local"
+        else:
+            fb_note = (f"{fb_from.upper()} отказала → скачано из "
+                       f"{svc_up} ({q_label})")
+            entry["switched_note_key"] = "history.fb_resolved"
+        entry["switched_from"] = fb_from
+        entry["switched_quality"] = q_label
+        entry["switched_note"] = fb_note
+    # Молчаливое понижение качества (страж _guard_quality_mismatch не дал ему
+    # остаться молчаливым) — карточка истории говорит об этом прямым текстом.
+    qd = str(task.get("quality_downgraded") or "")
+    if qd and status == "done":
+        entry["quality_downgraded"] = qd
+        entry["quality_wanted"] = str(task.get("quality_wanted") or "")
+        # Причина бывает разная: lossless-страж говорит «ни одна витрина не
+        # отдала выше», SoundCloud — «этот трек сервис отдаёт только так».
+        entry["quality_note_key"] = str(task.get("quality_note_key_override")
+                                        or "history.qd_downgraded")
+    # Файл пришёл не из своей учётки — человек вправе это видеть в истории
+    # (выбор 24.09.2026): region+ключ перевода, как у строки отказа выше.
+    _pub_region = str(task.get("_public_wrapper") or "") if status == "done" else ""
+    if _pub_region:
+        # «(lite)» — с 02.09.2026 публичный враппер говорит только на HTTP
+        # Wrapper-Lite API; для старых записей вида `amd` суффикса нет.
+        _lite = (" lite" if str(task.get("engine") or "") == "lite"
+                 else "")
+        entry["public_wrapper"] = _pub_region.upper()
+        entry["public_note"] = (f"скачано через публичный враппер{_lite} "
+                                f"({_pub_region.upper()})")
+        entry["public_note_key"] = ("history.public_wrapper_lite" if _lite
+                                    else "history.public_wrapper")
+    _download_history.insert(0, entry)
+    if fb_note:
+        for h in _download_history:
+            if h.get("id") == task.get("_fallback_origin"):
+                # Структурой, а не строкой: отказ исходной задачи виден и
+                # гостю-иностранцу — телефон/веб переводят по ключу.
+                h["resolved_by"] = {"id": entry["id"],
+                                    "from": fb_from,
+                                    "service": entry["service"],
+                                    "quality": entry.get("switched_quality", ""),
+                                    # непусто ⇒ понижение качества, а не прыжок
+                                    # на чужую витрину; веб выбирает ключ перевода
+                                    "quality_from": entry.get("switched_wanted", ""),
+                                    "elsewhere": bool(
+                                        entry.get("switched_note_key")
+                                        == "history.fb_quality")}
+                break
+    del _download_history[500:]
+    _save_history(_download_history)
+    print(
+        f"[history] recorded {entry['status']:<6} {entry['service']:<8} "
+        f"{entry.get('title') or entry['url']}"
+        + (f"  ERR: {entry['error'][:120]}" if entry.get("error")
+           else (f"  (пережито перебором: {entry['error_recovered'][:120]})"
+                 if entry.get("error_recovered") else "")),
+        flush=True,
+    )
+    # Native desktop toast on finish (Windows) — only when the owner enabled it in
+    # Settings. Lets the user know a download is done while Ripster is minimized/tray;
+    # Focus Assist auto-suppresses it over fullscreen games.
+    if status in ("done", "error") and _config.get("notify-on-done"):
+        try:
+            from ripster import notify as _notify
+            _notify.toast_download_done(
+                entry.get("title") or entry.get("url") or "Ripster",
+                status == "done", entry.get("got"),
+                lang=_config.get("language", "en"))
+        except Exception:
+            pass
+    # Persistent error trail — so a failed download leaves a diagnosable record
+    # (full error + tail of the engine output) even after history rotates. Log not
+    # just hard "error" status but ALSO partials and any task carrying an error
+    # message / partial flag: a CKC-salvaged Apple task records status "done" with
+    # partial=True, so the old `status=="error"` gate missed real failures entirely
+    # (nothing in errors.log to diagnose — e.g. the "Invalid CKC" wrapper failures).
+    # The log tail still carries the engine's failure lines.
+    _has_problem = (status in ("error", "partial")
+                    or bool(task.get("error")) or bool(task.get("partial")))
+    if _has_problem:
+        try:
+            from pathlib import Path as _P
+            logf = _P(__file__).resolve().parent.parent / "errors.log"
+            tail = "\n".join(str(x) for x in (task.get("log") or [])[-30:])
+            with open(logf, "a", encoding="utf-8") as f:
+                f.write(f"\n===== {entry['ts']} | {status.upper()} | {entry['service']} | "
+                        f"{entry.get('title') or entry['url']} =====\n")
+                f.write(f"url:     {entry['url']}\n")
+                f.write(f"engine:  {entry['engine']}   quality: {entry['quality']}\n")
+                f.write(f"error:   {task.get('error') or '(none captured — see output below)'}\n")
+                f.write(f"--- last engine output ---\n{tail}\n")
+        except Exception:
+            pass
+    try:
+        loop = asyncio.get_running_loop()
+        loop.create_task(_broadcast({"type": "history_updated"}))
+        if fb_note:
+            # Тот же факт в консоли: без строки успех второй задачи выглядит
+            # чудом, а не переключением витрины.
+            _nbk = str(entry.get("switched_note_key") or "")
+            if _nbk.startswith("history.fb_quality"):
+                # понижение качества — «отказала → скачано из» здесь врёт
+                loop.create_task(_broadcast(_i18n.log_event(
+                    _nbk.replace("history.", "console."), level="success",
+                    task_id=entry["id"],
+                    want=entry.get("switched_wanted", ""),
+                    got=entry.get("switched_quality", ""),
+                    svc=(entry["service"] or "").upper())))
+            else:
+                loop.create_task(_broadcast(_i18n.log_event(
+                    "console.fb_resolved", level="success", task_id=entry["id"],
+                    origin=fb_from.upper(), svc=(entry["service"] or "").upper(),
+                    quality=entry.get("switched_quality", ""))))
+    except RuntimeError:
+        pass
+
+    # Stats collector
+    try:
+        from ripster import stats_collector as _sc
+        _sc.record_download(entry)
+    except Exception:
+        pass
+
+    # Guest activity tracking — record download and consume quota on completion
+    try:
+        sid = task.get("session_id", "")
+        if sid:
+            from ripster.guest_manager import get_manager as _get_gm
+            gm = _get_gm()
+            gm.log_activity(sid, {
+                "url":     entry["url"],
+                "title":   entry.get("title") or "",
+                "service": entry.get("service", ""),
+                "status":  entry["status"],
+                "quality": entry.get("quality", ""),
+            })
+            # Idempotent per task object: a task that re-finalizes (retry-in-place,
+            # re-delivery) must NOT charge the guest's quota twice. A genuinely new
+            # download is a new task object → _quota_consumed unset → charged once.
+            if entry["status"] == "done" and not task.get("_quota_consumed"):
+                gm.consume_quota(sid)
+                # Недельный кап (7 альбомов + 7 треков) — записываем завершённую
+                # единицу в журнал ссылки. Вид определяем по URL, чтобы плейлист
+                # не проскочил как трек. Метод сам пропустит старые ссылки.
+                try:
+                    from ripster.guest_manager import classify_release
+                    gm.record_weekly(sid, classify_release(entry.get("service", ""), entry.get("url", "")))
+                except Exception:
+                    pass
+                task["_quota_consumed"] = True
+    except Exception:
+        pass
+
+
+# ── Skip re-download for OrpheusDL-based engines (tidal / beatport) ──────────
+# OrpheusDL's own "already downloaded, skip" check matches its OWN filename
+# template — but Ripster's post-download rename pass (_apply_rename below)
+# renames files to match TAGS instead, which no longer matches what OrpheusDL
+# is looking for on the next run. Result: re-queuing an already-complete
+# release re-downloads everything and leaves orphaned duplicate files (found
+# + root-caused 2026-07-22, see skill ripster-tidal-orpheus). Rather than
+# touch OrpheusDL's vendored internals (risky, shared across tidal/beatport/
+# spotify) or stop renaming files to match tags (the owner explicitly wants
+# filenames = tags for every service), Ripster now does its OWN "already
+# complete?" check BEFORE ever invoking the engine at all.
+
+def _wants_lossless(quality: str) -> bool:
+    q = (quality or "").lower()
+    return any(k in q for k in ("lossless", "hifi", "flac", "alac", "hires", "hi-res"))
+
+
+def _find_completed_duplicate(url: str, quality: str, engine_name: str) -> dict | None:
+    """A prior COMPLETE download of this exact url+quality+engine, whose
+    output folder still has at least as many audio files on disk as it
+    finished with. Returns the history entry, or None if no safe match."""
+    audio_exts = {".flac", ".m4a", ".mp3", ".alac", ".aac", ".ogg", ".opus", ".wav"}
+    for h in _download_history:
+        if not (h.get("url") == url and h.get("quality") == quality
+                and h.get("engine") == engine_name and h.get("status") == "done"
+                and not h.get("partial") and not h.get("missing")):
+            continue
+        save_dir = h.get("_save_dir") or ""
+        if not save_dir:
+            continue
+        d = Path(save_dir)
+        if not d.is_dir():
+            continue
+        try:
+            files = [p for p in d.rglob("*") if p.suffix.lower() in audio_exts]
+        except OSError:
+            continue
+        n_audio = len(files)
+        expected = h.get("got") or h.get("tracks") or 0
+        if not (n_audio and (not expected or n_audio >= expected)):
+            continue
+
+        # Совпал ЯРЛЫК качества — это ещё не значит, что на диске лежит то
+        # самое качество. Папка называется по ЗАПРОШЕННОМУ, и потому врёт
+        # (ровно об этом предупреждает integrity_verify.probe_codec).
+        # 05.09.2026: релиз, скачанный при сломанном Beatport-движке, лёг в
+        # «FLAC CD» как AAC 128. Каждая следующая попытка перекачать его в
+        # FLAC натыкалась сюда, переиспользовала ту же папку и отчитывалась
+        # «done» — движок ни разу даже не запускался. Из ямы нельзя было
+        # выбраться повтором в принципе: чем хуже скачалось в первый раз,
+        # тем прочнее оно закреплялось.
+        # Спрашиваем сам файл. Достаточно одного: внутри одной загрузки
+        # кодек одинаковый, а ffprobe на каждый трек стоил бы минуты.
+        if _wants_lossless(quality):
+            try:
+                from ripster.integrity_verify import probe_codec
+                info = probe_codec(sorted(files)[0])
+            except Exception:
+                info = {}
+            # Пустой ответ — «не знаю» (нет ffprobe, битый файл). Не знаем —
+            # не переиспользуем: перекачать дешевле, чем молча отдать не то.
+            if not info.get("lossless"):
+                print(f"[reuse] не переиспользую {d.name}: запрошено {quality}, "
+                      f"на диске {info.get('codec') or 'неизвестно'} — качаю заново",
+                      flush=True)
+                continue
+        return h
+    return None
+
+
+def _is_reuse_entry(h: dict) -> bool:
+    """Задача, завершённая путём «уже скачано», а не загрузкой.
+
+    Свежие записи помечены явно (`_reused`). Для старых признак — отсутствие
+    `_done_time` ПРИ нулевом числе треков: движок не запускался, и ставить время
+    окончания было некому, а `meta.trackCount` reuse-задача не заполняла.
+    Проверено на живом `history.json` (29.09, задача 027): из 428 завершённых
+    записей без `_done_time` ровно 8, и у ВСЕХ них `tracks=0` — ни одной настоящей
+    загрузки признак не задевает. Второе условие нужно именно ради старых
+    записей: история писалась до появления `_done_time`, и у них он нулевой, но
+    число треков известно — такие мы настоящими и оставляем.
+    """
+    if h.get("_reused"):
+        return True
+    if (h.get("tracks") or 0) > 0:
+        return False
+    try:
+        return float(h.get("_done_time") or 0.0) == 0.0
+    except (TypeError, ValueError):
+        return True
+
+
+def _files_of_history(h: dict) -> list:
+    """Список файлов записи истории: своё, а если его там нет — манифест задачи."""
+    names = [str(n) for n in (h.get("_files") or []) if n]
+    if names:
+        return names
+    try:
+        from ripster import download_manifest as _dmr
+        return [str(n) for n in ((_dmr.lookup(h.get("id") or "") or {}).get("files") or []) if n]
+    except Exception:                                          # noqa: BLE001
+        return []
+
+
+def _last_real_download(dup: dict) -> dict | None:
+    """Последняя НАСТОЯЩАЯ загрузка того же url+quality+engine.
+
+    Зачем: запись, рождённая путём «уже скачано», несёт список файлов ПРОШЛОЙ
+    задачи и время своего нажатия, а не момент появления файлов. Если та прошлая
+    задача была испорчена (её список собрали до сужения манифеста), грязь
+    перетекает по цепочке и каждый повтор только множит её — ровно то, что
+    померило 027: три записи Venera подряд с чужим Surga внутри, при том что код
+    сужения с чистым списком отдаёт один файл.
+
+    Берём САМУЮ СВЕЖУЮ из настоящих, а не самую первую: тэгер переименовывает
+    файлы после загрузки, и список более ранней настоящей загрузки может уже не
+    совпадать с именами на диске. Настоящая — значит не reuse: у неё свой
+    `_done_time` и честное число треков.
+    """
+    same = [h for h in _download_history
+            if h.get("url") == dup.get("url") and h.get("quality") == dup.get("quality")
+            and h.get("engine") == dup.get("engine") and h.get("status") == "done"
+            and not _is_reuse_entry(h)]
+    if not same:
+        return None
+    # `_download_history` — от новых к старым: идём по этому порядку и берём
+    # ПЕРВУЮ запись с непустым списком файлов, то есть самую свежую настоящую.
+    # Если списка нет ни у одной — всё равно возвращаем самую свежую настоящую:
+    # число её треков и время старта всё равно честные.
+    for h in same:
+        if _files_of_history(h):
+            return h
+    return same[0]
+
+
+async def _reuse_completed_download(task: dict, tid: str, dup: dict) -> None:
+    """Mark `task` instantly complete by reusing `dup`'s already-finished
+    output — no engine invocation, so no risk of the retry-duplicate bug.
+    Records a fresh manifest entry under THIS task's id (bot delivery/
+    /api/download-file look files up by task id, not by the original one)."""
+    d = Path(dup["_save_dir"])
+    from ripster.routes.download import _find_audio_files as _faf
+    # Точный список прошлой задачи, а не вся папка: у одиночных треков Beatport
+    # это папка артиста со всеми его прошлыми заказами (отчёт 007, Venera 1 → 4).
+    # Живая проверка 29.09 (Qwen, 012 шаг 3): повтор ссылки отдал чужой Surga —
+    # в самодельную задачу не попали ни число треков, ни время старта прошлого
+    # прогона, ни список файлов. Тогда понесли всё, что знает запись истории.
+    # 028 (Qwen): а сама запись истории могла быть reuse-клоном, унаследовавшим
+    # грязный список, — поэтому источник списка, времени и числа треков ищем у
+    # последней НАСТОЯЩЕЙ загрузки этого URL (см. [_last_real_download]).
+    real = _last_real_download(dup)
+    src = real or dup
+    prev_files = _files_of_history(src) or None
+    try:
+        expected_tracks = int((task.get("meta") or {}).get("trackCount")
+                              or src.get("tracks") or 0)
+    except (TypeError, ValueError):
+        expected_tracks = 0
+    if real is not None and real.get("id") != dup.get("id"):
+        print(f"[reuse] список прошлой задачи беру у настоящей загрузки "
+              f"{real.get('id')} (запись {dup.get('id')} — повтор, а не загрузка)",
+              flush=True)
+    audio = _narrow_to_this_task(_faf(d), {
+        "meta": {"title": src.get("title") or "", "type": src.get("type") or "",
+                 "trackCount": expected_tracks},
+        "url": src.get("url") or "",
+        "_first_start_time": src.get("_start_time") or 0.0,
+    }, prev_files=prev_files)
+    task["_save_dir"] = str(d)
+    task["_files"] = [f.name for f in audio]
+    task["_reused"] = True               # чтобы следующий повтор не считаетался
+    task["progress"] = 100
+    meta = task.setdefault("meta", {})
+    meta.setdefault("title", src.get("title") or dup.get("title") or "")
+    meta.setdefault("artist", src.get("artist") or dup.get("artist") or "")
+    if expected_tracks and not meta.get("trackCount"):
+        # Число треков релиза история reuse раньше теряла (tracks=0), и следующий
+        # повтор лишался опоры для сужения по названию.
+        meta["trackCount"] = expected_tracks
+    _try_advance_task(task, TaskStatus.DONE)
+    n = len(audio)
+    task.setdefault("log", []).append(
+        f"⏭ Уже скачано ранее ({n} треков) — файлы переиспользованы, повторная загрузка пропущена")
+    await _broadcast(_i18n.log_event("console.reused_existing", level="success",
+                                     task_id=tid, n=n))
+    try:
+        from ripster import download_manifest as _dm
+        _dm.record(tid, str(d), audio, task)
+        print(f"[manifest] {_dm.short_id(tid)} → {d.name} ({n} files, reused)", flush=True)
+    except Exception as _e:
+        print(f"[manifest] reuse record failed: {_e}", flush=True)
+
+
+# ── Tag → Filename post-processor ───────────────────────────────────────────
+
+_RENAME_TEMPLATE = "{tracknumber:02d}. {artist} - {title}"
+
+
+async def _sc_drm_fallback(orig_task: dict) -> None:
+    """SC track/playlist failed because Lucida can't decrypt FairPlay HLS.
+    Pull title+artist (+duration) for each source track and look it up on
+    Deezer → Qobuz → Apple by name+duration. If a match within ±3 s lands,
+    queue it as a fresh task on the matched service. Best-effort; logs only.
+
+    Triggered by runner when an SC task fails with a DRM-shaped error.
+    """
+    import re as _r
+    import httpx as _httpx
+    tid = orig_task.get("id", "")
+    src_url = orig_task.get("url", "").strip()
+    if not src_url:
+        return
+    await _log_key("console.sc_fb_try", "info", tid)
+
+    # Resolve SC URL → list of {title, artist, duration_s}
+    async def _resolve_sc_tracks() -> list[dict]:
+        try:
+            from ripster.routes.soundcloud import _get_client_id, _API, _UA
+        except Exception:
+            return []
+        cid = await _get_client_id()
+        if not cid:
+            return []
+        oauth = (_config.get("soundcloud-oauth-token") or "").strip()
+        headers = {"User-Agent": _UA}
+        if oauth:
+            headers["Authorization"] = (oauth if oauth.lower().startswith("oauth ")
+                                        else f"OAuth {oauth}")
+        # Extract numeric ID (best-effort) or hit the /resolve endpoint
+        async with _httpx.AsyncClient(timeout=_httpx.Timeout(connect=4, read=6, write=6, pool=6),
+                                      headers=headers) as c:
+            r = await c.get(f"{_API}/resolve",
+                            params={"url": src_url, "client_id": cid})
+            if r.status_code != 200:
+                return []
+            data = r.json() or {}
+            kind = data.get("kind")
+            if kind == "track":
+                return [{
+                    "title":    data.get("title", ""),
+                    "artist":   (data.get("user") or {}).get("username", ""),
+                    "duration": round((data.get("duration") or 0) / 1000),
+                }]
+            if kind in ("playlist", "system-playlist"):
+                out: list[dict] = []
+                for t in (data.get("tracks") or []):
+                    out.append({
+                        "title":    t.get("title", "") or "",
+                        "artist":   (t.get("user") or {}).get("username", ""),
+                        "duration": round((t.get("duration") or 0) / 1000),
+                    })
+                return [t for t in out if t["title"]]
+        return []
+
+    # Search a service by title + artist, return the best match URL or "".
+    async def _find_on(service: str, title: str, artist: str, dur_s: int) -> dict | None:
+        try:
+            from ripster.engines import get_engine
+            eng = get_engine({"qobuz":"qobuz","deezer":"deezer","apple":"zhaarey",
+                              "tidal":"tidal"}[service])
+            q = f"{artist} {title}".strip()
+            hits = await eng.search(q, "track", 5, _config) or []
+        except Exception:
+            return None
+        if not hits:
+            return None
+        # Normalise title — drop "(Remix)" / "[Mix]" suffixes for matching
+        def _norm(s: str) -> str:
+            s = (s or "").lower()
+            s = _r.sub(r'[\(\[].*?[\)\]]', '', s)
+            s = _r.sub(r'[^a-z0-9 ]+', ' ', s)
+            return _r.sub(r'\s+', ' ', s).strip()
+        want = _norm(title)
+        for h in hits:
+            if _norm(h.get("title","")) != want:
+                continue
+            # duration check when both sides know it
+            hd = h.get("duration") or 0
+            if dur_s and hd and abs(hd - dur_s) > 3:
+                continue
+            return h
+        # No strict match — return the top hit if title overlaps strongly
+        for h in hits:
+            if want and want.split()[0] in _norm(h.get("title","")):
+                return h
+        return hits[0]   # best-effort
+
+    tracks = await _resolve_sc_tracks()
+    if not tracks:
+        await _log_key("console.sc_fb_no_list", "warn", tid)
+        return
+    await _log_key("console.sc_fb_search", "info", tid, n=len(tracks))
+
+    # For each source track, search across services and queue best match.
+    # Priority: Deezer (no auth headache) → Qobuz (HiRes if HiRes works) → Apple.
+    queued = 0
+    for src in tracks:
+        for svc in ("deezer", "qobuz", "apple"):
+            try:
+                match = await _find_on(svc, src["title"], src["artist"], src["duration"])
+            except Exception:
+                match = None
+            if not match:
+                continue
+            url = match.get("url") or ""
+            if not url:
+                continue
+            try:
+                from ripster.routes.queue import _make_task as _mk, _queue, _queue_snapshot
+                from ripster.service_config import get_save_path as _gsp
+                qual = {"deezer":"flac","qobuz":"7","apple":"alac"}[svc]
+                engine = {"deezer":"deezer","qobuz":"qobuz","apple":"lite"}[svc]
+                t = _mk(url, qual, engine, svc, "sc_fallback",
+                        session_id=orig_task.get("session_id", ""))
+                if svc == "apple":
+                    t["_public_route"] = True
+                t["meta"] = {"title": match.get("title") or src["title"],
+                             "artist": match.get("artist") or src["artist"],
+                             "artworkUrl": match.get("cover") or "",
+                             "_sc_fallback_origin": tid}
+                t["_base_save_path"] = _gsp(_config, svc, qual)
+                t["_sc_fallback_origin"] = tid
+                _queue.append(t)
+                # Tag the source task so the UI / download endpoint can show
+                # "redirected to NEW_TASK_ID" instead of a confusing error.
+                orig_meta = orig_task.setdefault("meta", {})
+                fb_list = orig_meta.setdefault("fallback_targets", [])
+                fb_list.append(t["id"])
+                orig_meta["fallback_target"] = t["id"]   # last one wins (singular)
+                orig_task["_fallback_target"] = t["id"]
+                queued += 1
+                await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+                await _broadcast({
+                    "type": "sc_fallback_added",
+                    "origin_task_id": tid,
+                    "new_task_id":    t["id"],
+                    "service":        svc,
+                    "title":          t["meta"]["title"],
+                    "artist":         t["meta"]["artist"],
+                })
+                await _log(f"  ✓ {src['title']} → {svc.upper()} ({match.get('title','')})",
+                           "success", tid)
+                break
+            except Exception as e:
+                await _log(f"  fallback queue error ({svc}): {e}", "warn", tid)
+                continue
+        else:
+            await _log_key("console.sc_fb_miss", "warn", tid, title=src["title"])
+    if queued:
+        await _log_key("console.sc_fb_queued", "success", tid, n=queued, total=len(tracks))
+        # Make sure the queue worker is running so the new tasks actually start.
+        if not _qs.is_running:
+            _qs.start()
+            asyncio.create_task(process_queue())
+
+
+# Куда имеет смысл идти за Spotify-релизом. Apple в списке нет намеренно:
+# `/api/convert/spotify` уже проверяется тестом на честность подмен
+# (tests/test_convert_spotify_honesty.py), и «apple» для владельца — это враппер
+# с его же правами, а не другая витрина.
+_SP_FB_SERVICES = ("qobuz", "tidal", "deezer")
+
+
+async def _elsewhere_fallback(orig_task: dict, *, requested: str, url: str,
+                              upc: str, isrc: str, title: str, artist: str,
+                              miss_key: str, reason: str, added_event: str,
+                              seed: dict | None = None) -> None:
+    """Общий хвост запасного пути: матрица доступности → кандидаты → первый в очередь.
+
+    Разница между источниками только в том, ЧЕМ подтверждена идентичность и
+    какими словами сообщить о промахе — механизм «взять то же там, где дают»
+    один для Spotify (23.09.2026) и для Apple-отказа по CKC (24.09.2026).
+    """
+    tid = orig_task.get("id", "")
+    # Канареечный прогон — не клиент: его файлы удаляются сразу, а запасная
+    # задача легла бы в библиотеку владельца и в боевую историю, где её
+    # никто не разберёт. Canary проверяет СВОЙ сервис и отвечает сам.
+    if orig_task.get("source") == "download_canary":
+        return
+    try:
+        from ripster.routes.spotify import _convert_available_elsewhere
+        # Сид — сам альбом исходного сервиса: по нему матрица добывает ISRC
+        # треков ДО опроса витрин. Без него релиз с другим штрихкодом в магазине
+        # (24.09.2026, «Sweet Sacrifice (Remastered 2026)»: Spotify
+        # 00888072836037 против Deezer 888072836020) остался бы «нигде нет».
+        cands = await _convert_available_elsewhere(requested, upc, isrc, title, artist,
+                                                   seed=seed) or []
+    except Exception as e:
+        await _log_key("console.sp_fb_fail", "warn", tid, err=type(e).__name__)
+        return
+    playable = [c for c in cands
+                if c.get("service") in _SP_FB_SERVICES and (c.get("url") or "").strip()]
+    # Ссылка, которая УЖЕ стоит в очереди, — это не «не нашлось»: релиз нашли
+    # ровно там, и вторая задача была бы его дублем. Раньше такие кандидаты
+    # отсекались молча, и журнал выдавал «на Qobuz/Tidal/Deezer не нашлось» в
+    # тот самый момент, когда Deezer уже качался (30.09.2026, «El Numero 1»).
+    queued = [c for c in playable
+              if any((q.get("url") or "") == c["url"] for q in _queue)]
+    queued_urls = {c["url"] for c in queued}
+    # Куда запасной путь сознательно не ходит (публичный враппер Apple,
+    # покупочный Beatport): сказать это прямо, а не прятать за «нигде нет».
+    out_of_lane = sorted({c.get("service", "") for c in cands
+                          if c.get("service") not in _SP_FB_SERVICES})
+    cands = [c for c in playable if c["url"] not in queued_urls]
+    # Порядок взятия — хозяйская лестница доступности, а не фиксированный
+    # список: `availability-preference` решает, куда идти первым и владельцу, и
+    # гостю. Apple из неё вырезается фильтром выше — публичный враппер остаётся
+    # ручным, запасной путь через него не протаскивается.
+    pref = [s for s in (str(x).strip().lower()
+                        for x in (_config.get("availability-preference") or []))
+            if s in _SP_FB_SERVICES]
+    if pref:
+        rank = {s: i for i, s in enumerate(pref)}
+        cands.sort(key=lambda c: rank.get(c.get("service"), len(pref)))
+    if not cands:
+        # Молчание здесь и было главной жалобой инцидента: после «ищу его же
+        # на…» не появлялось ни задачи, ни внятной причины. Причина пишется в
+        # ЖУРНАЛ ЗАДАЧИ по каждому сервису — человек должен видеть, что
+        # программы не молчат, а проверили и не смогли.
+        why = ""
+        try:
+            # Причины читаются ИЗ КЭШа матрицы: конвертер только что всё спросил,
+            # а второй обход витрин ради одной строки был бы расточительством
+            # (и уводом в сеть из обработчика отказа).
+            from ripster import availability as _av
+            why = _av.explain_unavailable(
+                _av.cached_services(upc=upc, isrc=isrc, title=title, artist=artist),
+                source=requested,
+                source_reason=str(orig_task.get("_partial_reason") or ""))
+        except Exception:                                        # noqa: BLE001
+            why = ""
+        if out_of_lane:
+            why = (why + "; найден там, куда запасной путь не ходит: "
+                   + ", ".join(out_of_lane)) if why else \
+                  ("найден там, куда запасной путь не ходит: " + ", ".join(out_of_lane))
+        if queued:
+            why = (why + "; уже стоит в очереди: "
+                   + ", ".join(c.get("service", "") for c in queued)) if why else \
+                  ("уже стоит в очереди: "
+                   + ", ".join(c.get("service", "") for c in queued))
+        if why:
+            om = orig_task.setdefault("meta", {})
+            om["fallback_miss"] = why
+            orig_task.setdefault("log", []).append("🔁 " + why)
+        if queued:
+            await _log_key("console.fb_already_queued", "warn", tid,
+                           title=title or url,
+                           svc=", ".join(sorted({c.get("service", "") for c in queued})))
+        else:
+            await _log_key(miss_key, "warn", tid, title=title or url,
+                           svc=requested.upper())
+        return
+    # Полный список служит даже без взятия: телефон показывает по нему
+    # короткое «попробуй другой сервис» — названия сервисов интернациональны.
+    orig_task.setdefault("meta", {})["available_on"] = [c["service"] for c in cands]
+
+    cand = cands[0]
+    try:
+        from ripster.routes.queue import _make_task, _queue_snapshot
+        from ripster.service_layer import default_quality
+        from ripster.service_config import get_save_path as _gsp
+        svc = cand["service"]
+        t = _make_task(cand["url"], default_quality(svc), svc, svc, reason,
+                       session_id=orig_task.get("session_id", ""))
+        t["meta"] = {"service":          svc,
+                     "title":            cand.get("title") or title,
+                     "artist":           cand.get("artist") or artist,
+                     "artworkUrl":       cand.get("cover") or "",
+                     "fallback_origin":  tid}
+        t["_base_save_path"] = _gsp(_config, svc, t["quality"])
+        t["_fallback_origin"] = tid
+        # Откуда именно перепрыгнули — нужно честной строке в истории
+        # («Spotify отказала → скачано из Qobuz (FLAC CD 16-44)»).
+        t["_fallback_from"] = requested
+        _queue.append(t)
+        orig_meta = orig_task.setdefault("meta", {})
+        orig_meta.setdefault("fallback_targets", []).append(t["id"])
+        orig_meta["fallback_target"] = t["id"]
+        orig_task["_fallback_target"] = t["id"]
+        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+        await _broadcast({"type": added_event,
+                          "origin_task_id": tid,
+                          "new_task_id":    t["id"],
+                          "service":        svc,
+                          "title":          t["meta"]["title"],
+                          "artist":         t["meta"]["artist"]})
+        await _log_key("console.sp_fb_queued", "success", tid,
+                       svc=svc.upper(), title=t["meta"]["title"])
+        if not _qs.is_running:
+            _qs.start()
+            asyncio.create_task(process_queue())
+    except Exception as e:
+        await _log_key("console.sp_fb_fail", "warn", tid, err=type(e).__name__)
+
+
+async def _apple_ckc_fallback(orig_task: dict) -> None:
+    """Apple не отдала ключ на ЭТОТ релиз (свои сессии живы, все свои витрины
+    отказали) — взять то же самое на Qobuz/Tidal/Deezer.
+
+    Правила идентичности взяты у spotify-запасного пути дословно: только
+    ISRC (трек) / UPC (альбом) по `content_id`. Без кода вслепую по названию
+    не идём — ровно этим держат тесты честности подмен.
+    """
+    tid = orig_task.get("id", "")
+    url = (orig_task.get("url") or "").strip()
+    if "apple.com" not in url:
+        return
+    await _log_key("console.ap_fb_try", "info", tid)
+    try:
+        from ripster.metadata.apple import content_id
+        cid = (await content_id(url)) or ""
+    except Exception:
+        cid = ""
+    isrc = cid[5:] if cid.startswith("isrc:") else ""
+    upc  = cid[4:] if cid.startswith("upc:")  else ""
+    if not (isrc or upc):
+        await _log_key("console.ap_fb_no_id", "warn", tid)
+        return
+    meta = orig_task.get("meta") or {}
+    await _elsewhere_fallback(orig_task, requested="apple", url=url,
+                              upc=upc, isrc=isrc,
+                              title=meta.get("title", "") or "",
+                              artist=meta.get("artist", "") or "",
+                              miss_key="console.ap_fb_miss",
+                              reason="apple_ckc_fallback",
+                              added_event="apple_fallback_added")
+
+
+# ── Восстановление битой BBC-live записи (24.09.2026) ────────────────────────
+
+async def _bbc_live_recover(task: dict, tid: str, eng) -> None:
+    """Вердикт движка «файл битый» — не точка, а начало восстановления.
+
+    Порядок согласован с владельцем: 4a — спасти честные 320 кбит/с из самого
+    файла (на on-demand BBC Sounds их не бывает: 96..102 кбит/с HE-AAC, см.
+    HANDOFF §4), и только если спасать нечего — 4b запасная копия оттуда же,
+    явно подписанная как другая копия, НИКОГДА не вместо live-файла. Какую
+    копию человек получил — говорится в каждом исходе.
+    """
+    from ripster import bbc_live_recovery as _REC
+    info  = dict(getattr(eng, "recovery_info", None) or {})
+    src   = Path(info.get("file") or "")
+    if not src.exists():
+        await _log_key("console.bbc_live_recover_missing", "error", tid)
+        return
+    await _log_key("console.bbc_live_salvage_start", "info", tid, name=src.name)
+    try:
+        report = await asyncio.to_thread(_REC.salvage, src)
+    except Exception as e:                                   # noqa: BLE001
+        report = {"ok": False, "reason": f"{type(e).__name__}: {e}"[:200]}
+    if report.get("ok"):
+        out = Path(report["out"] or "")
+        # Теги спасённой копии — те же, что движок пишет честному файлу:
+        # библиотека не должна отличать восстановленный кусок от записанного.
+        try:
+            from ripster.tagger import write_tags
+            await asyncio.to_thread(write_tags, out, {
+                "title": info.get("title") or info.get("artist") or out.stem,
+                "artist": info.get("artist") or "",
+                "albumartist": info.get("artist") or "",
+                "album": f"{info.get('artist') or 'BBC'} (live {info.get('date') or ''})".strip(),
+                "year": info.get("date") or "",
+                "track": "1", "tracktotal": "1"})
+        except Exception:
+            pass
+        await _log_key("console.bbc_live_salvage_ok", "success", tid,
+                       clean=int((report.get("clean_s") or 0) // 60),
+                       damaged=int((report.get("damaged_s") or 0) // 60),
+                       total=int((report.get("total_s") or 0) // 60),
+                       out=out.name)
+        return
+    await _log_key("console.bbc_live_salvage_fail", "warn", tid,
+                   reason=report.get("reason") or "")
+    await _bbc_live_ondemand_copy(task, tid, info)
+
+
+_ONDEMAND_WAIT = 6 * 3600        # копия ждёт своей очереди не вечно
+
+
+async def _bbc_live_ondemand_copy(orig_task: dict, tid: str, info: dict) -> None:
+    """4b: тот же выпуск из BBC Sounds — ЗАПАСНАЯ подпись под битым эфиром.
+
+    Ищем эпизод по названию через RMS-поиск (у live-планов pid обычно нет),
+    ставим обычную задачу движка `bbc` и после её успеха переименовываем
+    приехавший MP3 с числом ИЗМЕРЕННОГО битрейта в имени — чтобы человек
+    перепутать копии не мог.
+    """
+    from ripster import bbc_live_recovery as _REC
+    title = info.get("title") or ""
+    if not title:
+        await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                       reason="у выпуска нет названия — искать не по чему")
+        return
+    hit = await asyncio.to_thread(_REC.find_episode, title)
+    if not hit:
+        await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                       reason=f"«{title}» в BBC Sounds не нашлось")
+        return
+    try:
+        from ripster.routes.queue import _make_task
+        from ripster.service_config import get_save_path as _gsp
+        t = _make_task(f"https://www.bbc.co.uk/sounds/play/{hit['pid']}",
+                       "mp3", "bbc", "bbc", source="bbc_live_recovery")
+        t["meta"] = {"service": "bbc", "title": hit.get("title") or title,
+                     "artist": info.get("artist") or "BBC Radio",
+                     "artworkUrl": ""}
+        t["_base_save_path"] = _gsp(_config, "bbc", "mp3")
+        _queue.append(t)
+        # СНАПШОТ — раннерский (инжектится в install), не routes.queue: тот же
+        # глобальный name там — None до boot-app, и путь постановки в очередь
+        # падал бы TypeError ровно там, где обязан пережить отказ.
+        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+        await _log_key("console.bbc_live_ondemand_queued", "warn", tid,
+                       title=t["meta"]["title"])
+        if not _qs.is_running:
+            _qs.start()
+            asyncio.create_task(process_queue())
+    except Exception as e:                                   # noqa: BLE001
+        await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                       reason=f"{type(e).__name__}: {e}"[:200])
+        return
+    # Ждём исхода задачи обычным путем очереди; следим за самим dict — его
+    # статус меняет на месте run_task.
+    waited = 0.0
+    while waited < _ONDEMAND_WAIT:
+        if t.get("status") == "done":
+            break
+        if t.get("status") in ("error", "cancelled"):
+            await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                           reason=str(t.get("error") or t.get("status"))[:200])
+            return
+        await asyncio.sleep(10)
+        waited += 10
+    else:
+        await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                       reason="копия не дождась своей очереди за 6 часов")
+        return
+    try:
+        from ripster.routes.download import _get_task_dir, _find_audio_files
+        d = _get_task_dir(t)
+        files = _find_audio_files(d) if d else []
+        if not files:
+            await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                           reason="файл копии не найден на диске")
+            return
+        f = max(files, key=lambda p: p.stat().st_size)
+        kbps = await asyncio.to_thread(_REC.measure_kbps, f)
+        dst = f.with_name(f"{f.stem} (BBC Sounds, {kbps or '?'} kbps){f.suffix}")
+        if not dst.exists():
+            try:
+                f.rename(dst)
+            except OSError:
+                dst = f
+        await _log_key("console.bbc_live_ondemand_done", "success", tid,
+                       out=dst.name, kbps=kbps or 0)
+    except Exception as e:                                   # noqa: BLE001
+        await _log_key("console.bbc_live_ondemand_fail", "warn", tid,
+                       reason=f"{type(e).__name__}: {e}"[:200])
+
+
+# С каких сервисов запасной путь запускается автоматически при ПОСТОЯННОМ
+# отказе (Apple и Spotify ведут свои обработчики, SoundCloud — sc_fallback).
+_PR_FB_SERVICES = ("qobuz", "deezer", "tidal", "yandex", "beatport")
+# Что считать «постоянным отказом сервиса ПЕРЕД НАМИ»: отказ по правам
+# аккаунта, гео-лок, мёртвая сессия (пул учёток уже перебран и не помог),
+# релиз снят/недоступен, нет нужного битрейта. Сломанное окружение
+# (deps/decryption/postprocess) — НЕ повод: там чинить надо pip, а не
+# витрину менять.
+_PR_FB_REASONS = ("entitlement", "region", "session", "unavailable",
+                  "removed", "no-flac")
+
+
+async def _permanent_fail_fallback(orig_task: dict, *,
+                                   try_key: str = "console.pr_fb_try",
+                                   miss_key: str = "console.pr_fb_miss",
+                                   try_params: dict | None = None,
+                                   stepdown_on_miss: bool = False) -> None:
+    """Qobuz/Deezer/Tidal/Yandex/Beatport отказали ПОСТОЯННО — взять ту же
+    запись на другой витрине.
+
+    24.09.2026: весь день «Invalid CKC» на каждый релиз означал, что гости
+    получали «ни одна учётка не дала ключ» по каждому сервису по очереди —
+    молча, без запасного пути. Тот же механизм, что у Spotify и Apple-отказа
+    по CKC (матрица доступности → ISRC/UPC → первая доступная витрина),
+    теперь закрывает и остальные сервисы. Идентичность — ТОЛЬКО по кодам:
+    без ISRC/UPC остаётся туманное сравнение по названию, ровно то, из-за
+    чего релизы подменялись (тесты честности подмен).
+    """
+    tid = orig_task.get("id", "")
+    svc = str(orig_task.get("service") or "").lower()
+    url = (orig_task.get("url") or "").strip()
+    if svc not in _PR_FB_SERVICES or not url:
+        return
+    await _log_key(try_key, "info", tid,
+                   **{"svc": svc.upper(), **(try_params or {})})
+    try:
+        from ripster.metadata import fetch_meta_any
+        meta = await fetch_meta_any(url, svc) or {}
+    except Exception:
+        meta = {}
+    ometa = orig_task.get("meta") or {}
+    isrc = str(meta.get("isrc") or ometa.get("isrc") or "").strip()
+    upc = str(meta.get("upc") or ometa.get("upc") or "").strip()
+    if not (isrc or upc):
+        await _log_key("console.pr_fb_no_id", "warn", tid, svc=svc.upper())
+        # Лестницу крутить нечем, но «нет FLAC ЗДЕСЬ» движок уже сказал —
+        # ступень качества на том же Deezer честна и без вслепого поиска.
+        if stepdown_on_miss:
+            await _deezer_quality_stepdown(orig_task, searched=False)
+        return
+    await _elsewhere_fallback(
+        orig_task, requested=svc, url=url, upc=upc, isrc=isrc,
+        title=str(ometa.get("title") or ""),
+        artist=str(ometa.get("artist") or ""),
+        miss_key=miss_key,
+        reason=f"{svc}_fallback",
+        added_event="cross_service_fallback_added")
+    if stepdown_on_miss and not orig_task.get("_fallback_target"):
+        # Промах по лестнице: записи нет в этом качестве больше нигде —
+        # вместо «ошибки» берём доступную ступень на Deezer (24.09, «Nightplay»).
+        await _deezer_quality_stepdown(orig_task, searched=True)
+
+
+# Ступень Deezer: id качеств из engines/deezer.py (_QUALITIES/_BITRATE 9→3→1).
+_DEEZER_QUALITY_LADDER = ("flac", "mp3_320", "mp3_128")
+
+
+def _deezer_quality_next(quality: str) -> str:
+    """Следующая LOWER ступень лесенки FLAC→320→128; "" — ступени ниже нет
+    (или качество не из deezer-лестницы: вслепую понижать нечем)."""
+    q = (quality or "").strip().lower()
+    if q not in _DEEZER_QUALITY_LADDER:
+        return ""
+    i = _DEEZER_QUALITY_LADDER.index(q)
+    return _DEEZER_QUALITY_LADDER[i + 1] if i + 1 < len(_DEEZER_QUALITY_LADDER) else ""
+
+
+def _quality_label(svc: str, quality: str) -> str:
+    """Папковая метка качества («FLAC», «MP3 320») для честных строк."""
+    try:
+        from ripster.service_config import _quality_folder_name
+        return _quality_folder_name(svc or "", quality or "") or (quality or "")
+    except Exception:                                            # noqa: BLE001
+        return quality or ""
+
+
+async def _deezer_quality_stepdown(orig_task: dict, *, searched: bool) -> None:
+    """Этого релиза нет в запрошенном качестве — поставить в очередь TU ЖЕ
+    ссылку Deezer ступенью ниже (FLAC→MP3 320→MP3 128).
+
+    Лестница идёт только ВНИЗ от запрошенного качества: гость получает ровно то
+    или ниже, никогда не выше — настройки качества гостя так соблюдаются, а
+    128 — терминальная ступень (бесплатному ARL выше нельзя, и ниже просить
+    нечего). `searched` различает честные строки истории: «нигде нет» говорят
+    только после реальной лестницы по ISRC/UPC; без кода известно лишь
+    «нет здесь» — той же формулировкой врать нельзя.
+    """
+    tid = orig_task.get("id", "")
+    if (str(orig_task.get("service") or "").lower() != "deezer"
+            or str(orig_task.get("_partial_reason") or "") != "no-flac"
+            or orig_task.get("source") == "download_canary"
+            or orig_task.get("_qdown_tried")):
+        return
+    cur = (orig_task.get("quality") or "").strip().lower()
+    nxt = _deezer_quality_next(cur)
+    url = (orig_task.get("url") or "").strip()
+    if not (nxt and url):
+        return
+    orig_task["_qdown_tried"] = True
+    if any((t.get("url") or "") == url
+           and (t.get("quality") or "").strip().lower() == nxt
+           and t.get("status") not in ("error", "cancelled", "done")
+           for t in _queue):
+        return
+    try:
+        from ripster.routes.queue import _make_task
+        from ripster.service_config import get_save_path as _gsp
+        t = _make_task(url, nxt, "deezer", "deezer", "deezer_quality_fallback",
+                       session_id=orig_task.get("session_id", ""))
+        t["lyrics"] = orig_task.get("lyrics")
+        t["lyrics_type"] = orig_task.get("lyrics_type")
+        t["lyrics_extra"] = orig_task.get("lyrics_extra")
+        ometa = orig_task.get("meta") or {}
+        t["meta"] = {"service":         "deezer",
+                     "title":           ometa.get("title", ""),
+                     "artist":          ometa.get("artist", ""),
+                     "artworkUrl":      ometa.get("artworkUrl", ""),
+                     "fallback_origin": tid}
+        t["_base_save_path"] = _gsp(_config, "deezer", nxt)
+        t["_fallback_origin"] = tid      # пришла из запасного пути — дальше не прыгает
+        t["_fallback_from"]   = "deezer"
+        # Поля честной строки истории (_add_to_history):
+        t["_quality_fallback_from"]      = cur
+        t["_quality_fallback_elsewhere"] = bool(searched)
+        _queue.append(t)
+        orig_task.setdefault("meta", {})["fallback_target"] = t["id"]
+        orig_task["_fallback_target"] = t["id"]
+        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+        await _broadcast({"type": "cross_service_fallback_added",
+                          "origin_task_id": tid,
+                          "new_task_id":    t["id"],
+                          "service":        "deezer",
+                          "title":          t["meta"]["title"],
+                          "artist":         t["meta"]["artist"]})
+        await _log_key("console.q_fb_queued", "info", tid,
+                       svc="DEEZER", want=_quality_label("deezer", cur),
+                       got=_quality_label("deezer", nxt),
+                       title=t["meta"]["title"] or url)
+        if not _qs.is_running:
+            _qs.start()
+            asyncio.create_task(process_queue())
+    except Exception as e:                                       # noqa: BLE001
+        print(f"[q-stepdown] {tid}: {e!r}", flush=True)
+
+
+async def _spotify_unavailable_fallback(orig_task: dict) -> None:
+    """Spotify не отдаёт релиз ЭТОЙ УЧЁТКЕ — взять то же самое там, где он есть.
+
+    Провод, которого не хватало (docs/SPOTIFY_UNAVAILABLE_2026-09-23.md, раздел
+    D): вся машинерия конверта — `availability.matrix` + `/api/convert/spotify` —
+    вызывалась ДО задачи, по кнопке. После вердикта «недоступно» не пробовалось
+    НИЧЕГО, хотя ровно тот вечер 20.09 владелец собрал бенгальский саундтрек с
+    Deezer: недоступность была свойством витрины Spotify для аккаунта, а не
+    свойством музыки.
+
+    Идентичность — только ISRC (трек) / UPC (альбом). Без кода остаётся
+    туманное сравнение по названию, а оно и рожало подмену релиза, за который
+    держат тест честности. Поэтому лучше честно сказать «не нашёл», чем притащить
+    чужую запись.
+    """
+    tid = orig_task.get("id", "")
+    url = (orig_task.get("url") or "").strip()
+    if not url or "spotify.com" not in url:
+        return
+    kind = "album" if "/album/" in url else "track" if "/track/" in url else ""
+    if not kind:
+        # Плейлист/артист — это не «тот же релиз», а набор; матрица по одному
+        # коду его не опознаёт.
+        await _log_key("console.sp_fb_unsupported", "warn", tid)
+        return
+
+    # Под 429 не молотим: фоллбэк стартует в момент, когда Spotify уже просил
+    # паузу, и добавленные туда запросы только продлевают бан.
+    try:
+        from ripster.routes.discovery import _sp_is_rate_limited
+        if _sp_is_rate_limited():
+            await _log_key("console.sp_fb_ratelimited", "warn", tid)
+            return
+    except Exception:
+        pass
+
+    await _log_key("console.sp_fb_try", "info", tid)
+    try:
+        from ripster.metadata.spotify import fetch_meta_spotify
+        meta = await fetch_meta_spotify(url) or {}
+    except Exception:
+        meta = {}
+    isrc  = (meta.get("isrc") or "").strip()
+    upc   = (meta.get("upc") or "").strip()
+    title = meta.get("title", "") or ""
+    artist = meta.get("artist", "") or ""
+    if not (upc if kind == "album" else isrc):
+        await _log_key("console.sp_fb_no_id", "warn", tid)
+        return
+
+    _sm = _re.search(r"open\.spotify\.com/(?:intl-[a-z-]+/)?album/([A-Za-z0-9]+)", url)
+    seed = {"id": _sm.group(1), "service": "spotify"} if (_sm and kind == "album") else None
+    await _elsewhere_fallback(orig_task, requested="spotify", url=url,
+                              upc=upc, isrc=isrc, title=title, artist=artist,
+                              miss_key="console.sp_fb_miss",
+                              reason="spotify_unavailable_fallback",
+                              added_event="sp_fallback_added", seed=seed)
+
+
+def _apply_rename(task: dict, tid: str) -> None:
+    """Rename audio files in the task's output directory so the filename matches
+    the (corrected) tags — keeps names clean/ASCII across every engine."""
+    from ripster.routes.download import _get_task_dir
+    from ripster.tagger import rename_from_tags
+    try:
+        d = _get_task_dir(task)
+        if not d:
+            return
+        # Папка может принадлежать не одному релизу: имена соседей по каталогу
+        # передаём в переименовальщик защитным множеством, чтобы чужой файл не
+        # был стёрт как «дубликат» и не переименован чужой задачей.
+        protect: set = set()
+        try:
+            from ripster import download_manifest as _dm, release_folders as _rf
+            _rid = _dm.release_id_of(task.get("url") or "")
+            protect = {str(fn) for _t, ent in _rf.foreign_claims(
+                d, tid, (task.get("service") or "").lower(), _rid)
+                for fn in (ent.get("files") or [])}
+        except Exception:
+            pass
+        # BBC uses a custom filename format: Artist - Show - YYYY-MM-DD.mp3
+        if task.get("service") == "bbc":
+            from ripster.metadata import bbc as _md_bbc
+            meta = {
+                "artist": task.get("_bbc_title") or "",
+                "title": task.get("_bbc_artist") or "",
+                "date": task.get("_bbc_date") or "",
+            }
+            new_name = _md_bbc.bbc_filename(meta)
+            renamed, new_dir = _rename_bbc_files(d, new_name, protect)
+            if new_dir:
+                task["_save_dir"] = str(new_dir)
+        else:
+            # Playlist context: if the task came from a playlist download, pass
+            # the playlist name and track position so {playlist}/{playlisttrack}
+            # template variables resolve correctly.
+            extra = {}
+            if task.get("playlist"):
+                extra["playlist"] = str(task["playlist"])
+            if task.get("playlisttrack"):
+                extra["playlisttrack"] = int(task["playlisttrack"])
+            renamed = rename_from_tags(d, _RENAME_TEMPLATE, protect=protect,
+                                       extra=extra if extra else None)
+        if renamed:
+            print(f"[tagger] renamed {len(renamed)} file(s) in {d}", flush=True)
+    except Exception as e:
+        print(f"[tagger] rename failed for task {tid}: {e}", flush=True)
+
+
+def _apply_replaygain(task: dict, tid: str) -> None:
+    """Measure loudness and write ReplayGain tags for every audio file in the
+    task's output directory.  No-op when ``write-replaygain`` is off.  A ffmpeg
+    failure tags nothing but never corrupts the file or fails the task."""
+    if not _config.get("write-replaygain"):
+        return
+    from pathlib import Path
+    from ripster.tagger import _AUDIO_EXTS
+    from ripster.replaygain import process_file
+    from ripster.routes.download import _get_task_dir
+    try:
+        d = _get_task_dir(task)
+        if not d:
+            return
+        d = Path(d)
+        if not d.is_dir():
+            return
+        ok = fail = 0
+        for f in sorted(d.rglob("*")):
+            if f.is_file() and f.suffix.lower() in _AUDIO_EXTS:
+                if process_file(f):
+                    ok += 1
+                else:
+                    fail += 1
+        if ok or fail:
+            print(f"[replaygain] {tid}: {ok} ok, {fail} fail", flush=True)
+    except Exception as e:
+        print(f"[replaygain] {tid}: {e}", flush=True)
+
+
+async def _apply_lyrics_universal(task: dict, tid: str, engine_name: str) -> None:
+    """Лучший найденный текст — в теги и `.lrc` для сервисов без своего текста.
+
+    Apple через Go-загрузчик (`zhaarey`) кладёт текст сам — такие файлы
+    `embed_for_files` узнаёт по синхре в теге/`.lrc` и не трогает. Но когда у
+    Apple текста нет (404 по обеим витринам), трек раньше так и оставался пустым:
+    теперь его дозаполняет та же лестница (NetEase, LRCLIB…), 14.10.2026. Миксы
+    и эфиры пропускаем. Выключатель — ключ `lyrics-universal` (по умолчанию да);
+    разовое «без текста» из задачи (`lyrics: false`) главнее. Никогда не роняет
+    задачу: любой сбой — строка в консоль.
+    """
+    try:
+        if not _config.get("lyrics-universal", True):
+            return
+        from ripster.lyrics_embed import SKIP_SERVICES, embed_for_files
+        if engine_name in SKIP_SERVICES or (task.get("service") or "").lower() in SKIP_SERVICES:
+            return
+        ov = task.get("lyrics")
+        if ov is False:
+            return
+        want_embed = True if ov else bool(_config.get("embed-lrc", True))
+        want_file = True if ov else bool(_config.get("save-lrc-file", False))
+        if not (want_embed or want_file):
+            return
+        from pathlib import Path
+        from ripster.routes.download import _get_task_dir as _gtd, _task_delivery_files as _tdf
+        from ripster.routes.discovery import lyrics_ladder
+        d = _gtd(task)
+        if not d or not Path(d).is_dir():
+            return
+        files = _narrow_to_this_task(
+            _filter_engine_files(_tdf(task, Path(d)), task.get("_engine_files")), task)
+        words_ok = ((task.get("lyrics_type") or _config.get("lrc-type") or "lyrics")
+                    == "syllable-lyrics")
+        st = await embed_for_files(
+            files, lyrics_ladder, want_embed=want_embed, want_file=want_file,
+            pronunciation=task.get("lyrics_extra") == "pronunciation",
+            words_ok=words_ok)
+        print(f"[lyrics-embed] {tid}: {st}", flush=True)
+    except Exception as e:  # noqa: BLE001
+        print(f"[lyrics-embed] {tid}: {type(e).__name__}: {e}", flush=True)
+
+
+def _rename_bbc_files(directory: str, new_name: str, protect: set) -> tuple:
+    """Rename BBC audio files to the canonical format. Returns (renamed_list, new_dir_or_None)."""
+    from pathlib import Path
+    from ripster.tagger import _AUDIO_EXTS
+
+    d = Path(directory)
+    if not d.is_dir():
+        return [], None
+
+    results = []
+    files = [f for f in d.iterdir() if f.is_file() and f.suffix.lower() in _AUDIO_EXTS]
+    if not files:
+        return [], None
+
+    for f in files:
+        if f.name.lower() in protect:
+            continue
+        target = d / new_name
+        if target == f:
+            continue
+        if target.exists():
+            base, ext = target.stem, target.suffix
+            for i in range(2, 100):
+                target = d / f"{base}_{i}{ext}"
+                if not target.exists():
+                    break
+        try:
+            f.rename(target)
+            results.append((f, target))
+        except Exception:
+            pass
+
+    # Rename the folder to match the filename (without extension)
+    new_dir = None
+    if results:
+        new_folder_name = Path(new_name).stem
+        parent = d.parent
+        new_folder = parent / new_folder_name
+        if new_folder != d and not new_folder.exists():
+            try:
+                d.rename(new_folder)
+                new_dir = new_folder
+            except Exception:
+                pass
+    return results, new_dir
+
+
+
+async def _apply_apple_placeholder_fix(task: dict, tid: str) -> None:
+    """Apple-only: a DJ mix / pre-release pulled by the LOCAL wrapper in the
+    wrong storefront comes out as '00. AppleMusic' placeholders (empty tags).
+    Fetch the real tracklist from amp-api by the URL's storefront and write
+    proper tags BEFORE rename, so files don't get locked in as 'AppleMusic 01'.
+    No-op for healthy releases and non-Apple sources."""
+    url = task.get("url", "")
+    if "music.apple.com" not in url:
+        return
+    from ripster.routes.download import _get_task_dir
+    from ripster.tagger import retag_apple_placeholders
+    try:
+        d = _get_task_dir(task)
+        if not d:
+            return
+        fixed = await retag_apple_placeholders(
+            Path(d), url, _config, log=lambda m: print(f"[apple-retag] {m}", flush=True))
+        if fixed:
+            print(f"[apple-retag] task {tid}: fixed {fixed} placeholder file(s)", flush=True)
+            await _broadcast(_i18n.log_event("console.mix_tags_fixed", level="success",
+                                             task_id=tid, n=fixed))
+    except Exception as e:
+        print(f"[apple-retag] failed for task {tid}: {e}", flush=True)
+
+
+async def _apply_retag(task: dict, tid: str) -> None:
+    """Re-tag CJK-localised metadata via ISRC lookup (Deezer → Apple Music)."""
+    from ripster.routes.download import _get_task_dir
+    from ripster.tagger import retag_directory
+    try:
+        d = _get_task_dir(task)
+        if not d:
+            return
+        summary = await retag_directory(
+            d, _config, log=lambda m: print(f"[retag] {m}", flush=True),
+        )
+        if summary.get("retagged"):
+            print(f"[retag] task {tid}: {summary}", flush=True)
+            await _broadcast(_i18n.log_event("console.tags_fixed_isrc", level="success",
+                                             task_id=tid, n=summary['retagged']))
+    except Exception as e:
+        print(f"[retag] failed for task {tid}: {e}", flush=True)
+
+
+def _apply_fix_artists(task: dict, tid: str) -> None:
+    """Fix slash-joined artist tags ('A / B') in all downloaded files."""
+    from ripster.routes.download import _get_task_dir
+    from ripster.tagger import fix_artist_tags
+    try:
+        d = _get_task_dir(task)
+        if not d:
+            return
+        fixed = fix_artist_tags(d)
+        if fixed:
+            print(f"[tagger] fixed artist tags in {len(fixed)} file(s) in {d}", flush=True)
+    except Exception as e:
+        print(f"[tagger] fix_artists failed for task {tid}: {e}", flush=True)
+
+
+def _apply_bbc_tags(task: dict, tid: str) -> None:
+    """BBC-only: write comprehensive ID3v2.4 tags (artist/DJ, title, album,
+    date, genre, comment with BBC URL + tracklist) BEFORE rename. Without this
+    step, BBC files only have yt-dlp's minimal title+artist metadata."""
+    if task.get("service") != "bbc":
+        return
+    from ripster.routes.download import _get_task_dir
+    from ripster.metadata import bbc as _md_bbc
+    try:
+        d = _get_task_dir(task)
+        if not d:
+            return
+        pid = task.get("_bbc_pid") or ""
+        artist = task.get("_bbc_title") or ""
+        title = task.get("_bbc_artist") or ""
+        brand = task.get("_bbc_brand") or ""
+        date = task.get("_bbc_date") or ""
+        url = task.get("_bbc_url") or ""
+        cover = task.get("_bbc_cover") or ""
+
+        album = ""
+        if brand:
+            album = f"BBC — {brand}"
+        elif title:
+            album = f"BBC — {title}"
+
+        comment_parts = []
+        if url:
+            comment_parts.append(url)
+
+        meta = {
+            "artist": artist,
+            "title": title,
+            "album": album,
+            "date": date,
+            "genre": "DJ Mix",
+            "comment": " | ".join(comment_parts),
+            "cover_url": cover,
+        }
+        n = _md_bbc.apply_bbc_tags(d, meta)
+        if n:
+            print(f"[bbc-tags] task {tid}: tagged {n} file(s) in {d}", flush=True)
+    except Exception as e:
+        print(f"[bbc-tags] failed for task {tid}: {e}", flush=True)
+
+
+def _apply_cover_to_folder(task: dict, tid: str) -> None:
+    """Ensure a uniform folder cover.jpg across ALL services. Most engines embed
+    art; some (Deezer/SC/etc.) don't drop a sidecar image. If the release dir has
+    no cover.* yet, extract the embedded art from the first track and write a
+    1200px cover.jpg — so every release looks the same regardless of source."""
+    if not _config.get("save-cover-to-folder", True):
+        return
+    from ripster.routes.download import _get_task_dir, _find_audio_files
+    try:
+        d = _get_task_dir(task)
+        if not d:
+            # Fallback for engines whose dir the generic resolver misses (e.g.
+            # orpheus_beatport sets no _save_dir/manifest entry): locate the release
+            # folder from the newest audio file under the task's base save path.
+            bsp = task.get("_base_save_path")
+            try:
+                if bsp and Path(bsp).is_dir():
+                    auds = [p for p in Path(bsp).rglob("*")
+                            if p.suffix.lower() in (".flac", ".m4a", ".mp3", ".alac", ".aac")]
+                    if auds:
+                        d = max(auds, key=lambda p: p.stat().st_mtime).parent
+            except Exception:
+                d = None
+        if not d:
+            print(f"[cover] no task dir for {tid} — skip", flush=True)
+            return
+        if any((d / n).exists() for n in ("cover.jpg", "cover.jpeg", "cover.png")):
+            return   # engine already saved one — leave it
+        from ripster.tagger import extract_embedded_cover
+        raw = None
+        for f in _find_audio_files(d):
+            raw = extract_embedded_cover(f)
+            if raw:
+                break
+        if not raw and (d / "folder.jpg").exists():
+            raw = (d / "folder.jpg").read_bytes()
+        if not raw:
+            return
+        out = d / "cover.jpg"
+        try:
+            from io import BytesIO
+            from PIL import Image
+            im = Image.open(BytesIO(raw)).convert("RGB")
+            sz = int(str(_config.get("cover-size", "1200")).split("x")[0] or 1200)
+            if max(im.size) > sz:
+                im.thumbnail((sz, sz))
+            im.save(str(out), "JPEG", quality=90)
+        except Exception:
+            out.write_bytes(raw)   # PIL missing/odd format → save the raw art as-is
+        print(f"[cover] wrote folder cover.jpg in {d}", flush=True)
+    except Exception as e:
+        print(f"[cover] failed for task {tid}: {e}", flush=True)
+
+
+async def _soundcloud_preflight(task: dict) -> bool:
+    """Turnkey SoundCloud — auto-provision Node 20 + the built Lucida engine.
+
+    A fresh install ships runner.mjs but NOT the compiled Lucida (lucida-src/build)
+    and may have only an old system Node. Node 18's undici breaks every SC fetch
+    with 'terminated' (proven live on the tester box; Node 20 fixes it). Rather
+    than make the user hunt for a Setup button, provision both ONCE here so a
+    clean install rips SoundCloud out of the box. Returns False (task → ERROR)
+    only when provisioning genuinely fails."""
+    tid = task.get("id", "")
+    from ripster.engines import soundcloud as _sc_eng
+    from ripster import setup as _setup_mod
+
+    # 1) Node ≥ 20 — install_node_windows() now enforces the minimum and drops a
+    #    portable v20 beside a stale system Node, prepending it to PATH so the
+    #    runner.mjs child process picks it up.
+    node_exe = _setup_mod.tool_path("node")
+    if node_exe is None or _setup_mod._node_version(node_exe) < _setup_mod._MIN_NODE_MAJOR:
+        await _log_key("console.node_installing", "info", tid)
+        try:
+            await _setup_mod.install_node_windows()
+        except Exception as e:                                       # noqa: BLE001
+            await _log_key("console.node_failed", "warn", tid, err=str(e))
+
+    # 2) Lucida built? (runner.mjs + lucida-src/build/index.js)
+    if not _sc_eng.is_installed():
+        await _log_key("console.lucida_installing", "info", tid)
+        try:
+            from ripster.routes.setup import _install_soundcloud_component
+            await _install_soundcloud_component()
+        except Exception as e:                                       # noqa: BLE001
+            await _log_key("console.lucida_failed", "warn", tid, err=str(e))
+
+    if not _sc_eng.is_installed():
+        await _log_key("console.lucida_manual", "error", tid)
+        _try_advance_task(task, TaskStatus.ERROR)
+        return False
+    if not _sc_eng.node_available():
+        await _log_key("console.node_missing", "error", tid)
+        _try_advance_task(task, TaskStatus.ERROR)
+        return False
+    return True
+
+
+# Принимает ОБА ходовых формата BBC-ссылки на передачу: /sounds/play/<pid> и
+# /programmes/<pid> (это одна и та же передача, один pid; /programmes/ — как раз
+# форму выдаёт наш же релиз-радар routes/radar.py и browse routes/bbc.py).
+# Раньше стоял только /sounds/play/, поэтому ссылки из радара падали с
+# console.bbc_bad_pid. Проверено боем 19.09.2026: m00315gq → HLS → MP3 320.
+_RE_BBC_PID = _re.compile(r'/(?:sounds/play|programmes|iplayer)/([a-zA-Z0-9]+)')
+
+
+async def _bbc_preflight(task: dict, page_url: str) -> "str | None":
+    """Resolve a BBC Sounds page URL to a fresh, playable HLS stream URL —
+    MediaSelector tokens are short-lived, so this MUST run right before the
+    download, not at enqueue time (a task can sit queued behind others for a
+    while). Also stashes title/artist/pid onto `task` so build_cmd (which only
+    gets url/quality/config) can name the output file — same pattern as the
+    `_sc_cover_override` stash used for SoundCloud's cover picker.
+
+    Returns the HLS URL on success, or None (task → ERROR, already logged)."""
+    tid = task.get("id", "")
+    m = _RE_BBC_PID.search(page_url or "")
+    if not m:
+        await _log_key("console.bbc_bad_pid", "error", tid, url=page_url)
+        _try_advance_task(task, TaskStatus.ERROR)
+        return None
+    pid = m.group(1)
+    import httpx as _httpx
+    try:
+        async with _httpx.AsyncClient(timeout=20) as c:
+            pr = await c.get(f"https://www.bbc.co.uk/programmes/{pid}.json")
+            if pr.status_code != 200:
+                await _log_key("console.bbc_api_fail", "error", tid, code=pr.status_code, pid=pid)
+                _try_advance_task(task, TaskStatus.ERROR)
+                return None
+            prog = (pr.json() or {}).get("programme") or {}
+            versions = prog.get("versions") or []
+            if not versions:
+                await _log_key("console.bbc_no_versions", "error", tid, pid=pid)
+                _try_advance_task(task, TaskStatus.ERROR)
+                return None
+            vpid     = versions[0]["pid"]
+            duration = int(versions[0].get("duration") or 0)
+            title = prog.get("title") or (prog.get("display_title") or {}).get("title") or pid
+            artist = (((prog.get("parent") or {}).get("programme") or {}).get("title")
+                      or ((prog.get("ownership") or {}).get("service") or {}).get("title")
+                      or "BBC Radio")
+            # Обложка выпуска (у самого эпизода её часто нет — берём картинку
+            # передачи-брэнда): движок BBC звук картинкой не дополняет, а общий
+            # шаг очереди достаёт обложку из тегов — брать там нечего.
+            _ppid = ((prog.get("image") or {}).get("pid")
+                     or (((prog.get("parent") or {}).get("programme") or {})
+                         .get("image") or {}).get("pid") or "")
+
+            # mediaset "pc" (not "iptv-all") — iptv-all only ever exposes a single
+            # 51 kbps HE-AAC rendition; pc exposes that SAME variant plus a real
+            # 102 kbps one, and yt-dlp/ffmpeg pick the highest-bandwidth HLS variant
+            # by default. See ripster/routes/bbc.py's _MSEL for the full investigation
+            # (2026-07-21) — that fix only landed in the web tab's route, not here.
+            msel = (f"https://open.live.bbc.co.uk/mediaselector/6/select/version/2.0/"
+                    f"mediaset/pc/vpid/{vpid}/format/json")
+            mr = await c.get(msel)
+            if mr.status_code != 200:
+                await _log_key("console.bbc_ms_fail", "error", tid, code=mr.status_code, vpid=vpid)
+                _try_advance_task(task, TaskStatus.ERROR)
+                return None
+            best_cf = best_ak = None
+            for media in (mr.json() or {}).get("media", []):
+                for conn in media.get("connection", []):
+                    href = conn.get("href", "")
+                    if conn.get("protocol") != "https" or ".m3u8" not in href:
+                        continue
+                    sup = conn.get("supplier", "")
+                    if "cloudfront" in sup and not best_cf:
+                        best_cf = href
+                    elif "akamai" in sup and not best_ak:
+                        best_ak = href
+            hls = best_cf or best_ak
+            if not hls:
+                await _log_key("console.bbc_no_hls", "error", tid, vpid=vpid)
+                _try_advance_task(task, TaskStatus.ERROR)
+                return None
+    except Exception as e:
+        await _log_key("console.bbc_resolve_err", "error", tid, err=str(e))
+        _try_advance_task(task, TaskStatus.ERROR)
+        return None
+
+    task["_bbc_title"]    = title
+    task["_bbc_artist"]   = artist
+    task["_bbc_pid"]      = pid
+    task["_bbc_duration"] = duration
+    from ripster.metadata import bbc as _md_bbc
+    task["_bbc_cover"]    = _md_bbc.ichef(_ppid, _md_bbc.EMBED_PX)
+    task["_bbc_date"]     = (prog.get("first_broadcast_date") or "")[:10]
+    task["_bbc_url"]      = page_url
+    task["_bbc_brand"]    = (prog.get("parent") or {}).get("title") or ""
+    return hls
+
+
+# Quality folders produced ONLY by Apple's Go downloaders (zhaarey/gamdl). These are
+# unambiguous — no other service emits them — so a bare-root copy can be re-homed
+# under apple/ without guessing the source service. (AAC 256 is intentionally NOT
+# here: SoundCloud-hq and Tidal-high also map to it.)
+_APPLE_EXCLUSIVE_QFOLDERS = {"ALAC (Lossless)", "Atmos", "Binaural", "AAC Downmix", "Downmix"}
+
+
+def _merge_dir(src: Path, dst: Path) -> None:
+    """Move every child of ``src`` into ``dst``, recursing on directory collisions.
+    The destination copy is authoritative and never overwritten; a file that
+    already exists in ``dst`` is a redundant duplicate of the same release track, so
+    the SOURCE copy is dropped (otherwise the emptied bare-root dir could never be
+    removed and the very debris we're cleaning would persist). Emptied source dirs
+    are removed."""
+    import shutil
+    dst.mkdir(parents=True, exist_ok=True)
+    for child in sorted(src.iterdir()):
+        target = dst / child.name
+        if not target.exists():
+            shutil.move(str(child), str(target))
+        elif child.is_dir() and target.is_dir():
+            _merge_dir(child, target)
+        else:
+            # File already present in dest (authoritative) → drop the redundant
+            # source copy so the bare-root dir can be fully cleaned up.
+            try:
+                child.unlink()
+            except OSError:
+                pass
+    try:
+        src.rmdir()
+    except OSError:
+        pass
+
+
+def _reclaim_bare_apple(config: dict) -> list[str]:
+    """Safety net: re-home Apple-exclusive quality folders that landed at the bare
+    downloads root into ``<base>/apple/<quality>/<artist>/<album>``.
+
+    zhaarey/gamdl write ``<base>/<quality>/…`` and the runner normally relocates each
+    task's dir immediately — but when the engine log didn't yield a parseable
+    output dir (``extract_save_dir`` → None) the per-task relocate never ran and the
+    release was orphaned at the root (on disk but invisible to the manifest/bot =
+    "downloaded, delivered nothing"). This sweep runs after every Apple task and
+    catches any such stragglers. Apple-exclusive folders only → attribution is
+    unambiguous. Returns the canonical dirs it moved."""
+    moved: list[str] = []
+    try:
+        import shutil
+        base = Path(config.get("save-path") or "downloads")
+        if not base.is_dir():
+            return moved
+        for qname in _APPLE_EXCLUSIVE_QFOLDERS:
+            bare = base / qname
+            if not bare.is_dir():
+                continue
+            canon_q = base / "apple" / qname
+            for artist in sorted(p for p in bare.iterdir() if p.is_dir()):
+                for album in sorted(p for p in artist.iterdir() if p.is_dir()):
+                    dest = canon_q / artist.name / album.name
+                    if dest.resolve() == album.resolve():
+                        continue
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    if dest.exists():
+                        _merge_dir(album, dest)
+                    else:
+                        shutil.move(str(album), str(dest))
+                    moved.append(str(dest))
+                    print(f"[reclaim] {album} -> {dest}", flush=True)
+            # Tidy now-empty bare <quality>/ (and its emptied artist dirs).
+            try:
+                for artist in [p for p in bare.iterdir() if p.is_dir()]:
+                    try: artist.rmdir()
+                    except OSError: pass
+                bare.rmdir()
+            except OSError:
+                pass
+    except Exception as e:                            # never let cleanup break a task
+        print(f"[reclaim] skipped: {e}", flush=True)
+    return moved
+
+
+def _born(p) -> float:
+    """Когда файл СОЗДАН. На Windows это st_birthtime/st_ctime — их не двигает
+    перезапись тегов (tagger трогает и чужие файлы папки, mtime врёт); на POSIX
+    времени создания нет — берём mtime."""
+    st = p.stat()
+    b = getattr(st, "st_birthtime", None)
+    if b:
+        return float(b)
+    return float(st.st_ctime if os.name == "nt" else st.st_mtime)
+
+
+def _is_single_track_task(task: dict) -> bool:
+    m = task.get("meta") or {}
+    if str(m.get("type") or "").lower() in ("song", "track"):
+        return True
+    # Релиз из одного трека (у Beatport это ссылка /release/, Venera 1992634).
+    n = m.get("trackCount") or m.get("totalTracks")
+    if not n and isinstance(m.get("tracks"), list):
+        n = len(m["tracks"])
+    try:
+        if int(n or 0) == 1:
+            return True
+    except (TypeError, ValueError):
+        pass
+    return "/track/" in str(task.get("url") or "").lower()
+
+
+def _narrow_to_this_task(audio: list, task: dict, *, prev_files=None) -> list:
+    """Оставить в выдаче только файлы ЭТОЙ задачи, если папка общая.
+
+    28.09.2026, жалоба гостя (отчёт Qwen 007): на ~10-й ссылке Beatport бот
+    присылал материал предыдущих релизов. OrpheusDL кладёт одиночный трек
+    (и часть релизов) прямо в ПАПКУ АРТИСТА, а манифест брал всё аудио папки:
+    Venera 1 трек → 4 файла, Surga 1 → 6, Soul On Soul 11 → 54 (106 файлов вместо
+    33 треков за сессию). Имён файлов Beatport-движок не сообщает, поэтому
+    `_filter_engine_files` тут бессилен.
+
+    Шаги идут ПОДРЯД, каждый сужает то, что оставил прежний (29.09, живая
+    проверка Qwen: на повторе ссылки «уже скачано» первая версия останавливалась
+    на первом сработавшем шаге и отдавала чужой файл рядом):
+      1. `prev_files` — точный список прошлой задачи (путь «уже скачано»);
+      2. файлы, СОЗДАННЫЕ с первого запуска задачи (ретраи не теряют файлы
+         первой попытки: берём `_first_start_time`);
+      3. одиночный трек — по названию трека в имени файла.
+    Шаг, который не оставил бы ни одного файла или ничего не убрал, пропускается:
+    пустая выдача хуже лишнего файла."""
+    if len(audio) <= 1:
+        return audio
+    # Общая папка узнаётся по ЧИСЛУ файлов: в папке ровно этого релиза их не больше
+    # треков релиза. Тогда сужать нечего, а сужение по времени вредило бы:
+    # докачка предзаказа и повторный заход (в том числе с телефона) кладут новые
+    # треки к файлам прошлой попытки, и релиз отдавался бы неполным.
+    m = task.get("meta") or {}
+    try:
+        expected = int(m.get("trackCount") or m.get("totalTracks") or 0)
+    except (TypeError, ValueError):
+        expected = 0
+    if expected and len(audio) <= expected:
+        return audio
+    # Список прошлой задачи длиннее, чем треков в релизе, — значит это НЕ список
+    # этого релиза, а чужой (замер Qwen 027: у Venera прошлая задача отдала
+    # 2 файла при одном треке, и каждый повтор переносил этот список дальше).
+    # Такому «точному списку» не верим и сузываем по времени и названию.
+    if prev_files and expected and len([n for n in prev_files if n]) > expected:
+        print(f"[manifest] список прошлой задачи длиннее релиза "
+              f"({len([n for n in prev_files if n])} > {expected}) — не считаю его "
+              f"точным, сузываю по времени и названию", flush=True)
+        prev_files = None
+    # Число треков неизвестно и это не одиночный трек и нет точного списка — общей
+    # папки мы не доказали, оставляем как было.
+    if not expected and not prev_files and not _is_single_track_task(task):
+        return audio
+    if prev_files:
+        names = {str(n) for n in prev_files if n}
+        hit = [f for f in audio if f.name in names]
+        if hit and len(hit) < len(audio):
+            audio = hit
+    if len(audio) <= 1:
+        return audio
+    since = task.get("_first_start_time") or task.get("_start_time")
+    if since:
+        try:
+            new = [f for f in audio if _born(f) >= float(since) - 5]
+        except OSError:
+            new = []
+        if new and len(new) < len(audio):
+            print(f"[manifest] {len(audio) - len(new)} чужих файлов папки отсечено "
+                  f"(созданы до этой задачи)", flush=True)
+            audio = new
+    if len(audio) > 1 and _is_single_track_task(task):
+        import re as _re
+        t = _re.sub(r"[^\w]+", "", str((task.get("meta") or {}).get("title") or "").lower())
+        if len(t) >= 3:
+            hit = [f for f in audio if t in _re.sub(r"[^\w]+", "", f.stem.lower())]
+            if hit and len(hit) < len(audio):
+                print(f"[manifest] одиночный трек: по названию оставлено {len(hit)} из "
+                      f"{len(audio)}", flush=True)
+                audio = hit
+    return audio
+
+
+def _filter_engine_files(audio: list, engine_files) -> list:
+    """Restrict the manifest's file list to the ones THIS task actually saved.
+
+    Issue #19: two parallel Apple tasks can share an output dir, so the manifest
+    must not be a blind directory glob — the engine reports the exact files it
+    wrote, and we keep only those (matched by stem).
+
+    BUT only when the stem-filter accounts for EVERY engine-reported file. Post-
+    download retag/rename (Apple placeholder fix '01.'→'1.', CJK re-tag, the
+    {artist} - {title} template) changes the on-disk names AFTER the engine log
+    was captured, so a stale stem-filter would wrongly DROP real files (the
+    manifest-records-2-of-3 bug). A partial match = names changed → trust the full
+    glob instead: by this point the dir is already relocated to the task's own
+    per-album folder, so the glob can't leak a parallel task's files anyway.
+    """
+    if not engine_files:
+        return audio
+    from pathlib import Path as _P
+    stems = {_P(n).stem for n in engine_files if n}
+    if not stems:
+        return audio
+    filtered = [f for f in audio if f.stem in stems]
+    # `>= len(stems)` means every engine file was found under its original name →
+    # the filter is valid (no rename happened). Fewer → names were rewritten → the
+    # filter is stale; keep the full glob so renamed tracks aren't lost.
+    if filtered and len(filtered) >= len(stems):
+        return filtered
+    return audio
+
+
+def _relocate_to_service_folder(save_dir: str, service: str, quality: str, config: dict) -> str:
+    """Keep the downloads tree consistent: every release should live under
+    ``<base>/<service>/<quality>/…``. Most engines already do (the runner shadows
+    their save-path keys), but Apple's Go downloaders (zhaarey/gamdl) write
+    ``<base>/<quality>/<artist>/<album>`` directly, skipping the ``<service>/``
+    segment — which leaves the downloads folder a mix of ``<base>/<service>/<quality>``
+    and bare ``<base>/<quality>`` folders. When (and ONLY when) the output landed at
+    ``<base>/<canonical-quality>/…`` we re-home it under the service folder. Same-drive
+    move = a fast rename. Conservative: any other shape is left untouched. Returns the
+    (possibly new) directory."""
+    try:
+        import shutil
+        from ripster.service_config import get_save_path
+        sd = Path(save_dir)
+        if not sd.is_dir():
+            return save_dir
+        canon = Path(get_save_path(config, service, quality))     # <base>/<service>/<quality>
+        sd_r, canon_r = sd.resolve(), canon.resolve()
+        if sd_r == canon_r or canon_r in sd_r.parents:
+            return save_dir                                       # already under canon
+        base = Path(config.get("save-path") or "downloads").resolve()
+        try:
+            rel = sd_r.relative_to(base)                          # <quality>/<artist>/<album>
+        except ValueError:
+            return save_dir                                       # outside base — leave it
+        parts = rel.parts
+        # Only the "missing <service> segment" shape: first part == the canonical
+        # quality folder. Anything else we leave untouched (no guessing).
+        if not parts or parts[0] != canon.name:
+            return save_dir
+        sub  = Path(*parts[1:]) if len(parts) > 1 else None
+        dest = (canon / sub) if sub else canon
+        if dest.resolve() == sd_r:
+            return save_dir
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            # The release is already under the service folder (re-download or a
+            # parallel task) — MERGE the bare-root copy in rather than orphaning it
+            # at the downloads root (the old code bailed here, which is exactly how
+            # bare <base>/<quality>/ debris accumulated). Never overwrites files.
+            _merge_dir(sd, dest)
+        else:
+            shutil.move(str(sd), str(dest))
+        print(f"[relocate] {sd} -> {dest}", flush=True)
+        # Tidy now-empty bare parents (artist/, then <quality>/) up to base. If a
+        # parent still holds STRAY FILES — zhaarey writes an artist-level folder.jpg
+        # next to the album dir — fold those into the canonical sibling so nothing
+        # is orphaned at the bare root (this is the leftover `Artist/folder.jpg`
+        # debris). Subdirs (a concurrent task's album) are left untouched: we stop
+        # climbing the moment one remains.
+        try:
+            p  = sd.parent
+            dp = dest.parent
+            while p.resolve() != base and base in p.resolve().parents:
+                try:
+                    p.rmdir()
+                except OSError:
+                    try:
+                        dp.mkdir(parents=True, exist_ok=True)
+                        for f in list(p.iterdir()):
+                            if f.is_file():
+                                tgt = dp / f.name
+                                if tgt.exists():
+                                    f.unlink()
+                                else:
+                                    shutil.move(str(f), str(tgt))
+                    except OSError:
+                        pass
+                    try:
+                        p.rmdir()
+                    except OSError:
+                        break          # subdirs remain (concurrent album) → stop
+                p  = p.parent
+                dp = dp.parent
+        except OSError:
+            pass
+        return str(dest)
+    except Exception as _e:
+        print(f"[relocate] skipped: {_e}", flush=True)
+        return save_dir
+
+
+# ── Engine-based runner ──────────────────────────────────────────────────────
+
+def _attempt_succeeded(task: dict) -> bool:
+    """Закончилась ли последняя попытка успехом.
+
+    Нужен потому, что `_run_engine_task` НИЧЕГО не возвращает: провал он
+    записывает в статус задачи. Из-за этого в цепочке витрин
+    `_retried_sf = True` ставился сразу после `await`, то есть означал «попытка
+    состоялась», а читался как «попытка удалась».
+
+    22.08.2026, лог владельца, PAINLESS (Deluxe Edition): витрина `us` не дала
+    ключ (нет прав), Ripster честно перешёл на свою `ca` — а там альбома нет в
+    каталоге («Failed to get album response»). Это не отказ по ключу, значит
+    `_NeedAppleFallback` не поднялся, значит `_retried_sf` остался True — и
+    ПРОПУЩЕНЫ обе оставшиеся ступени разом: и другие свои слоты, и спасение
+    через публичный wrapper. Наружу вышло «каталог не отдал релиз», то есть жалоба ВТОРОЙ
+    попытки, поданная как приговор всей задаче.
+    """
+    return str(task.get("status") or "").lower() == TaskStatus.DONE.value
+
+
+async def _run_engine_task(task: dict, engine_name: str, url: str, quality: str) -> None:
+    """Run task via a registered engine plugin (ProcessRunner)."""
+    tid = task.get("id", "")
+    # Прогон начинается — значит задача RUNNING. Лестница Apple (своя витрина →
+    # другие слоты) после проваленной ступени зовёт _revive_task (ERROR→QUEUED)
+    # и сразу следующую ступень, НЕ переводя её в RUNNING. Успех такой ступени
+    # упирался в QUEUED→DONE: переход запрещён, try_advance молча возвращал
+    # False, и скачанный альбом оставался висеть «в очереди» (19.09.2026).
+    if _task_state(task) is TaskStatus.QUEUED:
+        _try_advance_task(task, TaskStatus.RUNNING)
+    try:
+        eng = get_engine(engine_name)
+    except KeyError:
+        _try_advance_task(task, TaskStatus.ERROR)
+        task["log"].append(f"Unknown engine: {engine_name}")
+        _add_to_history(task)
+        return
+
+    if engine_name == "soundcloud":
+        if not await _soundcloud_preflight(task):
+            _add_to_history(task)
+            return
+
+    if engine_name == "bbc":
+        resolved = await _bbc_preflight(task, url)
+        if not resolved:
+            _add_to_history(task)
+            return
+        url = resolved   # HLS stream URL — build_cmd never sees the page URL
+
+    if engine_name in ("tidal", "orpheus_beatport"):
+        _dup = await asyncio.to_thread(_find_completed_duplicate, url, quality, engine_name)
+        if _dup:
+            await _reuse_completed_download(task, tid, _dup)
+            _add_to_history(task)
+            return
+
+    # ── Wrapper pool: Apple-local parallelism. Acquired below for zhaarey,
+    # released in the finally. ANY failure here → default single-wrapper cwd, so
+    # a download is NEVER broken by the pool. Defined out here so finally sees them.
+    _pool = None
+    _pool_slot = None
+    _task_cwd = None
+    # Deezer multi-account pool — same shape as the Apple pool above, no Docker
+    # (just a per-slot ARL + isolated deemix config dir). Acquired below,
+    # released in the finally.
+    _dz_pool = None
+    _dz_slot = None
+    # Qobuz multi-account pool — same shape, streamrip's --config-path even
+    # simpler (no subprocess env override needed).
+    _qz_pool = None
+    _qz_slot = None
+    # Spotify multi-account pool — КОРИДОРЫ: у каждой учётки свой config/
+    # (свои settings.json, loginstorage.bin и .librespot_cache/blob), поэтому
+    # учётки изолированы и могут качать параллельно (ripster/spotify_pool.py).
+    _sp_slot = None
+    _sp_corridor = None      # запись выбранного слота: {cwd, config_dir, ...}
+    # SoundCloud / Yandex pools — token-as-CLI-arg, simplest of all.
+    _sc_pool = None
+    _sc_slot = None
+    _yx_pool = None
+    _yx_slot = None
+    # Пул учёток Tidal. Слот = отдельный рабочий каталог со своей сессией
+    # OrpheusDL; каталог настроек движку называют явно (см. ниже), чтобы прогон
+    # не трогал общий settings.json соседнего сервиса. Любая осечка здесь
+    # оставляет `_task_cwd` пустым, то есть прогон идёт как раньше, на основной
+    # учётке, — пул не имеет права ломать загрузку, которая и без него работала.
+    _td_pool = None
+    _td_slot = None
+
+    try:
+        # Build a per-task config view so the quality-subfolder is visible to
+        # every engine without each one re-deriving it. _base_save_path already
+        # includes the quality suffix (see run_task → get_save_path), so we
+        # just shadow the global save-path AND the per-service path key.
+        from ripster.service_config import _SVC_PATH_KEYS as _SVC_KEYS
+        _cfg_view = dict(_config)
+        _base = task.get("_base_save_path")
+        if _base:
+            _cfg_view["save-path"] = _base
+            _svc_for_path = task.get("service") or ""
+            _svc_key = _SVC_KEYS.get(_svc_for_path)
+            if _svc_key:
+                _cfg_view[_svc_key] = _base
+            # Apple uses three sibling keys depending on the codec; rewrite the
+            # one matching the chosen quality so engines pick it up.
+            if _svc_for_path in ("apple", ""):
+                _q = (quality or "").lower()
+                if _q in ("atmos", "binaural", "downmix"):
+                    _cfg_view["atmos-save-folder"] = _base
+                    _cfg_view["atmos-path"]       = _base
+                elif _q.startswith("aac"):
+                    _cfg_view["aac-save-folder"]  = _base
+                    _cfg_view["aac-path"]         = _base
+                else:
+                    _cfg_view["alac-save-folder"] = _base
+        # Cover-source override picked in the SC mix drawer → hand it to the engine.
+        _cov_override = (task.get("meta") or {}).get("coverUrl")
+        if _cov_override and task.get("service") == "soundcloud":
+            _cfg_view["_sc_cover_override"] = _cov_override
+        # BBC: title/artist/pid resolved in _bbc_preflight (build_cmd needs them
+        # to name the output file — it only gets url/quality/config, not task).
+        if task.get("service") == "bbc":
+            _cfg_view["_bbc_title"]    = task.get("_bbc_title", "")
+            _cfg_view["_bbc_artist"]   = task.get("_bbc_artist", "")
+            _cfg_view["_bbc_pid"]      = task.get("_bbc_pid", "")
+            _cfg_view["_bbc_duration"] = task.get("_bbc_duration", 0)
+            _cfg_view["_bbc_cover"]    = task.get("_bbc_cover", "")
+            _cfg_view["_bbc_date"]     = task.get("_bbc_date", "")
+            _cfg_view["_bbc_url"]      = task.get("_bbc_url", "")
+            _cfg_view["_bbc_brand"]    = task.get("_bbc_brand", "")
+        # Отложенная запись эфира: канал и длительность приходят из плана
+        # (ripster/bbc_schedule.py), движок по ним строит адрес live-потока.
+        if engine_name == "bbc_live":
+            _m = task.get("meta") or {}
+            _cfg_view["_bbc_live_channel"] = _m.get("channel") or ""
+            _cfg_view["_bbc_duration"]     = int(_m.get("duration") or 0)
+            _cfg_view["_bbc_title"]        = _m.get("title") or ""
+            _cfg_view["_bbc_cover"]        = _m.get("artworkUrl") or ""
+        # Per-release lyrics checkbox override (None = use global config).
+        _cfg_view["_lyrics_override"] = task.get("lyrics")
+        _cfg_view["_lyrics_type_override"] = task.get("lyrics_type")
+        _cfg_view["_lyrics_extra_override"] = task.get("lyrics_extra")
+        # Spotify multi-account pool: РОТАЦИЯ аккаунтов (фейловер), не параллель —
+        # OrpheusDL читает durable-blob по ФИКСИРОВАННОМУ пути, поэтому acquire()
+        # ставит blob выбранного слота и ДЕРЖИТ лок до release() в finally.
+        # Любая ошибка здесь → пул просто не используется, и прогон идёт на
+        # основном (живом) blob ровно как до появления пула.
+        if engine_name == "orpheus_spotify":
+            try:
+                from ripster import spotify_pool as _spp
+                if _spp.pool_enabled(_config):
+                    from ripster import account_fallback as _afb
+                    _sp_acct = await asyncio.to_thread(
+                        _spp.acquire, _config,
+                        tuple(_afb.tried_slots(task, "spotify")))
+                    if _sp_acct:
+                        _sp_slot = _sp_acct["slot"]
+                        _sp_corridor = _sp_acct
+                        _afb.mark_tried(task, "spotify", _sp_slot)
+                        task["log"].append(
+                            f"🟢 spotify-pool: слот {_sp_slot} "
+                            f"({_sp_acct.get('label', '')})")
+                    else:
+                        task["log"].append(
+                            "🟢 spotify-pool: свободных аккаунтов нет — качаю основным")
+            except Exception as e:                       # noqa: BLE001
+                print(f"[spotify-pool] пропускаю пул: {e!r}", flush=True)
+                _sp_slot = None
+        # Deezer multi-account pool: route this task to a free ARL slot with
+        # its own isolated deemix config dir. ANY failure here → _cfg_view
+        # simply never gets deezer-arl/_deezer_cfg_dir overridden, so build_cmd
+        # falls back to the single primary-account behavior it always had.
+        if engine_name == "deezer":
+            try:
+                from ripster import deezer_pool as _dzp
+                _dz_pool = _dzp.get_pool(_config)
+                if _dz_pool is not None:
+                    from ripster import account_fallback as _afb
+                    _dz_acq = await asyncio.to_thread(
+                        _dz_pool.acquire, tuple(_afb.tried_slots(task, "deezer")))
+                    if _dz_acq:
+                        _dz_slot, _dz_arl, _dz_cfg_dir = _dz_acq
+                        _afb.mark_tried(task, "deezer", _dz_slot)
+                        # Пул выдаёт свободный слот, но НЕ проверяет, жив ли его
+                        # ARL. Мёртвая учётка уходила в загрузку и роняла её без
+                        # внятной причины, хотя рядом лежала рабочая. Спрашиваем
+                        # реестр (ответ кэшируется на 6 ч, так что это дёшево) и
+                        # при отказе подменяем на живую.
+                        try:
+                            from ripster import deezer_accounts as _dza
+                            _inf = await _dza.arl_info(_dz_arl)
+                            if not _inf.get("alive"):
+                                _alt = await _dza.pick_arl(_config)
+                                task["log"].append(
+                                    f"🎧 ARL слота {_dz_slot} не отвечает "
+                                    f"({_inf.get('reason')})" +
+                                    (" → беру живой" if _alt else " → живых нет"))
+                                print(f"[deezer-pool] slot {_dz_slot}: ARL dead "
+                                      f"({_inf.get('reason')}), replacement: "
+                                      f"{'found' if _alt else 'NONE'}", flush=True)
+                                if _alt:
+                                    _dz_arl = _alt
+                            elif not _inf.get("lossless"):
+                                # Жив, но БЕЗ lossless (Free-тариф). Раньше автоматика
+                                # пропускала только МЁРТВЫЕ учётки, а Free брала как
+                                # есть — и рядом лежащий Family с FLAC простаивал,
+                                # приходилось «подтягивать руками» (владелец 13.09.2026:
+                                # «где автоматизм?»). Теперь предпочитаем lossless сами.
+                                _better = await _dza.pick_arl(_config, need_lossless=True)
+                                if _better and _better != _dz_arl:
+                                    task["log"].append(
+                                        f"🎧 ARL слота {_dz_slot} без lossless "
+                                        f"({_inf.get('plan') or '?'}) → беру Family с FLAC")
+                                    print(f"[deezer-pool] slot {_dz_slot}: no lossless "
+                                          f"→ swapped to lossless ARL", flush=True)
+                                    _dz_arl = _better
+                                elif _inf.get("country"):
+                                    task["log"].append(
+                                        f"🎧 ARL слота {_dz_slot}: "
+                                        f"{_inf['country'].upper()}, "
+                                        f"{_inf.get('plan') or '?'} (без lossless, "
+                                        f"замены нет)")
+                            elif _inf.get("country"):
+                                _msg = (f"ARL слота {_dz_slot}: {_inf['country'].upper()}"
+                                        f", {_inf.get('plan') or 'тариф неизвестен'}")
+                                task["log"].append("🎧 " + _msg)
+                                # И в общий лог: task["log"] в консоль не идёт,
+                                # поэтому «всё хорошо» иначе неотличимо от
+                                # «код не выполнялся» — уже наступал дважды.
+                                print(f"[deezer-pool] {_msg}", flush=True)
+                        except Exception as _e_arl:
+                            # Не молча: немой except уже прятал NameError (08.08).
+                            print(f"[deezer-pool] ARL check failed: {_e_arl!r}",
+                                  flush=True)
+                        _cfg_view["deezer-arl"] = _dz_arl
+                        if _dz_cfg_dir is not None:
+                            _cfg_view["_deezer_cfg_dir"] = str(_dz_cfg_dir)
+                        task["log"].append(f"🎧 deezer-pool: slot {_dz_slot}")
+                        try:
+                            await _broadcast({"type": "deezer_pool_update", "pool": _dzp.live_status(_config)})
+                        except Exception:
+                            pass
+            except Exception as _dze:
+                _dz_pool = None
+                _dz_slot = None
+                print(f"[deezer-pool] acquire failed → single-account fallback: {_dze}", flush=True)
+        # Пул Tidal: слот = отдельный рабочий каталог со своей сессией
+        # OrpheusDL. Любая осечка здесь оставляет `_task_cwd` пустым, то есть
+        # прогон идёт как раньше, на основной учётке, — пул не имеет права
+        # ломать загрузку, которая и без него работала.
+        if engine_name == "tidal":
+            try:
+                from ripster import tidal_pool as _tdp
+                # Импорт СВОЙ, а не общий `_afb` ниже по функции: тот
+                # импортируется позже, поэтому Python считает имя локальным и
+                # необъявленным здесь. Поймано первой же боевой загрузкой
+                # (12.09.2026): пул молча уходил в запасной путь с ошибкой
+                # «cannot access local variable '_afb'».
+                from ripster import account_fallback as _afb_td
+                _td_pool = _tdp.get_pool(_config)
+                if _td_pool is not None:
+                    _got = await asyncio.to_thread(
+                        _td_pool.acquire, tuple(_afb_td.tried_slots(task, "tidal")))
+                    if _got:
+                        _td_slot, _td_acct, _td_dir = _got
+                        # Слот без сессии бесполезен: OrpheusDL не умеет войти
+                        # без терминала. Выписываем её из refresh-токена — и
+                        # ТОЛЬКО если файла ещё нет, иначе каждый прогон дёргал
+                        # бы Tidal тремя запросами на ровном месте.
+                        _sess = _tdp.slot_session(_td_slot)
+                        if _td_slot > 0 and not _sess.is_file() and _td_acct.get("tidal-refresh"):
+                            _rep = await asyncio.to_thread(
+                                _tdp.write_session, _td_slot,
+                                _td_acct["tidal-refresh"], _td_acct.get("tidal-country", ""))
+                            if _rep.get("ok"):
+                                task["log"].append(
+                                    f"🌊 tidal-pool: слот {_td_slot} получил сессию "
+                                    f"({', '.join(_rep.get('clients') or [])})")
+                            else:
+                                # Честная причина в лог: слот без сессии уедет
+                                # на основную учётку, и молчание об этом
+                                # выглядело бы как «пул не работает».
+                                task["log"].append(
+                                    f"🌊 tidal-pool: слоту {_td_slot} не выписать сессию — "
+                                    f"{_rep.get('why')}")
+                                _td_pool.release(_td_slot)
+                                _td_pool, _td_slot = None, None
+                        if _td_slot is not None:
+                            # Каталог конфига слота передаём движку НАПРЯМУЮ, а не
+                            # через окружение процесса: оно у всех движков одного
+                            # интерпретатора общее, и ORPHEUS_CONFIG_DIR, выставленный
+                            # здесь, уехал бы в параллельный прогон. CWD при этом
+                            # остаётся: по нему OrpheusDL находит modules/ и
+                            # extensions/ (они общие, через junction).
+                            _cfg_view["_tidal_config_dir"] = str(_tdp.slot_config_dir(_td_slot))
+                            if _td_slot > 0:
+                                _task_cwd = str(_td_dir)
+                                # Слот без своей сессии не качает ничего, поэтому
+                                # пиним явно: иначе коридор основного движка
+                                # утянул бы сессию владельца в чужой прогон.
+                                _cfg_view["_tidal_session_storage"] = str(_tdp.slot_session(_td_slot))
+                            if _td_acct.get("tidal-country"):
+                                _cfg_view["tidal-country"] = _td_acct["tidal-country"]
+                            task["log"].append(
+                                f"🌊 tidal-pool: слот {_td_slot} ({_td_acct.get('label')})")
+            except Exception as _tde:
+                _td_pool = None
+                _td_slot = None
+                print(f"[tidal-pool] acquire failed → single-account fallback: {_tde}", flush=True)
+        # Qobuz multi-account pool: same idea, even simpler — streamrip's CLI
+        # takes an explicit --config-path, so no subprocess env override is
+        # needed at all (unlike deezer). ANY failure here → _cfg_view never
+        # gets the qobuz-*/_qobuz_cfg_dir overrides, single-account fallback.
+        if engine_name == "qobuz":
+            try:
+                from ripster import qobuz_pool as _qzp
+                _qz_pool = _qzp.get_pool(_config)
+                if _qz_pool is not None:
+                    from ripster import account_fallback as _afb
+                    _qz_acq = await asyncio.to_thread(
+                        _qz_pool.acquire, tuple(_afb.tried_slots(task, "qobuz")))
+                    if _qz_acq:
+                        _qz_slot, _qz_acct, _qz_cfg_dir = _qz_acq
+                        _afb.mark_tried(task, "qobuz", _qz_slot)
+                        _cfg_view["qobuz-user-id"]    = _qz_acct["qobuz-user-id"]
+                        _cfg_view["qobuz-auth-token"] = _qz_acct["qobuz-auth-token"]
+                        _cfg_view["qobuz-email"]      = _qz_acct["qobuz-email"]
+                        _cfg_view["qobuz-password"]   = _qz_acct["qobuz-password"]
+                        if _qz_cfg_dir is not None:
+                            _cfg_view["_qobuz_cfg_dir"] = str(_qz_cfg_dir)
+                        task["log"].append(f"💿 qobuz-pool: slot {_qz_slot}")
+                        try:
+                            await _broadcast({"type": "qobuz_pool_update", "pool": _qzp.live_status(_config)})
+                        except Exception:
+                            pass
+            except Exception as _qze:
+                _qz_pool = None
+                _qz_slot = None
+                print(f"[qobuz-pool] acquire failed → single-account fallback: {_qze}", flush=True)
+        # SoundCloud / Yandex multi-account pools: simplest of the bunch — both
+        # engines take the token as a plain CLI arg (no shared file at all), so
+        # a slot is just "which token to substitute", no config-dir isolation
+        # or subprocess env override needed.
+        # `sc_widevine` — тот же SoundCloud, только DRM-ветка: без подмены токена
+        # она получала primary-учётку, listing которой вообще не знает транскод
+        # aac_256k, — и часовик ложился в папку «AAC 256» с 160 кбит/с (25.09).
+        if engine_name in ("soundcloud", "sc_widevine"):
+            try:
+                from ripster import soundcloud_pool as _scp
+                _sc_pool = _scp.get_pool(_config)
+                if _sc_pool is not None:
+                    from ripster import account_fallback as _afb
+                    _sc_acq = await asyncio.to_thread(
+                        _sc_pool.acquire, tuple(_afb.tried_slots(task, engine_name)))
+                    if _sc_acq:
+                        _sc_slot, _sc_token = _sc_acq
+                        _afb.mark_tried(task, engine_name, _sc_slot)
+                        _cfg_view["soundcloud-oauth-token"] = _sc_token
+                        task["log"].append(f"🟠 soundcloud-pool: slot {_sc_slot}")
+                        try:
+                            await _broadcast({"type": "soundcloud_pool_update", "pool": _scp.live_status(_config)})
+                        except Exception:
+                            pass
+            except Exception as _sce:
+                _sc_pool = None
+                _sc_slot = None
+                print(f"[soundcloud-pool] acquire failed → single-account fallback: {_sce}", flush=True)
+        if engine_name == "yandex":
+            try:
+                from ripster import yandex_pool as _yxp
+                _yx_pool = _yxp.get_pool(_config)
+                if _yx_pool is not None:
+                    from ripster import account_fallback as _afb
+                    _yx_acq = await asyncio.to_thread(
+                        _yx_pool.acquire, tuple(_afb.tried_slots(task, "yandex")))
+                    if _yx_acq:
+                        _yx_slot, _yx_token = _yx_acq
+                        _afb.mark_tried(task, "yandex", _yx_slot)
+                        _cfg_view["yandex-token"] = _yx_token
+                        task["log"].append(f"🟡 yandex-pool: slot {_yx_slot}")
+                        try:
+                            await _broadcast({"type": "yandex_pool_update", "pool": _yxp.live_status(_config)})
+                        except Exception:
+                            pass
+            except Exception as _yxe:
+                _yx_pool = None
+                _yx_slot = None
+                print(f"[yandex-pool] acquire failed → single-account fallback: {_yxe}", flush=True)
+        # Идентичатор задачи доезжает до движка: Qobuz по нему снимает СВОЮ
+        # прошлую папку с коллизии при повторе (иначе повтор ушёл бы в новый
+        # суффикс и перекачал релиз заново в чужую рядом стоящую папку).
+        _cfg_view["_task_id"] = tid
+        # Пер-таск оверрайд из диалога загрузки («скачать через публичный
+        # враппер») и ручной регион доезжают до движка через конфиг-вью:
+        # build_cmd получает конфиг, а не задачу.
+        if (task.get("service") or "apple") == "apple":
+            try:
+                from ripster.apple_router import public_decision
+                _pub_ok, _pub_mode, _ = public_decision(_config, url, task)
+                _cfg_view["_public_allowed"] = _pub_ok
+                _cfg_view["_public_mode"] = _pub_mode
+                _cfg_view.update(_lite_public_view(task, engine_name,
+                                                   {"_public_mode": _pub_mode},
+                                                   _cfg_view))
+            except Exception:
+                pass
+        cmd = eng.build_cmd(url, quality, _cfg_view)
+        task["log"].append(f"▶ {' '.join(cmd)}")
+        await _broadcast(_i18n.log_event("console.cmd_start", level="info", task_id=tid, cmd=' '.join(cmd[:3])))
+
+        from ripster.process_runner import ProcessRunner
+        from ripster.engines.base import EventKind
+        # SC and big-mix providers can pipe-stream + ffmpeg-transcode silently
+        # for many minutes; default 300 s would kill long mixes. Qobuz often
+        # Qobuz has its own silent windows during tagging. SC handles its own
+        # heartbeats in runner.mjs but we still leave headroom for slow CDNs.
+        if engine_name == "qobuz":
+            # streamrip renders a rich/tqdm progress bar via \r (NO \n) for the whole
+            # duration of a track transfer — same as OrpheusDL below. readline() blocks
+            # on a newline, so the runner sees ZERO output while a big file downloads.
+            # A long Hi-Res album (e.g. Yes — "Tales From Topographic Oceans", 4 tracks
+            # ~20 min each, 24/192 ≈ 700 MB/track, all downloading concurrently) stays
+            # newline-silent well past 300 s → the watchdog killed a LIVE download.
+            # Give it the same 20-min headroom as Tidal/SC; each finished track prints
+            # a newline that resets the watchdog, so a genuine hang still fails eventually.
+            line_timeout = 1200.0
+        elif engine_name == "soundcloud":
+            line_timeout = 1200.0   # 20 min — heartbeats every 30 s anyway
+        elif engine_name in ("tidal", "orpheus_spotify", "orpheus_beatport", "orpheus_jiosaavn"):
+            # OrpheusDL streams a tqdm progress bar via \r (NO \n) for the whole
+            # duration of a track's DASH/segment download. readline() blocks on a
+            # newline, so the runner sees zero output for that entire window — and
+            # on a slow VPN one Tidal track can take minutes, blowing past the
+            # default 300 s. The watchdog then kills OrpheusDL mid-download and
+            # only cover.jpg lands. Give it SoundCloud-style headroom; each
+            # finished track prints a newline that resets the watchdog.
+            line_timeout = 1200.0
+        elif engine_name == "bbc":
+            # Same class of bug: yt-dlp's `--downloader ffmpeg` reports progress
+            # via ffmpeg's own `-stats` line, which updates in place with \r (no
+            # \n) for the ENTIRE download — a 2-hour Essential Mix can run silent
+            # (by readline()'s definition) well past 300s. Give it the same
+            # headroom as Tidal/SC; a real hang still fails eventually.
+            line_timeout = 1200.0
+        elif engine_name == "bbc_live":
+            # ffmpeg here is silent for the whole recording by design (progress
+            # goes to -progress pipe:2 as key=value lines, one \n per update),
+            # and the segments arrive every ~6 s — 20 min of headroom only
+            # catches a genuinely dead stream.
+            line_timeout = 1200.0
+        else:
+            line_timeout = 300.0
+        if engine_name == "orpheus_spotify":
+            extra_env = {"PROTOCOL_BUFFERS_PYTHON_IMPLEMENTATION": "python", "PYTHONIOENCODING": "utf-8"}
+            # Коридор учётки. Нужны ОБА: CWD даёт слоту свои settings.json и
+            # loginstorage.bin (core.py резолвит 'config' относительно CWD), а
+            # ORPHEUS_CONFIG_DIR — свой .librespot_cache/blob (модуль Spotify
+            # резолвит его относительно ФАЙЛА МОДУЛЯ, см. «ПАТЧ RIPSTER» в
+            # spotify_api.py/spotify_embed_api.py). Без любого из двух мультиакк
+            # молча качал бы под ОДНОЙ учёткой.
+            if _sp_corridor:
+                extra_env["ORPHEUS_CONFIG_DIR"] = str(_sp_corridor["config_dir"])
+                _task_cwd = str(_sp_corridor["cwd"])
+        else:
+            extra_env = {"PYTHONIOENCODING": "utf-8"}
+        # Engine-specific env vars (secrets go here, NOT in argv — argv is
+        # visible in `ps` / process inspector).
+        try:
+            extra_env.update(eng.child_env(_config))
+        except Exception:
+            pass
+        # Движки Orpheus (beatport/spotify/tidal) не должны видеть user-site
+        # интерпретатора: в %APPDATA%\\Roaming\\Python\\Python3XX\\site-packages лежит
+        # пакет `ffmpeg` вместо `ffmpeg-python`, и он ломает импорт OrpheusDL
+        # (11.08.2026, 12 прогонов). _orpheus_python() уже прибит к .venv — это
+        # вторая линия: даже системный python не подтянет чужие пакеты.
+        if engine_name in ("orpheus_beatport", "orpheus_spotify", "tidal", "orpheus_jiosaavn"):
+            extra_env["PYTHONNOUSERSITE"] = "1"
+        if engine_name == "deezer" and _cfg_view.get("_deezer_cfg_dir"):
+            # Multi-account pool slot (>0): point the deemix SUBPROCESS itself
+            # at the same isolated config dir _write_arl()/_write_deemix_config()
+            # just wrote to (build_cmd only touches OUR process's env; deemix's
+            # own platformdirs lookup inside the subprocess needs its own copy).
+            _dz_dir = _cfg_view["_deezer_cfg_dir"]
+            if _IS_WINDOWS:
+                extra_env["APPDATA"] = _dz_dir
+            else:
+                extra_env["XDG_CONFIG_HOME"] = _dz_dir
+        # Apple-local pool: give this zhaarey task its OWN wrapper container so
+        # several Apple releases download in parallel. Slot 0 reuses the always-on
+        # amd-wrapper, so a single download spins up nothing new and behaves
+        # exactly as before. acquire() is blocking docker → off-thread. On ANY
+        # failure we leave _task_cwd None → default cwd → the global wrapper.
+        if engine_name == "zhaarey":
+            try:
+                from ripster import wrapper_pool as _wp
+                _pool = _wp.get_pool(_config)
+                if _pool is not None:
+                    # Задача может ТРЕБОВАТЬ конкретный слот: маршрутизатор
+                    # подобрал сессию в стране, где релиз доступен. Без этого
+                    # acquire() выдавал первый свободный, и повтор с британской
+                    # ссылкой снова уходил в канадский враппер — 09.08.2026
+                    # именно поэтому переключение «срабатывало», а альбом всё
+                    # равно не добирался.
+                    _forced = task.get("_force_slot")
+                    _acq = None
+                    if _forced is not None:
+                        try:
+                            _fs = int(_forced)
+                            _fp = _pool._ports(_fs)
+                            from ripster import apple_accounts as _AAp
+                            _name = "amd-wrapper" if _fs == 0 else f"rip-wrapper-{_fs}"
+                            # Слот занимаем ДО ожидания подъёма: без этого две
+                            # задачи, которым маршрутизатор подсказал одну
+                            # витрину, садились на одну учётку двумя потоками —
+                            # а личная подписка Apple отвечает на второй поток
+                            # «More than one device is trying to play music»
+                            # (lease 3084). Право на второй поток считает пул
+                            # по тарифу учётки (`WrapperPool.reserve_slot`).
+                            _room = await asyncio.to_thread(_pool.reserve_slot, _fs)
+                            if not _room:
+                                task["log"].append(
+                                    f"🦝 слот {_fs} занят соседкой по этой учётке — "
+                                    f"тариф не даёт второго потока, беру другой")
+                                print(f"[runner] slot {_fs} refused: no room for a "
+                                      f"second stream on this account", flush=True)
+                            elif await asyncio.to_thread(
+                                    _AAp.ensure_slot_up, _name, _fp[0], 90.0, _config):
+                                _acq = (_fs, _fp[0], _fp[1])
+                                task["log"].append(
+                                    f"🦝 слот закреплён за задачей: {_fs} (порт {_fp[0]})")
+                                print(f"[runner] slot {_fs} pinned, port {_fp[0]}", flush=True)
+                            else:
+                                await asyncio.to_thread(_pool.release, _fs)
+                                task["log"].append(
+                                    f"🦝 pinned slot {_forced} did not come up - taking any")
+                                print(f"[runner] pinned slot {_forced} did NOT come up", flush=True)
+                        except Exception as _e_fs:
+                            print(f"[runner] slot pinning failed: {_e_fs!r}", flush=True)
+                    if _acq is None:
+                        _acq = await asyncio.to_thread(_pool.acquire)
+                    if _acq:
+                        _slot, _dec_p, _m3u_p = _acq
+                        _pool_slot = _slot
+                        _base_dir = str(Path(__file__).resolve().parent.parent)
+                        # apple-parallel-tracks: hand this album the WHOLE pool so
+                        # the Go tool fans its tracks across every container (each
+                        # concurrent track gets its own CKC session). zh_cap is
+                        # forced to 1 below, so no other album competes for slots.
+                        _dports = ""
+                        # Слот закреплён по ПРАВАМ — раздавать треки по всему пулу
+                        # нельзя: часть уйдёт в контейнер другой страны и получит
+                        # Invalid CKC. 09.08.2026 именно так закреплённый британский
+                        # слот дал 10 отказов, хотя в одиночку брал альбом целиком.
+                        if _config.get("apple-parallel-tracks") and task.get("_force_slot") is None:
+                            try:
+                                _plist = await asyncio.to_thread(
+                                    _wp.ensure_all_decrypt_ports, _config)
+                                _dports = ",".join(_plist)
+                                if _dports:
+                                    task["log"].append(
+                                        f"🦝 parallel tracks across pool: {_dports}")
+                            except Exception:
+                                _dports = ""
+                        _task_cwd = await asyncio.to_thread(
+                            _wp.slot_cwd, _slot, _dec_p, _m3u_p, _base_dir, _dports)
+                        task["log"].append(f"🦝 wrapper-pool: slot {_slot} (decrypt {_dec_p}, m3u8 {_m3u_p})")
+                        try:
+                            await _broadcast({"type": "pool_update", "pool": _wp.live_status()})
+                        except Exception:
+                            pass
+            except Exception as _pe:
+                _pool = None
+                _pool_slot = None
+                _task_cwd = None
+                print(f"[pool] acquire failed → single-wrapper fallback: {_pe}", flush=True)
+        runner = ProcessRunner(
+            cmd=cmd, engine=eng, line_timeout=line_timeout,
+            env=extra_env, cwd=(_task_cwd if _task_cwd is not None else eng.working_dir()),
+        )
+        _qs.register_runner(tid, runner)
+        _qs.proc = None
+
+        if engine_name == "qobuz":
+            msg = "⏳ Qobuz: скачиваю… (может занять до нескольких минут)"
+            task["log"].append(msg)
+            await _broadcast({"type": "log", "msg": msg, "level": "info", "task_id": tid})
+
+        fatal_hit = False
+        _fatal_msg = ""          # вердикт движка, чтобы он не потерялся
+        _fatal_nokey_hint = False # zhaarey FATAL: «нет прав в регионе» (Invalid CKC)
+        async for ev in runner.run():
+            if ev.kind is EventKind.FATAL:
+                task["log"].append(ev.message)
+                _fatal_msg = ev.message
+                await _broadcast({"type": "log", "msg": f"✗ {ev.message}", "level": "error", "task_id": tid})
+                if ev.message.startswith("ORPHEUS_NOT_AUTHED"):
+                    await _broadcast({"type": "orpheus_not_authed"})
+                elif engine_name == "zhaarey" and "Invalid CKC" in ev.message:
+                    # Хендофф в лестницу витрин/учёток. Раньше ловился ТОЛЬКО по
+                    # «Invalid CKC» в тексте — 23.09.2026 текст переписали честно
+                    # (без совета про публичный wrapper), слово исчезло, и перебор
+                    # своих учёток перестал запускаться вовсе: Hospital30 дважды
+                    # умер после одной попытки. Причина — Invalid CKC, по ней и
+                    # решаем; формулировка сообщения — не контракт.
+                    _fatal_nokey_hint = True
+                fatal_hit = True
+                await runner.cancel()
+                break
+
+            if ev.kind is EventKind.PROGRESS:
+                if ev.total and ev.total > 0:
+                    task["progress"] = int((ev.current or 0) / ev.total * 100)
+                    # Store engine's progress total separately — don't overwrite
+                    # meta.trackCount which comes from the API and is the real
+                    # track count (Go tool may report steps/segments, not tracks).
+                    task["_prog_total"] = ev.total
+                    await _broadcast({"type": "progress", "id": tid,
+                                      "progress": task["progress"],
+                                      "current":  ev.current or 0,
+                                      "total":    ev.total})
+                elif ev.total == 0 and ev.current:
+                    # Track completion counter (StreamripMixin).
+                    # Estimate % from meta.trackCount so the progress bar actually moves.
+                    meta = task.get("meta") or {}
+                    total_tracks = meta.get("trackCount") or meta.get("totalTracks") or 0
+                    if total_tracks > 1:
+                        task["progress"] = min(int(ev.current / total_tracks * 100), 99)
+                    await _broadcast({"type": "progress", "id": tid,
+                                      "progress": task.get("progress", 0),
+                                      "current":  ev.current,
+                                      "total":    0})
+                continue
+
+            if ev.message:
+                task["log"].append(ev.message)
+                _logd = {"type": "log", "msg": ev.message, "level": ev.level.value, "task_id": tid}
+                # Engines may attach an i18n key+params via Event.extra so the
+                # client can translate the line (msg stays the RU fallback).
+                _mk = ev.extra.get("msg_key") if ev.extra else None
+                if _mk:
+                    _logd["msg_key"] = _mk
+                    _logd["params"]  = ev.extra.get("params", {})
+                await _broadcast(_logd)
+
+        log_text = "\n".join(task.get("log", []))
+
+        if fatal_hit:
+            if _fatal_nokey_hint:
+                # Это ХЕНДОФФ в лестницу витрин/слотов/публичного wrapper, а НЕ терминальный
+                # отказ. Движок честно отдал FATAL (напр. «✗ Apple не выдал ключ
+                # (Invalid CKC), сессия ЖИВА → нет прав в регионе»), а раннер
+                # превращает его в _NeedAppleFallback, чтобы перебрать свои витрины
+                # и учётки. Без метки `_in_retry` finally у `_run_engine_task`
+                # видел бы «running» и на КАЖДОМ таком хендоффе жёг SAFETY NET:
+                # гнал живую задачу в ERROR и клал раннюю запись в историю — из-за
+                # чего сеть безопасности стала НОРМОЙ, а не последним рубежом
+                # (Apple Invalid CKC ×N, 11–17.09.2026). Терминал и историю
+                # гарантирует обработчик _NeedAppleFallback в run_task (см. ниже).
+                # Тот же идиом уже стоит у _NeedRetry ниже. 18.09.2026.
+                task["_in_retry"] = True
+                raise _NeedAppleFallback()
+            # Вердикт движка ОБЯЗАН дойти до задачи, а не только до консоли.
+            #
+            # Живой случай 05.09.2026: Apple не выдал ключ (Invalid CKC) при
+            # живой сессии wrapper'а — то есть у контента нет прав в регионе
+            # аккаунта. Движок сказал это точно и подробно, строка ушла в
+            # консоль и в task["log"], но в `error` не попала. Дальше сеть
+            # безопасности видела пустой `error` и честно подставляла свой
+            # общий текст: «Задача завершилась без результата… так быть не
+            # должно — повтори загрузку». Владелец получил в бот совет
+            # повторять то, что повторяться не может, вместо настоящей
+            # причины, которая была известна за секунду до этого.
+            if _fatal_msg and not task.get("error"):
+                task["error"] = _fatal_msg.lstrip("✗ ").strip()
+            _try_advance_task(task, TaskStatus.ERROR)
+            return
+
+        if runner._cancelled:
+            _try_advance_task(task, TaskStatus.CANCELLED)
+            return
+
+        rc        = runner.result.exit_code if runner.result else -1
+        timed_out = runner.result.timed_out  if runner.result else False
+
+        if timed_out and rc != 0:
+            _try_advance_task(task, TaskStatus.ERROR)
+            await _broadcast(_i18n.log_event("console.timeout", level="error", task_id=tid))
+            return
+
+        # В потоке, а не в цикле событий: is_finished у Deezer ходит в сеть (тариф ARL,
+        # страны трека — до ~15 с), у Beatport пишет файл сессии. Синхронный вызов
+        # здесь замораживал ВСЁ приложение — WS, очередь, ответы гостям (19.09.2026).
+        result = await asyncio.to_thread(eng.is_finished, log_text, rc=rc)
+        if result.quality_actual:
+            # Что ПРОСИЛИ, терялось вместе с этой строкой — а по запрошенному
+            # работает страж понижения качества ниже. 27.09.2026: Яндекс на FLAC
+            # отдал AAC, task["quality"] стал «aac_192», страж прочитал это как
+            # «lossy просили осознанно» и промолчал, а бот положил AAC в кэш под
+            # ключом lossless-cd — и раздавал его другим гостям.
+            if result.quality_actual != task.get("quality"):
+                task["quality_requested"] = task.get("quality") or ""
+            task["quality"] = result.quality_actual
+
+        # Cross-service error clarity (EVERY engine, one place): when a download
+        # FAILED and the engine only gave a GENERIC message, scan the log for a
+        # region-lock / phantom-removed-link cause and surface the REAL reason so
+        # users understand WHY. Engine-specific reasons (auth/token/Premium/CKC/
+        # wrapper) are NOT touched — only generic/empty errors get upgraded.
+        if not result.success:
+            _err = result.error or ""
+            _GENERIC = ("завершился с кодом", "нет маркера", "не докачался",
+                        "неожиданное", "unexpected", "0 треков", "ни один трек",
+                        "нет вывода", "Exit code", "проверь")
+            # ── ДИСК ПЕРВИЧЕН ────────────────────────────────────────────────
+            # Проверка «а не легли ли файлы» стояла ниже и срабатывала только
+            # когда причину классифицировать НЕ удалось. Поэтому 09.08.2026
+            # альбом Apparat, у которого на диске лежало 10 треков из 11, был
+            # объявлен «контент удалён из сервиса или ссылка фантомная»:
+            # классификатор уверенно опознал `gone` по слову из чужого лога, и
+            # до диска очередь не дошла.
+            #
+            # Утверждение «контента нет» опровергается свежими файлами без
+            # всяких рассуждений, поэтому диск спрашиваем ПЕРВЫМ. Ставка на
+            # mtime (не старше начала прогона) отсекает остатки прошлых заходов.
+            _salvaged = False
+            # Диск первичен, НО не над файлом, который сам движок проверил
+            # декодером и признал бракованным (24.09.2026: BBC-эфир на 290 МБ
+            # лег «успешно», хотя 7667 строк ошибок декода). Для corrupt=True
+            # свежие файлы — это и есть тот брак, partial-зачёт врал бы.
+            if not getattr(result, "corrupt", False):
+                try:
+                    from ripster.routes.download import (_get_task_dir as _gtd_pre,
+                                                         _find_audio_files as _faf_pre)
+                    _dd_pre = _gtd_pre(task)
+                    if _dd_pre:
+                        _st_pre = float(task.get("_start_time") or 0.0) - 5.0
+                        _fresh_pre = [f for f in _faf_pre(_dd_pre)
+                                      if f.stat().st_mtime >= _st_pre]
+                        if _fresh_pre:
+                            result.success   = True
+                            result.tracks_ok = len(_fresh_pre)
+                            result.error     = ""
+                            _disk_full = _disk_completeness(task, _fresh_pre)
+                            if _disk_full:
+                                task.setdefault("log", []).append(
+                                    f"[salvage] на диске {len(_fresh_pre)} файл(ов) — "
+                                    f"по каталогу столько же, релиз цел (диск первичен)")
+                            else:
+                                task.setdefault("log", []).append(
+                                    f"[salvage] на диске {len(_fresh_pre)} свежих файл(ов) — "
+                                    f"отдаю как частичную загрузку, а не как ошибку")
+                                task["partial"] = True
+                                _pr = _classify_partial_reason(log_text, False)
+                                task["_partial_reason"] = _pr
+                                task.setdefault("meta", {})["_partial_reason"] = _pr
+                            _salvaged = True
+                except Exception:
+                    pass
+
+            if _salvaged:
+                pass
+            elif (not _err) or any(g in _err for g in _GENERIC):
+                from ripster.engines.errors import classify_download_error
+                _cls = classify_download_error(log_text)
+                if _cls:
+                    _svc = (task.get("service") or "").capitalize()
+                    result.error = f"{_svc}: {_cls[1]}" if _svc else _cls[1]
+                    # «Нет в этом магазине» — половина ответа. Вторая половина
+                    # (В КАКОМ есть) выясняется одним запросом и превращает
+                    # тупик в понятное действие: взять ссылку из той страны.
+                    if _cls[0] == "storefront":
+                        try:
+                            from ripster.engines.errors import apple_storefronts_with
+                            _sf = apple_storefronts_with(task.get("url") or "")
+                        except Exception:
+                            _sf = []
+                        if _sf:
+                            import re as _re_sf
+                            _m = _re_sf.search(r"music\.apple\.com/([a-z]{2})/",
+                                               task.get("url") or "")
+                            _link_cc = (_m.group(1) if _m else "").lower()
+                            _lst = ", ".join(s.upper() for s in _sf)
+                            if _link_cc and _link_cc in _sf:
+                                # Ссылка ведёт в магазин, где релиз ЕСТЬ, — значит
+                                # ограничивает не она, а страна аккаунта, которым
+                                # расшифровываем. 08.08.2026 ровно этот случай:
+                                # ссылка /ru/ (релиз есть), аккаунт CA (релиза нет),
+                                # а текст советовал менять ссылку.
+                                result.error += (
+                                    f" Проверено: в магазине ссылки ({_link_cc.upper()}) релиз ЕСТЬ, "
+                                    f"значит ограничивает страна аккаунта Apple, а не ссылка. "
+                                    f"Доступен в: {_lst}. Нужен аккаунт одной из этих стран"
+                                    # Совет про публичный wrapper звучит только
+                                    # тогда, когда он реально включён (владелец,
+                                    # 03.09.2026): в локальном режиме он никогда
+                                    # не подключается, и напоминание о нём —
+                                    # ложная надежда.
+                                    + (", либо публичный wrapper — он включён и держит несколько регионов."
+                                       if str(_config.get("apple-wrapper") or "auto").strip().lower() == "public"
+                                       else "; публичный wrapper выключен и сам не подключится."))
+                            else:
+                                result.error += (f" Проверено: релиз есть в магазинах {_lst} "
+                                                 f"— возьми ссылку оттуда.")
+                else:
+                    # Disk-truth salvage: an engine can exit non-zero AFTER its files
+                    # already landed (e.g. OrpheusDL-Spotify crashes on a trailing
+                    # metadata fetch while the .ogg tracks are on disk → bar at 66%
+                    # then "Couldn't download the release"). With a GENERIC error and
+                    # no real failure reason classified, dropping the release =
+                    # "downloaded but delivered nothing". If FRESH audio files (mtime
+                    # ≥ this run's start) sit in the output dir, flip to success so the
+                    # normal path + silent-partial guard delivers what landed. Auth /
+                    # region / premium failures save zero files, so they never trip
+                    # this (and the mtime gate ignores any stale same-named folder).
+                    try:
+                        from ripster.routes.download import (_get_task_dir as _gtd_chk,
+                                                             _find_audio_files as _faf_chk)
+                        _dd = _gtd_chk(task)
+                        if _dd and not getattr(result, "corrupt", False):
+                            _st = float(task.get("_start_time") or 0.0) - 5.0
+                            _fresh = [f for f in _faf_chk(_dd) if f.stat().st_mtime >= _st]
+                            if _fresh:
+                                _disk_full_c = _disk_completeness(task, _fresh)
+                                task.setdefault("log", []).append(
+                                    f"[salvage] engine exited rc={rc} but {len(_fresh)} fresh "
+                                    f"file(s) on disk → delivering as "
+                                    f"{'complete' if _disk_full_c else 'partial'}")
+                                result.success    = True
+                                result.tracks_ok  = len(_fresh)
+                                result.tracks_err = 0
+                                result.error      = ""
+                    except Exception:
+                        pass
+
+        # gamdl на ЛОССИ-пути упал разбором манифеста → добираем через wrapper.
+        #
+        # 15.08.2026, гость: «Gold Chain» в AAC падал у gamdl дважды подряд с
+        # `KeyError: AUDIO-SESSION-KEY-IDS` — в манифесте Apple у выбранного
+        # варианта просто нет этого поля. Сам gamdl честно предупреждает строкой
+        # выше: «experimental song codec without enabling wrapper». Владелец тот
+        # же самый релиз забрал СЕКУНДЫ спустя через zhaarey, потому что у него
+        # качество вело на wrapper. То есть релиз доступен, а отказ — свойство
+        # лосси-пути, и повторять его бессмысленно (и было повторено).
+        #
+        # Фоллбэк идёт в ALAC, а не в AAC: wrapper всё равно нужен, а раз он
+        # есть — отдаём лучшее, что он умеет. Направление обратно тому, что
+        # выше (ALAC→AAC), и флаг у них общий, поэтому зациклиться нельзя.
+        if (
+            engine_name == "gamdl"
+            and quality not in ("mv",)          # видео умеет только gamdl
+            and not task.get("_apple_fallback")
+            and result.tracks_ok == 0
+            and _RE_GAMDL_MANIFEST_ERR.search(log_text)
+        ):
+            from ripster.apple_router import local_wrapper_session_alive as _lw_alive
+            if _lw_alive(_config):
+                # Хендофф на zhaarey ALAC — не терминал (см. выше). 18.09.2026.
+                task["_in_retry"] = True
+                raise _NeedZhaareyFallback("alac")
+
+        # Сервер декрипта ЛЁГ, и не скачалось ВООБЩЕ ничего. Ветка «частичной»
+        # дозагрузки ниже исходит из того, что часть треков упала по своим
+        # причинам и второй проход их подберёт — но когда сервера нет, второй
+        # проход гарантированно повторит тот же отказ, только ещё раз по 20+
+        # минут (до 4 раз подряд). Отдаём честную ошибку сразу: причина не в
+        # релизе, ждать нечего, лечится локальным ALAC или временем.
+        # `tracks_err > 0` намеренно НЕ требуется: движок считает ошибочные треки
+        # по своим маркерам, и при лежащем сервере счётчик остаётся нулевым (ни
+        # один трек даже не начался). Тогда `tracks_ok == 0 and tracks_err == 0`
+        # мимо ветки частичной дозагрузки проходило, но попадало в обычный
+        # авто-повтор с ПУСТЫМ result.error — а пустая строка не совпадает ни с
+        # одной отсечкой, так что прогон повторялся все три раза. Признак «сервер
+        # лежит и не сохранено ничего» самодостаточен.
+        _wrapper_down_empty = (
+            result.tracks_ok == 0
+            and bool(_RE_WRAPPER_DEAD.search(log_text))
+        )
+        if _wrapper_down_empty and not result.error:
+            result.error = ("публичный сервер Hi-Res (wrapper-manager) не отдал ни одного "
+                            "живого инстанса — это его сторона, не релиз. Возьми локальное "
+                            "качество ALAC или повтори позже")
+
+        # ── Вердикт самого движка важнее текста ошибки ────────────────────────
+        # Движок ставит `abort_reason`, когда УЖЕ знает, что дальше бессмысленно
+        # (10 отказов по правам подряд и ноль сохранённых, пустой пул wrapper'а).
+        # Раннер этот вердикт до сих пор не читал вообще: он сверял с регулярками
+        # только `result.error`, который собирается ОТДЕЛЬНО — в `is_finished()`
+        # по логу. Из-за этого один и тот же класс поломки всплывал трижды:
+        # 08.08 отсечка враппера (24 мин, 830 ERROR, 0 файлов), 09.08 отсечка прав
+        # Beatport, и Tidal, где `is_finished` поверх абортированного прогона
+        # возвращал «трек не докачался (DASH/сеть прервалась) — повтори», то есть
+        # не просто терял вердикт, а ЗАМЕНЯЛ его противоположным по смыслу.
+        #
+        # Чинить это добавлением ещё одной строки в `_RE_NO_RETRY` бессмысленно —
+        # так уже чинили дважды, и оба раза следующая формулировка снова не
+        # совпадала. Читаем сам факт аборта: он не зависит ни от одной фразы.
+        _engine_aborted = bool(getattr(eng, "abort_reason", ""))
+        if _engine_aborted and not result.success:
+            # Вердикт движка — самая точная причина из имеющихся, поэтому он
+            # вытесняет обобщённый текст `is_finished()`, а не дописывается к нему.
+            result.error = getattr(eng, "abort_reason", "") or result.error
+
+        if result.success:
+            _try_advance_task(task, TaskStatus.DONE)
+            task["progress"]   = 100
+            task["_done_time"] = time.time()
+            # «Оседает» (26.09, ночной прогон Qwen, реальный случай Boards of Canada
+            # 5/18): DONE стоит здесь, а решение «добрать недостающие треки» — ниже,
+            # после переноса и ретега. В этом окне бот видел «готово» и навсегда
+            # закрывал задачу — добранное потом никто не получал. Пока метка стоит,
+            # клиенты видят «идёт» (app.queue_snapshot); снимается после решения.
+            task["_settling"] = True
+            # ВНИМАНИЕ: статус DONE ставится ЗДЕСЬ, а файлы кладутся, переносятся,
+            # перетегируются, переименовываются и попадают в манифест НИЖЕ. То
+            # есть «готово» человек видит раньше, чем результат существует в
+            # окончательном виде: обрыв в этом окне (падение, перезапуск) оставит
+            # зелёную задачу без единого файла и без записи в манифесте — ровно
+            # это и получилось 15.08.2026, когда сервер перезапустили сразу после
+            # «done» (повтор той же загрузки отработал начисто, движок ни при чём).
+            # Поэтому «получилось» в матрицу доступности пишем НЕ отсюда, а ниже —
+            # из ветки, где файлы уже НАЙДЕНЫ на диске.
+            # Capture the exact output directory from engine JSON/log output
+            # so /api/download-file can find the files without guessing.
+            save_dir = eng.extract_save_dir(log_text)
+            # Also capture the EXACT files this task saved (issue #19): two parallel
+            # Apple tasks can share an output dir, so the manifest must not be built
+            # by a blind directory glob. getattr → engines without it just fall back.
+            try:
+                _ef = getattr(eng, "extract_save_files", None)
+                task["_engine_files"] = _ef(log_text) if _ef else None
+            except Exception:
+                task["_engine_files"] = None
+            # Apple Go downloaders (zhaarey/gamdl) write to a bare <base>/<quality>/
+            # root; sweep any stragglers under apple/ so they're never orphaned at
+            # the downloads root (orphaned = invisible to the manifest = "downloaded
+            # but delivered nothing"). If the engine log gave no dir but the sweep
+            # moved exactly ONE release, that's almost certainly THIS task's output
+            # → adopt it so the marker/manifest still get written and delivery
+            # happens. More than one moved → too ambiguous to attribute, leave it
+            # (files are at least correctly placed now).
+            # Only sweep the bare root as a FALLBACK when the engine gave no dir.
+            # On the common path save_dir is known and `_relocate_to_service_folder`
+            # below moves THIS task's own dir — safe under parallel zhaarey. A blind
+            # sweep on every success could grab a concurrent task's in-progress dir.
+            if (not save_dir) and (task.get("service") in ("apple", "")) and engine_name == "zhaarey":
+                _reclaimed = _reclaim_bare_apple(_config)
+                if len(_reclaimed) == 1:
+                    save_dir = _reclaimed[0]
+                    task["log"].append(f"[reclaim] adopted orphaned output: {save_dir}")
+            if save_dir:
+                # Engine-agnostic layout fix: re-home output that landed at a bare
+                # <base>/<quality>/… (Apple's Go downloaders) under the canonical
+                # <base>/<service>/<quality>/… so the downloads folder stays uniform.
+                save_dir = _relocate_to_service_folder(save_dir, task.get("service") or "",
+                                                       quality, _config)
+                task["_save_dir"] = save_dir
+                # Write marker file so download.py can find this dir by task ID
+                try:
+                    from ripster.task_marker import write_marker as _write_marker
+                    _write_marker(Path(save_dir), tid, task)
+                except Exception:
+                    pass
+                # Optional post-download transcode → one uniform output format
+                # (Settings `transcode-format`, all services). The selector is
+                # AUTHORITATIVE once present — an explicit "" means native/no-convert
+                # and must override the legacy booleans (otherwise a stale
+                # transcode-mp3=true would silently re-enable conversion). Legacy
+                # booleans are only consulted when the new key was never set.
+                if "transcode-format" in _config:
+                    _tc_target = (_config.get("transcode-format") or "").strip().lower()
+                else:
+                    _tc_target = ("flac" if _config.get("transcode-flac")
+                                  else "mp3" if _config.get("transcode-mp3") else "")
+                if _tc_target in _TRANSCODE_TARGETS:
+                    _tc_label = {"mp3": "MP3 320", "flac": "FLAC", "alac": "ALAC"}[_tc_target]
+                    await _broadcast(_i18n.log_event("console.transcode_start", level="info",
+                                                     task_id=tid, label=_tc_label))
+                    n = await asyncio.to_thread(_transcode_dir, save_dir, _tc_target)
+                    await _broadcast(_i18n.log_event("console.transcode_done", level="success",
+                                                     task_id=tid, label=_tc_label, n=n))
+            # Post-process: fix slash-joined artist tags (Deezer writes "A / B / C")
+            _apply_fix_artists(task, tid)
+            # Apple wrong-storefront placeholder fixer — MUST run before rename so
+            # 'AppleMusic'-junk files get real catalog tags first (else rename locks
+            # them in as 'AppleMusic 01'). No-op unless the files are actually broken.
+            await _apply_apple_placeholder_fix(task, tid)
+            # Post-process: re-tag CJK-localised metadata via ISRC lookup, then
+            # rename every file so the filename matches the corrected tags.
+            if _config.get("auto-retag", True):
+                await _apply_retag(task, tid)
+            # BBC-only: write comprehensive tags (artist/DJ, title, album, date,
+            # genre, comment) BEFORE rename so the filename uses enriched metadata.
+            _apply_bbc_tags(task, tid)
+            # orpheus_spotify keeps OrpheusDL's OWN filenames: it skips already-
+            # downloaded tracks by its own naming on auto-retry. Renaming them to
+            # the {artist} - {title} template would hide those files from that
+            # skip-check → re-download → byte-identical _2/_3 duplicates. So don't
+            # rename native-Spotify output (the bot delivers by embedded tags
+            # anyway, so the on-disk filename doesn't matter for quality/labels).
+            # bbc_live строит имя САМ («Канал - Выпуск (дата).m4a», 24.09.2026):
+            # шаблон «01. Artist - Title» ломает его, а пустые теги live-записей
+            # рождали «00. -.m4a». Именованные файлы движка не трогаем.
+            if engine_name not in ("orpheus_spotify", "bbc_live"):
+                _apply_rename(task, tid)
+            # ReplayGain: measure loudness and write tags.  After rename so the
+            # files are at their final paths.  No-op unless write-replaygain=true.
+            _apply_replaygain(task, tid)
+            # Тексты для сервисов без своих (пословный > построчный > голый).
+            await _apply_lyrics_universal(task, tid, engine_name)
+            # Uniform folder cover.jpg for every service (extract embedded art if
+            # the engine didn't drop a sidecar). Before disc-split so it lands at
+            # the album root, above any CD 1/CD 2 subfolders.
+            _apply_cover_to_folder(task, tid)
+            # Multi-disc → per-disc folders (CD 1/, CD 2/…), universal across all
+            # services. No-op for single-disc releases and for engines that already
+            # split into disc subfolders. Done before the manifest so it records
+            # the final (moved) paths.
+            if _config.get("disc-subfolders", True):
+                try:
+                    _sd = task.get("_save_dir")
+                    if _sd:
+                        _nd = await asyncio.to_thread(_organize_discs, _sd)
+                        if _nd:
+                            await _broadcast(_i18n.log_event("console.discs_organized", level="info",
+                                                             task_id=tid, n=_nd))
+                except Exception as _e:
+                    print(f"[discs] {_e}", flush=True)
+            # ── Record the download manifest (THE durable map: task → dir + files).
+            # Done here, after all post-processing, so the file list is final. The
+            # serving endpoints read this first and never have to guess the folder.
+            try:
+                from ripster import download_manifest as _dm
+                from ripster.routes.download import (
+                    _get_task_dir as _gtd, _task_delivery_files as _tdf)
+                final_dir = task.get("_save_dir")
+                d = Path(final_dir) if final_dir else None
+                if not (d and d.is_dir()):
+                    d = _gtd(task)          # robust resolver at the freshest moment
+                if d and d.is_dir():
+                    task["_save_dir"] = str(d)
+                    # ── Одна папка — один релиз (страховка). Движок не смог
+                    # отличить издание до старта (нет version, манифест был пуст)
+                    # — и чужой релиз сидит в этой же папке: уносим СВОИ файлы
+                    # в соседнюю папку с суффиксом. Ничего чужого не удаляется
+                    # и не перезаписывается (24.09.2026, NORTHERN EXPOSURE).
+                    try:
+                        from ripster import release_folders as _rfs
+                        _spl = await asyncio.to_thread(
+                            _rfs.separate_collided_files, task, d,
+                            (task.get("service") or "release").lower(),
+                            task.get("url") or url or "")
+                        if _spl:
+                            print(f"[release-split] {_dm.short_id(tid)} → {_spl.name}", flush=True)
+                            await _broadcast(_i18n.log_event("console.release_split",
+                                                             level="info", task_id=tid,
+                                                             dir=_spl.name))
+                            d = _spl
+                            task["_save_dir"] = str(d)
+                            try:
+                                from ripster.task_marker import write_marker as _wm
+                                _wm(d, tid, task)
+                            except Exception:
+                                pass
+                    except Exception as _sp_e:
+                        print(f"[release-split] {_sp_e}", flush=True)
+                    # Разнодисковые у streamrip сюда доходят впервые: ранний
+                    # блок disc-subfolders работает по task["_save_dir"], а
+                    # движок его не выдаёт (extract_save_dir пуст). Идемпотентно:
+                    # уже разобранный релиз вернёт 0.
+                    if _config.get("disc-subfolders", True):
+                        try:
+                            _nd = await asyncio.to_thread(_organize_discs, str(d))
+                            if _nd:
+                                await _broadcast(_i18n.log_event("console.discs_organized",
+                                                                 level="info",
+                                                                 task_id=tid, n=_nd))
+                        except Exception as _e:
+                            print(f"[discs] {_e}", flush=True)
+                    # Qobuz: streamrip tags only the primary `performer` → collabs
+                    # land with ONE artist and no composer. Re-derive the FULL credits
+                    # from the Qobuz API (per-track credits) and rewrite ARTIST +
+                    # COMPOSER. Runs HERE, on the robustly-resolved delivered folder
+                    # `d` — the earlier `if save_dir:` gate never fired for streamrip
+                    # (its extract_save_dir returns empty), so the retag was silently
+                    # skipped for every Qobuz download.
+                    if task.get("service") == "qobuz":
+                        try:
+                            import re as _re_q
+                            _u = task.get("url") or url or ""
+                            _am = _re_q.search(r'/album/(?:[^/]+/)?([A-Za-z0-9]{6,})', _u)
+                            if _am:
+                                from ripster.engines.qobuz_retag import retag_qobuz_album
+                                _rn = await retag_qobuz_album(_am.group(1), _cfg_view, str(d))
+                                print(f"[qobuz-retag] {_am.group(1)} → {_rn} file(s) retagged", flush=True)
+                                if _rn:
+                                    task.setdefault("log", []).append(
+                                        f"[qobuz] artist/composer tags fixed: {_rn} file(s)")
+                            else:
+                                print(f"[qobuz-retag] no album id in url {_u!r}", flush=True)
+                        except Exception as _re_e:
+                            import traceback as _tb
+                            print(f"[qobuz-retag] FAILED: {_re_e}\n{_tb.format_exc()[:500]}", flush=True)
+                    # SoundCloud: папка и метка качества — по ЗАМЕРУ файла, а не
+                    # по запрошенному пресету (25.09: «AAC 256» крыла 160 кбит/с).
+                    # Двигаем до манифеста, чтобы record() записал настоящий путь.
+                    _mv = await _sc_relabel_to_actual(task, d, tid)
+                    if _mv:
+                        d = _mv
+                    # Манифест = СПИСОК ЭТОЙ ЗАДАЧИ, а не россыпь папки качества:
+                    # сингл, скачанный до фикса раскладки deemix, лежит в
+                    # `<service>/<quality>/` среди чужих файлов, и слепой glob
+                    # записал бы соседей в выдачу гостю (routes/download.py:
+                    # `_task_delivery_files`). Обычную папку релиза он не меняет.
+                    audio = _tdf(task, d)
+                    # Issue #19: if the engine reported the EXACT files it saved,
+                    # keep only those so a shared output dir can't leak a parallel
+                    # task's files. Rename-aware: a stale post-retag filter that
+                    # would drop real files falls back to the full glob (see helper).
+                    audio = _filter_engine_files(audio, task.get("_engine_files"))
+                    # Папка артиста/чужого одноимённого релиза: только файлы этой задачи.
+                    audio = _narrow_to_this_task(audio, task)
+                    task["_files"] = [f.name for f in audio]
+                    _dm.record(tid, str(d), audio, task)
+                    print(f"[manifest] {_dm.short_id(tid)} → {d.name} ({len(audio)} files)", flush=True)
+                    # Архив «Артист - Название [качество].zip» рядом с папкой релиза.
+                    # Флаг задачи `zip` главнее глобального `zip-releases`.
+                    _zv = task.get("zip")
+                    if (_zv if _zv is not None else _config.get("zip-releases", False)):
+                        try:
+                            from ripster.release_zip import pack_release as _pack
+                            _zp = await asyncio.to_thread(
+                                _pack, audio, d, task.get("meta"), d.name)
+                            if _zp:
+                                task["_zip_name"] = _zp.name
+                                print(f"[zip] {_dm.short_id(tid)} → {_zp.name}", flush=True)
+                        except Exception as _ze:  # noqa: BLE001
+                            print(f"[zip] {_dm.short_id(tid)}: {type(_ze).__name__}: {_ze}", flush=True)
+                    # ВОТ ТЕПЕРЬ «получилось» — файлы найдены на диске, а не
+                    # заявлены движком. Матрица доступности должна опираться на
+                    # самое твёрдое доказательство, какое у нас есть.
+                    if audio:
+                        await _record_availability(task, "ok")
+                    # Integrity verify: "done" only proves the engine THINKS it
+                    # saved the file — decode-check it for real. ALAC failures get
+                    # one auto-repair pass (utils/alacfix, via the compiled Go
+                    # binary's standalone --fix-alac mode); anything else that
+                    # fails is reported, never hidden, but never blocks delivery.
+                    if _config.get("integrity-verify", True) and audio:
+                        try:
+                            from ripster.integrity_verify import verify_and_repair
+                            _iv = await asyncio.to_thread(verify_and_repair, audio, _config)
+                            if _iv["fixed"]:
+                                task.setdefault("log", []).append(
+                                    f"[integrity] repaired: {', '.join(_iv['fixed'])}")
+                                await _broadcast(_i18n.log_event("console.integrity_fixed", level="success",
+                                                                 task_id=tid, n=len(_iv["fixed"])))
+                            if _iv["corrupt"]:
+                                task.setdefault("log", []).append(
+                                    f"[integrity] still failing decode-check: {', '.join(_iv['corrupt'])}")
+                                task["_integrity_corrupt"] = _iv["corrupt"]
+                                await _broadcast(_i18n.log_event("console.integrity_corrupt", level="warn",
+                                                                 task_id=tid, n=len(_iv["corrupt"])))
+                            # Страж понижения качества: не молчать, если вместо
+                            # запрошенного lossless приехал lossy (подробности и
+                            # лестница действий — в докстринге _guard_quality_mismatch).
+                            await _guard_quality_mismatch(task, audio, tid)
+                        except Exception as _iv_e:
+                            print(f"[integrity] verify skipped: {_iv_e}", flush=True)
+                else:
+                    # Канарейка качает в СОБСТВЕННУЮ temp-папку вне save-роотов
+                    # библиотеки, а общий `_get_task_dir` валидирует путь через
+                    # `_safe_path` по этим роотам — поэтому никогда её не находит
+                    # и печатал «dir unresolved at completion», даже когда FLAC
+                    # был скачан (031№2, ложно-красная канарейка, проход 20:12).
+                    # Папка задачи канарейки authoritative: берём её напрямую и
+                    # фиксируем скачанные файлы. Обычные задачи в эту ветку не
+                    # заходят (у них `source != download_canary`).
+                    _cd = (Path(task.get("_canary_save_path") or task.get("_base_save_path") or "")
+                           if task.get("source") == "download_canary" else None)
+                    _cf = []
+                    if _cd is not None and _cd.is_dir():
+                        _cf = [p for p in _cd.rglob("*")
+                               if p.is_file() and p.suffix.lower() in
+                               (".flac", ".m4a", ".mp3", ".ogg", ".opus", ".wav",
+                                ".alac", ".aiff", ".aac")]
+                    if _cf:
+                        task["_save_dir"] = str(_cd)
+                        task["_files"] = [p.name for p in _cf]
+                        try:
+                            _dm.record(tid, str(_cd), _cf, task)
+                        except Exception:
+                            pass
+                        print(f"[manifest] {_dm.short_id(tid)} → canary {_cd.name} "
+                              f"({len(_cf)} files)", flush=True)
+                    else:
+                        print(f"[manifest] {_dm.short_id(tid)} — dir unresolved at completion",
+                              flush=True)
+            except Exception as _e:
+                print(f"[manifest] record skipped: {_e}", flush=True)
+            # Silent-partial guard: the engine may report success while some tracks
+            # never landed (e.g. Apple wrapper "Invalid CKC" on a few tracks but the
+            # summary still says OK). Compare ACTUAL audio files on disk against the
+            # release's expected track count and surface a shortfall honestly —
+            # retry once in-place (skip-existing recovers transient failures), then
+            # report a clear PARTIAL instead of a misleading green "done".
+            _meta = task.get("meta") or {}
+            # `meta["tracks"]` с 23.09.2026 — СПИСОК треков (треклист при старте),
+            # а не число: int(list) падал в except, ожидание становилось 0, и
+            # страж недостачи молча выключался там, где trackCount не пришёл.
+            _mt = _meta.get("tracks")
+            if isinstance(_mt, list):
+                _mt = len(_mt)
+            if not _mt and isinstance(task.get("tracks"), list):
+                _mt = len(task["tracks"])
+            try:
+                _expected = int(_meta.get("trackCount") or _meta.get("totalTracks")
+                                or _mt or 0)
+            except Exception:
+                _expected = 0
+            # Apple's catalog metadata trackCount can be INFLATED — e.g. a phantom
+            # pre-order / region-locked / removed track that's still counted (the
+            # Mujhse soundtrack shows "8 songs" in OG metadata but only 7 are in
+            # the actual catalog tracklist). The engine prints an authoritative
+            # "have N/M" where M is the real per-storefront tracklist it walked, so
+            # trust that over the metadata to avoid a permanent false "7/8 partial".
+            _m_have = _re.search(r"\bhave\s+(\d+)\s*/\s*(\d+)\b", log_text)
+            if _m_have:
+                _expected = int(_m_have.group(2))
+            _got = len(task.get("_files") or [])
+            _shortfall = _expected > 1 and 0 < _got < _expected
+            # Some missing tracks are PERMANENTLY unavailable via this engine
+            # (e.g. gamdl AAC can't decrypt certain tracks → "Decryption is not
+            # available for media ID"; region-locked / removed tracks). Re-running
+            # never recovers them — worse, the retry can hit a transient network
+            # error on a healthy 4/6 and flip the whole task to "error". So when
+            # the shortfall is permanent, skip the retry and report PARTIAL with
+            # what we actually got (the user can grab the rest via the wrapper).
+            _permanent_miss = bool(_re.search(
+                r"Decryption is not available|not available in your country|"
+                r"Resource not found|no longer available|region|"
+                # Spotify/OrpheusDL: трек недоступен учётке — повтор даст то же
+                # самое (Srabon Megher Din, 20.09.2026: 2 из 11 так и не пришли)
+                r"is unavailable \(Cannot get alternative track\)", log_text, _re.I))
+            # Auto-complete a partial release ON ITS OWN — keep re-running (engines
+            # skip already-downloaded tracks) until it's whole or we stop making
+            # progress, so the user never has to press "повторить" 4 times. Bail
+            # out early when a pass adds NO new tracks (the rest is permanently
+            # missing) or the shortfall is a known-permanent one.
+            _MAX_PARTIAL_RETRY = 4
+            _pr = int(task.get("_partial_retry", 0))
+            _no_progress = _got == int(task.get("_last_got", -1))
+            # Предзаказ: до релиза дозагрузка бессмысленна — вместо ретраев
+            # честное «ожидает релиза» и план докачки на полночь страны учётки.
+            _po = _preorder_of(task) if _shortfall else None
+            if (_shortfall and not _permanent_miss and not _po
+                    and _pr < _MAX_PARTIAL_RETRY and not _no_progress):
+                _miss = _expected - _got
+                task["_partial_retry"] = _pr + 1
+                task["_last_got"]      = _got
+                await _broadcast(_i18n.log_event("console.topup_missing", level="warn", task_id=tid,
+                                                 got=_got, expected=_expected, miss=_miss,
+                                                 attempt=_pr + 1, max=_MAX_PARTIAL_RETRY))
+                await asyncio.sleep(3)
+                task.pop("_settling", None)
+                task["status"]      = "queued"
+                task["progress"]    = 0
+                # 27.09 (ночной аудит Qwen): журнал прошлой попытки нужен, чтобы назвать
+                # настоящую причину недобора; без него доборка классифицировалась
+                # по пустоте → ложное «сбой постобработки, повтор поможет».
+                task["_prior_log"] = ((task.get("_prior_log") or [])
+                                      + list(task.get("log") or [])[-300:])[-600:]
+                task["log"]         = []
+                task["_auto_retry"] = True   # gate the error/tracks_err retry paths
+                for _k in ("_start_time", "_done_time", "_save_dir",
+                           "_prog_total", "_prog_current"):
+                    task.pop(_k, None)
+                task["_in_retry"] = True
+                await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+            elif _shortfall:
+                _miss = _expected - _got
+                task["_partial"]  = True
+                task["_missing"]  = _miss
+                # Issue #5: carry a canonical, human reason for the shortfall so the
+                # delivery card / web history can say WHY N of M arrived — not just
+                # that some are missing. Classified from the engine log; runner
+                # already knows `_permanent_miss`, this just names it.
+                _reason = ("preorder" if _po
+                           else _classify_partial_reason(
+                               log_text + "\n" + "\n".join(task.get("_prior_log") or []),
+                               _permanent_miss))
+                task["_partial_reason"] = _reason
+                task.setdefault("meta", {})["_partial_reason"] = _reason
+                await _record_availability(task, _reason)
+                if _po:
+                    _preorder_plan(task, _po)
+                # Issue #5b: which tracks fell short (best-effort, engines that
+                # emit per-track failure lines). Empty for engines without a known
+                # format → card shows the aggregate reason above.
+                _failed = _extract_failed_tracks(log_text)
+                if _failed:
+                    task["_failed_tracks"] = _failed
+                    task.setdefault("meta", {})["_failed_tracks"] = _failed
+                # Issue #5b Phase 2: authoritative per-track shortfall + cross-
+                # service/retry routing from the source tracklist (works even when
+                # the engine log has no per-track lines). Bounded, best-effort.
+                try:
+                    _detail = await asyncio.wait_for(
+                        _resolve_shortfall_detail(task, _reason), timeout=8)
+                    if _detail:
+                        task["_shortfall_detail"] = _detail
+                        task.setdefault("meta", {})["_shortfall_detail"] = _detail
+                except Exception:
+                    pass
+                try:
+                    from ripster import download_manifest as _dm_sp
+                    _dm_sp.set_partial(tid, _got, _expected, _miss, _reason, _failed)
+                except Exception:
+                    pass
+                if _po:
+                    from ripster import preorder as _pom
+                    await _broadcast(_i18n.log_event(
+                        "console.partial_preorder", level="warn", task_id=tid,
+                        date=_pom.human_date(_po.get("release_date") or ""),
+                        cc=_po.get("cc") or "?",
+                        got=_got, expected=_expected, miss=_miss))
+                else:
+                    _pkey = ("console.partial_permanent" if _permanent_miss
+                             else "console.partial_region")
+                    await _broadcast(_i18n.log_event(_pkey, level="warn", task_id=tid,
+                                                     got=_got, expected=_expected, miss=_miss))
+            else:
+                await _broadcast(_i18n.log_event("console.done_tracks", level="success",
+                                                 task_id=tid, n=result.tracks_ok))
+            # Optional auto-merge of "(DJ Mix)" releases → one file + CUE.
+            try:
+                await _maybe_auto_mix(task, tid)
+            except Exception as _e:
+                print(f"[coder] auto-mix skipped: {_e}", flush=True)
+            # Решение принято, задача окончательна — теперь клиенты видят DONE.
+            if task.pop("_settling", None):
+                await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+        elif (result.tracks_err > 0
+              and not task.get("_auto_retry")
+              and not (int(result.tracks_ok or 0) > 0 and _preorder_of(task))
+              and not _wrapper_down_empty
+              and not _engine_aborted   # движок уже сказал «дальше бессмысленно»
+              # Брак по decode-check — не «недокачка»: второй прогон писал бы
+              # ПРЯМО СЕЙЧАС другую передачу под именем запланированной.
+              and not getattr(result, "corrupt", False)
+              and not (engine_name == "soundcloud"
+                       and "FairPlay" in (result.error or "")
+                       and result.tracks_ok == 0)):
+            # Partial failure — reset in-place (same tile, same ID).
+            # streamrip/gamdl skip already-downloaded tracks, so a second pass
+            # picks up the failed ones without re-downloading the successful ones.
+            n_ok  = result.tracks_ok
+            n_err = result.tracks_err
+            await _broadcast(_i18n.log_event("console.partial_retry", level="warn",
+                                             task_id=tid, n_ok=n_ok, n_err=n_err))
+            await asyncio.sleep(3)
+            task["status"]      = "queued"
+            task["progress"]    = 0
+            # 27.09 (ночной аудит Qwen): журнал прошлой попытки нужен, чтобы назвать
+            # настоящую причину недобора; без него доборка классифицировалась
+            # по пустоте → ложное «сбой постобработки, повтор поможет».
+            task["_prior_log"] = ((task.get("_prior_log") or [])
+                                  + list(task.get("log") or [])[-300:])[-600:]
+            task["log"]         = []
+            task["_auto_retry"] = True
+            for _k in ("_start_time", "_done_time", "_save_dir",
+                       "_prog_total", "_prog_current"):
+                task.pop(_k, None)
+            task["_in_retry"] = True   # tell finally to skip _add_to_history
+            await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+            await _broadcast(_i18n.log_event("console.autoretry_partial", level="info"))
+        else:
+            msg = result.error or _no_reason_msg(engine_name, rc, log_text)
+            if msg.startswith("ORPHEUS_NOT_AUTHED"):
+                await _broadcast({"type": "orpheus_not_authed"})
+            elif "-1002" in msg and engine_name in ("gamdl", "zhaarey"):
+                # Хендофф в лестницу/публичный wrapper — не терминал; судьбу
+                # решит обработчик в run_task (он же сверяет политику допуска).
+                # 18.09.2026.
+                task["_in_retry"] = True
+                raise _NeedAppleFallback()
+            elif "New settings detected" in msg or "обнаружены новые настройки" in msg:
+                # Задача не завершена — её перезапустит run_task. Без метки finally
+                # ниже видит «running», срабатывает SAFETY NET и в историю ложится
+                # ложная ошибка «внутреннее состояние running» (12–13.09.2026).
+                task["_in_retry"] = True
+                raise _NeedRetry()
+
+            # SoundCloud DRM-only fallback — Lucida can't decrypt FairPlay HLS,
+            # so try to match the track on Deezer/Qobuz/Apple by title+artist+
+            # duration and queue THAT as a fresh task. Opt-in via config so
+            # users who want SC-only results don't get auto-redirected.
+            if (
+                engine_name == "soundcloud"
+                and ("FairPlay" in msg or "ffmpeg" in msg.lower())
+                and not task.get("_sc_fallback_tried")
+                and bool(_config.get("sc-isrc-fallback", False))
+            ):
+                task["_sc_fallback_tried"] = True
+                asyncio.create_task(_sc_drm_fallback(task))
+
+            # Предзаказ и здесь решает: движок сорвался на альбоме, который
+            # ещё не вышел, — гонять ошибки по кругу бессмысленно. Отдаём, что
+            # есть (страховочная сетка ниже соберёт partial из файлов на диске),
+            # ставим план докачки и отпускаем задачу без ретраев.
+            _po_e = _preorder_of(task)
+            if _po_e:
+                _preorder_plan(task, _po_e)
+                _meta_e = task.get("meta") or {}
+                try:
+                    _exp_e = int(_meta_e.get("trackCount") or _meta_e.get("totalTracks") or 0)
+                except (TypeError, ValueError):
+                    _exp_e = 0
+                if _exp_e > 1:
+                    from ripster import preorder as _pom
+                    await _broadcast(_i18n.log_event(
+                        "console.partial_preorder", level="warn", task_id=tid,
+                        date=_pom.human_date(_po_e.get("release_date") or ""),
+                        cc=_po_e.get("cc") or "?", got=len(task.get("_files") or []),
+                        expected=_exp_e, miss=_exp_e - len(task.get("_files") or [])))
+
+            retry_n = task.get("_retry_count", 0)
+            # Transient wrapper overload → patient (many) retries; otherwise the
+            # normal small cap. Either way capped at 120s spacing (no hammering).
+            # Decrypt-core-down first (fewest retries — won't self-heal), then the
+            # patient wrapper-busy class, else the normal small cap.
+            if _RE_WRAPPER_DEAD.search(msg):
+                max_r = _MAX_DEAD_RETRIES
+            elif _RE_DECRYPT_DOWN.search(msg):
+                max_r = _MAX_DECRYPT_RETRIES
+            elif _RE_PATIENT.search(msg):
+                max_r = _MAX_PATIENT_RETRIES
+            else:
+                max_r = _MAX_AUTO_RETRIES
+            # Временный отказ каталога Apple (429 / сетевой сбой) отменяет ТОЛЬКО
+            # вердикт регулярки — не вердикт движка и не остальные предохранители.
+            _no_retry = (bool(_RE_NO_RETRY.search(msg))
+                         and not _apple_catalog_transient(msg))
+            can_retry = (
+                retry_n < max_r
+                and not _no_retry
+                and not _engine_aborted   # вердикт движка сильнее любой регулярки
+                and not task.get("_auto_retry")   # don't chain onto partial-fail retry
+                and not _po_e             # предзаказ: повтор до релиза ничего не добавит
+                # Битый по decode-check файл повтором не лечится: эфир — окно
+                # в прошлом, и новый прогон писал бы ПРЯМО СЕЙЧАС совсем другую
+                # передачу под именем запланированной (24.09.2026). Судьба
+                # таких файлов — восстановление, а не повтор.
+                and not getattr(result, "corrupt", False)
+            )
+            if can_retry:
+                delay = _RETRY_BACKOFF[min(retry_n, len(_RETRY_BACKOFF) - 1)]
+                # Trim long errors at a WORD boundary (not mid-word like the old
+                # msg[:120] → "…Повтори позже, выб") so the retry line reads clean.
+                _emsg = msg if len(msg) <= 160 else (msg[:160].rsplit(" ", 1)[0] + "…")
+                await _broadcast(_i18n.log_event("console.error_retry", level="warn", task_id=tid,
+                                                 msg=_emsg, n=retry_n + 1, max=max_r, delay=delay))
+                await asyncio.sleep(delay)
+                # Reset in-place: same tile, same ID, no new queue entry.
+                task["status"]       = "queued"
+                task["progress"]     = 0
+                # 27.09 (ночной аудит Qwen): журнал прошлой попытки нужен, чтобы назвать
+                # настоящую причину недобора; без него доборка классифицировалась
+                # по пустоте → ложное «сбой постобработки, повтор поможет».
+                task["_prior_log"] = ((task.get("_prior_log") or [])
+                                      + list(task.get("log") or [])[-300:])[-600:]
+                task["log"]          = []
+                task["_retry_count"] = retry_n + 1
+                for _k in ("_start_time", "_done_time", "_save_dir",
+                           "_prog_total", "_prog_current", "_apple_fallback"):
+                    task.pop(_k, None)
+                task["_in_retry"] = True   # tell finally to skip _add_to_history
+                await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+                await _broadcast(_i18n.log_event("console.autoretry_n", level="info",
+                                                 n=retry_n + 1, max=max_r))
+            else:
+                # ── Salvage-from-disk ────────────────────────────────────────
+                # The process failed/hung (e.g. the Apple Go tool downloads a
+                # track, then stalls before printing "Completed" and the watchdog
+                # kills it). If REAL audio files actually landed on disk, deliver
+                # them as a partial result instead of throwing the download away.
+                # Strictly guarded: only salvages when audio files genuinely exist.
+                salvaged = False
+                try:
+                    from ripster.routes.download import (
+                        _get_task_dir as _gtd, _find_audio_files as _faf)
+                    from ripster import download_manifest as _dm
+                    _d = _gtd(task)
+                    # Apple Go output lands at a bare <base>/<quality>/ root. Re-home
+                    # it under <service>/ BEFORE recording — otherwise a CKC/partial
+                    # salvage leaves a bare orphan folder at the downloads root (the
+                    # success path relocates; the salvage path used to skip it).
+                    if _d and _d.is_dir() and _faf(_d):
+                        _d = Path(_relocate_to_service_folder(
+                            str(_d), task.get("service") or "", quality, _config))
+                    _audio = _faf(_d) if (_d and _d.is_dir()) else []
+                    # Файл, который движок проверил декодером и признал браком,
+                    # — НЕ «реальные файлы на диске»: выдать его за partial
+                    # означало бы соврать второй раз. Для corrupt — путь
+                    # восстановления ниже, а не сюда.
+                    if _audio and not getattr(result, "corrupt", False):
+                        task["_save_dir"] = str(_d)
+                        task["_files"]    = [f.name for f in _audio]
+                        _dm.record(tid, str(_d), _audio, task)
+                        try:
+                            from ripster.task_marker import write_marker as _wm
+                            _wm(_d, tid, task)
+                        except Exception:
+                            pass
+                        _try_advance_task(task, TaskStatus.DONE)
+                        task["progress"]   = 100
+                        task["_done_time"] = time.time()
+                        _disk_full_b = _disk_completeness(task, _audio)
+                        if not _disk_full_b:
+                            task["partial"]    = True   # bot shows ↺ + "N из M"
+                            _pr_b = _classify_partial_reason(
+                                "\n".join(task.get("log") or []), False)
+                            task["_partial_reason"] = _pr_b
+                            task.setdefault("meta", {})["_partial_reason"] = _pr_b
+                        await _broadcast(_i18n.log_event("console.salvaged_disk", level="warn",
+                                                         task_id=tid, msg=msg[:80], n=len(_audio),
+                                                         complete=_disk_full_b))
+                        await _broadcast({"type": "queue_update",
+                                          "queue": _queue_snapshot()})
+                        salvaged = True
+                        print(f"[salvage] {_dm.short_id(tid)} → {_d.name} "
+                              f"({len(_audio)} files)", flush=True)
+                except Exception as _e:
+                    print(f"[salvage] failed: {_e}", flush=True)
+
+                if not salvaged:
+                    if _po_e:
+                        # Движок всё же сорвался ДО релиза (меты ещё не было на
+                        # стартовом шлюзе). Ни файлов, ни пользы — не писать
+                        # ошибку, тост и ⛔: план уже заведён выше, карточка
+                        # переходит в «ожидает релиза» (как на шлюзе).
+                        if not task.get("_preorder_wait"):
+                            _preorder_plan(task, _po_e)
+                        if task.get("_preorder_wait"):
+                            _try_advance_task(task, TaskStatus.SCHEDULED)
+                            task["progress"] = 0
+                            task["_in_retry"] = True   # ни истории, ни страховки
+                            await _broadcast({"type": "queue_update",
+                                              "queue": _queue_snapshot()})
+                            return
+                    task["error"] = msg
+                    # Причина отказа нужна и при ПОЛНОМ провале, а не только при
+                    # частичной загрузке. 14.08.2026 два Beatport-релиза упали с
+                    # 403 «нет прав» — токен причины не проставился ни у одного,
+                    # потому что классификатор жил только в ветке недокачки. А
+                    # полный отказ по правам — как раз главный повод взять другую
+                    # учётку, и решать это не по чему.
+                    _fail_reason = _classify_partial_reason(msg, False)
+                    task["_partial_reason"] = _fail_reason
+                    task.setdefault("meta", {})["_partial_reason"] = _fail_reason
+                    # ── СЛЕДУЮЩАЯ УЧЁТКА ТОГО ЖЕ СЕРВИСА ────────────────────
+                    # «Нет смысла от пяти акков, если релиз, доступный по
+                    # дополнительным, выдаёт ошибку». Перебор МОЛЧАЛИВЫЙ: человек
+                    # видит итог, а не промежуточные отказы, — поэтому здесь нет
+                    # ни тоста, ни console-события, только запись в task["log"].
+                    # Что считать поводом, а что нет — в ripster/account_fallback.py
+                    # (сетевые и врапперные аварии не повод: сожжём все учётки на
+                    # одной аварии). Предел и терминальный статус обязательны,
+                    # иначе получим ровно `ripster-runaway-runs`.
+                    try:
+                        from ripster import account_fallback as _afb
+                        if _afb.should_try_next(task, engine_name, _fail_reason, _config):
+                            _n = len(_afb.tried_slots(task, engine_name))
+                            task["log"].append(
+                                f"─── учётка {_n} отказала ({_fail_reason}) → "
+                                f"пробую следующую ───")
+                            print(f"[account-fallback] {engine_name}: слот "
+                                  f"{_afb.tried_slots(task, engine_name)} → следующий "
+                                  f"(причина {_fail_reason})", flush=True)
+                            task["status"]   = "queued"
+                            task["progress"] = 0
+                            # 27.09 (ночной аудит Qwen): журнал прошлой попытки нужен, чтобы назвать
+                            # настоящую причину недобора; без него доборка классифицировалась
+                            # по пустоте → ложное «сбой постобработки, повтор поможет».
+                            task["_prior_log"] = ((task.get("_prior_log") or [])
+                                                  + list(task.get("log") or [])[-300:])[-600:]
+                            task["log"]      = []
+                            for _k in ("_start_time", "_done_time", "_save_dir",
+                                       "_prog_total", "_prog_current"):
+                                task.pop(_k, None)
+                            task["_in_retry"] = True   # finally пропустит историю
+                            await _broadcast({"type": "queue_update",
+                                              "queue": _queue_snapshot()})
+                            return
+                    except Exception as _e_afb:                     # noqa: BLE001
+                        print(f"[account-fallback] не сработал: {_e_afb!r}", flush=True)
+                    await _record_availability(task, _fail_reason)
+                    # ── Фоллбэк «взять то же в другом сервисе» ───────────────
+                    # Сюда доходит только ПОЛНЫЙ отказ: хоть один трек лежал бы на
+                    # диске — сработал salvage выше. Поэтому повтор релиза целиком
+                    # на Qobuz/Tidal/Deezer ничего не дублирует.
+                    # В ветке частичной недодачи (`elif _shortfall`) фоллбэк
+                    # намеренно НЕ зовётся: там Spotify уже отдал часть, а у
+                    # Spotify-меты нет поштучных ISRC (только UPC альбома), так что
+                    # единственным шагом был бы целый релиз заново — дубли того, что
+                    # лежит. Для таких задач карточка показывает список
+                    # `cross_service` и кнопку конверта (раздел D отчёта).
+                    if (engine_name == "orpheus_spotify"
+                            and (_no_retry or _engine_aborted)
+                            and task.get("source") != "download_canary"
+                            and not task.get("_sp_fb_tried")):
+                        task["_sp_fb_tried"] = True
+                        asyncio.create_task(_spotify_unavailable_fallback(task))
+                    # Тот же запасной путь для остальных сервисов: права/гео/
+                    # мёртвая сессия (пул учёток уже перебран и не помог).
+                    # Задача, которая САМА пришла из запасного пути, дальше не
+                    # прыгает: иначе два упрямых отказа гоняли бы релиз по
+                    # всему кругу.
+                    if (str(task.get("service") or "").lower() in _PR_FB_SERVICES
+                            and (_no_retry or _engine_aborted)
+                            and _fail_reason in _PR_FB_REASONS
+                            and task.get("source") != "download_canary"
+                            and not task.get("_fallback_origin")
+                            and not task.get("_pr_fb_tried")):
+                        task["_pr_fb_tried"] = True
+                        asyncio.create_task(_permanent_fail_fallback(
+                            task, stepdown_on_miss=True))
+                    _try_advance_task(task, TaskStatus.ERROR)
+                    await _broadcast({"type": "log", "msg": f"✗ {msg}", "level": "error", "task_id": tid})
+                    # Битый BBC-эфир не бросаем: сначала спасаем честные 320 из
+                    # самого файла, копия BBC Sounds — только подпись-запас
+                    # (24.09.2026, порядок 4a→4b согласован с владельцем).
+                    if getattr(result, "corrupt", False) and engine_name == "bbc_live":
+                        asyncio.create_task(_bbc_live_recover(task, tid, eng))
+
+    except asyncio.CancelledError:
+        r = _qs.get_runner(tid)
+        if r is not None:
+            await r.cancel()
+        if task.pop("_pause_requested", False):
+            # Admin paused a RUNNING task: kill the engine but keep the task held
+            # (status 'paused' → runner skips it). Resume re-runs the engine, which
+            # skips already-downloaded tracks (skip-existing), so it finishes fast.
+            task["status"] = "paused"
+            try:
+                await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+            except Exception:
+                pass
+        else:
+            _try_advance_task(task, TaskStatus.CANCELLED)
+        raise
+    except _NeedAppleFallback:
+        raise
+    except _NeedZhaareyFallback:
+        raise
+    except _NeedRetry:
+        raise
+    except Exception as e:
+        import traceback
+        msg_e = str(e)
+        task["error"] = f"Engine error: {msg_e}"
+        _try_advance_task(task, TaskStatus.ERROR)
+        task["log"].append(f"Engine error: {msg_e}")
+        await _broadcast({"type": "log", "msg": f"✗ Engine error: {msg_e}", "level": "error", "task_id": tid})
+        if msg_e.startswith("ORPHEUS_NOT_AUTHED"):
+            await _broadcast({"type": "orpheus_not_authed"})
+        traceback.print_exc()
+    finally:
+        # Любой выход (исключение посреди постобработки) — метка «оседает» не
+        # должна навсегда прятать DONE от клиентов.
+        if task.pop("_settling", None):
+            try:
+                await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+            except Exception:
+                pass
+        # Release the pool wrapper slot back for the next Apple task (every exit
+        # path passes here, including auto-retry re-queue and fallbacks).
+        if _pool is not None and _pool_slot is not None:
+            try:
+                _pool.release(_pool_slot)
+            except Exception:
+                pass
+            try:
+                from ripster import wrapper_pool as _wp_rel
+                await _broadcast({"type": "pool_update", "pool": _wp_rel.live_status()})
+            except Exception:
+                pass
+        if _td_pool is not None and _td_slot is not None:
+            try:
+                _td_pool.release(_td_slot)
+            except Exception:
+                pass
+        if _dz_pool is not None and _dz_slot is not None:
+            try:
+                _dz_pool.release(_dz_slot)
+            except Exception:
+                pass
+            try:
+                from ripster import deezer_pool as _dzp_rel
+                await _broadcast({"type": "deezer_pool_update", "pool": _dzp_rel.live_status(_config)})
+            except Exception:
+                pass
+        # Spotify: пул держит ЛОК на всё время прогона — освободить обязательно,
+        # иначе следующая загрузка Spotify встанет навсегда.
+        if _sp_slot is not None:
+            try:
+                from ripster import spotify_pool as _spp_rel
+                _spp_rel.release()
+            except Exception:
+                pass
+        if _qz_pool is not None and _qz_slot is not None:
+            try:
+                _qz_pool.release(_qz_slot)
+            except Exception:
+                pass
+            try:
+                from ripster import qobuz_pool as _qzp_rel
+                await _broadcast({"type": "qobuz_pool_update", "pool": _qzp_rel.live_status(_config)})
+            except Exception:
+                pass
+        if _sc_pool is not None and _sc_slot is not None:
+            try:
+                _sc_pool.release(_sc_slot)
+            except Exception:
+                pass
+            try:
+                from ripster import soundcloud_pool as _scp_rel
+                await _broadcast({"type": "soundcloud_pool_update", "pool": _scp_rel.live_status(_config)})
+            except Exception:
+                pass
+        if _yx_pool is not None and _yx_slot is not None:
+            try:
+                _yx_pool.release(_yx_slot)
+            except Exception:
+                pass
+            try:
+                from ripster import yandex_pool as _yxp_rel
+                await _broadcast({"type": "yandex_pool_update", "pool": _yxp_rel.live_status(_config)})
+            except Exception:
+                pass
+        # Skip history when the task was reset in-place for auto-retry —
+        # it's still queued and will be re-run by process_queue().
+        if task.pop("_in_retry", False):
+            pass
+        else:
+            # SAFETY NET (TASKS_NEXT #4): every task MUST leave run_task in a
+            # terminal state. A run that ends still 'queued'/'running' — e.g. an
+            # early failure whose `_try_advance_task(ERROR)` was rejected as an
+            # illegal QUEUED→ERROR move — used to slip past `_add_to_history`
+            # (it drops non-terminal status) AND past process_queue's "no active,
+            # no queued → finished" break, so the task vanished with no history
+            # row and no error status. Force it terminal here so it's always
+            # visible as a failure instead of "потерялась".
+            if not _task_is_terminal(task):
+                _cur = _task_state(task).value
+                # Переход теперь ЗАКОННЫЙ (task_state: QUEUED→ERROR), поэтому
+                # идём через модель, а не мимо неё: прямое присваивание было
+                # обходом, который сам же модуль и запрещает.
+                _try_advance_task(task, TaskStatus.ERROR)
+                if not task.get("error"):
+                    # Движок мог напечатать НАСТОЯЩИЙ приговор («✗ Apple не выдал
+                    # ключ (Invalid CKC)…») и всё равно завершить генератор без
+                    # терминального error-события — тогда SAFETY NET ловит
+                    # «running», а генерик «повтори загрузку» и врёт (Invalid CKC
+                    # повтором не лечится), и прячет причину. Сначала честно берём
+                    # вердикт из лога; общий текст — только если приговора реально
+                    # нет. Так весь класс runner-stuck становится честным разом.
+                    # 18.09.2026 (Apple Invalid CKC ×N, spotify, wl_*).
+                    _verdict = _verdict_from_log(task)
+                    task["error"] = _verdict or (
+                        f"Задача завершилась без результата (внутреннее состояние "
+                        f"«{_cur}»). Так быть не должно — повтори загрузку; если "
+                        f"повторяется, пришли ссылку владельцу.")
+                task["status"] = TaskStatus.ERROR.value
+                print(f"[runner] SAFETY NET: task {str(tid)[:8]} left run_task "
+                      f"as '{_cur}' — forced to error", flush=True)
+            _add_to_history(task)
+        _qs.unregister_runner(tid)
+        _qs.proc = None
+
+
+# ── Task dispatcher ──────────────────────────────────────────────────────────
+
+# Which service(s) each engine can actually speak. Used by the sanity gate in
+# run_task() — an engine handed a URL from a service it doesn't know produces a
+# confusing "failure that looks like nothing happened" rather than a clean error.
+# Engines absent from this map are never re-routed (unknown → leave alone).
+_ENGINE_SERVICES: dict[str, frozenset] = {
+    "zhaarey":          frozenset({"apple"}),
+    "lite":             frozenset({"apple"}),   # Wrapper Lite: свой key-сервер
+                                                # или публичный враппер
+    "gamdl":            frozenset({"apple"}),
+    "qobuz":            frozenset({"qobuz"}),
+    "deezer":           frozenset({"deezer"}),
+    "tidal":            frozenset({"tidal"}),
+    "soundcloud":       frozenset({"soundcloud"}),
+    "sc_widevine":      frozenset({"soundcloud"}),
+    "orpheus_spotify":  frozenset({"spotify"}),
+    "zotify":           frozenset({"spotify"}),
+    "spotiflac":        frozenset({"spotify"}),
+    "orpheus_beatport": frozenset({"beatport"}),
+    "orpheus_jiosaavn": frozenset({"jiosaavn"}),
+    "yandex":           frozenset({"yandex"}),
+    "bbc":              frozenset({"bbc"}),
+    "bbc_live":         frozenset({"bbc"}),
+}
+
+
+def _sanity_route(task: dict, svc: str, engine: str, url: str) -> tuple[str, str]:
+    """Make sure *engine* can speak the service *url* belongs to.
+
+    `service`/`engine` used to default to apple/zhaarey when a task carried
+    neither, so ANY task that reached the runner without them — a legacy entry
+    restored from queue_pending.json, or an add-path that forgot to set them —
+    was handed to apple-music-downloader.exe. On 2026-07-27 that sent an
+    open.spotify.com album to the Apple Go tool: "Failed to get album response",
+    exit code 0, three retries, and the task vanished without a history row.
+
+    Fill in a missing service from the URL, and re-route the engine when it
+    provably cannot handle that service. An ALREADY-SET service is never
+    overwritten — the Spotify convert flow deliberately keeps service=spotify
+    while running an Apple URL through zhaarey, and `service` picks the save
+    folder, so rewriting it would move files.
+    """
+    if not url or not _detect_service:
+        return svc, engine
+    try:
+        url_svc = _detect_service(url) or ""
+    except Exception:
+        return svc, engine
+    if not url_svc or url_svc == "unknown":
+        return svc, engine
+
+    if not task.get("service"):
+        svc = url_svc
+        task["service"] = svc
+
+    allowed = _ENGINE_SERVICES.get(engine)
+    if allowed is not None and url_svc not in allowed:
+        try:
+            from ripster import service_layer as _sl
+            new_engine = _sl.engine_for_svc(url_svc) or ""
+        except Exception:
+            new_engine = ""
+        if new_engine and new_engine != engine and url_svc in _ENGINE_SERVICES.get(new_engine, frozenset()):
+            task.setdefault("log", []).append(
+                f"⚠ Движок «{engine}» не умеет {url_svc} — переключаюсь на «{new_engine}»")
+            task["engine"] = new_engine
+            engine = new_engine
+        else:
+            # Nothing can speak this URL. engine_for_svc() falls back to the APPLE
+            # default for every service it has no mapping for, so with the default
+            # spotify-engine=convert a raw open.spotify.com URL is handed straight
+            # BACK to apple-music-downloader.exe — the exact 2026-07-27 failure this
+            # gate exists to stop, and the gate silently no-ops on it. (Only
+            # spotify-engine=orpheus_spotify happens to route out of it.) Flag it
+            # instead; run_task raises inside its try so this lands as a named ERROR
+            # row rather than an exit-0 that looks like nothing happened.
+            task["_route_error"] = (
+                f"движок «{engine}» не умеет {url_svc} — задача не запущена "
+                f"(включи движок для {url_svc} в настройках)")
+    return svc, engine
+
+
+
+async def _guard_quality_mismatch(task: dict, audio: list, tid: str) -> bool:
+    """Страж понижения качества: FLAC просили — AAC приехал — молчать нельзя.
+
+    Молчание стоило фонотеке правды: папка называется по ЗАПРОШЕННОМУ качеству,
+    и lossy внутри неё выглядит как lossless (28.07.2026 AAC 268 в папке «FLAC»;
+    24.09.2026 14:01Z канарейка поймала AAC на beatport/hifi — прогон был
+    помечен зелёным). Причина того случая установлена из лога движка: в 17:01:09
+    «не удалось подтвердить тариф аккаунта» — живой запрос тарифа упал, кэш
+    known-good был пуст, OrpheusDL при неизвестном тарифе откатывается на
+    «medium» = AAC 128 (orpheus_beatport.py, _apply_settings). Через 6 минут
+    тариф подтвердился снова — то есть это транзиентный сбой токена/сети,
+    который надо лечить повтором, а не принимать как норму.
+
+    Лестница: один повтор со свежей сессией (битые-не-мы убиваются, движок
+    докачивает только их) → фоллбэк «взять то же на другой витрине» → честная
+    метка «скачано в пониженном качестве» + одно письмо владельцу в сутки.
+    True — задача снята с «готово» и перезапущена, дальше её судьбу решает
+    повторный проход.
+    """
+    try:
+        from ripster.integrity_verify import probe_codec
+        from ripster.engines import get_engine
+        qid = str(task.get("quality_requested") or task.get("quality") or "")
+        eng = str(task.get("engine") or "")
+        if not qid or not eng or not audio:
+            return False
+        # Политика качества: «skip» — не принимать понижение, а пометить задачу
+        # как пропущенную с причиной (владелец выбрал «только нужное качество»).
+        # «nearest» (по умолчанию) — обычная лестница: повтор → фоллбэк → принять.
+        policy = str(_config.get("quality-policy") or "nearest").strip().lower()
+        # Канарейка — сама сигнал: страж её не залечивает, нечего подменять
+        # проверяемый прогон собственными повторами (несовпадение кодека она
+        # честно валит сама, tools/download_canary.py).
+        if task.get("source") == "download_canary":
+            return False
+        try:
+            quals = get_engine(eng).qualities() or []
+        except Exception:
+            return False
+        q = next((x for x in quals if x.get("id") == qid), None)
+        if q is None:
+            return False
+        badge = str(q.get("badge") or "").upper()
+        ext = str(q.get("ext") or "").lower()
+        # Просили lossless? Опознаём и по РАСШИРЕНИЮ, и по badge — одного badge
+        # мало: у Beatport «hifi» стоит badge="FLAC", а не "LOSSLESS", и прежняя
+        # проверка по badge-слову молча пропускала ровно тот молчаливый
+        # AAC-даунгрейд 24.09 (и молчание 28.07 — он и тогда бы не сработал).
+        # ALAC — законный lossless внутри m4a (badge LOSSLESS у накрывает).
+        if not (ext in ("flac", "alac", "wav", "aiff")
+                or badge in ("LOSSLESS", "HI-RES", "24-BIT")):
+            return False                       # lossy/spatial просили осознанно
+        want_lbl = str(q.get("label") or qid)
+        lossy = []
+        for f in audio:
+            try:
+                info = await asyncio.to_thread(probe_codec, f)
+            except Exception:
+                info = None
+            if info and not info.get("lossless"):
+                lossy.append((f, info))
+        if not lossy:
+            return False
+        info = lossy[0][1]
+        got = str(info.get("codec") or "?").upper()
+        try:
+            kbps = int(info.get("bit_rate") or 0) // 1000
+        except (TypeError, ValueError):
+            kbps = 0
+        got_lbl = f"{got} {kbps}" if kbps else got
+        svc = str(task.get("service") or eng).upper()
+        task["quality_actual_codec"] = got.lower()
+
+        # ── Политика «skip»: не принимать понижение, пометить и остановить ────
+        if policy == "skip":
+            task["quality_downgraded"] = got_lbl
+            task["quality_wanted"] = want_lbl
+            task["quality_skip_reason"] = f"{svc}: wanted {want_lbl}, got {got_lbl}"
+            await _log_key("console.qd_skipped", "warn", tid,
+                           svc=svc, got=got_lbl, want=want_lbl)
+            return False
+
+        # ── Ступень 1: один повтор со свежей сессией ─────────────────────────
+        # Пропускаем её, когда о фактическом кодекe СКАЗАЛ САМ ДВИЖОК
+        # (quality_requested выставлен раннером): это не сбой токена, а ответ
+        # витрины — Яндекс на запрос FLAC вернул файл с quality="lossless", но
+        # codec=aac (27.09, album/5909). Повтор тем же токеном даёт тот же файл,
+        # а quality к тому моменту уже переписан на факт, то есть повтор просил
+        # бы уже lossy. Beatport-кейс 24.09 (тариф не подтвердился) сюда не
+        # попадает: тот движок quality_actual не сообщает, страж измеряет сам.
+        if not task.get("_qd_retry") and not task.get("quality_requested"):
+            task["_qd_retry"] = True
+            await _qd_refresh_credentials(task)
+            for f, _ in lossy:
+                try:
+                    f.unlink()                 # движок пропускает готовые файлы —
+                except OSError:                # без удаления повтор принёс бы то же AAC
+                    pass
+            dropped = {f.name for f, _ in lossy}
+            task["_files"] = [n for n in (task.get("_files") or [])
+                              if n not in dropped]
+            await _log_key("console.qd_retry", "warn", tid,
+                           svc=svc, got=got_lbl, want=want_lbl)
+            await asyncio.sleep(3)
+            task["status"]   = "queued"
+            task["progress"] = 0
+            # 27.09 (ночной аудит Qwen): журнал прошлой попытки нужен, чтобы назвать
+            # настоящую причину недобора; без него доборка классифицировалась
+            # по пустоте → ложное «сбой постобработки, повтор поможет».
+            task["_prior_log"] = ((task.get("_prior_log") or [])
+                                  + list(task.get("log") or [])[-300:])[-600:]
+            task["log"]      = []
+            for _k in ("_start_time", "_done_time", "_save_dir",
+                       "_prog_total", "_prog_current"):
+                task.pop(_k, None)
+            task["_in_retry"] = True   # finally пропустит историю
+            await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+            return True
+
+        # ── Ступень 2: то же самое, но на витрине, которая отдаёт FLAC ───────
+        if (not task.get("_qd_fb_tried") and not task.get("_fallback_origin")
+                and str(task.get("service") or "").lower() in _PR_FB_SERVICES):
+            task["_qd_fb_tried"] = True
+            await _permanent_fail_fallback(
+                task, try_key="console.qd_fb_try",
+                try_params={"got": got_lbl, "want": want_lbl})
+            if task.get("_fallback_target"):
+                return False       # спасатель качает ту же запись в requested quality
+
+        # ── Ступень 3: заменить нечем — сказать прямо и позвать владельца ────
+        task["quality_downgraded"] = got_lbl
+        task["quality_wanted"]     = want_lbl
+        await _log_key("console.qd_downgraded", "warn", tid,
+                       svc=svc, got=got_lbl, want=want_lbl)
+        await _qd_owner_notice(task, svc, got_lbl, want_lbl)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[quality-guard] skipped: {e}", flush=True)
+    return False
+
+
+_SC_Q_PROMISE_KBPS = {"hq": 256}   # единственное качество SC, которое что-то обещает
+
+
+async def _sc_relabel_to_actual(task: dict, d: Path, tid: str) -> "Path | None":
+    """SoundCloud: папку и метку качества выбирает ФАЙЛ, а не запрос.
+
+    «AAC 256» у SC — не обещание, а потолок тарифа: сервис даёт 256 только
+    когда у трека есть aac_256k И учётка Go+. 25.09.2026 часовик Anjunadeep
+    612 лежал в папке «AAC 256» с 160 кбит/с, и молчание было двойным: ни
+    строки в истории, ни метки на карточке. Здесь, ПОСЛЕ движка и ДО манифеста,
+    спрашиваем ffprobe: факт != имя папки — релиз переезжает в папку по замеру,
+    а task["quality"] переписывается на измеренное (история, манифест и карточки
+    читают его — дальше везде правда). Если же обещанное было ВЫШЕ фактического,
+    это громкая строка истории и карточки с ЧЕСТНОЙ причиной: не «не дожали»,
+    а «SoundCloud отдаёт этот трек только так» (страж lossless к таким кейсам
+    не ходит: тут lossy → lossy, и понижать нечем — потолок есть потолок).
+    Не измерили — не гадаем: ни переезда, ни метки.
+    """
+    try:
+        if str(task.get("service") or "").lower() != "soundcloud":
+            return None
+        from ripster import sc_transcoding as _sct
+        from ripster.integrity_verify import probe_codec
+        from ripster.routes.download import _find_audio_files as _faf
+        from ripster.service_config import _quality_folder_name
+        files = _faf(d)
+        if not files:
+            return None
+        info = await asyncio.to_thread(probe_codec, files[0])
+        fq = _sct.folder_quality(info.get("codec") or "", info.get("bit_rate") or "")
+        if not fq:
+            return None
+        got_lbl = _quality_folder_name("soundcloud", fq)
+        qid = str(task.get("quality") or "")
+        want_lbl = _quality_folder_name("soundcloud", qid) or qid
+        promised = _SC_Q_PROMISE_KBPS.get(qid)
+        try:
+            actual_kbps = int(info.get("bit_rate") or 0) // 1000
+        except (TypeError, ValueError):
+            actual_kbps = 0
+        # ── переезд: <base>/soundcloud/<запрошенное>/<релиз> → по замеру ──
+        sd = Path(task.get("_save_dir") or str(d)).resolve()
+        base = Path(_config.get("save-path") or "downloads").resolve()
+        svc_root = base / "soundcloud"
+        moved = None
+        if sd.parent.parent == svc_root and sd.is_dir() and sd.parent.name != got_lbl:
+            import shutil
+            dest = svc_root / got_lbl / sd.name
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                _merge_dir(sd, dest)
+                try:
+                    sd.rmdir()
+                except OSError:
+                    pass
+            else:
+                shutil.move(str(sd), str(dest))
+            moved = dest
+            task["_save_dir"] = str(dest)
+            try:
+                from ripster.task_marker import write_marker as _wm
+                _wm(dest, tid, task)
+            except Exception:
+                pass
+            print(f"[sc-relabel] {sd.parent.name} → {got_lbl}: {dest.name}", flush=True)
+        task["quality"] = fq            # дальше всё (история/манифест/карта) — по факту
+        if promised and actual_kbps and promised > actual_kbps:
+            task["quality_downgraded"] = got_lbl
+            task["quality_wanted"] = want_lbl
+            task["quality_note_key_override"] = "history.sc_qd_downgraded"
+            await _log_key("console.sc_qd_downgraded", "warn", tid,
+                           got=got_lbl, want=want_lbl)
+        return moved
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[sc-relabel] skipped: {e}", flush=True)
+        return None
+
+
+async def _qd_refresh_credentials(task: dict) -> None:
+    """Сбросить сессию сервиса перед повтором: чаще всего битый тариф/токен
+    и есть причина, по которой витрина отдала lower tier."""
+    eng = str(task.get("engine") or "")
+    if eng == "orpheus_beatport":
+        try:
+            from ripster.engines.orpheus_beatport import (
+                _invalidate_bp_session, _BP_AT_CACHE)
+            _BP_AT_CACHE["exp"] = 0.0
+            _invalidate_bp_session()
+        except Exception:
+            pass
+
+
+_QD_NOTICE_FILE = "logs/quality_downgrade_notice.json"
+
+
+async def _qd_owner_notice(task: dict, svc: str, got: str, want: str) -> None:
+    """Письмо владельцу о молчаливом понижении качества — не чаще раза в сутки,
+    иначе библиотека из 50 таких пролетов превращает уведомления в шум."""
+    import json as _j
+    try:
+        p = _BASE_DIR / _QD_NOTICE_FILE
+        last = ""
+        try:
+            if p.exists():
+                last = str(_j.loads(p.read_text(encoding="utf-8")).get("date") or "")
+        except Exception:
+            # Битый журнал («питание умерло посреди записи») не имеет права
+            # глушить письмо навсегда: нет читаемой даты — считаем, что сегодня
+            # владельца ещё не тревожили.
+            pass
+        today = datetime.now().strftime("%Y-%m-%d")
+        if last == today:
+            return
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(_j.dumps({"date": today}), encoding="utf-8")
+        except Exception:
+            pass
+        text = (f"🎧 {svc}: скачали отдали {got} вместо {want} — повтор и другие "
+                f"витрины не помогли\n{(task.get('url') or '')[:160]}")
+        from ripster.accounts_watch import _default_notify
+        await _default_notify(text, _BASE_DIR)
+    except Exception as e:                                    # noqa: BLE001
+        print(f"[quality-guard] owner notice skipped: {e}", flush=True)
+
+
+# Как враппер объясняет своё молчание — по-человечески в одну строку. Те же
+# самые коды уходят в `_ladder`, чтобы отчёт в истории был машинно читаемым.
+_BLOCK_LABELS = {
+    "device_limit": "лимит устройств",
+    "login_failed": "логин отклонён",
+    "no_session": "сессии нет",
+    "stopped": "контейнер остановлен",
+    "": "причина в журнале контейнера не найдена",
+}
+
+
+def _why_not_usable(h: dict) -> str:
+    """Одна строка: почему слот пропущен. «Не поднялся» — это ТРИ разных
+    состояния (контейнер мёртв / порт закрыт / порт жив, но внутри некому дать
+    ключ), и сваливать их в одно было ошибкой 22.09.2026."""
+    if not h.get("running"):
+        return "контейнер не поднят — " + _BLOCK_LABELS.get(h.get("reason") or "", "не поднят")
+    if not h.get("session"):
+        return ("порт жив, но учётка не даёт ключ: "
+                + _BLOCK_LABELS.get(h.get("reason") or "", "?"))
+    if not h.get("port_open"):
+        return "порт расшифровки не отвечает"
+    return "не готов"
+
+
+def _rung_in_catalog(avail, cc: str):
+    """True/False — есть ли релиз в витрине `cc` по каталогу Apple; None — не
+    выяснили. Пустой ответ `apple_album_by_storefront` означает «не известно», а
+    НЕ «нигде нет»: False при пустом каталоге был бы тем же враньём, что и
+    «нет прав в регионе»."""
+    if not avail:
+        return None
+    try:
+        return str(cc) in avail
+    except Exception:
+        return None
+
+
+def _rung_text(d: dict) -> str:
+    """Одна ступень перебора в человеческую строку: не «✗», а ЧТО именно
+    случилось. `in_catalog=None` значит «каталог не спрашивали/не ответили» — и
+    тогда про права региона молчим, потому что сказать об этом нечего."""
+    out = str(d.get("outcome") or "?")
+    tag = {"ok": "✓ дал ключ", "nokey": "ключа нет", "down": d.get("why") or "не готов"}.get(out)
+    if out == "nokey":
+        here = d.get("in_catalog")
+        tag = ("релиза в этой витрине нет" if here is False else
+               "релиз там есть, но ключа не дали" if here else
+               "ключа нет")
+    return f"{d.get('country')}[слот {d.get('slot')}: {tag or out}]"
+
+
+# Ссылки на фоновые задачи треклиста: create_task без переменной — и Gatherer
+# в любой момент может собрать coroutine до того, как она отработает.
+_TRACKLIST_TASKS: set = set()
+
+
+def _own_storefronts(config: dict, extra=()) -> set:
+    """Витрины, в которых у нас ЕСТЬ свой аккаунт (для режима «резерв по
+    региону»). Пустое множество честнее догадки: вызывающий тогда не утверждает,
+    что релиз «недоступен нигде у своих»."""
+    out: set = set()
+    try:
+        from ripster import wrapper_pool as _wp
+        for a in _wp.all_accounts(config or {}):
+            cc = str(a.get("country") or "").strip().lower()
+            if cc:
+                out.add(cc)
+    except Exception:                                       # noqa: BLE001
+        pass
+    for x in extra:
+        cc = str(x or "").strip().lower()
+        if cc:
+            out.add(cc)
+    return out
+
+
+def _lite_public_view(task: dict, engine_name: str,
+                      public_state: dict | None, view: dict | None = None) -> dict:
+    """Пометка «эта lite-задача идёт в публичный враппер» для конфиг-вью.
+
+    Движок `lite` ДВОЙНОЙ: при `apple-wrapper = lite` это свой контейнер на
+    петле, а режимы 24.09 ставят его ради публичного wm.wol.moe. Без метки
+    оракул возил бы чужие закачки через свой key-сервер — и наоборот."""
+    mode = str((public_state or {}).get("_public_mode")
+               or (public_state or {}).get("apple-public-mode") or "").strip().lower()
+    if not mode:
+        try:
+            from ripster.apple_router import public_mode
+            mode = public_mode(public_state or {})
+        except Exception:                                   # noqa: BLE001
+            mode = ""
+    try:
+        from ripster.apple_router import PUBLIC_ENGINE
+    except Exception:                                       # noqa: BLE001
+        PUBLIC_ENGINE = "lite"
+    if engine_name != PUBLIC_ENGINE:
+        return {}
+    if not (task.get("public_wrapper") or task.get("_public_route")
+            or mode in ("only", "manual_region")):
+        return {}
+    out = dict(view or {})
+    out["_lite_public"] = True
+    return out
+
+
+def _public_region_for(config: dict, url: str) -> str:
+    """Какую витрину мы попросим у публичного пула — для честной строки в
+    истории («скачано через публичный враппер (NZ)»), а не для решения."""
+    cc = str(config.get("amd-region-force") or "").strip().lower()
+    if cc:
+        return cc
+    try:
+        from ripster import apple_router as _ar
+        want = _ar.url_storefront(url) or str(config.get("storefront") or "us")
+        return (_ar.public_pool_pick_region(config, want) or want).lower()
+    except Exception:                                       # noqa: BLE001
+        return ""
+
+
+def _public_fallback_reason(mode: str, task: dict, url: str, config: dict,
+                            avail: dict | None) -> str:
+    """ПОЧЕМУ после честного перебора своих задача имеет право уйти на публичный
+    wrapper. Пустая строка — не имеет (режим `off`, или условие режима не
+    выполнено). Возвращает короткую причину для лога и истории.
+
+    Правило 03.09 («публичный — только по явному выбору») здесь не нарушается:
+    сюда доходит только тот выбор, который владелец сделал сам в Настройках
+    (или чекбоксом задачи), а не догадка кода."""
+    if task.get("public_wrapper"):
+        return "по запросу этой задачи"
+    if mode == "on_fail":
+        return "все свои учётки отказали"
+    if mode == "on_region":
+        # Нужен факт: релиз ЕСТЬ в какой-то витрине, и ни одна своя её не
+        # покрывает. Каталог молчит (пусто) — значит не выяснили, и утверждать
+        # «у нас нет» нельзя.
+        own = _own_storefronts(config, task.get("_slots_tried") or [])
+        have = {str(c).lower() for c in (avail or {})}
+        fresh = have - own
+        if not fresh:
+            return ""
+        return ("релиза нет ни в одной витрине своих аккаунтов "
+                f"(есть в {', '.join(sorted(have))})")
+    if mode == "on_limit":
+        rung = [d for d in (task.get("_ladder") or []) if d.get("outcome") == "down"]
+        try:
+            from ripster.apple_router import apple_pacing_blocked
+            if apple_pacing_blocked(config):
+                return "свои упёрлись в лимит запросов Apple"
+        except Exception:                                   # noqa: BLE001
+            pass
+        if rung:
+            return "свои слоты на паузе/лимите устройств"
+        return ""
+    return ""
+
+
+async def _public_wrapper_attempt(task: dict, url: str, qid: str,
+                                  reason: str, config: dict) -> bool:
+    """Один запасной заход через публичный wrapper. Возвращает True, если
+    скачалось. Никакого смешивания источников внутри альбома: враппер берёт
+    релиз ЦЕЛИКОМ (свои ступени к этому моменту уже ничего не дали).
+
+    Транспорт — Wrapper-Lite HTTP API + Temari; прежний gRPC-клиент wm.wol.moe
+    снят 02.09.2026."""
+    region = _public_region_for(config, url)
+    task["log"].append(
+        f"─── {reason} → один запасной заход через публичный wrapper (lite)"
+        + (f", сервер сам берёт витрину с треком; просили '{region.upper()}'"
+           if region else "") + " ───")
+    await _broadcast(_i18n.log_event("console.public_fallback", level="warn",
+                                     reason=reason,
+                                     region=(region or "pool").upper(),
+                                     task_id=task.get("id", "")))
+    _revive_task(task)
+    _advance_task(task, TaskStatus.RUNNING)
+    task["progress"] = 0
+    await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+    try:
+        from ripster.apple_router import PUBLIC_ENGINE
+        from ripster import lite_shim as _shim_mod
+    except Exception:                                       # noqa: BLE001
+        PUBLIC_ENGINE, _shim_mod = "lite", None
+    _seq0 = 0
+    if _shim_mod is not None:
+        try:
+            # Отметка ДО прогона: «сервер отказал» должно значить «отказал
+            # во время ЭТОЙ задачи», а не когда-нибудь раньше.
+            _seq0 = int(_shim_mod.oracle_state(config, seq_only=True).get("seq") or 0)
+        except Exception:                                   # noqa: BLE001
+            _seq0 = 0
+    try:
+        await _run_engine_task(task, PUBLIC_ENGINE, url, qid)
+    except (_NeedAppleFallback, _NeedZhaareyFallback):
+        pass
+    ok = _attempt_succeeded(task)
+    if ok:
+        # Честная строка истории: человек вправе знать, что файл пришёл не из
+        # его аккаунта. Ключ + параметры — для перевода на телефоне.
+        task["_public_wrapper"] = region or "pool"
+        task["_public_reason"] = reason
+    elif _shim_mod is not None:
+        _why = _public_lite_verdict(_shim_mod.oracle_state(config, _seq0))
+        if _why:
+            # Go-загрузчик на пустой ответ оракула молчит или сетует на
+            # «Unavailable»; причина отказа key-сервера знает точнее.
+            task["error"] = task.get("error") or _why
+    return ok
+
+
+def _public_lite_verdict(state: dict) -> str:
+    """Вердикт задачи по ответу публичного lite-сервера (429/401/403).
+
+    Тот же переход прав, что держал движок `amd`: череду 429 ведёт
+    `mark_public_429` (пауза 24 ч на уровне роутера), а задаче остаётся
+    назвать причину — «квота», а не «сервер упал». Повтором квота не чинится,
+    и молчаливый.generic-текст гнал бы пользователя тыкать «Ещё»."""
+    st = int(state.get("status") or 0)
+    if st == 429:
+        try:
+            from ripster.apple_router import public_pause_remaining
+            left = public_pause_remaining()
+        except Exception:                                   # noqa: BLE001
+            left = 0.0
+        if left:
+            return ("квота wm.wol.moe исчерпана — публичный враппер "
+                    f"отключён на {int(left / 3600) + 1} ч после серии 429")
+        return ("квота wm.wol.moe исчерпана — повтори позже; частыми "
+                "попытками она не возвращается")
+    if st in (401, 403):
+        return ("wm.wol.moe не пускает наш ключ (401/403) — проверь "
+                "Настройки → Apple → API-ключ wm.wol.moe")
+    return ""
+
+
+async def _expand_short_link_in_task(task: dict, url: str) -> str:
+    """Короткая ссылка Spotify (open.spotify.com/s/…, spotify.link) обязана быть
+    развёрнута ДО движка. На входе очереди это делается, но задачи, созданные
+    раньше (история/повтор/восстановление очереди), несут короткую ссылку, и
+    OrpheusDL отвечал «Invalid URL» → «ни один трек не сохранён» (30.09, гость
+    6966526211). Разворачиваем и здесь, в потоке: сеть не держит цикл событий.
+    Не развернулась — возвращаем как есть."""
+    try:
+        from ripster.service_layer import is_spotify_short_link, expand_spotify_short_link
+        if is_spotify_short_link(url):
+            full = await asyncio.to_thread(expand_spotify_short_link, url)
+            if full and not is_spotify_short_link(full):
+                task.setdefault("log", []).append(f"↪ короткая ссылка Spotify → {full}")
+                task["url_short"] = url
+                task["url"] = full
+                return full
+    except Exception as e:                                      # noqa: BLE001
+        print(f"[spotify] short link expand at run failed: {type(e).__name__}: {e}", flush=True)
+    return url
+
+
+async def run_task(task: dict) -> None:
+    """Dispatch a single task to the correct engine runner."""
+    svc    = task.get("service", "apple")
+    engine = task.get("engine", _config.get("engine", "zhaarey"))
+    url    = task.get("url", "")
+    url = await _expand_short_link_in_task(task, url)
+    qid    = task.get("quality", _config.get("quality", "alac"))
+    svc, engine = _sanity_route(task, svc, engine, url)
+
+    # Предзаказ: до момента выхода движок не запускаем вовсе (ни 404, ни
+    # тоста, ни ⛔) — задача встаёт в план и ждёт релиза карточкой
+    # «ожидает релиза».
+    if await _preorder_gate(task):
+        return
+
+    _advance_task(task, TaskStatus.RUNNING)
+    task["progress"]    = 0
+    task["_start_time"] = time.time()
+    # Первый запуск задачи — граница «файлы этой задачи» для манифеста: ретрай
+    # не должен терять файлы первой попытки (см. _narrow_to_this_task).
+    task.setdefault("_first_start_time", task["_start_time"])
+    svc = task.get("service", svc)
+    from ripster.service_config import get_save_path
+    # Canary (tools/download_canary.py) несёт СВОЙ временный каталог: проверка
+    # «файл реально скачивается» не должна гадать в библиотеке владельца между
+    # своими же удалёнными файлами. Обычные задачи поле не ставят — путь как был.
+    task["_base_save_path"] = (task.get("_canary_save_path")
+                               or get_save_path(_config, svc, qid or ""))
+    await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+
+    # Треклист — СРАЗУ при старте, параллельно скачиванию, а не по его итогам.
+    # Ждать его нельзя: это сетевой запрос к чужому API, а загрузка обязана
+    # начинаться, даже если API лежит. ensure_tracks не бросает исключений и
+    # сам широковещает queue_update, когда список появится.
+    import ripster.metadata as _md
+    _tl = asyncio.create_task(_md.ensure_tracks(task))
+    _TRACKLIST_TASKS.add(_tl)
+    _tl.add_done_callback(_TRACKLIST_TASKS.discard)
+
+    # Normalize empty engine string to configured default
+    engine = engine or _config.get("engine", "zhaarey")
+
+    # The public wm.wol.moe wrapper is MANUAL-ONLY (owner, 03.09.2026): it is
+    # used only when the owner explicitly asked for it. With the mode group of
+    # 24.09.2026 that choice comes in six flavours (`apple-public-mode`), and
+    # they split into two DIFFERENT permissions:
+    #   _apple_public_ok     — задача может идти на публичный сразу, минуя свои
+    #                          слоты (only / manual_region / чекбокс задачи /
+    #                          on_limit при активном лимите своих);
+    #   _apple_fallback_ok   — публичный разрешён ПОСЛЕ честного перебора своих
+    #                          (on_fail, on_region, on_limit, чекбокс задачи).
+    # Всё остальное (режим off и отсутствие выбора) — local-only: NEVER silently
+    # auto-switch an Apple task to the public wrapper on a wrapper-down /
+    # DRM-CKC failure.
+    _apple_wrapper_pref = str(_config.get("apple-wrapper") or "auto").strip().lower()
+    try:
+        from ripster.apple_router import public_decision, public_mode
+        _apple_public_ok, _apple_mode, _apple_public_block = \
+            public_decision(_config, url, task)
+    except Exception:
+        _apple_public_ok, _apple_mode, _apple_public_block = (
+            _apple_wrapper_pref == "public", "off", "")
+    _apple_fallback_ok = bool(task.get("public_wrapper")) or _apple_mode in (
+        "on_fail", "on_region", "on_limit", "only", "manual_region")
+    _apple_local_only = not _apple_public_ok
+    if _apple_public_block:
+        task["log"].append(f"─── публичный wrapper: {_apple_public_block} ───")
+
+    try:
+        # Sanity gate found no engine able to speak this URL — fail cleanly here,
+        # inside the handler, so the task gets a real ERROR row and a message.
+        if task.get("_route_error"):
+            raise ValueError(task.pop("_route_error"))
+
+        # zhaarey без локального враппера → публичный wrapper (lite-API). Ветка
+        # и так закрыта политикой (`_apple_local_only`), поэтому никакого
+        # «AMD не установлен → просим Docker» больше нет: lite ничего локально
+        # не требует.
+        if engine == "zhaarey" and svc in ("apple", "") and not _apple_local_only:
+            wrapper_quals = {"alac", "atmos", "binaural", "downmix"}
+            if qid in wrapper_quals and not await _amd_mod.check_wrapper_running():
+                await _log(
+                    f"⚠ Wrapper не запущен — переключаюсь на публичный "
+                    f"wrapper (wm.wol.moe, lite-API) для {qid.upper()}",
+                    "warn",
+                )
+                engine = "lite"
+                task["_public_route"] = True
+
+        # Ключ враппера Apple выдаёт по витрине АККАУНТА, а не по витрине ссылки
+        # (факт из переписки авторов wrapper'а; разбор — docs/APPLE_STOREFRONT_-
+        # MISMATCH_2026-09-24.md). Раньше ПЕРВЫЙ заход шёл по витрине ссылки →
+        # заведомый «Invalid store / Invalid CKC», и только реактивный блок ниже
+        # (после провала) переписывал ссылку на витрину аккаунта. Переписываем
+        # сразу, до первого запроса ключа: ровно то же действие, что и там, — но
+        # без гарантированно провального запроса (лишний CKC жжёт слот сессии).
+        # Мутируем ТОЛЬКО `_first_url` (даём ему переписать первый заход), а `url`
+        # остаётся ссылкой витрины: на нём работают фолбэк на публичный wrapper и
+        # многоаккаунтная лестница ниже, где регион решает уже конкретный слот.
+        _first_url = url
+        if engine == "zhaarey" and not task.get("_sf_retried"):
+            try:
+                from ripster.apple_router import (key_request_storefront,
+                                                  rewrite_storefront_resolved,
+                                                  local_wrapper_storefront,
+                                                  url_storefront)
+                _acct_sf0 = await asyncio.to_thread(local_wrapper_storefront)
+                _cc, _changed = key_request_storefront(url, _acct_sf0)
+                if _changed:
+                    task["_sf_retried"] = True   # реактивный блок не повторит
+                    _first_url = await asyncio.to_thread(
+                        rewrite_storefront_resolved, url, _cc)
+                    task["log"].append(
+                        f"─── ключ: витрина ссылки '{url_storefront(url)}' "
+                        f"→ аккаунта '{_cc}' ───")
+                    await _broadcast(_i18n.log_event(
+                        "console.wrapper_local_sf_retry", level="warn",
+                        frm=url_storefront(url), to=_cc, task_id=task.get("id", "")))
+            except Exception:
+                pass
+
+        try:
+            await _run_engine_task(task, engine, _first_url, qid)
+        except _NeedAppleFallback:
+            if not _apple_public_ok:
+                # Local-only: do NOT salvage via the public wrapper. Surface the
+                # local-wrapper DRM/CKC failure as a real error so the owner can
+                # re-login the premium wrapper instead of silently going public.
+                # НО «нет ключа» ≠ «сессия умерла»: zhaarey уже различает эти два
+                # случая (engines/zhaarey.py:145). 28.07.2026 эта строка шла сразу
+                # ПОСЛЕ его вывода «сессия ЖИВА, перелогин НЕ поможет» и советовала
+                # ровно перелогин — противоречие, за которым стоит реальный вред:
+                # лишние логины жгут device-lease и загоняют аккаунт в throttle.
+                # Спрашиваем то же состояние и советуем то, что действительно чинит.
+                _sess_alive = False
+                try:
+                    from ripster.apple_router import local_wrapper_session_alive
+                    # to_thread: это HTTP-запрос с таймаутом 4 с, а мы в event loop.
+                    _sess_alive = await asyncio.to_thread(local_wrapper_session_alive)
+                    if not _sess_alive:
+                        # Слот 0 молчит — это НЕ значит, что молчат все. Ключ в
+                        # этот момент мог отдавать другой слот (или мог бы), и
+                        # завязывать перебор своих учёток на один-единственный
+                        # контейнер значит лишать задачу ровно того лечения,
+                        # которое ей подходит.
+                        from ripster import apple_accounts as _AA_probe
+                        _sess_alive = await asyncio.to_thread(
+                            _AA_probe.any_session_alive, _config)
+                except Exception:
+                    pass
+
+                # Два разных случая, и подавлять фолбэк осмысленно только в одном.
+                #
+                # Сессия МЕРТВА — уход на публичный wrapper замаскировал бы поломку,
+                # которую владелец должен починить: подавляем, как и раньше.
+                #
+                # Сессия ЖИВА, а ключа нет — РАНЬШЕ отсюда следовал вывод «у
+                # контента нет прав в регионе аккаунта». 22.09.2026 он оказался
+                # враньём: «живая сессия» относилась к слоту 0, а ключ запрашивал
+                # слот 1 с device-limit, и перебор своих витрин — единственное
+                # верное лечение — под этим выводом просто отменялся. Теперь
+                # живость проверяется по ВСЕМ своим учёткам, а причина отказа
+                # выясняется у каждой ступени отдельно.
+                _strict = bool((_config or {}).get("apple-local-only-strict", False))
+                if _sess_alive and not _strict:
+                    # СНАЧАЛА своя витрина, и только потом чужой публичный wrapper.
+                    # «Нет прав в регионе» почти всегда значит, что ссылка ведёт в
+                    # ЧУЖУЮ витрину: 01.08.2026 аккаунт враппера был в `ca`, а
+                    # ссылка на `gb` — и тот же альбом в канадской витрине есть.
+                    # Гонять это через публичный wrapper бессмысленно вдвойне:
+                    # он в те минуты лежал («Deadline Exceeded»), а живой
+                    # оплаченный аккаунт стоял рядом без дела.
+                    _retried_sf = False
+                    if not task.get("_sf_retried"):
+                        try:
+                            from ripster.apple_router import (rewrite_storefront_resolved,
+                                                              local_wrapper_storefront,
+                                                              url_storefront)
+                            _acct_sf = await asyncio.to_thread(local_wrapper_storefront)
+                            _url_sf = url_storefront(url)
+                            if _acct_sf and _url_sf and _acct_sf != _url_sf:
+                                task["_sf_retried"] = True
+                                # Именно ..._resolved: обычная замена страны
+                                # оставляет прежний номер альбома, а у витрин он
+                                # разный — повтор промахивался мимо существующего
+                                # релиза (08.08.2026, Apparat).
+                                _new_url = await asyncio.to_thread(
+                                    rewrite_storefront_resolved, url, _acct_sf)
+                                await _broadcast(_i18n.log_event(
+                                    "console.wrapper_local_sf_retry", level="warn",
+                                    frm=_url_sf, to=_acct_sf, task_id=task.get("id", "")))
+                                task["log"].append(
+                                    f"─── витрина '{_url_sf}' → '{_acct_sf}' (свой аккаунт) ───")
+                                await _run_engine_task(task, engine, _new_url, qid)
+                                _retried_sf = _attempt_succeeded(task)
+                                if not _retried_sf:
+                                    task["log"].append(
+                                        _i18n.tr("console.sf_rung_failed", cc=_acct_sf))
+                                    await _broadcast(_i18n.log_event(
+                                        "console.sf_rung_failed", level="warn",
+                                        cc=_acct_sf, task_id=task.get("id", "")))
+                                    # Ступень провалилась — вернуть задачу в очередь,
+                                    # иначе следующая отработает «в мёртвую»: её успех
+                                    # не сможет вывести задачу из терминальной ошибки.
+                                    _revive_task(task, _acct_sf)
+                        except _NeedAppleFallback:
+                            _retried_sf = False      # и своя витрина не дала ключа
+                        except Exception:
+                            _retried_sf = False
+                    # ── ЛЕСТНИЦА СВОИХ АККАУНТОВ ──────────────────────────────────────────────
+                    # Перебор был ОДНОСТУПЕНЧАТЫМ: выбирался один слот, его
+                    # отказ проглатывался `except _NeedAppleFallback` ниже, и
+                    # честная ошибка выходила без попытки на остальных
+                    # учётках. 22.09.2026 к этому добавилась вторая
+                    # немая ступень: перебор требовал, чтобы каталог
+                    # ПОДТВЕРДИЛ релиз в чужой витрине, а поиск по названию
+                    # не находит DJ-миксы → `_avail` пуст → не проверена ни
+                    # одна GB-учётка. Пустой ответ каталога — «не
+                    # выяснили», а не «прав нет» (см. ladder_order).
+                    # Каталог мог и не опроситься (упал импорт или сам запрос) —
+                    # тогда «не выяснили», а не NameError в аварийном обработчике.
+                    _avail = {}
+                    if not _retried_sf:
+                        try:
+                            from ripster import apple_accounts as _AA
+                            from ripster.engines.errors import apple_album_by_storefront
+                            # rewrite_storefront_resolved импортируется ЗДЕСЬ, а не
+                            # заимствуется из блока выше: тот блок выполняется только
+                            # на первом заходе (при повторном `_sf_retried` уже стоит),
+                            # и во втором заходе имя оказывалось несвязанным. NameError
+                            # ловил широкий `except Exception` ниже, ветка молча
+                            # проваливалась на публичном wrapper, и выглядело это как «код не
+                            # сработал» — хотя он работал и падал.
+                            from ripster.apple_router import (local_wrapper_storefront,
+                                                              rewrite_storefront_resolved)
+                            _failed_cc = (await asyncio.to_thread(local_wrapper_storefront) or "").lower()
+                            _avail = await asyncio.to_thread(apple_album_by_storefront, url)
+                            # Отказавшую витрину исключаем: она уже сказала «нет».
+                            # Исключаем и всё, что уже пробовала ЭТА задача, —
+                            # иначе перебор зациклится на первой же учётке.
+                            _tried = set(task.get("_slots_tried") or [])
+                            if _failed_cc:
+                                _tried.add(_failed_cc)
+                            _cands = await asyncio.to_thread(
+                                _AA.ladder_order, _config, url, tuple(_tried), _avail)
+                            task["_ladder"] = []       # чем отчитаться в финале
+                            for _slot in _cands:
+                                if str(task.get("status") or "").lower() == "cancelled":
+                                    break             # отмена — воля человека
+                                _cc = _slot["country"]
+                                _tried.add(_cc)
+                                task["_slots_tried"] = sorted(_tried)
+                                # Закрепляем слот ЗА ЗАДАЧЕЙ: иначе пул выдаст
+                                # повтору первый свободный, и подбор страны
+                                # пропадёт, а раздача треков по пулу уедет в
+                                # контейнеры других витрин (09.08.2026).
+                                task["_force_slot"] = _slot["slot"]
+                                # Поднять слот и ДОЖДАТЬСЯ порта расшифровки;
+                                # если контейнера нет — пересоздать (пул умеет,
+                                # 22.09.2026 именно этого не хватало).
+                                _up = await asyncio.to_thread(
+                                    _AA.ensure_slot_up, _slot["container"],
+                                    _slot.get("port") or 0, 90.0, _config)
+                                if not _up:
+                                    # «не поднялся» ≠ «нет прав»: эти два
+                                    # исхода обязаны различаться и в логе, и
+                                    # в итоговом отчёте перебора. И «не
+                                    # поднялся» тоже НЕ одно состояние: 22.09
+                                    # слот 1 держал порт 10021 открытым, а
+                                    # внутри у него был device-limit — то есть
+                                    # ключ дать было некому. Различаем это по
+                                    # журналу самого контейнера.
+                                    _h = await asyncio.to_thread(
+                                        _AA.slot_health, _slot["container"],
+                                        _slot.get("port") or 0)
+                                    _why = _why_not_usable(_h)
+                                    # Пауза входа после отказа Apple — назвать её,
+                                    # а не «контейнер остановлен»: остановлен он
+                                    # именно потому, что логинить его сейчас вредно.
+                                    try:
+                                        from ripster import wrapper_pool as _wpp
+                                        _acs = _wpp.all_accounts(_config or {})
+                                        _pz = (_wpp.login_pause(_acs[_slot["slot"]])
+                                               if 0 <= _slot["slot"] < len(_acs) else None)
+                                        if _pz:
+                                            _why = ("вход на паузе до " + time.strftime(
+                                                "%d.%m %H:%M", time.localtime(_pz["until"]))
+                                                + " — Apple: " + _BLOCK_LABELS.get(
+                                                    _pz.get("reason") or "", _pz.get("reason") or "?"))
+                                    except Exception:
+                                        pass
+                                    task["log"].append(
+                                        f"─── слот {_slot['slot']} ({_cc}) пропускаю: {_why} ───")
+                                    print(f"[runner] slot {_slot['container']} skipped: {_h}",
+                                          flush=True)
+                                    task["_ladder"].append(
+                                        {"slot": _slot["slot"], "country": _cc,
+                                         "outcome": "down", "why": _why})
+                                    continue
+                                _u2 = await asyncio.to_thread(
+                                    rewrite_storefront_resolved, url, _cc)
+                                task["log"].append(
+                                    f"─── витрина '{_failed_cc or '?'}' не дала ключ → пробую свой "
+                                    f"аккаунт в '{_cc}' (слот {_slot['slot']}) ───")
+                                await _broadcast(_i18n.log_event(
+                                    "console.wrapper_other_slot", level="warn",
+                                    frm=_failed_cc or "?", to=_cc, slot=_slot["slot"],
+                                    task_id=task.get("id", "")))
+                                _revive_task(task, _cc)      # ERROR→QUEUED до попытки
+                                try:
+                                    await _run_engine_task(task, engine, _u2, qid)
+                                except _NeedAppleFallback:
+                                    task["_ladder"].append(
+                                        {"slot": _slot["slot"], "country": _cc,
+                                         "outcome": "nokey",
+                                         "in_catalog": _rung_in_catalog(_avail, _cc)})
+                                    _failed_cc = _cc
+                                    continue                  # следующая учётка
+                                if _attempt_succeeded(task):
+                                    _retried_sf = True
+                                    task["_ladder"].append(
+                                        {"slot": _slot["slot"], "country": _cc,
+                                         "outcome": "ok"})
+                                    # память побед: следующий такой релиз
+                                    # начнётся с этой учётки
+                                    await asyncio.to_thread(
+                                        _AA.remember_win, _cc, url, _slot["slot"])
+                                    break
+                                _here = _rung_in_catalog(_avail, _cc)
+                                task["_ladder"].append(
+                                    {"slot": _slot["slot"], "country": _cc,
+                                     "outcome": "nokey", "in_catalog": _here})
+                                # «не дал релиз» и «релиза в этой витрине нет» —
+                                # РАЗНЫЕ утверждения, и путать их нельзя: 22.09
+                                # именно эта строка убедила владельца, что дело
+                                # в правах, хотя каталог показывал альбом в
+                                # четырёх витринах из пяти.
+                                _key = ("console.slot_rung_no_key" if _here is not False
+                                        else "console.slot_rung_no_release")
+                                task["log"].append(_i18n.tr(_key, slot=_slot["slot"], cc=_cc))
+                                await _broadcast(_i18n.log_event(
+                                    _key, level="warn",
+                                    slot=_slot["slot"], cc=_cc,
+                                    task_id=task.get("id", "")))
+                                _failed_cc = _cc
+                            if not _cands:
+                                # СВОИХ УЧЁТОК не нашлось вовсе — молчать
+                                # нельзя: отсутствие записи неотличимо от
+                                # «код не выполнялся», и на этом уже
+                                # строили неверный вывод.
+                                _all = await asyncio.to_thread(
+                                    _AA.all_slots, 8, True, _config)
+                                print(f"[runner] nothing to try: our sessions="
+                                      f"{[(s['slot'], s['country'], s.get('running')) for s in _all]}, "
+                                      f"release available in={sorted(_avail)}, "
+                                      f"excluded={sorted(_tried)}", flush=True)
+                                task["log"].append(_i18n.tr(
+                                    "console.no_own_slot",
+                                    have=", ".join(sorted(_avail)) or "—",
+                                    mine=", ".join(sorted({s["country"] for s in _all
+                                                          if s.get("country")})) or "—",
+                                    tried=", ".join(sorted(_tried)) or "—"))
+                                await _broadcast(_i18n.log_event(
+                                    "console.no_own_slot", level="warn",
+                                    have=", ".join(sorted(_avail)) or "—",
+                                    mine=", ".join(sorted({s["country"] for s in _all
+                                                          if s.get("country")})) or "—",
+                                    tried=", ".join(sorted(_tried)) or "—",
+                                    task_id=task.get("id", "")))
+                        except _NeedAppleFallback:
+                            _retried_sf = False          # и чужой слот не дал ключа
+                        except Exception as _e_slot:
+                            # НЕ молча. Именно немой except прятал здесь NameError,
+                            # и отказ ветки был неотличим от её отсутствия.
+                            _retried_sf = False
+                            task["log"].append(
+                                f"─── перебор своих Apple-аккаунтов не состоялся: "
+                                f"{type(_e_slot).__name__}: {_e_slot} ───")
+                            print(f"[runner] slot-pick failed: {_e_slot!r}", flush=True)
+                    if not _retried_sf and _apple_fallback_ok:
+                        # Режимы 2/3/4 (и чекбокс задачи): свои честно перебраны
+                        # и не дали ключ — теперь очередь публичного враппера.
+                        # Один заход на весь релиз, смешивания источников
+                        # внутри альбома нет.
+                        _pub_reason = _public_fallback_reason(
+                            _apple_mode, task, url, _config,
+                            _avail if isinstance(_avail, dict) else None)
+                        if _pub_reason:
+                            task["_pub_fb_tried"] = True
+                            if await _public_wrapper_attempt(
+                                    task, url, qid, _pub_reason, _config):
+                                _retried_sf = True
+                    if not _retried_sf:
+                        # РАНЬШЕ здесь была последняя ступень — уход на публичный
+                        # wm.wol.moe. 03.09.2026 владелец запретил это категорически:
+                        # публичный wrapper НЕ используется автоматически ни при
+                        # каких обстоятельствах, включается только вручную
+                        # (apple-wrapper = public). Все свои витрины и слоты
+                        # перебраны, ключа нет → честная терминальная ошибка.
+                        _rung = task.get("_ladder") or []
+                        # Перебор реально шёл — значит человек вправе увидеть,
+                        # КОГО именно спрашивали и что ответил каждый. Раньше
+                        # наружу уходил вердикт движка про ОДНУ сессию («нет прав
+                        # в регионе, возьми релиз через публичный wrapper»), и владелец по
+                        # нему делал руками ровно то, что код делать
+                        # отказывался. Теперь отчёт — по всем своим учёткам, и
+                        # каждая ступень несёт НАСТОЯЩУЮ причину, а не mark.
+                        _who = ", ".join(_rung_text(d) for d in _rung)
+                        if _who:
+                            _ekey = "console.wrapper_own_accounts_fail"
+                            _eparams = {"tried": _who, "mode": _apple_wrapper_pref}
+                        else:
+                            _ekey = "console.wrapper_own_accounts_none"
+                            _eparams = {"mode": _apple_wrapper_pref}
+                        _msg = _i18n.tr(_ekey, **_eparams)
+                        await _broadcast(_i18n.log_event(
+                            _ekey, level="error", task_id=task.get("id", ""), **_eparams))
+                        task["log"].append(f"─── {_msg} ───")
+                        _try_advance_task(task, TaskStatus.ERROR)
+                        # История больше НЕ пишется в _run_engine_task.finally:
+                        # каждая CKC-ступень помечена `_in_retry`, и finally её
+                        # пропускает (иначе SAFETY NET был бы нормой). Значит
+                        # ФИНАЛЬНУЮ терминальную запись обязан сделать этот
+                        # обработчик — иначе задача, перебравшая все свои учётки,
+                        # осталась бы без строки в истории. Дедуп по id (history
+                        # + stats) делает повтор записи безопасным. 18.09.2026.
+                        if _who:
+                            # отчёт перебора важнее вердикта одной сессии
+                            task["error"] = _msg
+                            # Короткий вердикт для телефона: абзац выше — для
+                            # ПК-истории, а на экран телефона он не ложится и
+                            # перевода не знает. `error_key` телефон меняет на
+                            # свою строку, список сервисов допишет запасной
+                            # путь (available_on, асинхронно — не дожидаясь
+                            # него, телефон покажет хотя бы короткую причину).
+                            task.setdefault("meta", {})["error_key"] = "apple_no_key"
+                            if not task.get("_ap_fb_tried"):
+                                task["_ap_fb_tried"] = True
+                                asyncio.create_task(_apple_ckc_fallback(task))
+                        elif not task.get("error"):
+                            task["error"] = _verdict_from_log(task) or (
+                                "Apple: ключ не выдан ни одной вашей учёткой; "
+                                "публичный wrapper не участвует.")
+                        _add_to_history(task)
+                else:
+                    # Два разных молчания: «пробовать было некого» и «пробовать
+                    # запрещено настройкой». Прежний текст сводил их к одному и
+                    # заверял владельца правами региона — как раз тем, что
+                    # каталог в этот раз и опровергал.
+                    _ekey = ("console.wrapper_strict_no_ladder" if _sess_alive
+                             else "console.wrapper_local_drm_fail")
+                    await _broadcast(_i18n.log_event(
+                        _ekey, level="error", task_id=task.get("id", "")))
+                    task["log"].append(_i18n.tr(_ekey))
+                    task["log"].append("─── local-only: публичный фолбэк подавлен ───")
+                    _try_advance_task(task, TaskStatus.ERROR)
+                    # Как и выше: CKC-ступень помечена `_in_retry`, историю
+                    # пишет этот финальный обработчик, а не finally. 18.09.2026.
+                    if not task.get("error"):
+                        task["error"] = _verdict_from_log(task) or (
+                            "Apple: локальный wrapper не выдал ключ; публичный "
+                            "фолбэк подавлен (публичный wrapper включается вручную).")
+                    _add_to_history(task)
+            else:
+                await _broadcast(_i18n.log_event("console.drm_retry_public", level="warn"))
+                # Публичный враппер — lite-путь (gRPC `amd` мёртв с 02.09.2026).
+                task["log"].append("─── публичный wrapper auto-fallback (lite-API) ───")
+                task["_public_route"] = True
+                await _run_engine_task(task, "lite", url, qid)
+        except _NeedZhaareyFallback as _fb:
+            _fbq = _fb.quality
+            await _broadcast(_i18n.log_event("console.apple_aac_fallback", level="warn",
+                                             quality=_fbq.upper()))
+            task["log"].append(f"─── zhaarey {_fbq} auto-fallback ───")
+            task["_apple_fallback"] = True
+            # The failed attempt inside _run_engine_task may already have marked
+            # the task ERROR before raising — QUEUED→RUNNING is legal, ERROR→
+            # RUNNING is not (task_state.advance raises InvalidTransition, the
+            # retry never starts, and the SAFETY NET has to force it to error).
+            _revive_task(task)
+            _advance_task(task, TaskStatus.RUNNING)
+            task["progress"] = 0
+            await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+            await _run_engine_task(task, "zhaarey", url, _fbq)
+        except _NeedRetry:
+            await _broadcast(_i18n.log_event("console.orpheus_retry", level="warn",
+                                             task_id=task.get("id", "")))
+            # Лог ОБНУЛЯЕМ, как и обычный авто-повтор: is_finished() читает весь
+            # task["log"], и старая строка «New settings detected» заставляла его
+            # снова вернуть «новые настройки» — повторный _NeedRetry улетал в
+            # except Exception («✗ » без текста), а настоящий вердикт прогона
+            # терялся. 13.09.2026: «недоступно для учётки» превратилось в SAFETY NET.
+            task["log"] = ["─── auto-retry (new settings) ───"]
+            # Same reason as _NeedZhaareyFallback above: the OrpheusDL run that
+            # raised _NeedRetry ("New settings detected") had already errored the
+            # task, so error→running was rejected — "Illegal transition for task
+            # …: error → running", then the safety net (03.09.2026).
+            _revive_task(task)
+            _advance_task(task, TaskStatus.RUNNING)
+            task["progress"] = 0
+            await _run_engine_task(task, engine, url, qid)
+    except Exception as e:
+        import traceback
+        _try_advance_task(task, TaskStatus.ERROR)
+        task["log"] = task.get("log", []) + [f"run_task error: {e}"]
+        await _broadcast({"type": "log", "msg": f"✗ {e}", "level": "error"})
+        traceback.print_exc()
+    finally:
+        await _broadcast({"type": "queue_update", "queue": _queue_snapshot()})
+
+
+# ── Queue worker ─────────────────────────────────────────────────────────────
+
+def _lock_key(task: dict) -> str | None:
+    """Contended-resource key for queue concurrency. Tasks sharing a key run ONE
+    at a time; tasks with key None run fully parallel (up to max-parallel).
+
+    Serialized paths: `zhaarey` (local docker wrapper binds fixed ports
+    10020/20020), `deemix`/Deezer (shared %APPDATA%\\deemix\\.arl) and streamrip
+    (shared config.toml) — plus their per-account rate-limits."""
+    eng = (task.get("engine") or "").lower()
+    svc = (task.get("service") or "").lower()
+    if eng == "zhaarey":
+        return "apple-local"             # local wrapper → fixed ports, one at a time
+    if eng == "lite":
+        # TCP-оракул LiteShim — один на процесс и с ОДНИМ key-сервером
+        # (свой контейнер или публичный враппер). Две lite-задачи разных
+        # серверов одновременно рассинхронизировали бы оракул посреди
+        # закачки, поэтому дорожка общая.
+        return "apple-lite"
+    if eng == "bbc_live":
+        # Живой эфир пишется с одной машины и ловит только то, что звучит
+        # СЕЙЧАС: две параллельные записи одного канала дали бы два одинаковых
+        # файла, а разные каналы делят один аплинк. Своя дорожка, чтобы плановая
+        # запись не спорила за место с обычным on-demand BBC-прогоном.
+        return "bbc-live"
+    return svc or eng or "default"       # deemix/streamrip/etc → serialize per service
+
+
+# ── Fair per-requester scheduling (issue #11) ────────────────────────────────────
+# When several people share the box (owner + guest links), a single requester's
+# big playlist (say 40 queued tracks) would, under plain FIFO, sit at the head of
+# a shared service lane and make everyone else wait their whole batch out. We
+# round-robin the *pending* list across requesters BEFORE the lane-assignment loop
+# so each active requester gets a turn — one user's bulk job can no longer starve
+# another's single track in the same lane. This only reorders which queued task is
+# *considered* first; it never touches the lane caps, the disk brake, or running
+# tasks. Requester identity = the guest session token; the owner (and every
+# bot-submitted task, which enters as the owner) shares the empty-string bucket.
+# A single requester — the common case — leaves the order byte-for-byte FIFO.
+# Kill-switch: RIPSTER_FAIR_SCHED=0 restores strict FIFO (self-update principle).
+def _fair_sched_on() -> bool:
+    return (os.environ.get("RIPSTER_FAIR_SCHED", "1") or "1").strip() not in ("0", "false", "no")
+
+
+def _fair_order(pending: list[dict]) -> list[dict]:
+    """Round-robin *pending* across requesters (guest token; owner = ""). Stable
+    within a requester. Identity-preserving for 0/1 requester → unchanged FIFO."""
+    if len(pending) < 2 or not _fair_sched_on():
+        return pending
+    from collections import OrderedDict
+    from itertools import chain, zip_longest
+    buckets: "OrderedDict[str, list]" = OrderedDict()
+    for t in pending:
+        buckets.setdefault(t.get("_guest_token") or "", []).append(t)
+    if len(buckets) < 2:
+        return pending                   # one requester → strict FIFO, no reorder
+    _SENT = object()
+    return [t for t in chain.from_iterable(zip_longest(*buckets.values(), fillvalue=_SENT))
+            if t is not _SENT]
+
+
+# ── Disk-space safety brake ─────────────────────────────────────────────────────
+# Protect the HOST (a powerful home box OR a small VPS the project is uploaded to)
+# from filling its disk: when free space on the download volume drops below the
+# floor, process_queue stops STARTING new downloads — running ones finish and
+# auto_cleanup frees space, then it resumes on its own. Hardware-agnostic on
+# purpose: an absolute GB floor (works on any disk size) plus an optional % floor,
+# BOTH env-overridable so retuning never needs a rebuild (self-update principle).
+# Defaults keep a 5 GB headroom on every machine. Set RIPSTER_MIN_FREE_GB=0 to off.
+def _env_float(name: str, default: float) -> float:
+    try:
+        v = float(os.environ.get(name, "") or default)
+        return v if v >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+_DISK_MIN_FREE_GB  = _env_float("RIPSTER_MIN_FREE_GB", 5.0)
+_DISK_MIN_FREE_PCT = _env_float("RIPSTER_MIN_FREE_PCT", 0.0)   # 0 = % check off
+_disk_warn_ts = 0.0
+
+
+def _disk_free(path: str) -> "tuple[float, float]":
+    """(free_GB, free_%) for the filesystem holding `path`. Fails OPEN: any error
+    (or an unreadable path) returns (inf, 100) so a broken probe NEVER blocks
+    downloads — the brake only ever engages on a CONFIRMED low-space reading."""
+    import shutil
+    try:
+        pp = Path(path or ".")
+        while not pp.exists() and pp.parent != pp:   # dir may not exist yet
+            pp = pp.parent
+        u = shutil.disk_usage(str(pp))
+        return u.free / (1024 ** 3), (u.free / u.total * 100 if u.total else 100.0)
+    except Exception:
+        return float("inf"), 100.0
+
+
+def _disk_guard_ok() -> "tuple[bool, float, float]":
+    """(ok, free_GB, free_%) — ok is False when free space is below the floor and
+    new downloads should be held. Returns the numbers so the caller can warn."""
+    if _DISK_MIN_FREE_GB <= 0 and _DISK_MIN_FREE_PCT <= 0:
+        return True, float("inf"), 100.0
+    free_gb, free_pct = _disk_free(_config.get("save-path", "downloads"))
+    ok = (free_gb >= _DISK_MIN_FREE_GB
+          and (_DISK_MIN_FREE_PCT <= 0 or free_pct >= _DISK_MIN_FREE_PCT))
+    return ok, free_gb, free_pct
+
+
+async def process_queue() -> None:
+    """Main queue worker — supports 1..N parallel downloads via max-parallel config."""
+    global _disk_warn_ts
+    if not _qs.is_running:
+        return
+    active: dict[str, asyncio.Task] = {}
+    try:
+        while _qs.is_running:
+            if _qs.is_paused:
+                await asyncio.sleep(0.3)
+                continue
+
+            # Remove finished asyncio tasks
+            done_ids = [tid for tid, t in active.items() if t.done()]
+            for tid in done_ids:
+                del active[tid]
+            _qs.active_tasks.clear()
+            _qs.active_tasks.update(active)
+
+            # Smart per-lane parallelism: every contended resource (lock-key)
+            # is its OWN lane — Deezer never waits on Apple and vice-versa.
+            #   • each keyed lane (deemix/streamrip/zhaarey…) runs ONE at a time
+            #     (shared ARL / config.toml / fixed ports / per-account limits);
+            #   • key=None (не опознанные служба/движок) gets a wide lane of
+            #     `max(3, max-parallel)` — it contends for no known local resource.
+            # Different lanes run fully in parallel — there is no single global
+            # pool that one service can starve. Floor of 3 per the user's rule.
+            open_cap = max(3, int(_config.get("max-parallel", 1)))
+            # Apple-local (zhaarey) was a single lane (one local wrapper, fixed
+            # ports). The wrapper pool now gives it `pool_size` concurrent slots —
+            # each task acquires its own container. Pool off ⇒ 1 ⇒ original serial.
+            zh_cap = 1
+            if any((t.get("engine") or "").lower() == "zhaarey" for t in _queue):
+                # apple-parallel-tracks dedicates the WHOLE pool to ONE album (the
+                # Go tool fans tracks across every container), so albums must run
+                # one-at-a-time — otherwise two albums fight over the same slots.
+                if _config.get("apple-parallel-tracks"):
+                    zh_cap = 1
+                else:
+                    try:
+                        from ripster.wrapper_pool import pool_size as _pool_size
+                        # Honour max-parallel as a REAL ceiling for the local wrapper:
+                        # the pool may expose N container slots, but if the user lowered
+                        # parallelism (e.g. to ease the wrapper's CKC load), running more
+                        # than that overloads the local Apple session → "Invalid CKC".
+                        # zh_cap = min(pool slots, max-parallel).
+                        _mp = max(1, int(_config.get("max-parallel", 1)))
+                        zh_cap = max(1, min(_pool_size(_config), _mp))
+                    except Exception:
+                        zh_cap = 1
+            by_id = {t["id"]: t for t in _queue}
+            busy_keys = set()
+            open_active = 0
+            zh_active  = 0
+            for atid in active:
+                if atid in by_id:
+                    k = _lock_key(by_id[atid])
+                    if k is None:
+                        open_active += 1
+                    elif k == "apple-local":
+                        zh_active += 1
+                    else:
+                        busy_keys.add(k)
+            # Отменённую человеком задачу не запускаем никогда: ретрай-ветки run_task
+            # (пауза → «queued» прямой записью) могли воскресить её уже после отмены.
+            for t in _queue:
+                if t["status"] == "queued" and t.get("_cancelled_by"):
+                    _try_advance_task(t, TaskStatus.CANCELLED)
+            pending = [
+                t for t in _queue
+                if t["status"] == "queued" and t["id"] not in active
+            ]
+            # Disk safety brake: below the free-space floor, don't START new
+            # downloads this round — running ones keep going (auto_cleanup then
+            # frees space) and the queue resumes by itself. Already-running tasks
+            # are never interrupted. Warning is throttled to once a minute.
+            if pending:
+                _ok, _free_gb, _free_pct = _disk_guard_ok()
+                if not _ok:
+                    if time.time() - _disk_warn_ts > 60:
+                        _disk_warn_ts = time.time()
+                        # `_log_key`, а не голый dict: клиент читает лог из полей
+                        # text/msg, а здесь стояло "message" — строка уходила в
+                        # пустую ячейку консоли и на любом языке была русской.
+                        await _log_key("console.low_disk", level="warn",
+                                       free=f"{_free_gb:.1f}",
+                                       floor=f"{_DISK_MIN_FREE_GB:.0f}")
+                    pending = []
+            # Регулятор нагрузки (ripster/governor.py, 26.09): общий потолок
+            # одновременных загрузок по живым CPU/RAM. Влияет ТОЛЬКО на старт
+            # новых — идущие не трогаем; None = ещё не мерил, не мешаем.
+            try:
+                from ripster.governor import cap as _gov_cap
+                _gcap = _gov_cap()
+            except Exception:
+                _gcap = None
+            # Fair-share: round-robin queued tasks across requesters so one user's
+            # bulk batch can't monopolise a shared lane (issue #11). No-op for a
+            # single requester; lane caps below are unaffected.
+            for task in _fair_order(pending):
+                if _gcap is not None and len(active) >= _gcap:
+                    break                 # потолок регулятора: остальные ждут
+                k = _lock_key(task)
+                if k is None:
+                    if open_active >= open_cap:
+                        continue          # wide fallback lane full
+                    open_active += 1
+                elif k == "apple-local":
+                    if zh_active >= zh_cap:
+                        continue          # Apple-local pool full (all wrappers busy)
+                    zh_active += 1
+                elif k in busy_keys:
+                    continue              # this service's lane already busy
+                else:
+                    busy_keys.add(k)      # claim this service's lane
+                at = asyncio.create_task(run_task(task))
+                active[task["id"]] = at
+            _qs.active_tasks.clear()
+            _qs.active_tasks.update(active)
+
+            # Оставаться должен и ради отложенных записей: их карточка висит в
+            # очереди со статусом «scheduled», планировщик переведёт её в queued
+            # в момент эфира — а разгребать её будет этот же цикл. Выйти сейчас
+            # значило бы оставить запись без исполнителя до следующего старта.
+            if (not active
+                    and not [t for t in _queue if t["status"] == "queued"]
+                    and not [t for t in _queue if t["status"] == "scheduled"]):
+                break
+
+            await asyncio.sleep(0.2)
+    finally:
+        _qs.stop()
+        _qs.proc = None
+        _qs.active_tasks.clear()
+        await _broadcast({"type": "queue_done"})
+        await _broadcast(_i18n.log_event("console.queue_finished", level="success"))

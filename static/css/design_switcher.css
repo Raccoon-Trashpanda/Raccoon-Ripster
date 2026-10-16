@@ -1,0 +1,50 @@
+/* Design Switcher — стили переключателя дизайна. */
+
+.ds-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.ds-tile {
+  padding: 16px;
+  border: 2px solid var(--border, #333);
+  border-radius: var(--r, 12px);
+  background: var(--surface, #1a1a1f);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  outline: none;
+}
+
+.ds-tile:hover {
+  border-color: var(--accent, #666);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+}
+
+.ds-tile:focus-visible {
+  box-shadow: 0 0 0 3px var(--accent, #666);
+}
+
+.ds-tile.active {
+  border-color: var(--red, #c084a0);
+  background: var(--surface-raised, #222228);
+}
+
+.ds-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #e8e8f8);
+  margin-bottom: 4px;
+}
+
+.ds-tile.active .ds-title {
+  color: var(--red, #c084a0);
+}
+
+.ds-desc {
+  font-size: 12px;
+  color: var(--muted, #888);
+  line-height: 1.4;
+}

@@ -1,0 +1,444 @@
+<!-- «Раскопки» (Digs).
+     Чужие ленты советуют, ЧТО ПОСЛУШАТЬ. Ripster знает твою фонотеку и советует,
+     ЧТО ЗАБРАТЬ: только то, чего у тебя нет, и с объяснением почему. Считается по
+     накопленным данным, без сетевых запросов.
+
+     ДИЗАЙН НАМЕРЕННО НЕ ПЛИТОЧНЫЙ, и метафора здесь СТРУКТУРНАЯ, а не рисованная
+     сверху. Первый заход был именно рисованным: баннер с енотом на 150 px, под ним
+     обычные прогресс-бары — то есть дашборд с наклейкой «раскопки». Выбросил.
+     Теперь страница и есть разрез: каждый жанр — горизонтальный пласт во всю
+     ширину, его находки лежат ВНУТРИ пласта, прокрутка вниз = глубже в раскоп.
+     Толщина полосы и насыщенность породы = доля жанра, то есть картинка и есть
+     данные, а не украшение.
+
+     Цвет: одна янтарная порядковая шкала (величина → один тон, светлее→темнее),
+     СВОЯ для тёмной и светлой темы. Автоматический переворот не годится: бледный
+     конец тёмной шкалы даёт на белом 1.44:1 при пороге 2:1. Обе шкалы прогнаны
+     валидатором палитры, а не подобраны на глаз (см. digs.js).
+     Анимация — только transform/opacity, без фильтров и масок на движущемся. -->
+<style>
+  /* Полоса раскопа вместо баннера: тонкая, и КАЖДОЕ число в ней настоящее. */
+  #view-digs .dg-bar{display:flex;align-items:center;gap:14px;padding:10px 0 14px;
+    border-bottom:1px solid rgba(255,255,255,.06)}
+  #view-digs .dg-coon{width:34px;height:34px;flex-shrink:0;transform-origin:60% 90%;
+    animation:dgPaw 1.15s ease-in-out infinite}
+  @keyframes dgPaw{0%,100%{transform:rotate(-6deg)}45%{transform:rotate(8deg) translateY(3px)}}
+  /* Числа — шкала приложения: цифра как .view-title (display, 800), подпись как
+     .block-title (10px, UPPERCASE, letter-spacing .9px). Своих размеров не выдумываем. */
+  #view-digs .dg-num{font-family:var(--display);font-size:18px;font-weight:800;
+    color:var(--text);line-height:1;letter-spacing:-.4px}
+  #view-digs .dg-num small{display:block;font-family:var(--display);font-size:10px;
+    font-weight:700;color:var(--muted);margin-top:4px;text-transform:uppercase;
+    letter-spacing:.9px}
+
+  /* ── Ручка «глубина копа» ─────────────────────────────────────────
+     ОДИН орган управления с тремя положениями, а не три кнопки: положения
+     накопительные (каждое включает предыдущее), и переключатель обязан
+     читаться шкалой — слева мелко и знакомо, справа широко и незнакомо.
+     Текущее выделено ЗАЛИВКОЙ, а не только цветом текста: рамка одного из трёх
+     одинаковых сегментов различается плохо и на глаз, и в светлой теме. */
+  #view-digs .dg-depth{display:flex;align-items:center;gap:12px;flex-wrap:wrap;
+    padding:12px 0 2px}
+  #view-digs .dg-depth-lbl{font-family:var(--display);font-size:10px;font-weight:700;
+    color:var(--muted);text-transform:uppercase;letter-spacing:.9px}
+  #view-digs .dg-depth-seg{display:inline-flex;border:1px solid rgba(201,162,39,.34);
+    border-radius:20px;overflow:hidden;background:rgba(201,162,39,.06)}
+  #view-digs .dg-depth-b{padding:5px 15px;background:none;border:none;cursor:pointer;
+    font-family:var(--font);font-size:11.5px;font-weight:700;color:var(--muted);
+    line-height:1.5;transition:background .14s ease,color .14s ease}
+  #view-digs .dg-depth-b + .dg-depth-b{border-left:1px solid rgba(201,162,39,.28)}
+  #view-digs .dg-depth-b:hover{color:var(--text);background:rgba(201,162,39,.12)}
+  #view-digs .dg-depth-b.on{background:rgba(201,162,39,.28);color:#e8b45c}
+  :root[data-theme="light"] #view-digs .dg-depth-b.on{background:rgba(140,83,20,.18);color:#8c5314}
+
+  /* ── Пласт породы ──────────────────────────────────────────────────
+     Фон слоя тонирован тем же тоном, что и его полоса, поэтому пласты
+     видны как пласты, а находки внутри читаются как найденное в слое. */
+  #view-digs .dg-seam{position:relative;padding:14px 18px 6px;margin:0 -18px;
+    border-top:1px solid rgba(255,255,255,.05)}
+  #view-digs .dg-seam-head{display:flex;align-items:baseline;gap:10px;margin-bottom:9px}
+
+  /* ── Шапка пласта = орган управления (сужение страницы до жанра) ───
+     Кликабельна ТОЛЬКО шапка: сетка находок — её сосед, а не потомок, поэтому
+     нажатия по карточкам и их кнопкам сюда не всплывают вовсе.
+     Три признака, а не один: курсор, подсветка при наведении и подпись словом.
+     Курсора мало — он виден лишь тому, кто уже навёл, а навести на то, что
+     годами было картинкой, повода нет. */
+  #view-digs .dg-seam-head{cursor:pointer;border-radius:9px;padding:3px 7px;
+    margin:0 -7px 6px;transition:background .15s ease}
+  #view-digs .dg-seam-head:hover{background:rgba(201,162,39,.11)}
+  #view-digs .dg-seam-head:focus-visible{outline:2px solid #c9a227;outline-offset:1px}
+  #view-digs .dg-seam-pick{font-family:var(--display);font-size:9.5px;font-weight:700;
+    color:var(--muted);text-transform:uppercase;letter-spacing:.8px;
+    border:1px dashed rgba(201,162,39,.4);border-radius:9px;padding:1px 7px;
+    transition:color .15s ease,border-color .15s ease,background .15s ease}
+  #view-digs .dg-seam-head:hover .dg-seam-pick{color:#c9a227;border-color:#c9a227;
+    background:rgba(201,162,39,.12)}
+  /* Активный пласт: заливка + корешок слева, а не только цвет текста — один
+     выделенный слой среди одинаковых по цвету букв не отличается (та же причина,
+     по которой заливкой выделено положение ручки глубины). */
+  #view-digs .dg-seam.on{background:rgba(201,162,39,.09);box-shadow:inset 3px 0 0 #c9a227}
+  #view-digs .dg-seam.on .dg-seam-name{color:#e8b45c}
+  #view-digs .dg-seam.on .dg-seam-pick{color:#e8b45c;border-style:solid;
+    border-color:rgba(201,162,39,.6);background:rgba(201,162,39,.18)}
+  :root[data-theme="light"] #view-digs .dg-seam.on .dg-seam-name,
+  :root[data-theme="light"] #view-digs .dg-seam.on .dg-seam-pick{color:#8c5314}
+
+  /* Строка включённого фильтра. Повторный клик по пласту — снятие вслепую:
+     надо помнить, что нажал, и найти тот же пласт глазами. Название и кнопка
+     снятия стоят над результатом всегда. */
+  #view-digs .dg-filter{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    margin:12px 0 4px;padding:8px 12px;border-radius:11px;
+    background:rgba(201,162,39,.09);border:1px solid rgba(201,162,39,.3)}
+  #view-digs .dg-filter-t{font-family:var(--display);font-size:10px;font-weight:700;
+    color:var(--muted);text-transform:uppercase;letter-spacing:.9px}
+  #view-digs .dg-filter-g{font-size:12.5px;color:#e8b45c;font-weight:700}
+  :root[data-theme="light"] #view-digs .dg-filter-g{color:#8c5314}
+  #view-digs .dg-filter-note{font-size:10.5px;color:var(--muted);margin-left:auto}
+  #view-digs .dg-filter-x{background:rgba(201,162,39,.14);border:1px solid rgba(201,162,39,.42);
+    border-radius:20px;color:#c9a227;font-size:11px;font-weight:700;cursor:pointer;
+    padding:4px 12px;font-family:var(--font);line-height:1.4;
+    transition:background .15s ease,border-color .15s ease}
+  #view-digs .dg-filter-x:hover{background:rgba(201,162,39,.26);border-color:#c9a227}
+  #view-digs .dg-filter-x:focus-visible{outline:2px solid #c9a227;outline-offset:2px}
+
+  /* Пустой результат сужения: страница, молча ставшая пустой, неотличима от
+     сломанной — человек уходит чинить не то. */
+  #view-digs .dg-empty{padding:26px 18px;margin:10px 0;border-radius:12px;
+    border:1px dashed rgba(201,162,39,.32);background:rgba(201,162,39,.04)}
+  #view-digs .dg-empty-t{font-family:var(--display);font-size:13px;font-weight:700;color:var(--text)}
+  #view-digs .dg-empty-s{font-size:11.5px;color:var(--muted);margin-top:6px}
+  #view-digs .dg-empty-a{display:flex;gap:8px;flex-wrap:wrap;margin-top:13px}
+  #view-digs .dg-seam-name{font-family:var(--display);font-size:12px;font-weight:700;color:var(--text);letter-spacing:-.1px}
+  #view-digs .dg-seam-share{font-size:11px;color:var(--muted)}
+  #view-digs .dg-seam-who{font-size:10.5px;color:var(--muted);margin-left:auto;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:50%}
+  /* Полоса толщины: 4px скруглённый конец, прижата к левому краю-«баселайну». */
+  #view-digs .dg-seam-bar{height:8px;border-radius:0 4px 4px 0;margin-bottom:2px}
+
+  /* ── Находки: СЕТКА колонок ────────────────────────────────────────
+     Раньше каждая находка была строкой во всю ширину окна, и кнопка действия
+     уезжала к правому краю — на полторы тысячи пикселей от имени, к которому
+     относится. Понять, что лупа принадлежит именно этому артисту, было нельзя.
+     Колонка фиксированной ширины держит кнопку рядом с именем и заодно даёт
+     сетку, которой не хватало. */
+  #view-digs .dg-grid{display:grid;gap:8px;margin-top:8px;
+    grid-template-columns:repeat(auto-fill,minmax(330px,1fr))}
+  /* max-width: ячейка сетки на широком экране шире содержимого, и кнопка
+     уезжала к её правому краю — отрывалась от названия, к которому относится.
+     Ограничение держит их вместе при любой ширине окна. */
+  #view-digs .dg-item{display:flex;align-items:flex-start;gap:11px;padding:9px 11px;max-width:560px;
+    background:rgba(255,255,255,.025);border:1px solid rgba(255,255,255,.07);
+    border-radius:11px;transition:border-color .15s,background .15s}
+  #view-digs .dg-item:hover{border-color:rgba(201,162,39,.45);background:rgba(201,162,39,.05)}
+  #view-digs .dg-cover{width:44px;height:44px;border-radius:50%;object-fit:cover;
+    flex-shrink:0;box-shadow:0 2px 9px rgba(0,0,0,.5);transform:rotate(-3deg);
+    transition:transform .18s ease}
+  #view-digs .dg-item:hover .dg-cover{transform:rotate(0) scale(1.07)}
+  #view-digs .dg-blank{width:44px;height:44px;border-radius:50%;flex-shrink:0;
+    background:radial-gradient(circle at 34% 28%,#3a3228,#1f1a14);
+    display:flex;align-items:center;justify-content:center;color:#6b6153;font-size:16px}
+  #view-digs .dg-name{font-size:12.5px;color:var(--text);font-weight:600;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #view-digs .dg-why{font-size:10.5px;color:var(--muted);margin-top:2px}
+  /* Кнопка действия ВСЕГДА видна. Раньше стояло opacity:0 до наведения — и
+     человек просто не знал, что находку можно забрать или поискать: элемент
+     управления, которого не видно, для пользователя не существует. Теперь она
+     приглушена в покое и наливается при наведении. */
+  #view-digs .dg-act{background:rgba(201,162,39,.1);border:1px solid rgba(201,162,39,.32);
+    border-radius:6px;color:#c9a227;font-size:13px;cursor:pointer;padding:5px 9px;
+    font-family:var(--font);line-height:1;flex-shrink:0;transition:background .15s,border-color .15s}
+  #view-digs .dg-item:hover .dg-act{background:rgba(201,162,39,.22);border-color:rgba(201,162,39,.6)}
+  #view-digs .dg-act:focus-visible{outline:2px solid #c9a227;outline-offset:2px}
+
+  #view-digs .dg-vein{display:flex;align-items:baseline;gap:9px;margin:24px 0 2px}
+  /* Заголовок жилы = идиома .block-title, а не собственный кегль. */
+  #view-digs .dg-vein h3{margin:0;font-family:var(--display);font-size:10px;font-weight:700;
+    color:var(--muted);text-transform:uppercase;letter-spacing:.9px}
+  #view-digs .dg-vein span{font-size:10px;color:var(--muted);font-family:var(--display);
+    letter-spacing:.6px}
+  #view-digs .dg-vein::after{content:'';flex:1;height:1px;
+    background:linear-gradient(90deg,rgba(201,162,39,.3),transparent)}
+
+  /* Чип артиста: заметная граница и фон. Прежние rgba(255,255,255,.05/.08)
+     на тёмном фоне не читались вовсе — ряд имён выглядел сплошной кашей без
+     границ, и было непонятно, что это отдельные кликабельные объекты. */
+  #view-digs .dg-chip{display:inline-flex;align-items:center;gap:6px;padding:5px 11px;
+    border-radius:20px;font-size:11.5px;background:var(--surface,#1c1e2a);
+    border:1px solid var(--border,#333);color:var(--text);
+    box-shadow:0 1px 3px rgba(0,0,0,.25);transition:border-color .15s,transform .12s}
+  #view-digs .dg-chip:hover{border-color:#c9a227;transform:translateY(-1px)}
+  #view-digs .dg-chip.fav{background:rgba(192,132,160,.16);border-color:rgba(192,132,160,.4)}
+  #view-digs .dg-chip button{background:none;border:none;color:var(--muted);cursor:pointer;
+    font-size:12px;padding:0 0 0 2px;line-height:1;font-family:var(--font)}
+  #view-digs .dg-chip button:hover{color:#ff453a}
+  #view-digs .dg-pick{cursor:pointer;user-select:none}
+  #view-digs .dg-pick.on{background:rgba(192,132,160,.2);border-color:rgba(192,132,160,.5);color:#c084a0}
+
+  @media (prefers-reduced-motion: reduce){
+    #view-digs .dg-coon{animation:none}
+    #view-digs .dg-cover{transform:none}
+  }
+
+  /* ── Вид из настроек ──────────────────────────────────────────────────
+     Значения ставит digsApplyLook() из конфига. Через переменные, а не
+     перерисовкой: вид меняется мгновенно и не требует второго запроса. */
+  #view-digs{--dg-size:56px;--dg-radius:50%;--dg-gap:8px;--dg-clip:none}
+  #view-digs .dg-cover,#view-digs .dg-blank{
+    width:var(--dg-size);height:var(--dg-size);border-radius:var(--dg-radius);
+    clip-path:var(--dg-clip)}
+  #view-digs .dg-item{padding-top:var(--dg-gap);padding-bottom:var(--dg-gap)}
+  #view-digs[data-covers="0"] .dg-cover,#view-digs[data-covers="0"] .dg-blank{display:none}
+  #view-digs[data-coon="0"] .dg-bar{display:none}
+  #view-digs[data-bg="flat"] .dg-seam{background:rgba(255,255,255,.02) !important}
+  #view-digs[data-bg="none"] .dg-seam{background:none !important}
+  #view-digs[data-motion="off"] .dg-coon{animation:none}
+  #view-digs[data-motion="off"] .dg-cover,#view-digs[data-motion="off"] .dg-item:hover .dg-cover{
+    transform:none;transition:none}
+  #view-digs[data-motion="hover"] .dg-coon{animation:none}
+  #view-digs[data-motion="hover"] .dg-coon:hover{animation:dgPaw 1.15s ease-in-out infinite}
+
+  /* Светлая тема: полупрозрачный белый на бежевом фоне не виден вовсе,
+     границы и подложка должны браться от тёмного, а не от светлого. */
+  :root[data-theme="light"] #view-digs .dg-item{
+    background:rgba(0,0,0,.02);border-color:rgba(0,0,0,.12)}
+  :root[data-theme="light"] #view-digs .dg-item:hover{
+    border-color:rgba(140,83,20,.55);background:rgba(140,83,20,.06)}
+  :root[data-theme="light"] #view-digs .dg-seam{border-top-color:rgba(0,0,0,.08)}
+  :root[data-theme="light"] #view-digs .dg-bar{border-bottom-color:rgba(0,0,0,.1)}
+
+  /* ── Дерево похожих артистов ────────────────────────────────────────
+     Размер пузыря = степень похожести, то есть картинка снова несёт данные.
+     Появление — transform/opacity, чтобы не дёргать раскладку. */
+  #dg-bubbles{position:fixed;inset:0;z-index:99998;background:rgba(8,7,6,.82);
+    backdrop-filter:blur(3px);display:flex;align-items:center;justify-content:center}
+  #dg-bubbles .dg-bb-wrap{position:relative;width:min(96vw,620px);height:min(80vh,560px)}
+  #dg-bubbles .dg-bb{position:absolute;transform:translate(-50%,-50%) scale(.4);
+    border-radius:50%;border:1px solid rgba(201,162,39,.45);background:rgba(40,33,24,.92);
+    color:#f0e6d2;font-family:var(--font);font-size:11px;cursor:pointer;padding:4px;
+    display:flex;align-items:center;justify-content:center;text-align:center;
+    opacity:0;animation:dgBb .34s cubic-bezier(.2,.9,.3,1.2) forwards;
+    transition:border-color .15s,box-shadow .15s}
+  #dg-bubbles .dg-bb:hover{border-color:#c9a227;box-shadow:0 0 0 4px rgba(201,162,39,.16)}
+  #dg-bubbles .dg-bb span{overflow:hidden;display:-webkit-box;-webkit-line-clamp:3;
+    -webkit-box-orient:vertical;line-height:1.15;word-break:break-word}
+  #dg-bubbles .dg-bb-core{background:rgba(192,132,160,.2);border-color:rgba(192,132,160,.6);
+    font-size:13px;font-weight:700}
+  /* Знакомый артист — не находка. Не прячем (у нишевого артиста похожих может
+     быть трое, и все знакомые), но приглушаем, чтобы новое читалось первым.
+     На наведении возвращаем в полную силу: это по-прежнему рабочий пузырь. */
+  #dg-bubbles .dg-bb-known{opacity:.42;filter:saturate(.55)}
+  #dg-bubbles .dg-bb-known:hover{opacity:1;filter:none}
+  @keyframes dgBb{to{opacity:1;transform:translate(-50%,-50%) scale(1)}}
+  #dg-bubbles .dg-bb-close{position:absolute;right:-4px;top:-30px;background:none;border:none;
+    color:#9a9aa4;font-size:26px;cursor:pointer;font-family:var(--font);line-height:1}
+  #dg-bubbles .dg-bb-hint{position:absolute;left:0;right:0;bottom:-26px;text-align:center;
+    font-size:11px;color:#9a9aa4}
+  #dg-bubbles .dg-bb-load{position:absolute;inset:0;display:flex;align-items:center;
+    justify-content:center;color:#c9c3b6;font-size:13px;text-align:center;padding:0 24px}
+  #view-digs .dg-item{cursor:pointer}
+  #view-digs .dg-item:focus-visible{outline:2px solid #c9a227;outline-offset:2px}
+  @media (prefers-reduced-motion: reduce){
+    #dg-bubbles .dg-bb{animation:none;opacity:1;transform:translate(-50%,-50%)}
+  }
+
+  /* Действия на пузыре. Без них дерево похожих было тупиком: артиста нашёл, а
+     забрать, отметить или начать следить — нечем, и весь смысл терялся. */
+  #dg-bubbles .dg-bb-acts{position:absolute;left:50%;bottom:-64px;transform:translateX(-50%);
+    display:flex;gap:8px}
+  #dg-bubbles .dg-bb-act{background:rgba(40,33,24,.94);border:1px solid rgba(201,162,39,.42);
+    border-radius:20px;color:#f0e6d2;font-family:var(--font);font-size:11.5px;
+    padding:7px 14px;cursor:pointer;white-space:nowrap;transition:border-color .15s,background .15s}
+  #dg-bubbles .dg-bb-act:hover{border-color:#c9a227;background:rgba(201,162,39,.16)}
+  #dg-bubbles .dg-bb-act.done{border-color:#3ecfaa;color:#3ecfaa}
+
+  /* Пузырь с лицом: фото заполняет кружок, имя подписью под ним, галочка в углу
+     для множественного выбора. Клик по галочке — отметить, двойной по пузырю —
+     копнуть глубже; разные жесты для разных намерений. */
+  #dg-bubbles .dg-bb{overflow:visible;padding:0}
+  #dg-bubbles .dg-bb > img{pointer-events:none}
+  #dg-bubbles .dg-bb-ini{font-family:var(--display);font-size:19px;font-weight:800;color:#c9a227}
+  #dg-bubbles .dg-bb-cap{position:absolute;left:50%;top:calc(100% + 5px);transform:translateX(-50%);
+    white-space:nowrap;font-size:10.5px;color:#d8d0c2;pointer-events:none;
+    text-shadow:0 1px 3px rgba(0,0,0,.9);max-width:150px;overflow:hidden;text-overflow:ellipsis}
+  #dg-bubbles .dg-bb-tick{position:absolute;right:-4px;top:-4px;width:22px;height:22px;
+    border-radius:50%;border:1px solid rgba(201,162,39,.5);background:rgba(20,17,12,.94);
+    color:#6b6153;font-size:12px;line-height:1;cursor:pointer;padding:0;font-family:var(--font)}
+  #dg-bubbles .dg-bb.on{border-color:#3ecfaa;box-shadow:0 0 0 3px rgba(62,207,170,.22)}
+  #dg-bubbles .dg-bb.on .dg-bb-tick{color:#3ecfaa;border-color:#3ecfaa}
+  #dg-bubbles .dg-bb-picked{position:absolute;left:50%;top:-52px;transform:translateX(-50%);
+    display:flex;align-items:center;gap:8px;font-size:11.5px;color:#d8d0c2;white-space:nowrap}
+  #dg-bubbles .dg-bb-picked b{color:#3ecfaa}
+
+  /* Действия словами, а не пиктограммами: «лупа» не читалась. */
+  #view-digs .dg-acts{display:flex;gap:5px;flex-shrink:0}
+  #view-digs .dg-act{background:transparent;border:1px solid rgba(255,255,255,.12);
+    border-radius:6px;color:var(--muted);font-size:10.5px;cursor:pointer;padding:4px 8px;
+    font-family:var(--font);line-height:1.2;white-space:nowrap;
+    transition:border-color .15s,color .15s,background .15s}
+  #view-digs .dg-act:hover{border-color:#c9a227;color:#c9a227;background:rgba(201,162,39,.1)}
+  #view-digs .dg-act.primary{border-color:rgba(201,162,39,.45);color:#c9a227}
+  #view-digs .dg-act.primary:hover{background:rgba(201,162,39,.2)}
+  :root[data-theme="light"] #view-digs .dg-act{border-color:rgba(0,0,0,.16)}
+  /* Вторая половина причины — та, что отвечает «почему мне это показывают». */
+  #view-digs .dg-why b{color:#c9a227;font-weight:600}
+  :root[data-theme="light"] #view-digs .dg-why b{color:#8c5314}
+
+  /* ── Тело находки: артист и название РАЗНЫМИ строками ────────────────
+     Одной строкой «Артист — Название» шесть находок одного артиста читались как
+     «Lane 8 — JCM 20…», «Lane 8 — Dance …», «Lane 8 — Group …»: отличить нельзя
+     ни одну. Артист повторяется и его достаточно одной строкой с многоточием,
+     а вот название — то, ради чего сюда смотрят, и оно переносится. */
+  #view-digs .dg-body{flex:1;min-width:0}
+  #view-digs .dg-art{font-size:12.5px;font-weight:700;color:var(--text);
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #view-digs .dg-ttl{font-size:11.5px;color:var(--text);opacity:.82;margin-top:1px;
+    line-height:1.28;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;
+    overflow:hidden}
+  /* Битая ссылка на фото — не повод показывать сломанную картинку. */
+  #view-digs .dg-cover-off{visibility:hidden}
+
+  /* Вспомогательные действия — ТИХИМИ ссылками, а не третьей пилюлей.
+     Кнопок было три на карточку и тридцать карточек: шестьдесят четыре рамки
+     весили больше, чем сами находки. Прятать их нельзя (невидимого элемента
+     управления для человека не существует), поэтому разведены по весу. */
+  #view-digs .dg-links{display:flex;gap:12px;margin-top:5px}
+  #view-digs .dg-link{background:none;border:none;padding:0;color:var(--muted);
+    font-size:10.5px;cursor:pointer;font-family:var(--font);line-height:1.2;
+    text-decoration:underline dotted;text-underline-offset:2px}
+  #view-digs .dg-link:hover{color:#c9a227}
+  #view-digs .dg-link:focus-visible{outline:2px solid #c9a227;outline-offset:2px}
+  :root[data-theme="light"] #view-digs .dg-link:hover{color:#8c5314}
+
+  /* Разворот остатка пласта: «ещё N». */
+  #view-digs .dg-more{margin-top:8px;background:none;border:1px dashed rgba(201,162,39,.35);
+    border-radius:8px;color:var(--muted);font-size:10.5px;cursor:pointer;padding:5px 12px;
+    font-family:var(--font);transition:color .15s,border-color .15s}
+  #view-digs .dg-more:hover{color:#c9a227;border-color:#c9a227}
+
+  #view-digs .dg-seam-cnt{font-size:10px;color:var(--muted);opacity:.8}
+
+  /* Пласты без находок — одной строкой. */
+  #view-digs .dg-quiet-row{display:flex;flex-wrap:wrap;gap:7px;margin-top:8px}
+  #view-digs .dg-quiet{display:inline-flex;align-items:center;gap:6px;font-size:10.5px;
+    color:var(--muted);padding:4px 9px;border-radius:14px;
+    border:1px solid rgba(255,255,255,.07)}
+  #view-digs .dg-quiet i{width:14px;height:4px;border-radius:2px;flex-shrink:0}
+  #view-digs .dg-quiet b{color:var(--text);opacity:.6;font-weight:600}
+  :root[data-theme="light"] #view-digs .dg-quiet{border-color:rgba(0,0,0,.12)}
+</style>
+
+<!-- Заголовок ПРИЛИПАЕТ к верху. Раньше он жил внутри прокручиваемой области
+     и уезжал вместе с находками: владелец сказал «слово Раскопки сверху
+     вообще не видно» (02.08.2026). В измерении он был цел — значит дело
+     было не в обрезке, а в прокрутке. -->
+<!-- flex:0 0 auto — то, из-за чего слово «Раскопки» срезалось второй раз.
+     Секция вкладки это flex-колонка, и шапка как её первый ребёнок сжималась
+     до 22 px при собственном содержимом в 40 px (14 px отступа + строка), а
+     `overflow:auto` этот излишек отрезал. Замер: clientH 22, scrollH 40.
+     Прошлая правка (sticky) лечила другую болезнь — уезжание при прокрутке —
+     и на обрезку не влияла вовсе. -->
+<div style="padding:14px 16px 0;position:sticky;top:0;z-index:5;background:var(--bg);
+            backdrop-filter:none;flex:0 0 auto;overflow:visible">
+  <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+    <div style="font-size:14px;font-weight:700;color:var(--text)"
+         title="Не «что послушать», а что забрать: только то, чего у тебя ещё нет — и почему именно тебе"
+         data-i18n="digs.title" data-i18n-title="digs.sub">Раскопки</div>
+    <!-- Повторный проход тура. В правом верхнем углу, потому что там его ищут,
+         и потому что объяснение должно быть доступно всегда, а не только при
+         первом заходе: вкладка предлагает, а не выполняет команду. -->
+    <button id="dg-tour-btn" onclick="digsTourStart()" data-i18n-title="digs.tour_btn"
+            title="Как это работает"
+            style="margin-left:auto;width:26px;height:26px;flex-shrink:0;border-radius:50%;
+                   background:rgba(201,162,39,.1);border:1px solid rgba(201,162,39,.34);
+                   color:#c9a227;font-size:12px;font-weight:700;cursor:pointer;
+                   font-family:var(--font);line-height:1;padding:0;
+                   transition:background .16s ease,transform .18s cubic-bezier(.34,1.56,.64,1)"
+            onmouseover="this.style.background='rgba(201,162,39,.22)'"
+            onmouseout="this.style.background='rgba(201,162,39,.1)'">?</button>
+  </div>
+</div>
+
+<div class="view-body" style="padding:10px 16px 20px">
+
+  <!-- Вместо пустого баннера — строка раскопа: енот и три настоящих числа. -->
+  <div class="dg-bar">
+
+    <div class="dg-num" id="dg-n-finds">—<small data-i18n="digs.n_finds">находок</small></div>
+    <div class="dg-num" id="dg-n-seams">—<small data-i18n="digs.n_seams">пластов</small></div>
+    <div class="dg-num" id="dg-n-owned">—<small data-i18n="digs.n_owned">уже у тебя</small></div>
+    <!-- Строка «глубже всего залегает…» переехала в подсказку: она объясняет,
+         а не сообщает, и постоянно занимала правую половину шапки. -->
+    <div style="margin-left:auto" id="dg-hero-cap-host" title=""></div>
+  </div>
+
+  <!-- Глубина копа. Наша ось вместо чужих «настроений»: знакомое ↔ незнакомое.
+       Стоит СРАЗУ под шапкой, до находок, — ручка объясняет, что именно ниже.
+       Вынесена из .dg-bar намеренно: ту скрывает настройка «Енот и счётчики»,
+       а орган управления не должен исчезать вместе с украшением. -->
+  <div class="dg-depth">
+    <span class="dg-depth-lbl" data-i18n="digs.depth">Глубина копа</span>
+    <div class="dg-depth-seg" role="radiogroup" data-i18n-title="digs.depth_hint"
+         title="Насколько далеко от знакомого копать. Каждое следующее положение добавляет к предыдущему, а не заменяет его.">
+      <button type="button" class="dg-depth-b" role="radio" aria-checked="false" data-depth="core"
+              onclick="digsSetDepth('core')" data-i18n="digs.depth_core"
+              data-i18n-title="digs.depth_core_h" title="Только те, кого ты уже качал">Ядро</button>
+      <button type="button" class="dg-depth-b" role="radio" aria-checked="false" data-depth="near"
+              onclick="digsSetDepth('near')" data-i18n="digs.depth_near"
+              data-i18n-title="digs.depth_near_h" title="И те, кого слушал или за кем следишь, но так и не забрал">Рядом</button>
+      <button type="button" class="dg-depth-b on" role="radio" aria-checked="true" data-depth="far"
+              onclick="digsSetDepth('far')" data-i18n="digs.depth_far"
+              data-i18n-title="digs.depth_far_h" title="И всё, что пришло по связям: похожие, гости шоу. Так вкладка работает по умолчанию.">Далеко</button>
+    </div>
+  </div>
+
+  <div id="digs-loading" style="color:var(--muted);font-size:13px;padding:18px 0" data-i18n="digs.loading">
+    Считаю по твоей истории…
+  </div>
+
+  <!-- Первый запуск: пока человек не сказал, что копаем, спрашиваем. Иначе у
+       нового пользователя вкладка пуста (истории нет), а у владельца профиль
+       засорён загрузками гостей бота. -->
+  <div id="digs-onboard" style="display:none;padding:16px 0 4px">
+    <div class="dg-vein"><h3 data-i18n="digs.ob_title">Где копаем?</h3></div>
+    <div style="font-size:11.5px;color:var(--muted);line-height:1.7;margin:4px 0 14px;max-width:660px" data-i18n="digs.ob_sub">
+      Один раз — и дальше сам. По одной истории загрузок вкус угадывается плохо: там же качают гости бота, а направления вроде «ликвид фанка» из жанров Apple не выводятся вовсе.
+    </div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:7px" data-i18n="digs.ob_genres">Направления — отметь свои</div>
+    <div id="digs-ob-genres" style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:16px"></div>
+    <div style="font-size:11px;color:var(--muted);margin-bottom:7px" data-i18n="digs.ob_artists">Артисты, которых любишь — через запятую</div>
+    <textarea id="digs-ob-artists" data-i18n-ph="digs.ob_ph" placeholder="Apparat, The Midnight, Bonobo…"
+      style="width:100%;max-width:660px;height:56px;resize:vertical;background:rgba(255,255,255,.03);border:1px solid var(--border);border-radius:10px;color:var(--text);padding:9px;font-size:12px;font-family:var(--font)"></textarea>
+    <div style="display:flex;gap:10px;align-items:center;margin-top:12px">
+      <button onclick="digsSaveFavorites()" id="digs-ob-save"
+        style="padding:8px 18px;background:rgba(192,132,160,.18);border:1px solid rgba(192,132,160,.45);border-radius:20px;color:#c084a0;font-size:12px;font-weight:700;cursor:pointer;font-family:var(--font)">
+        <span data-i18n="digs.ob_save">Копать здесь</span>
+      </button>
+      <span id="digs-ob-status" style="font-size:11px;color:var(--muted)"></span>
+    </div>
+  </div>
+
+  <!-- Сам разрез: пласты с находками внутри -->
+  <div id="digs-seams"></div>
+
+  <!-- Находки, не привязанные к жанру (гости шоу, забытое) -->
+  <div id="digs-sections"></div>
+
+  <div id="digs-profile" style="display:none">
+    <div class="dg-vein"><h3 data-i18n="digs.anchors">Опорные артисты</h3>
+      <span data-i18n="digs.anchors_hint">крестик — если это не твоё</span>
+      <button onclick="digsShowOnboard()" style="background:none;border:none;color:var(--muted);font-size:11px;cursor:pointer;font-family:var(--font);text-decoration:underline dotted">
+        <span data-i18n="digs.edit_taste">поправить</span>
+      </button>
+    </div>
+    <div id="digs-artists" style="display:flex;flex-wrap:wrap;gap:7px;margin-top:8px"></div>
+
+    <div id="digs-shows-wrap" style="display:none">
+      <div class="dg-vein"><h3 data-i18n="digs.shows">Шоу и лейблы</h3>
+        <span data-i18n="digs.shows_hint">это не артисты — в опоры не идут</span></div>
+      <div id="digs-shows" style="display:flex;flex-wrap:wrap;gap:7px;margin-top:8px"></div>
+    </div>
+    <div id="digs-foot" style="font-size:10px;color:var(--muted);margin-top:16px;line-height:1.6"></div>
+  </div>
+
+</div>

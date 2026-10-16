@@ -1,0 +1,548 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"/>
+<title>Ripster</title>
+<!-- PWA -->
+<link rel="manifest" href="/static/manifest.json"/>
+<meta name="theme-color" content="#c084a0"/>
+<meta name="mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-capable" content="yes"/>
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
+<meta name="apple-mobile-web-app-title" content="Ripster"/>
+<link rel="apple-touch-icon" href="/static/apple-touch-icon.png"/>
+<link rel="icon" type="image/png" sizes="32x32" href="/static/favicon-32.png"/>
+<link rel="icon" type="image/svg+xml" href="/static/favicon-32.svg"/>
+<!-- hls.js — плеер BBC. Лежит локально СОЗНАТЕЛЬНО: раньше тянулся с jsdelivr,
+     и при любом провале DNS/сети (01.08.2026 — ровно это) `Hls` оказывался
+     undefined, а BBC молча переставал играть, хотя бэкенд отдавал поток. -->
+<script src="/static/vendor/hls.min.js?v=1520"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@400;500&family=DM+Sans:wght@300;400;500;600&family=Inter:wght@300;400;500;600;700&family=Geist:wght@300;400;500;600;700&family=Nunito:wght@300;400;500;600;700&family=Roboto:wght@300;400;500;700&family=Manrope:wght@300;400;500;600;700&family=Atkinson+Hyperlegible:wght@400;700&family=Source+Sans+3:wght@300;400;500;600;700&display=swap" rel="stylesheet"/>
+<link rel="stylesheet" href="/static/css/main.css?v=160"/>
+<link rel="stylesheet" href="/static/css/player_dnd.css?v=1"/>
+<link rel="stylesheet" href="/static/panel/host.css?v=2"/>
+</head>
+<body>
+<div id="net-progress"></div>
+<div id="guest-banner">
+  <span data-i18n="g.banner">🔗 Гостевой доступ</span>
+  <span id="guest-label" style="opacity:.7;font-weight:400"></span>
+  <span id="guest-expiry" style="opacity:.7;margin-left:8px;font-size:11px"></span>
+  <span id="guest-quota" style="margin-left:auto;opacity:.7"></span>
+  <button onclick="showGuestServiceInfo()" data-i18n-title="g.about" title="О сервисе" style="margin-left:10px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.18);border-radius:50%;width:22px;height:22px;color:#fff;font-size:12px;cursor:pointer;padding:0;flex-shrink:0">ℹ</button>
+</div>
+
+<div class="app">
+
+  <!-- ── TOPBAR ── -->
+  <header class="topbar">
+    <div class="tb-logo">
+      <div class="tb-mark">
+        <svg width="32" height="32" viewBox="0 0 64 64" xmlns="http://www.w3.org/2000/svg">
+          <ellipse cx="32" cy="36" rx="18" ry="17" fill="#7a7a8a"/>
+          <ellipse cx="16" cy="19" rx="7" ry="8" fill="#7a7a8a"/><ellipse cx="48" cy="19" rx="7" ry="8" fill="#7a7a8a"/>
+          <ellipse cx="16" cy="20" rx="4" ry="5" fill="#c084a0"/><ellipse cx="48" cy="20" rx="4" ry="5" fill="#c084a0"/>
+          <ellipse cx="24" cy="33" rx="9" ry="7" fill="#2a2a38"/><ellipse cx="40" cy="33" rx="9" ry="7" fill="#2a2a38"/>
+          <rect x="29" y="28" width="6" height="7" fill="#2a2a38"/>
+          <ellipse cx="24" cy="32" rx="6" ry="5" fill="#e8e8f0"/><ellipse cx="40" cy="32" rx="6" ry="5" fill="#e8e8f0"/>
+          <ellipse cx="24" cy="32" rx="4" ry="4" fill="#111318"/><ellipse cx="40" cy="32" rx="4" ry="4" fill="#111318"/>
+          <ellipse cx="26" cy="30" rx="1.5" ry="1.5" fill="white"/><ellipse cx="42" cy="30" rx="1.5" ry="1.5" fill="white"/>
+          <ellipse cx="32" cy="39" rx="4" ry="3" fill="#2a2a38"/>
+          <ellipse cx="32" cy="44" rx="8" ry="6" fill="#c8c8d8"/>
+          <path d="M26 46 Q32 50 38 46" fill="none" stroke="#9a9aaa" stroke-width="1" stroke-linecap="round"/>
+        </svg>
+      </div>
+      <div>
+        <div class="tb-name"><span>Raccoon</span> <span style="color:var(--red)">Ripster</span></div>
+        <div class="tb-sub" id="tb-ver">v—</div>
+      </div>
+    </div>
+    <button id="mobile-menu-btn" onclick="toggleMobileDrawer()" data-i18n-title="tb.menu" title="Меню"
+      style="background:var(--surface);border:1px solid var(--border);border-radius:8px;width:32px;height:32px;font-size:17px;cursor:pointer;align-items:center;justify-content:center;flex-shrink:0;color:var(--text);padding:0;line-height:1">☰</button>
+    <!-- Статусные лампы (Wrapper / Public wrapper) и кардиограмма-индикатор
+         убраны по решению владельца, 21.09.2026. Спаннер — чтобы правый угол
+         (язык + тема) прижался к краю, как это делал margin-left:auto на лампе. -->
+    <div style="flex:1;min-width:0"></div>
+    <button class="glob-btn" id="lang-switcher" onclick="cycleLang(event)" data-i18n-title="tb.lang_t" title="Следующий язык (клик по точке — выбрать конкретный)">
+      <span class="gi">🌐</span><span class="code" id="lang-code">RU</span>
+      <span class="dots" id="lang-dots">
+        <i data-lang="ru" onclick="setLang('ru');event.stopPropagation()"></i>
+        <i data-lang="en" onclick="setLang('en');event.stopPropagation()"></i>
+        <i data-lang="hi" onclick="setLang('hi');event.stopPropagation()"></i>
+        <i data-lang="ja" onclick="setLang('ja');event.stopPropagation()"></i>
+        <i data-lang="zh" onclick="setLang('zh');event.stopPropagation()"></i>
+      </span>
+    </button>
+    <button id="theme-btn" onclick="toggleTheme()" class="tb-icon-btn"
+            data-i18n-title="tb.theme_t" title="Тема оформления">🌙</button>
+    <button class="tb-restart owner-only" id="tb-restart-btn" onclick="restartServer()" data-i18n-title="tb.restart_t" title="Перезапустить сервер" style="display:none">↺</button>
+  </header>
+  <div id="restart-overlay" style="display:none;position:fixed;inset:0;z-index:99999;background:rgba(0,0,0,.7);align-items:center;justify-content:center;flex-direction:column;gap:12px">
+    <div style="color:#fff;font-size:18px;font-weight:600" data-i18n="tb.restarting">Перезапуск сервера…</div>
+    <div style="color:var(--muted);font-size:13px" data-i18n="tb.reload_auto">Страница обновится автоматически</div>
+  </div>
+
+  <!-- Details popover removed together with the pulse: the pulse window was
+       its only opener. -->
+
+  <!-- ── SIDEBAR ── -->
+  <nav class="sidebar">
+   <!-- Два этажа: меню прокручивается здесь, док загрузок — отдельным этажом
+        под ним (.dlside-foot, его вешает dlorb.js). Наезжать на пункты больше
+        нечем (замечание владельца 24.09.2026). -->
+   <div class="nav-scroll">
+    <div class="nav-section" data-i18n="nav.s_main">Главное</div>
+    <div class="nav-item active" data-view="queue" onclick="showView('queue',this)">
+      <span class="icon">⬇</span> <span data-i18n="nav.queue">Очередь</span>
+      <span class="nav-badge" id="queue-badge" style="display:none">0</span>
+    </div>
+    <div class="nav-item" data-view="search" onclick="showView('search',this)">
+      <span class="icon">🔍</span> <span data-i18n="nav.search">Поиск</span>
+    </div>
+    <!-- Панель — не вью, а оверлей поверх любого экрана: кнопка в баре плеера
+         живёт только во время игры, этот вход доступен всегда (трекер #37). -->
+    <div class="nav-item" id="nav-panel-btn" onclick="rpPanelToggle()" data-i18n-title="panel.btn_hint">
+      <span class="icon">⧉</span> <span data-i18n="nav.panel">Панель</span>
+    </div>
+    <div class="nav-item" data-view="history" onclick="showView('history',this);loadHistory()">
+      <span class="icon">◷</span> <span data-i18n="nav.history">История</span>
+    </div>
+    <div class="nav-item" data-view="stations" onclick="showView('stations',this);stationsInit()">
+      <span class="icon" style="color:#7aa2ff">&#9673;</span> <span data-i18n="nav.stations">Станции</span>
+    </div>
+    <div class="nav-item" data-view="digs" onclick="showView('digs',this);digsInit()">
+      <span class="icon" style="color:#c084a0">&#9935;</span> <span data-i18n="nav.digs">&#1056;&#1072;&#1089;&#1082;&#1086;&#1087;&#1082;&#1080;</span>
+    </div>
+    <div class="nav-item owner-only" data-view="watchlist" onclick="showView('watchlist',this);loadWatchlist()">
+      <span class="icon">★</span> <span data-i18n="nav.watchlist">Watchlist</span>
+    </div>
+    <div class="nav-item owner-only" data-view="releases" onclick="showView('releases',this)">
+      <span class="icon" style="color:#1db954">♻</span> <span data-i18n="nav.releases">Релизы</span>
+      <span class="nav-badge" id="releases-badge" style="display:none;background:#1db954;color:#fff">0</span>
+    </div>
+
+    <div class="nav-item" data-view="bbc" onclick="showView('bbc',this);bbcInit()">
+      <span class="icon" style="color:#e4003b">📻</span> BBC Sounds
+    </div>
+    <div class="nav-item" data-view="soundcloud" onclick="showView('soundcloud',this);scInit()">
+      <span class="icon" style="color:#ff5500">☁</span> SoundCloud
+    </div>
+    <div class="nav-item" data-view="coder" onclick="showView('coder',this);coderInit()">
+      <span class="icon" style="color:#c9a0ff">🎛</span> Ripster Coder
+    </div>
+    <div class="nav-item" data-view="spectrogram" onclick="showView('spectrogram',this)">
+      <span class="icon" style="color:#af52de">📊</span> <span data-i18n="nav.spectrum">Спектр</span>
+    </div>
+    <div class="nav-section" data-i18n="nav.s_config">Настройки</div>
+    <div class="nav-item" data-view="settings" onclick="showView('settings',this)">
+      <span class="icon">⚙️</span> <span data-i18n="nav.settings">Настройки</span>
+    </div>
+    <div class="nav-section" data-i18n="nav.s_debug">Отладка</div>
+    <div class="nav-item" data-view="setup" onclick="showView('setup',this)">
+      <span class="icon">🔧</span> Setup
+      <span class="nav-badge" id="setup-badge" style="display:none">!</span>
+    </div>
+    <div class="nav-item" data-view="console" onclick="showView('console',this)">
+      <span class="icon">🖥</span> Console
+      <span class="nav-badge" id="log-badge" style="display:none">!</span>
+    </div>
+   </div><!-- /.nav-scroll -->
+  </nav>
+
+  <!-- ── MAIN ── -->
+  <main class="main">
+
+    <!-- ── QUEUE VIEW ── -->
+    <section class="view active" id="view-queue">
+    </section>
+
+    <!-- ── QUALITY VIEW ── -->
+    <!-- ── SETTINGS VIEW ── -->
+    <section class="view" id="view-settings">
+    </section>
+
+    <!-- ══ RELEASES VIEW ══ -->
+    <section class="view owner-only" id="view-releases">
+    </section>
+
+    <!-- ══ BBC SOUNDS VIEW ══ -->
+    <!-- ══ SOUNDCLOUD VIEW ══ -->
+    <section class="view" id="view-soundcloud" style="overflow:auto">
+    </section>
+
+    <section class="view" id="view-bbc" style="overflow:auto">
+    </section>
+
+    <!-- ══ RIPSTER CODER VIEW ══ -->
+    <section class="view owner-only" id="view-coder" style="overflow:auto">
+    </section>
+
+    <!-- ══ SPECTROGRAM VIEW ══ -->
+    <section class="view" id="view-spectrogram" style="overflow:auto">
+    </section>
+
+    <!-- ══ SEARCH VIEW ══ -->
+    <section class="view" id="view-search">
+    </section>
+
+    <!-- ══ HISTORY VIEW ══ -->
+    <!-- ══ HISTORY VIEW ══ -->
+    <section class="view" id="view-digs" style="overflow:auto"></section>
+    <!-- ══ STATIONS VIEW ══ -->
+    <section class="view" id="view-stations" style="overflow:auto">
+      <div class="st-top">
+        <div class="st-title" data-i18n="nav.stations">Станции</div>
+        <div class="st-status" id="st-status"></div>
+      </div>
+      <!-- Ручки эфира: настраиваются СЕРВЕРНЫМ докладом knob_report, мёртвые
+           значения показываются отключёнными — см. stRenderKnobs() -->
+      <div class="st-knobs" id="st-knobs"></div>
+      <div id="st-body"></div>
+    </section>
+    <section class="view" id="view-history">
+    </section>
+
+    <!-- ══ WATCHLIST VIEW ══ -->
+    <section class="view owner-only" id="view-watchlist">
+    </section>
+
+    <!-- ══ CONSOLE VIEW — uses a dedicated grid layout so height cannot collapse ══ -->
+    <section class="view view--console" id="view-console">
+    </section>
+
+    <!-- ── SETUP VIEW ── -->
+    <section class="view" id="view-setup">
+    </section>
+
+  </main>
+
+  <!-- ─── Artist / Album detail: right-side sliding panel ─── -->
+  <div id="detail-overlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9000" onclick="if(event.target===this)closeDetail()">
+    <div id="detail-panel" style="position:absolute;top:0;right:0;bottom:0;width:min(780px,100vw);background:var(--bg);display:flex;flex-direction:column;box-shadow:-16px 0 60px rgba(0,0,0,.85)">
+      <!-- Sticky header bar -->
+      <div style="position:sticky;top:0;background:var(--player-bg);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border-bottom:1px solid var(--border);display:flex;align-items:center;gap:10px;padding:10px 16px;flex-shrink:0;z-index:2">
+        <button id="detail-back-btn" onclick="detailGoBack()" data-i18n-title="pp.back" title="Назад" style="display:none;width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.08);color:var(--muted);border:none;cursor:pointer;font-size:16px;flex-shrink:0;transition:background .15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background='rgba(255,255,255,.16)'" onmouseout="this.style.background='rgba(255,255,255,.08)'">←</button>
+        <button onclick="closeDetail()" data-i18n-title="pp.close" title="Закрыть" style="width:32px;height:32px;border-radius:50%;background:rgba(255,255,255,.08);color:var(--muted);border:none;cursor:pointer;font-size:15px;flex-shrink:0;transition:background .15s;display:inline-flex;align-items:center;justify-content:center" onmouseover="this.style.background='rgba(255,255,255,.16)'" onmouseout="this.style.background='rgba(255,255,255,.08)'">✕</button>
+        <span id="detail-breadcrumb" style="font-size:12px;color:var(--muted);flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+      </div>
+      <!-- Scrollable content -->
+      <div id="detail-content" style="flex:1;overflow-y:auto;padding:20px 20px 120px">
+        <div style="text-align:center;padding:80px 0;color:var(--muted)" data-i18n="ui.loading">Загрузка…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Preview player ─── -->
+  <!-- Backdrop behind the expanded now-playing drawer (click to close) -->
+  <div id="pp-backdrop" onclick="togglePlayerExpanded()" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9540"></div>
+  <div id="preview-player" style="position:fixed;bottom:0;left:220px;right:0;background:var(--player-bg);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border-top:1px solid var(--border);z-index:9500">
+
+    <!-- ══ Expanded Now Playing panel ══ -->
+    <div id="pp-expanded" style="display:none;padding:20px 24px 16px;border-bottom:1px solid rgba(255,255,255,.07)">
+      <div style="display:flex;gap:20px;align-items:center;max-width:900px;margin:0 auto">
+        <!-- Big cover -->
+        <div id="pp-art-big" style="width:116px;height:116px;border-radius:12px;background:rgba(192,132,160,.1);color:var(--red);display:flex;align-items:center;justify-content:center;font-size:36px;flex-shrink:0;overflow:hidden">♪</div>
+        <!-- Controls column -->
+        <div style="flex:1;min-width:0">
+          <div id="pp-title-big" style="font-size:18px;font-weight:700;font-family:var(--display);letter-spacing:-.3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;color:var(--text)">—</div>
+          <div id="pp-artist-big" data-i18n="pp.preview" style="font-size:13px;color:var(--muted);margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Предпрослушка</div>
+          <!-- Playback controls row -->
+          <div style="display:flex;align-items:center;gap:14px;margin-top:18px">
+            <button onclick="previewPrev()" data-i18n-title="pp.prev" title="Предыдущий" style="width:36px;height:36px;border-radius:50%;background:transparent;color:var(--muted);border:1px solid var(--border2);cursor:pointer;font-size:15px;padding:0;flex-shrink:0;transition:color .12s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">⏮</button>
+            <button id="pp-play-big" onclick="previewToggle()" style="width:48px;height:48px;border-radius:50%;background:var(--red);color:#fff;border:none;cursor:pointer;font-size:20px;padding:0;flex-shrink:0;transition:transform .1s" onmouseover="this.style.transform='scale(1.05)'" onmouseout="this.style.transform=''">▶</button>
+            <button onclick="previewNext()" data-i18n-title="pp.next" title="Следующий" style="width:36px;height:36px;border-radius:50%;background:transparent;color:var(--muted);border:1px solid var(--border2);cursor:pointer;font-size:15px;padding:0;flex-shrink:0;transition:color .12s" onmouseover="this.style.color='var(--text)'" onmouseout="this.style.color='var(--muted)'">⏭</button>
+            <div style="flex:1"></div>
+            <button id="pp-mute-big" onclick="previewMute()" data-i18n-title="pp.sound" title="Звук" style="width:30px;height:30px;border-radius:50%;background:transparent;color:var(--muted);border:none;cursor:pointer;font-size:15px;padding:0;flex-shrink:0">🔊</button>
+            <input id="pp-vol-big" type="range" min="0" max="1" step="0.05" value="1" oninput="previewVolume(this.value)" style="width:80px;flex-shrink:0;cursor:pointer"/>
+          </div>
+          <!-- Seek bar -->
+          <div style="display:flex;align-items:center;gap:9px;margin-top:20px">
+            <span id="pp-cur-big" style="font-size:10px;color:var(--muted2);font-family:var(--mono);width:34px;text-align:right;flex-shrink:0">0:00</span>
+            <div id="pp-progress-big" onclick="previewSeek(event)" style="flex:1;height:6px;background:rgba(255,255,255,.1);border-radius:3px;cursor:pointer;position:relative;overflow:hidden">
+              <div id="pp-buffered-big" style="position:absolute;top:0;left:0;height:100%;width:0%;background:rgba(255,255,255,.22);border-radius:3px;pointer-events:none;z-index:0"></div>
+              <div id="pp-fill-big" style="position:absolute;top:0;left:0;height:100%;background:var(--red);border-radius:3px;width:0%;pointer-events:none;transition:none;z-index:1"></div>
+            </div>
+            <span id="pp-dur-big" style="font-size:10px;color:var(--muted2);font-family:var(--mono);width:34px;flex-shrink:0">0:00</span>
+          </div>
+        </div>
+      </div>
+      <!-- Chapters (YouTube-style) — shown only when the mix has timecodes -->
+      <div id="pp-chapters-wrap" style="display:none;max-width:900px;margin:16px auto 0;border-top:1px solid rgba(255,255,255,.07);padding-top:12px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">
+          <div style="font-size:11px;font-weight:700;color:var(--muted);text-transform:uppercase;letter-spacing:.4px" data-i18n="pp.tracklist_time">Трек-лист по времени</div>
+          <div id="pp-chapter-count" style="font-size:10px;color:var(--muted2);font-family:var(--mono)"></div>
+        </div>
+        <div id="pp-chapters" style="max-height:208px;overflow-y:auto;display:flex;flex-direction:column"></div>
+      </div>
+    </div>
+
+    <!-- ══ Full-width seek strip — spans the whole dock (top of the mini bar) ══ -->
+    <div id="pp-progress" onclick="previewSeek(event)" data-i18n-title="pp.seek" title="Перемотка"
+      style="height:12px;background:rgba(255,255,255,.1);cursor:pointer;position:relative;overflow:hidden">
+      <canvas id="pp-wave" aria-hidden="true"></canvas>
+      <div id="pp-buffered" style="position:absolute;top:0;left:0;height:100%;width:0%;background:rgba(255,255,255,.22);pointer-events:none;z-index:0"></div>
+      <div id="pp-fill" style="position:absolute;top:0;left:0;height:100%;background:var(--red);width:0%;pointer-events:none;z-index:1"></div>
+    </div>
+
+    <!-- ══ Single-row controls — именованные области сетки (player_bar_layout.js) ══ -->
+    <div id="pp-bar" style="display:flex;align-items:center;gap:12px;padding:0 14px;height:58px;box-sizing:border-box">
+
+      <!-- Mini visualizer — always-visible strip (was fullscreen-only, which
+           nobody opens). Bars tint to the playing track's service color. -->
+      <canvas id="pp-viz" aria-hidden="true"
+        style="width:68px;height:46px;flex-shrink:0;border-radius:6px;background:rgba(255,255,255,.045);opacity:0;transition:opacity .3s ease"></canvas>
+
+      <!-- ── LEFT: cover + meta. Гибкая зона: сужается первой, текст уходит в
+           многоточие. min-width задаёт CSS (not the old inline max-width:320px,
+           which let the right zone balloon past the middle and skew the transport). ── -->
+      <div class="pp-zone pp-zone-left" style="display:flex;align-items:center;gap:11px;flex:1 1 0;min-width:0">
+        <div id="pp-art" onclick="togglePlayerExpanded()" data-i18n-title="pp.expand_player" title="Развернуть плеер" style="width:42px;height:42px;border-radius:8px;background:rgba(192,132,160,.12);color:var(--red);display:flex;align-items:center;justify-content:center;font-size:16px;flex-shrink:0;overflow:hidden;cursor:pointer">♪</div>
+        <div id="pp-mini-meta" onclick="togglePlayerExpanded()" data-i18n-title="pp.expand_player" title="Развернуть плеер" style="min-width:0;line-height:1.3;cursor:pointer">
+          <div id="pp-title" data-mq style="font-size:13px;font-weight:600;color:var(--text)">—</div>
+          <div id="pp-artist" data-i18n="pp.preview" data-mq style="font-size:11.5px;color:var(--muted)">Предпрослушка</div>
+        </div>
+      </div>
+
+      <!-- ── CENTER: BIG time readout on the LEFT, then transport buttons.
+           Колонка сетки «center»: её ширина = natural, поэтому наезд на соседей
+           физически невозможен. ⏮▶⏭ не сворачиваются НИКОГДА. ── -->
+      <div class="pp-zone pp-zone-center" id="pp-center">
+        <span class="pp-time-box pp-time-big" data-pp-prio="20">
+          <span id="pp-cur" class="pp-time-cur">0:00.000</span><span class="pp-time-sep">/</span><span id="pp-dur" class="pp-time-dur">0:00</span>
+        </span>
+        <button id="pp-prev" onclick="previewPrev()" data-i18n-title="pp.prev_hint" title="Предыдущий (или перемотать в начало)" class="pp-transport">⏮</button>
+        <button id="pp-play" onclick="previewToggle()" data-i18n-title="pp.play_pause" title="Воспроизведение / Пауза" style="width:42px;height:42px;border-radius:50%;background:var(--red);color:#fff;border:none;cursor:pointer;font-size:17px;flex-shrink:0;padding:0">▶</button>
+        <button id="pp-next" onclick="previewNext()" data-i18n-title="pp.next_track" title="Следующий трек" class="pp-transport">⏭</button>
+        <button id="pp-queue-btn" data-pp-prio="60" onclick="event.stopPropagation();togglePlayerQueue()" data-i18n-title="pq.title" title="Трек-лист" class="pp-transport">☰</button>
+        <button id="pp-fav-btn" data-pp-prio="70" onclick="event.stopPropagation();ppFollowCurrent()" data-i18n-title="af.follow" title="В любимые артисты" class="pp-transport">♡</button>
+        <!-- Минус и «скачать» по текущему треку: человек отказывает и забирает
+             ту музыку, что звучит СЕЙЧАС, а не ту, что он нашёл в списке. Оба
+             уходят на сервер событиями станции (dislike / download). -->
+        <button id="pp-dl-btn" data-pp-prio="50" onclick="event.stopPropagation();ppDownloadCurrent()" data-i18n-title="st.dl_title" title="Скачать этот трек" class="pp-transport">⭳</button>
+        <button id="pp-dis-btn" data-pp-prio="40" onclick="event.stopPropagation();ppDislikeCurrent()" data-i18n-title="st.dislike" title="Не надо этой музыки" class="pp-transport">🚫</button>
+      </div>
+
+      <!-- ── RIGHT: quality + volume + extras. Три колонки сетки, каждая со
+           своей шириной natural; порядок сворачивания — data-pp-prio
+           (больше = сворачивается раньше). ── -->
+      <div class="pp-zone pp-zone-right">
+        <!-- Quality pill -->
+        <div id="pp-quality" style="position:relative;flex-shrink:0">
+          <button id="pp-quality-btn" onclick="toggleQualityMenu(event)" data-i18n-title="pp.stream_quality" title="Качество стрима" style="height:26px;padding:0 10px;border-radius:13px;background:var(--pp-tile);color:var(--text);border:1px solid var(--border);cursor:pointer;font-size:11px;font-weight:600;display:flex;align-items:center;gap:5px;white-space:nowrap"><span id="pp-quality-label">MP3</span><span id="pp-quality-caret" style="font-size:8px;opacity:.7">▾</span></button>
+          <div id="pp-quality-menu" style="display:none;position:absolute;bottom:34px;right:0;background:var(--player-bg);backdrop-filter:blur(14px);-webkit-backdrop-filter:blur(14px);border:1px solid var(--border);border-radius:10px;padding:5px;min-width:170px;box-shadow:0 8px 28px rgba(0,0,0,.55);z-index:9600"></div>
+        </div>
+        <!-- Volume: mute icon + inline horizontal slider (flat, centred, consistent with the rest of the bar) -->
+        <div id="pp-vol-wrap" data-pp-prio="30" style="display:flex;align-items:center;gap:7px;flex-shrink:0">
+          <button id="pp-mute" onclick="previewMute()" data-i18n-title="pp.mute" title="Без звука" style="width:28px;height:28px;border-radius:50%;background:transparent;color:var(--text);border:none;cursor:pointer;font-size:14px;padding:0">🔊</button>
+          <input id="pp-vol" type="range" min="0" max="1" step="0.05" value="1" oninput="previewVolume(this.value)" data-i18n-title="pp.volume" title="Громкость" data-i18n-aria="pp.volume" aria-label="Громкость"/>
+        </div>
+        <!-- extras — tight Win10-tile cluster. Одна кнопка «Плеер-окно» вместо
+             прежних двух (⧉ панель-док + 🖥 внешний плеер): см. player_bar_layout.js. -->
+        <div class="pp-extras" id="pp-extras">
+          <button onclick="rpPlayerWindowToggle(event)" id="pp-ext-btn" data-i18n-title="player.window_btn" title="Плеер-окно: отдельное окно; если его не создать — панель справа" class="pp-extra">🖥</button>
+          <button onclick="togglePlayerExpanded()" id="pp-expand-btn" data-pp-prio="90" data-i18n-title="pp.expand_collapse" title="Развернуть / Свернуть" class="pp-extra">⌃</button>
+          <button onclick="document.getElementById('pp-local-input').click()" id="pp-local-btn" data-pp-prio="80" data-i18n-title="pp.local_file" title="Слушать локальный файл" class="pp-extra">📂</button>
+          <button onclick="closePreview()" id="pp-close-btn" data-i18n-title="pp.close_player" title="Закрыть плеер" class="pp-extra">✕</button>
+          <div class="pp-of" id="pp-of">
+            <button id="pp-of-btn" onclick="ppOverflowToggle(event)" data-i18n-title="player.overflow" title="Свернувшиеся кнопки плеера" class="pp-extra">⋯</button>
+            <div class="pp-of-menu" id="pp-of-menu" role="menu"></div>
+          </div>
+        </div>
+        <input type="file" id="pp-local-input" accept="audio/*" style="display:none" onchange="playLocalFile(this.files[0]);this.value=''"/>
+        <audio id="pp-audio" preload="none" style="display:none"></audio>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── Fullscreen player (mobile / opt-in desktop) ─── -->
+  <div id="fullscreen-player" aria-hidden="true">
+    <!-- Blurred cover fills the whole screen -->
+    <div id="fp-bg" aria-hidden="true"></div>
+    <div id="fp-shade" aria-hidden="true"></div>
+    <canvas id="fp-viz" aria-hidden="true"
+      style="position:absolute;left:0;right:0;bottom:0;height:35vh;width:100%;
+             pointer-events:none;opacity:0;transition:opacity .4s ease;z-index:0"></canvas>
+
+    <!-- Top bar -->
+    <div class="fp-top">
+      <button class="fp-icon-btn" onclick="fpClose()" data-i18n-title="fp.dock" title="Свернуть в док" data-i18n-aria="digs.less" aria-label="Свернуть">⌄</button>
+      <div class="fp-top-label" id="fp-source" data-i18n="fp.now_playing">Сейчас играет</div>
+      <button class="fp-icon-btn" onclick="fpMenu(event)" data-i18n-title="fp.menu" title="Меню" data-i18n-aria="fp.menu" aria-label="Меню">⋯</button>
+    </div>
+
+    <!-- Cover -->
+    <div class="fp-art-wrap">
+      <div id="fp-art" class="fp-art" onclick="previewToggle()">♪</div>
+    </div>
+
+    <!-- Meta -->
+    <div class="fp-meta">
+      <div id="fp-title">—</div>
+      <div id="fp-artist"></div>
+      <!-- Строка формата. Пустой пока качество неизвестно: подпись берётся из
+           _pqQuality(), которая честно возвращает пусто без сервиса, — иначе
+           получалось выдуманное «FLAC» (та же ловушка, что в трек-листе). -->
+      <div id="fp-fmt" class="fp-fmt" hidden></div>
+    </div>
+
+    <!-- Seek -->
+    <div class="fp-seek-wrap">
+      <div id="fp-progress" class="fp-seek" onclick="previewSeek(event)" role="slider"
+           data-i18n-aria="pp.seek" aria-label="Перемотка" data-i18n-title="pp.seek" title="Перемотка">
+        <!-- Волна = полоса перемотки (референс neon-reference-mobile.png).
+             pointer-events:none — клик и протяжка достаются полосе, перемотка штатная. -->
+        <canvas id="fp-wave" aria-hidden="true"></canvas>
+        <div id="fp-buffered" style="position:absolute;left:0;top:50%;transform:translateY(-50%);height:6px;width:0%;background:rgba(255,255,255,.22);border-radius:3px;pointer-events:none;z-index:0"></div>
+        <div id="fp-fill" class="fp-fill" style="z-index:1"></div>
+        <div id="fp-thumb" class="fp-thumb"></div>
+      </div>
+      <div class="fp-times">
+        <span id="fp-cur">0:00</span>
+        <span id="fp-dur">0:00</span>
+      </div>
+    </div>
+
+    <!-- Big controls -->
+    <div class="fp-controls">
+      <button class="fp-ctrl" onclick="previewPrev()" data-i18n-title="pp.prev" title="Предыдущий" data-i18n-aria="pp.prev" aria-label="Предыдущий">⏮</button>
+      <button id="fp-play" class="fp-ctrl fp-play" onclick="previewToggle()" data-i18n-aria="pp.play_pause" aria-label="Воспроизведение/Пауза">▶</button>
+      <button class="fp-ctrl" onclick="previewNext()" data-i18n-title="pp.next" title="Следующий" data-i18n-aria="pp.next" aria-label="Следующий">⏭</button>
+    </div>
+
+    <!-- Extra row: speed / sleep / queue -->
+    <div class="fp-extra">
+      <button id="fp-speed-btn" class="fp-pill" onclick="fpCycleSpeed()" data-i18n-title="fp.speed" title="Скорость воспроизведения">
+        <span id="fp-speed-val">1×</span>
+      </button>
+      <button id="fp-queue-btn" class="fp-pill" onclick="togglePlayerQueue()" data-i18n-title="pq.title" title="Трек-лист">
+        <span>☰</span> <span data-i18n="pq.title">Трек-лист</span>
+      </button>
+      <button id="fp-radio-btn" class="fp-pill" onclick="digsRadioToggle()" data-i18n-title="fp.radio_title" title="Радио по вкусу — очередь дополняется сама">
+        <span>◈</span> <span data-i18n="fp.radio">Радио</span>
+      </button>
+      <button id="fp-sleep-btn" class="fp-pill" onclick="fpToggleSleepMenu(event)" data-i18n-title="fp.sleep_timer" title="Таймер сна">
+        <span>⏲</span> <span id="fp-sleep-val" data-i18n="fp.sleep">Сон</span>
+      </button>
+      <button id="fp-lyrics-btn" class="fp-pill" onclick="fpToggleLyrics()" data-i18n-title="fp.lyrics_title" title="Текст песни">
+        <span>📝</span> <span data-i18n="fp.lyrics">Текст</span>
+      </button>
+      <button class="fp-pill" onclick="fpShare()" data-i18n-title="fp.share_title" title="Поделиться ссылкой">
+        <span>⇪</span> <span data-i18n="fp.link">Ссылка</span>
+      </button>
+    </div>
+    <!-- Lyrics panel — slides up from bottom over the visualizer/cover -->
+    <div id="fp-lyrics" style="display:none;position:absolute;left:0;right:0;bottom:0;
+      max-height:60%;background:linear-gradient(180deg,rgba(0,0,0,.78),rgba(0,0,0,.95));
+      backdrop-filter:blur(20px);overflow-y:auto;padding:20px 24px 30px;z-index:2;
+      transition:transform .3s cubic-bezier(.22,1.18,.36,1);transform:translateY(100%)">
+      <div style="position:sticky;top:0;display:flex;align-items:center;gap:8px;margin-bottom:10px">
+        <button onclick="fpToggleLyrics()" class="fp-icon-btn" style="width:32px;height:32px;font-size:14px">⌄</button>
+        <div id="fp-lyrics-status" data-i18n="ui.loading" style="font-size:11px;color:rgba(255,255,255,.55);flex:1">Загрузка…</div>
+      </div>
+      <div id="fp-lyrics-body" style="font-size:15px;line-height:1.65;color:rgba(255,255,255,.6);text-align:center;font-weight:500"></div>
+    </div>
+  </div>
+
+  <!-- Sleep timer popup -->
+  <div id="fp-sleep-pop" style="display:none;position:fixed;z-index:9750;background:var(--player-bg);backdrop-filter:blur(20px);border:1px solid var(--border);border-radius:12px;padding:8px;box-shadow:0 12px 40px rgba(0,0,0,.5);min-width:180px"></div>
+
+  <!-- styles moved to /static/css/main.css -->
+</div>
+
+<div id="notif-stack"></div>
+<div id="toast" style="display:none"></div>
+
+<!-- Lightbox: fullscreen image viewer. Click any cover with data-lightbox to open.
+     Escape key or click on the backdrop closes. Backdrop blurs background. -->
+<div id="lightbox" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.88);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);z-index:12000;align-items:center;justify-content:center;cursor:zoom-out;padding:24px;box-sizing:border-box" onclick="closeLightbox(event)">
+  <img id="lightbox-img" style="max-width:92vw;max-height:92vh;object-fit:contain;border-radius:8px;box-shadow:0 20px 60px rgba(0,0,0,.6);cursor:default" onclick="event.stopPropagation()"/>
+  <button type="button" onclick="closeLightbox()" style="position:absolute;top:16px;right:16px;width:36px;height:36px;border-radius:50%;background:rgba(255,255,255,.1);color:#fff;border:none;cursor:pointer;font-size:16px;backdrop-filter:blur(4px)">✕</button>
+</div>
+
+<script src="/static/js/i18n.js?v=10247"></script>
+<script src="/static/js/boot_splash.js?v=2"></script>
+<script src="/static/js/views.js?v=10120"></script>
+<script src="/static/js/source_mode_ui.js?v=1"></script>
+<script src="/static/js/scrolltop.js?v=1"></script>
+<script src="/static/js/cover_tint.js?v=6"></script>
+<script src="/static/js/dlorb.js?v=8"></script>
+<script src="/static/js/artist_follow.js?v=2"></script>
+<script src="/static/js/render_perf.js?v=2"></script>
+<script src="/static/js/nudges.js?v=4"></script>
+<script src="/static/js/app.js?v=10156"></script>
+<script src="/static/js/telemetry_consent.js?v=1"></script>
+<script src="/static/js/wrapper.js?v=11"></script>
+<script src="/static/js/coder.js?v=11"></script>
+<script src="/static/js/queue_tree.js?v=4"></script>
+<script src="/static/js/guest.js?v=3"></script>
+<script src="/static/js/setup_ui.js?v=12"></script>
+<script src="/static/js/selfupdate_ui.js?v=8"></script>
+<!-- search.js was merged into cookies_ui.js locally but stayed behind in the
+     mirror. Both declare `let _srchItems`, so with search.js loaded first the
+     browser threw "Identifier '_srchItems' has already been declared" on
+     cookies_ui.js and SKIPPED THAT WHOLE FILE — taking checkCookies and the
+     search/album/artist rendering with it, on
+     every public install. Reported by a user 30.07.2026 (a WS message handler
+     crashed with "checkAMDStatus is not defined" on every page load — that
+     function and its AMD mates were removed 25.09.2026 with the dead `amd`
+     engine). Every
+     function search.js defined already exists in cookies_ui.js — it was pure
+     dead weight. Do not re-add it. -->
+<script src="/static/js/console_ui.js?v=8"></script>
+<script src="/static/js/stats_ui.js?v=5"></script>
+<script src="/static/js/orpheus_ui.js?v=10"></script>
+<script src="/static/js/service_login.js?v=6"></script>
+<script src="/static/js/sc_tab.js?v=59"></script>
+<script src="/static/js/namesake_feedback.js?v=2"></script>
+<script src="/static/js/stations.js?v=12"></script>
+<script src="/static/js/cookies_ui.js?v=32"></script>
+<script src="/static/js/lightbox.js?v=26"></script>
+<script src="/static/js/urlbar_detect.js?v=28"></script>
+<script src="/static/js/qr_min.js?v=1"></script>
+<script src="/static/js/auth_ui.js?v=40"></script>
+<script src="/static/js/digs.js?v=23"></script>
+<script src="/static/js/player_lib.js?v=51"></script>
+<script src="/static/js/remote_ui.js?v=5"></script>
+<script src="/static/js/service_colors_ui.js?v=26"></script>
+<script src="/static/js/deps_ui.js?v=7"></script>
+<script src="/static/js/tokens_ui.js?v=2"></script>
+<script src="/static/js/config_yaml_ui.js?v=2"></script>
+<script src="/static/js/player_wave.js?v=1"></script>
+<script src="/static/js/player.js?v=10077"></script>
+<script src="/static/js/digs_radio.js?v=4"></script>
+<script src="/static/js/digs_tour.js?v=4"></script>
+<script src="/static/js/player_queue.js?v=19"></script>
+<script src="/static/js/player_dnd.js?v=3"></script>
+<script src="/static/js/player_fps.js?v=13"></script>
+<script src="/static/js/bbc.js?v=10019"></script>
+<script src="/static/js/sc.js?v=10026"></script>
+<script src="/static/js/fx_ui.js?v=9"></script>
+<script src="/static/js/panel_host.js?v=12"></script>
+<script src="/static/js/player_bar_layout.js?v=4"></script>
+
+<!-- Mobile sidebar drawer overlay -->
+<div id="drawer-overlay" class="drawer-overlay" onclick="closeMobileDrawer()"></div>
+
+<!-- Mobile bottom tab bar -->
+<nav class="mobile-tabbar" id="mobile-tabbar" role="navigation" aria-label="Навигация" data-i18n-aria="nav.aria_main">
+  <button class="mobile-tab active" id="mt-queue"
+    onclick="showView('queue',document.querySelector('[data-view=queue]'));setMobileTab(this)">
+    <span class="mt-icon">⬇</span><span data-i18n="nav.queue">Очередь</span>
+  </button>
+  <button class="mobile-tab" id="mt-search"
+    onclick="showView('search',document.querySelector('[data-view=search]'));setMobileTab(this)">
+    <span class="mt-icon">🔍</span><span data-i18n="nav.search">Поиск</span>
+  </button>
+  <button class="mobile-tab" id="mt-history"
+    onclick="showView('history',document.querySelector('[data-view=history]'));loadHistory();setMobileTab(this)">
+    <span class="mt-icon">◷</span><span data-i18n="nav.history">История</span>
+  </button>
+  <button class="mobile-tab" onclick="toggleMobileDrawer()">
+    <span class="mt-icon">☰</span><span data-i18n="fp.menu">Меню</span>
+  </button>
+</nav>
+
+</body>
+</html>

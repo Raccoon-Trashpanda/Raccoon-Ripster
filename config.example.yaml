@@ -1,0 +1,129 @@
+# Ripster — example configuration.
+# Copy this file to `config.yaml` and fill in the services you use.
+# Everything can also be set from the web UI (Settings tab) — config.yaml is
+# written back automatically, so you rarely need to edit this by hand.
+#
+# Leave a service's credentials blank to simply not use it.
+
+# ── General ──────────────────────────────────────────────────────────────────
+engine: amd                # default Apple engine: amd | gamdl | zhaarey.
+                           # 'amd' = AppleMusicDecrypt via the public wrapper —
+                           # NO Apple ID, NO Docker, works after one Setup click.
+                           # 'zhaarey' needs Docker + your OWN premium Apple ID.
+quality: alac              # default quality: alac | aac | atmos
+save-path: downloads       # where finished files land (relative or absolute)
+queue-autostart: true      # start downloading as soon as a link is added
+minimize-to-tray: true     # closing/minimizing the window folds Ripster into the system tray (server keeps running)
+max-parallel: 2            # parallel downloads (>2 not recommended for Apple)
+auto-delete-minutes: 0     # delete finished releases after N min (0 = never)
+quality-subfolders: true   # sort output into per-quality folders
+
+# ── Apple Music ──────────────────────────────────────────────────────────────
+# media-user-token / authorization-token: from music.apple.com DevTools, or use
+# the "Login via Apple" button in Settings. Needed for AAC/video.
+media-user-token: ''
+authorization-token: ''
+storefront: us
+language: en-US
+apple-wrapper: public          # ALAC/Atmos decryption: public | local | auto. Default
+                               # 'public' = works out of the box, NO Docker. Use 'local'
+                               # only if you run your own Docker wrapper with a premium Apple ID.
+amd-instance-url: wm.wol.moe   # public wrapper for ALAC/Atmos (no Apple ID needed)
+amd-instance-secure: true
+amd-parallel: 4
+gamdl-cookies-path: cookies.txt
+gamdl-song-codec: alac
+gamdl-ffmpeg-path: ffmpeg
+embed-cover: true
+cover-format: jpg
+cover-size: 1000x1000
+save-cover-to-folder: true
+
+# ── Qobuz ────────────────────────────────────────────────────────────────────
+qobuz-auth-token: ''
+qobuz-app-id: '312369995'
+qobuz-secrets: e79f8b9be485692b0e5f9dd895826368
+qobuz-email: ''
+qobuz-password: ''        # hashed (MD5) before use; never stored in clear
+qobuz-quality: '27'       # 5=MP3 320 · 6=CD · 7=24/96 · 27=24/192
+
+# ── Deezer ───────────────────────────────────────────────────────────────────
+deezer-arl: ''            # deezer.com → DevTools → Application → Cookies → arl
+deezer-quality: flac
+
+# ── Tidal ────────────────────────────────────────────────────────────────────
+# Easiest: use the device-flow login button in Settings (auto-refreshing).
+tidal-token: ''
+tidal-refresh: ''
+tidal-country: US
+tidal-quality: lossless
+
+# ── Spotify (conversion only — finds the release on Apple/Qobuz/etc.) ─────────
+spotify-client-id: ''     # create an app at developer.spotify.com
+spotify-client-secret: ''
+spotify-sp-dc: ''         # sp_dc cookie (for native streaming, optional)
+spotify-engine: orpheus_spotify
+orpheus-quality: hifi
+
+# ── Beatport ─────────────────────────────────────────────────────────────────
+beatport-username: ''
+beatport-password: ''
+beatport-quality: hifi
+
+# ── SoundCloud ───────────────────────────────────────────────────────────────
+soundcloud-oauth-token: ''
+soundcloud-save-path: downloads
+
+# ── Yandex Music (optional) ──────────────────────────────────────────────────
+yandex-token: ''
+yandex-quality: flac
+
+# ── Output transcode (optional, off by default = keep native format) ─────────
+transcode-format: ''       # '' = native · mp3 · flac · alac
+transcode-keep-original: false
+
+# ── Built-in audio player ────────────────────────────────────────────────────
+player-gapless: true
+player-viz: true
+player-stream-quality: mp3
+
+# ── Diagnostics (optional, OFF by default — opt in from Settings) ────────────
+# If enabled, sends only WARN/ERROR console lines (with credentials stripped
+# out) to the developer so problems can be fixed without you copying logs.
+# No music, no personal files, no tokens. Off unless you turn it on yourself.
+telemetry-forward: false
+# Куда уходят диагностические данные. Раньше здесь было пусто, и из-за этого
+# отправка не работала НИ У КОГО: тумблер в настройках включался, а адреса не
+# было — forwarding_enabled() молча возвращал False. Люди слали скриншоты.
+telemetry-url: 'https://raccoon-ripster.serveousercontent.com'
+telemetry-level: warn      # warn = warnings + errors · error = errors only
+telemetry-token: 'OtHdzmO7GiZPTPjxSaj9lEUCy0A__rhW'
+telemetry-name: ''          # your name/label (asked on first run, shown to the developer)
+telemetry-instance-id: ''  # auto-generated anonymous id on first run
+
+# ── Updates ──────────────────────────────────────────────────────────────────
+ripster-repo: Raccoon-Trashpanda/Raccoon-Ripster   # self-update source (in-app)
+update-require-signature: false  # require Ed25519 signature on release zipballs.
+                                 # false = transitional: update works, but warns in
+                                 # "Requires attention". Flip to true AFTER the first
+                                 # signed release is published.
+
+# ── Flex (owner-only, OFF by default) ────────────────────────────────────────
+# Premium-quality streaming relay for guest mobile devices. Guests pair via a
+# one-shot code from the bot, then stream through the owner's subscriptions.
+# Requires a working tunnel and governor. OFF by default — the owner enables
+# explicitly after verifying the infrastructure.
+flex-enabled: false
+flex-quality-policy: nearest   # nearest | skip — what to do when the exact
+                               # requested quality is unavailable.
+flex-max-streams: 8            # total concurrent Flex streams across all devices
+flex-log-retention-days: 30    # audit log retention (device/time/service only,
+                               # no track titles or secrets)
+
+# Apple preparation (task 104): server-side download+decrypt of Apple ALAC
+# tracks for Flex streaming. Requires flex-enabled. Uses ONLY the local wrapper
+# (never the public wm.wol.moe). OFF by default.
+flex-apple-enabled: false
+flex-cache-ttl-hours: 6        # how long cached files survive after last access
+flex-cache-max-gb: 5           # max disk space for flex_cache/ (LRU eviction)
+flex-apple-max-concurrent: 2   # max simultaneous Apple downloads (wrapper limit)

@@ -1,0 +1,280 @@
+"""
+Security policy — all hard-coded access restrictions in one place.
+
+Importing this module is safe at any point; it has no side effects.
+"""
+from __future__ import annotations
+
+# ── Config write whitelist ─────────────────────────────────────────────────────
+# Keys (or prefixes) that the frontend is allowed to mutate via POST /api/config.
+# Anything not matched here is silently dropped.  This prevents RCE via path
+# injection or overwriting internal-only keys.
+
+CONFIG_WRITABLE_PREFIXES: tuple[str, ...] = (
+    # Пользовательский тюнинг, добавленный 01–02.08.2026. Без записи в этот
+    # список переключатель в настройках молча ничего не делает: POST /api/config
+    # отбрасывает всё, чего здесь нет.
+    # Найдено самопроверкой 02.08.2026: эти переключатели есть в настройках,
+    # но их ключи не проходили белый список — нажатие молча не сохранялось.
+    "main-go-path", "save-cover-to-folder", "save-lrc-file",
+    "radio-autostart",      # продолжать очередь самой
+    "source-mode",          # свои ключи / Премиум / оба
+    "nudges-",              # подсказки в простое
+    "webview-hw-accel", "webview-browser-args",   # ускорение окна
+    "apple-local-only-strict",                     # запрет публичного подхвата при local-only
+    "upcoming-",            # лента грядущих релизов: включение и её настройки.
+                            # Без этой строки переключатель молча ничего не делает —
+                            # ровно тот класс, что уже ловили самопроверкой 02.08.
+    "quality", "quality-policy", "engine", "language", "font", "theme",
+    "proxy", "proxy-api", "proxy-download", "proxy-metadata",
+    "embed-", "save-path", "cover-", "lrc-", "lyric",
+    "write-replaygain",
+    "zip-releases",         # упаковка релиза в zip (ripster/release_zip.py)
+    "musixmatch-token",     # тексты Musixmatch (ripster/lyrics_musixmatch.py), секрет
+    "truncate",
+    "gamdl-cookies-path", "gamdl-use-wrapper", "gamdl-wrapper-account-url", "gamdl-download-mode",
+    "gamdl-song-codec", "gamdl-overwrite", "gamdl-save-playlist",
+    "gamdl-synced-lyrics-format", "gamdl-no-synced-lyrics",
+    "gamdl-lyrics-only", "gamdl-use-album-date",
+    "gamdl-fetch-extra-tags", "gamdl-artist-auto-select",
+    "gamdl-mv-remux-mode", "gamdl-mv-resolution",
+    "gamdl-cover-size", "gamdl-cover-format",
+    "gamdl-album-template", "gamdl-file-template",
+    "gamdl-exclude-tags", "gamdl-truncate",
+    "gamdl-nm3u8dlre-path", "gamdl-ffmpeg-path",   # found unsaveable in the 2026-07-22 settings audit
+    "authorization-token",   # Apple bearer — found unsaveable via REST in the 2026-07-22 audit
+                              # (only ever landed via the WS token_update path in practice)
+    "amd-instance-url", "amd-instance-secure",
+    "amd-wm-api-key",   # ключ wm.wol.moe (с 10.09.2026 обязателен) — секрет, маску см. routes/core
+    # Публичный враппер wm.wol.moe: суточный потолок запросов и принуждённая
+    # витрина. Без этих строк поле в Настройках сохранялось бы «успешно» и молча
+    # не действовало.
+    "amd-daily-cap", "amd-region-force",
+    "apple-parallel",   # apple-parallel-tracks / apple-parallel-count (zhaarey)
+    # Мягкие потолки пейсинга (ripster/pacing.py): наши запросы к amp-api и к
+    # официальному эндпоинту плейлистов Qobuz. Без этой строки поле в Настройках
+    # сохранялось бы «успешно» и молча не действовало.
+    "apple-requests-per", "qobuz-playlist-per",
+    # Свой реле-сервер ключей (ripster/relay_store.py + routes/relay.py) и его
+    # потолок на враппер. Без этой строки любой из ключей сохранялся бы
+    # «успешно» и молча не действовало — ровно тот класс, что ловили 02.08.
+    "relay-",
+    "atmos-max", "max-memory",
+    # Регулятор нагрузки (ripster/governor.py) и пауза фоновой разведки Spotify:
+    # тихие часы (governor-quiet-hours), пауза краула/сверки в тихие часы
+    # (spotify-bg-scan-quiet-pause), сам фоновый скан. Без этих строк /set и
+    # переключатель в Настройках «сохранялись успешно» и молча не действовали —
+    # ровно поэтому вечерний гул не глушился (15.10.2026).
+    "governor-", "spotify-bg-scan",
+    "media-user",
+    "storefront",
+    "qobuz-app-id", "qobuz-secrets",
+    "qobuz-email", "qobuz-password",
+    "qobuz-user-id", "qobuz-auth-token",
+    "qobuz-quality", "qobuz-save-path",
+    "qobuz-max-connections", "qobuz-requests-per-minute",
+    "qobuz-accounts",   # multi-account Qobuz pool (load-balanced) — list of {user_id/auth_token or email/password, label}
+    "deezer-arl", "deezer-quality", "deezer-save-path", "deezer-arl-label",
+    "deezer-accounts",   # multi-account Deezer pool (load-balanced) — list of {arl,label}
+    "tidal-token", "tidal-refresh",
+    "tidal-user-id", "tidal-country", "tidal-token-expiry",
+    # Пул учёток Tidal — список {refresh | email+password, country, label}.
+    # Вход обоими способами: TV-логин отдаёт refresh, mobile-логин принимает
+    # логин с паролем, и оба пути у OrpheusDL есть.
+    "tidal-accounts", "tidal-email", "tidal-password",
+    "tidal-quality", "tidal-save-path",
+    "spotify-client-id", "spotify-client-secret", "spotify-sp-dc",
+    "spotify-engine",
+    # Мультиакк Spotify для СКАЧИВАНИЯ — список {label, enabled, priority}.
+    # Сам durable-blob в конфиге НЕ хранится (секрет+бинарь): он лежит файлом в
+    # dist/spotify_pool/acct{i}/. См. ripster/spotify_pool.py — пул ротирует
+    # (фейловер), а не параллелит, потому что OrpheusDL читает blob по
+    # фиксированному пути.
+    "spotify-accounts", "spotify-account-label",
+    # Отдельная учётка РАДАРА: свои sp_dc/OAuth, чтобы 429 и баны радара не
+    # жгли аккаунты, которыми качаем.
+    "spotify-radar-sp-dc", "spotify-radar-client-id", "spotify-radar-client-secret",
+    "spotify-proxy", "spotify-crawl-interval", "spotify-bg-scan",
+    "spotify-bg-scan-quiet-pause",   # пауза фонового краула в тихие часы (ripster/routes/spotify.py)
+    "spotify-totp",   # spotify-totp-secret / -ver (owner drops in a fresh TOTP when Spotify rotates)
+    "orpheus-",   # orpheus-quality, orpheus-save-path, orpheus-convert-mp3, …
+    "beatport-username", "beatport-password", "beatport-quality", "beatport-save-path",
+    "jiosaavn-quality", "jiosaavn-save-path",
+    "soundcloud-save-path", "soundcloud-oauth-token", "soundcloud-hq",
+    "sc-isrc-fallback", "sc-widevine-wrapper-url",   # found unsaveable in the 2026-07-22 settings audit
+    "soundcloud-accounts",   # multi-account SoundCloud pool (load-balanced) — list of {token,label}
+    "yandex-token", "yandex-quality", "yandex-save-path",
+    "yandex-accounts",   # multi-account Yandex pool (load-balanced) — list of {token,label}
+    "releases-services", "releases-days", "releases-types",
+    # Кросс-сервисный радар (02.08.2026): источник ищет релизы артистов, за
+    # которыми следят в ДРУГИХ сервисах, и вишлист опрашивает ранние витрины.
+    # Без записи из интерфейса выключить это было бы нечем.
+    "radar-cross-service",
+    "watchlist-early-services", "watchlist-early-download",
+    "watchlist-nz-early",   # opt-in NZ-Friday pass + NZ-account routing (default OFF)
+    "watchlist-compilations",
+    "queue-autostart", "max-parallel",
+    "minimize-to-tray",
+    "minimize-to",      # where a plain minimize goes: taskbar (default) / tray
+    "wrapper-apple-id", "wrapper-password", "wrapper-mode", "apple-wrapper",
+    # Режим публичного враппера (6 сценариев владельца, 24.09.2026). По умолчанию
+    # «off»: код сам публичный враппер не включает никогда.
+    "apple-public-mode",
+    "wrapper-accounts",   # multi-account Apple wrapper pool — list of {id,password,label}
+    "apple-pool", "apple-pool-size",
+    "decrypt-port", "m3u8-port",
+    "url-quality", "album-folder", "single-disc",
+    "show-", "auto-", "_last_svc",
+    "default-search-service",   # владельческий дефолт поиска — первое открытие
+                                 # без запомненного _last_svc падает сюда, а не в Apple
+    "use-go-run",
+    "transcode-",
+    "coder-",
+    "discogs-token",
+    "tunnel-subdomain", "tunnel-provider", "tl1001-",
+    "file-rename-template",
+    "remote-enabled", "public-url", "ngrok-",
+    "service-colors",
+    "player-",
+    "notify-",        # notify-on-done (native desktop toast on download finish)
+    # NOTE: "ripster-repo" (the update source slug) is deliberately NOT here —
+    # writing it via the API lets anyone who can reach /api/config point
+    # self-update at an arbitrary repo, which auto-updates a running install
+    # to run whatever code is there (RCE). It's only settable by editing
+    # config.yaml directly (filesystem access = already a higher trust level).
+    # The auth token for a private fork is still API-writable — it doesn't
+    # change WHERE updates come from, only whether a fixed repo is reachable.
+    "ripster-repo-token",
+    # Требовать Ed25519-подпись релиза при самообновлении (задача 089).
+    # По умолчанию false (переходный режим): обновление работает, но пишет
+    # предупреждение в «Требует внимания». Владелец включает после первого
+    # подписанного релиза.
+    "update-require-signature",
+    "telemetry-",     # diagnostics forwarding (telemetry-forward/url/level/token/...)
+    # «Раскопки»: что человек сам объявил своим (digs-favorite-artists /
+    # digs-favorite-genres) и что явно отверг (digs-exclude-artists). Секретов
+    # тут нет, а без записи из интерфейса вкус нечем задать — и профиль
+    # остаётся на одних догадках по статистике, которая содержит ещё и чужие
+    # загрузки (гости бота).
+    "digs-",
+    # Ключ Last.fm для «похожих артистов» в Раскопках (бесплатный, необязательный).
+    "lastfm-api-key",
+    # Свой аудиотракт: устройство вывода и эксклюзивный режим. 12.09.2026 владелец:
+    # «в рипстере вывод звука каждый раз, заебало уже» — и был прав буквально:
+    # экран настройки писал выбор через POST /api/config, а тот молча его
+    # отбрасывал, потому что ключей не было здесь. Ровно тот класс, о котором
+    # предупреждает шапка этого списка, и уже третий его случай.
+    "audio-device", "audio-exclusive",
+    # Играть ли локальные lossless-файлы своим трактом, а не браузером. Ключ
+    # отдельный от `audio-exclusive`: режим вывода и «кто вообще воспроизводит»
+    # — разные решения, и включать второе за человека нельзя (эксклюзивный
+    # захват отбирает звук у всей системы).
+    "audio-native-local",
+    # Скин интерфейса (data-skin на <html>): classic/neon/console/oled.
+    # Ключ `ui-skin` в config.yaml был, но сюда он не попадал ни разу:
+    # то есть переключатель в настройках физически не мог сохранить выбор —
+    # ровно подвид 1 из ripster-setting-with-no-wire. Оформляющих правил для
+    # classic нет, поэтому запись меняет только явно выбранный новый скин.
+    "ui-skin",
+    # Дизайн интерфейса (макет): classic/.... Ключ `ui-design` в config.yaml.
+    "ui-design",
+    # Авто-уборка очереди (ripster/queue_tidy.py): done/error/stale.
+    # Без этих строк переключатели в настройках молча не сохраняются.
+    "queue-tidy-", "queue-stale-",
+    # Список включённых анимаций ухода плиток из очереди (задача 064).
+    # Пустой список = «без анимации». Без этой строки выбор в настройках
+    # молча не сохраняется — тот же класс дефекта, что queue-tidy выше.
+    "queue-exit-anims",
+    # Flex (задача 095): серверное качество для гостевых мобильных устройств.
+    # flex-enabled по умолчанию ВЫКЛ.
+    "flex-enabled", "flex-quality-policy", "flex-max-streams",
+    "flex-log-retention-days",
+)
+
+
+def config_key_allowed(k: str) -> bool:
+    """Return True if *k* is in the frontend-writable whitelist."""
+    return any(k == p or k.startswith(p) for p in CONFIG_WRITABLE_PREFIXES)
+
+
+# ── WebSocket guest filter ─────────────────────────────────────────────────────
+# Event types that must never be forwarded to guest WebSocket connections.
+
+# The WS fan-out (app.py broadcast) is DENY-BY-DEFAULT for guests (security
+# audit 2026-07-21): queue_update / log / progress / dl_counter /
+# sc_fallback_added / bbc_dl_* are scoped to the guest's own session/tasks,
+# guest_link_revoked has its own handling, queue_done/ping carry no payload
+# and are always safe, and anything NOT explicitly handled is now dropped —
+# a NEW owner-sensitive event type is safe by default instead of leaking
+# until someone remembers to add it here. This blocklist still exists as a
+# belt-and-suspenders early-exit for the known-sensitive types (checked
+# before the per-type branches), not because the fan-out depends on it.
+GUEST_BLOCKED_WS_TYPES: frozenset[str] = frozenset({
+    "history_updated",
+    "queue_started", "queue_stopped", "queue_paused", "queue_resumed",
+    "releases_scan_start", "releases_scan_progress", "releases_scan_done",
+    "watchlist_new_release", "watchlist_scan_progress",
+    "watchlist_check_start", "watchlist_check_progress", "watchlist_check_done",
+    "spotify_authed", "spotify_sp_dc_updated",
+    "orpheus_authed", "orpheus_not_authed",
+    "apple_authed", "bearer_updated",
+    "engine_changed", "restart_required",
+    "remote_stopped", "tunnel_status",
+    # Apple wrapper infra — Docker logs / fixed ports / owner Apple-session state.
+    "wrapper_built", "wrapper_log", "wrapper_login_failed",
+    "wrapper_started", "wrapper_status", "pool_update", "wrapper_autoheal",
+    # Setup tab — install logs can leak filesystem paths / tool versions.
+    "install_log", "install_step", "setup_done", "tools_status",
+    "gamdl_deps_fixed", "soundcloud_installed", "widevine_minted",
+    # Coder is an owner-only local-file tool (reveals owner folders/paths).
+    "coder_progress", "coder_done", "coder_cancelled",
+})
+
+
+# ── HTTP guest route guard ─────────────────────────────────────────────────────
+# Path prefixes that guests are never allowed to call, regardless of auth.
+# Checked by the guest-guard middleware in app.py.
+
+GUEST_BLOCKED_PATHS: tuple[str, ...] = (
+    "/api/config",          # no config reads/writes
+    "/api/engine",          # no engine switching
+    "/api/settings",
+    "/api/setup/",
+    "/api/wrapper/",
+    "/api/watchlist/",
+    "/api/releases/",
+    "/api/apple-auth/",
+    "/api/fetch-bearer",
+    "/api/upload-cookies",
+    "/api/admin/",
+    "/api/stats",           # global stats reveal owner info
+    "/api/import-token/",   # writes tokens to config.yaml
+    "/api/test-auth/",      # leaks subscription/email info
+    "/api/release/smart-resolve",  # acquisition helper — uses owner Qobuz/Tidal tokens
+    "/api/isrc",            # ISRC resolve/upgrade — uses owner tokens (download helper)
+    "/api/soundcloud/tracklist-1001",  # scrapes 1001tracklists on the owner's login/IP
+    "/api/soundcloud/upload-wvd",   # installs/overwrites the owner's Widevine CDM (device.wvd)
+    "/api/soundcloud/login",        # writes the owner's SoundCloud OAuth token
+    "/api/spectrogram/",            # owner-only tool — heavy ffmpeg analysis; nav is
+                                    # owner-only but had no backend guard (DoS surface)
+    "/api/yandex/auth",     # OAuth device flow — writes the owner's yandex-token to config
+    "/api/coder/",          # owner-only local file tool — lists/reads/writes arbitrary owner folders
+    "/api/tagger/",         # owner-only local file tool — reads/writes arbitrary owner folders
+    "/api/library/",        # owner-only — scan/cover/file expose & stream the owner's
+                            # entire local music collection under the save-path roots.
+                            # library.py is documented owner-only but had no enforcement
+                            # of its own (relies on this allowlist).
+    "/api/open-url",   # открывает страницу в браузере НА МАШИНЕ ВЛАДЕЛЬЦА.
+                       # Докстринг роута обещал «через туннель нельзя», но
+                       # обеспечить это проверкой request.client.host он не мог:
+                       # туннель (cloudflared/serveo) подключается с localhost —
+                       # см. разбор в auth.py:_client_ip. Гостю тут делать нечего.
+    "/api/history",         # owner's GLOBAL download log (all users' titles/timestamps).
+                            # Guests have their own scoped view at /api/guest/history and
+                            # never need this; leaving GET open leaked the owner's log.
+                            # Prefix also covers DELETE /api/history{,/<id>} (the app.py
+                            # DELETE special-case is now defence-in-depth). NOTE: matched
+                            # as a prefix — /api/guest/history does NOT start with this.
+    # Flex admin (задача 095): список устройств, отзыв, аудит — только владелец.
+    "/api/flex/devices", "/api/flex/revoke", "/api/flex/audit",
+)

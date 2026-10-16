@@ -1,0 +1,150 @@
+"""
+Service resolution — URL detection, quality defaults, engine routing.
+
+All functions that map URLs / service-names to capabilities live here so
+app.py does not need to own domain logic.
+
+Call install(config) once at startup so quality / engine lookups see the
+live, mutable config dict without any extra plumbing.
+"""
+from __future__ import annotations
+
+from urllib.parse import urlparse, urlunparse
+
+_config: dict = {}
+
+
+def install(config: dict) -> None:
+    global _config
+    _config = config
+
+
+# ── Recognised music service hostnames ────────────────────────────────────────
+
+ALLOWED_HOSTS: frozenset[str] = frozenset({
+    "music.apple.com",
+    "qobuz.com", "www.qobuz.com", "open.qobuz.com",
+    "deezer.com", "www.deezer.com", "deezer.page.link",
+    "tidal.com", "listen.tidal.com",
+    "spotify.com", "open.spotify.com",
+    "soundcloud.com", "www.soundcloud.com", "m.soundcloud.com", "on.soundcloud.com",
+    "beatport.com", "www.beatport.com",
+    "jiosaavn.com", "www.jiosaavn.com",
+    "music.yandex.ru", "music.yandex.com", "music.yandex.kz", "music.yandex.by",
+    "bbc.co.uk", "www.bbc.co.uk",
+})
+
+
+def validate_url(url: str) -> bool:
+    """Return True if *url* belongs to any supported music service."""
+    try:
+        h = (urlparse(url).hostname or "").lower()
+        return any(h == d or h.endswith("." + d) for d in ALLOWED_HOSTS)
+    except Exception:
+        return False
+
+
+# Хосты-псевдонимы, которые сервисы отдают своей же кнопкой «Поделиться», но
+# которые их собственные инструменты не разбирают.
+_HOST_ALIASES = {
+    # Apple Music делится ссылками через geo.music.apple.com — редирект на
+    # витрину по стране. Регексы Go-загрузчика принимают только music /
+    # beta.music / classical.music, поэтому такая ссылка не разбиралась вовсе:
+    # инструмент отвечал «Failed to get album response» и выходил с кодом 0,
+    # то есть провал выглядел как успех. Поймано 28.07.2026 на задаче, где
+    # альбом целиком качался, а отдельный трек по share-ссылке — нет.
+    "geo.music.apple.com": "music.apple.com",
+}
+
+
+def normalize_url(url: str) -> str:
+    """Привести ссылку к виду, который понимают движки. Пустое/чужое — как есть."""
+    try:
+        p = urlparse(url)
+        host = (p.hostname or "").lower()
+        target = _HOST_ALIASES.get(host)
+        if not target:
+            return url
+        netloc = target + (f":{p.port}" if p.port else "")
+        return urlunparse(p._replace(netloc=netloc))
+    except Exception:
+        return url
+
+
+def detect_service(url: str) -> str:
+    """Map a music URL to its service key."""
+    u = url.lower()
+    if "music.apple.com" in u: return "apple"
+    if "qobuz.com"       in u: return "qobuz"
+    if "deezer.com"      in u: return "deezer"
+    if "deezer.page"     in u: return "deezer"
+    if "tidal.com"       in u: return "tidal"
+    if "spotify.com"     in u: return "spotify"
+    if "soundcloud.com"  in u: return "soundcloud"
+    if "beatport.com"    in u: return "beatport"
+    if "jiosaavn.com"    in u: return "jiosaavn"
+    if "music.yandex."   in u: return "yandex"
+    if "bbc.co.uk"       in u: return "bbc"
+    return "unknown"
+
+
+# Apple music-video detection lives in the single Apple-routing source of truth
+# (ripster/apple_router.py); re-exported here for backward compatibility.
+from ripster.apple_router import is_apple_music_video  # noqa: F401,E402
+
+
+def default_quality(svc: str) -> str:
+    """Return the configured default quality string for a given service."""
+    if svc == "spotify" and _config.get("spotify-engine") == "orpheus_spotify":
+        return _config.get("orpheus-quality", "hifi")
+    # SoundCloud: with a Go+ OAuth token the CDM/Lucida engines unlock AAC 256
+    # ("hq"). Default to it so the quality label + save folder match what is
+    # actually downloaded — otherwise an AAC-256 file lands in an "MP3 128"
+    # folder. Falls back to the free MP3 128 stream when no token is set.
+    sc_default = "hq" if (_config.get("soundcloud-oauth-token") or "").strip() else "mp3"
+    return {
+        "apple":      _config.get("quality", "alac"),
+        "qobuz":      _config.get("qobuz-quality", "27"),
+        "deezer":     _config.get("deezer-quality", "flac"),
+        "tidal":      _config.get("tidal-quality", "lossless"),
+        "spotify":    _config.get("quality", "alac"),   # will be converted
+        "soundcloud": sc_default,
+        "beatport":   _config.get("beatport-quality", "hifi"),
+        "jiosaavn":   _config.get("jiosaavn-quality", "high"),
+        "yandex":     _config.get("yandex-quality", "flac"),
+        "bbc":        "mp3",
+    }.get(svc, "alac")
+
+
+def engine_for_svc(svc: str) -> str:
+    """Map a service key to the engine name that should handle it."""
+    from ripster import source_mode as _sm
+    if _sm.use_flex(_config, svc):          # режим «Премиум Ripster»: ключ поддержки активен
+        return "flex"
+    if svc == "spotify":
+        if _config.get("spotify-engine") == "orpheus_spotify":
+            return "orpheus_spotify"
+    if svc == "beatport":
+        return "orpheus_beatport"
+    if svc == "jiosaavn":
+        return "orpheus_jiosaavn"
+    if svc == "soundcloud":
+        # Prefer the pywidevine engine when a device file is available — handles
+        # DRM-protected tracks (now the majority of SC content) that Lucida
+        # cannot decrypt. Falls back to Lucida for the public/non-DRM ones.
+        try:
+            from ripster.engines.sc_widevine import is_available
+            if is_available(_config):
+                return "sc_widevine"
+        except Exception:
+            pass
+        return "soundcloud"
+    return {
+        "apple":      _config.get("engine", "zhaarey"),
+        "deezer":     "deezer",
+        "qobuz":      "qobuz",
+        "tidal":      "tidal",
+        "soundcloud": "soundcloud",
+        "yandex":     "yandex",
+        "bbc":        "bbc",
+    }.get(svc, _config.get("engine", "zhaarey"))

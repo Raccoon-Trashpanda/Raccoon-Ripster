@@ -1,0 +1,181 @@
+/* Shell v4 — стили оболочки: «Пульт», «Система» с подвкладками.
+ * Все цвета через токены var(--…). Работает во всех дизайнах.
+ */
+
+/* ── Система: подвкладки ── */
+.sys-bar {
+  display: flex;
+  gap: 4px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--border, #333);
+  margin-bottom: 12px;
+  overflow-x: auto;
+}
+.sys-tab {
+  padding: 6px 14px;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted, #888);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.sys-tab:hover {
+  background: var(--card-bg, #1a1a1a);
+  color: var(--text, #eee);
+}
+.sys-tab.active {
+  background: var(--accent-fill, #a86a88);
+  color: var(--text-on-fill, #fff);
+  border-color: transparent;
+}
+.sys-panel { display: none; }
+.sys-panel.active { display: block; }
+
+/* ── Пульт: плитки ── */
+.pulse-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+  align-content: start;
+}
+.pulse-tile {
+  padding: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border, #333);
+  background: var(--card-bg, #1a1a1a);
+  text-align: center;
+  transition: border-color 0.15s, box-shadow 0.15s;
+  min-height: 0;
+}
+.pulse-tile--lit {
+  box-shadow: 0 0 0 1px var(--a1, #c084a0);
+}
+.pulse-tile--ok .pulse-tile__n { color: var(--green, #2ecc71); }
+.pulse-tile--warn .pulse-tile__n { color: var(--orange, #e67e22); }
+.pulse-tile--unknown .pulse-tile__n { color: var(--muted, #888); }
+.pulse-tile--snoozed .pulse-tile__n { color: var(--blue, #3498db); }
+.pulse-tile__n {
+  font-size: 28px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.pulse-tile__l {
+  font-size: 12px;
+  color: var(--muted, #888);
+  margin-top: 4px;
+}
+
+/* ── Пульт: список проблем ── */
+.pulse-section { margin-top: 16px; }
+.pulse-section__title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text, #eee);
+  margin-bottom: 8px;
+}
+.pulse-rec {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--card-bg, #1a1a1a);
+  border-left: 3px solid var(--border, #333);
+  margin-bottom: 6px;
+}
+.pulse-rec--err { border-left-color: var(--red, #e74c3c); }
+.pulse-rec--warn { border-left-color: var(--orange, #e67e22); }
+.pulse-rec--info { border-left-color: var(--blue, #3498db); }
+.pulse-rec__head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.pulse-rec__svc {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  color: var(--muted, #888);
+  letter-spacing: 0.5px;
+}
+.pulse-rec__ttl {
+  font-size: 13px;
+  color: var(--text, #eee);
+  flex: 1;
+}
+.pulse-rec__ev {
+  font-size: 11px;
+  color: var(--muted, #888);
+  margin-top: 4px;
+  word-break: break-word;
+}
+.pulse-rec__act {
+  font-size: 11px;
+  color: var(--blue, #3498db);
+  margin-top: 2px;
+}
+.pulse-act-btn {
+  padding: 3px 10px;
+  border-radius: 6px;
+  border: 1px solid var(--border, #333);
+  background: transparent;
+  color: var(--blue, #3498db);
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.pulse-act-btn:hover {
+  background: var(--card-hover, #252525);
+}
+.pulse-act-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ── Aurora: пункты меню ── */
+[data-design="aurora"] .nav-section {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  color: var(--muted, #888);
+  padding: 12px 14px 4px;
+}
+.aur-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text, #eee);
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  user-select: none;
+}
+.aur-item:hover {
+  background: var(--card-bg, #1a1a1a);
+}
+.aur-item.active {
+  background: var(--accent-fill, #a86a88);
+  color: var(--text-on-fill, #fff);
+}
+.aur-item .icon {
+  font-size: 15px;
+  width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* Пульт: баннер состояния и подпись плитки (01.10.2026) */
+.pulse-banner { padding: 14px 18px; border-radius: 12px; font-weight: 600; margin-bottom: 14px; border: 1px solid var(--border, #333); }
+.pulse-banner--ok { color: var(--green, #2ecc71); background: color-mix(in srgb, var(--green, #2ecc71) 12%, transparent); }
+.pulse-banner--warn { color: var(--orange, #e67e22); background: color-mix(in srgb, var(--orange, #e67e22) 14%, transparent); }
+.pulse-tile__s { font-size: 11px; color: var(--muted, #888); margin-top: 4px; overflow-wrap: anywhere; }
+
+/* Виды, чьё содержимое перенесено в «Систему»: оригинал остаётся пустым носителем класса active для опросчиков (01.10.2026) */
+.view.sys-moved { display: none !important; }

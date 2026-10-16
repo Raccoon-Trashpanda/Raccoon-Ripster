@@ -1,0 +1,172 @@
+"""
+Task state machine.
+
+The old code had ``task["status"] = "running"`` as stringly-typed assignments
+scattered across the codebase. Nobody checked that the transition was legal,
+so you could go from ``done`` back to ``queued`` by accident — and the UI
+would render the task as fresh when it had already finished.
+
+This module makes status a typed enum and forces every transition through
+``advance(task, new)``, which validates that the move is actually legal
+given the current state.
+
+Illegal transitions raise ``InvalidTransition`` — callers should either fix
+the calling code, or use ``try_advance`` when a best-effort move is desired.
+
+The legal-transition table is deliberately conservative. If you need a new
+edge (e.g. manual requeue of a failed task), add it explicitly — don't work
+around the check by bypassing this module.
+"""
+from __future__ import annotations
+
+from enum import Enum
+from typing import Optional
+
+
+class TaskStatus(str, Enum):
+    QUEUED    = "queued"
+    RUNNING   = "running"
+    DONE      = "done"
+    ERROR     = "error"
+    CANCELLED = "cancelled"
+    # Transient: the task is queued but blocked on metadata fetch. Not used
+    # as a blocker today — kept for future use once enrichment is mandatory.
+    PENDING   = "pending"
+    # Отложенная запись BBC-эфира: задача ждёт своего времени. В отличие от
+    # PENDING она не «вот-вот стартует», а может ждать часы и пережить
+    # перезапуск — процесс очереди обязан её пропускать, пока не позовут.
+    SCHEDULED = "scheduled"
+
+
+# Legal transitions. Entries not in this table are rejected by advance().
+# Read as: FROM state → {allowed TO states}.
+_TRANSITIONS: dict[TaskStatus, set[TaskStatus]] = {
+    TaskStatus.PENDING:   {TaskStatus.QUEUED, TaskStatus.CANCELLED},
+    # Отложенный эфир: время пришло → в очередь; человек отменил → cancelled;
+    # RUNNING — страховка на случай, если планировщик и процесс очереди
+    # разминулись (иначе переход был бы запрещён и задача зависла бы в
+    # «запланировано» при уже идущей записи).
+    TaskStatus.SCHEDULED: {TaskStatus.QUEUED, TaskStatus.RUNNING,
+                           TaskStatus.ERROR, TaskStatus.CANCELLED},
+    # Running→queued is the "stop and requeue" edge used by /api/queue/stop.
+    # It's deliberately allowed: pressing Stop should leave pending work that
+    # the user can resume by pressing Start again, not force them to re-add
+    # every URL. Done→queued (restart a finished task) is still forbidden —
+    # that's what the new-task path is for.
+    # QUEUED→ERROR разрешён намеренно: задача может провалиться ДО старта —
+    # ссылка не разобралась, движка для сервиса нет, учётку получить не удалось.
+    # Без этого ребра такой отказ было нечем записать: `try_advance(ERROR)`
+    # отвергался, задача уходила из run_task нетерминальной, и страховочная сетка
+    # проставляла статус ПРЯМЫМ присваиванием — ровно тем обходом, который этот
+    # модуль и заведён запрещать. За сутки 04.09.2026 так «терялись» две задачи,
+    # и человек получал «Задача завершилась без результата» вместо причины.
+    # QUEUED→SCHEDULED: стартовый шлюз предзаказа (25.09) — релиз ещё не вышел,
+    # движок не запускался, карточка переходит в «ожидает релиза» и ждёт план.
+    TaskStatus.QUEUED:    {TaskStatus.RUNNING, TaskStatus.ERROR,
+                           TaskStatus.CANCELLED, TaskStatus.SCHEDULED},
+    # RUNNING→SCHEDULED: движок сорвался на предзаказе, которого меты не
+    # видели на стартовом шлюзе (25.09) — ошибка не пишется, карточка
+    # догоняет план и переходит в «ожидает релиза».
+    TaskStatus.RUNNING:   {TaskStatus.DONE, TaskStatus.ERROR, TaskStatus.CANCELLED,
+                           TaskStatus.QUEUED, TaskStatus.SCHEDULED},
+    # Terminal states — no further transitions. A task that finished is
+    # finished; requeue means *creating a new task*, not mutating this one.
+    TaskStatus.DONE:      set(),
+    TaskStatus.ERROR:     set(),
+    TaskStatus.CANCELLED: set(),
+}
+
+TERMINAL_STATES = frozenset({TaskStatus.DONE, TaskStatus.ERROR, TaskStatus.CANCELLED})
+
+
+class InvalidTransition(ValueError):
+    """Raised when code tries to move a task between states that aren't
+    connected in ``_TRANSITIONS``. Always a programmer error — fix the caller."""
+
+
+def current(task: dict) -> TaskStatus:
+    """Read the task's current status as an enum. Falls back to QUEUED for
+    tasks that don't have a status set yet (fresh-from-dict)."""
+    raw = task.get("status", TaskStatus.QUEUED.value)
+    try:
+        return TaskStatus(raw)
+    except ValueError:
+        # Unknown string — treat as terminal error, don't pretend it's a known
+        # state. This surfaces corrupted history entries rather than hiding them.
+        return TaskStatus.ERROR
+
+
+def can_advance(task: dict, new: TaskStatus) -> bool:
+    """True iff the transition from the task's current state to ``new``
+    is in the legal-transition table."""
+    cur = current(task)
+    return new in _TRANSITIONS.get(cur, set())
+
+
+def advance(task: dict, new: TaskStatus) -> None:
+    """Apply a status transition, rejecting illegal moves.
+
+    Mutates ``task['status']`` on success. On illegal moves raises
+    ``InvalidTransition`` — this is a loud failure by design: a bad status
+    update elsewhere in the code is a bug I want to see, not hide.
+    """
+    cur = current(task)
+    if new == cur:
+        return  # no-op
+    if new not in _TRANSITIONS.get(cur, set()):
+        raise InvalidTransition(
+            f"Illegal transition for task {task.get('id','?')}: "
+            f"{cur.value} → {new.value}"
+        )
+    task["status"] = new.value
+
+
+def try_advance(task: dict, new: TaskStatus) -> bool:
+    """Best-effort transition. Returns True if applied, False if the move
+    was illegal. Use this when the caller genuinely doesn't mind being
+    ignored — e.g. setting a task to ``cancelled`` from a global stop when
+    the task may already be done."""
+    try:
+        advance(task, new)
+        return True
+    except InvalidTransition:
+        return False
+
+
+def revive_for_retry(task: dict, why: str = "") -> bool:
+    """Вернуть в очередь задачу, чья ОЧЕРЕДНАЯ ПОПЫТКА провалилась.
+
+    Единственное узаконенное исключение из «error терминален», и оно здесь
+    именно затем, чтобы быть единственным: правило про терминальность
+    защищает от «перезапустить готовое», а не от «у задачи было пять
+    запланированных ступеней, первая не вышла».
+
+    Так устроена лестница Apple: витрина ссылки → своя витрина → другие свои
+    слоты → публичный wrapper. Каждая ступень — это `_run_engine_task`, и провал
+    записывает как ERROR всей задачи. Без этой функции лестница обрывается на
+    первой неудаче: следующие ступени отработают, но их успех уже не сможет
+    перевести задачу из терминального состояния, и человек увидит «ошибка» при
+    успешно скачанном альбоме. Это хуже исходного дефекта, а не лучше.
+
+    Возвращает True, если задача действительно была в ERROR и возвращена в
+    QUEUED. Отменённую и завершённую не трогает НИКОГДА: отмена — это воля
+    человека, а done — это результат.
+    """
+    if current(task) is not TaskStatus.ERROR:
+        return False
+    task["status"] = TaskStatus.QUEUED.value
+    task.pop("error", None)
+    if why:
+        # Текст живёт в реестре ripster/i18n.py, а не здесь: в Ripster ни одна
+        # видимая человеку строка не хардкодится по месту.
+        try:
+            from ripster import i18n as _i18n
+            task.setdefault("log", []).append(_i18n.tr("console.rung_revived", why=why))
+        except Exception:
+            pass
+    return True
+
+
+def is_terminal(task: dict) -> bool:
+    """True iff the task can no longer transition to any other state."""
+    return current(task) in TERMINAL_STATES

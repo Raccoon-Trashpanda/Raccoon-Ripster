@@ -1,0 +1,75 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <!-- App icon background with rounded corners (iOS/macOS style) -->
+  <rect width="512" height="512" rx="112" fill="#111318"/>
+
+  <!-- Subtle inner gradient ring -->
+  <rect width="512" height="512" rx="112" fill="none" stroke="#c084a0" stroke-width="2" opacity="0.15"/>
+
+  <!-- Raccoon head -->
+  <ellipse cx="256" cy="272" rx="130" ry="122" fill="#7a7a8a"/>
+
+  <!-- Ears -->
+  <ellipse cx="148" cy="162" rx="46" ry="50" fill="#7a7a8a"/>
+  <ellipse cx="364" cy="162" rx="46" ry="50" fill="#7a7a8a"/>
+  <!-- Inner ears -->
+  <ellipse cx="148" cy="166" rx="28" ry="31" fill="#c084a0"/>
+  <ellipse cx="364" cy="166" rx="28" ry="31" fill="#c084a0"/>
+
+  <!-- Mask left -->
+  <ellipse cx="218" cy="260" rx="54" ry="40" fill="#2a2a38"/>
+  <!-- Mask right -->
+  <ellipse cx="294" cy="260" rx="54" ry="40" fill="#2a2a38"/>
+  <!-- Mask bridge -->
+  <rect x="240" y="234" width="32" height="34" fill="#2a2a38"/>
+
+  <!-- Eye whites -->
+  <ellipse cx="218" cy="257" rx="36" ry="30" fill="#e8e8f0"/>
+  <ellipse cx="294" cy="257" rx="36" ry="30" fill="#e8e8f0"/>
+
+  <!-- Iris -->
+  <ellipse cx="218" cy="257" rx="22" ry="22" fill="#2a2a4a"/>
+  <ellipse cx="294" cy="257" rx="22" ry="22" fill="#2a2a4a"/>
+
+  <!-- Pupil -->
+  <ellipse cx="218" cy="257" rx="14" ry="14" fill="#0e0e1e"/>
+  <ellipse cx="294" cy="257" rx="14" ry="14" fill="#0e0e1e"/>
+
+  <!-- Eye shine large -->
+  <ellipse cx="226" cy="247" rx="8" ry="8" fill="white"/>
+  <ellipse cx="302" cy="247" rx="8" ry="8" fill="white"/>
+  <!-- Eye shine small -->
+  <ellipse cx="212" cy="264" rx="4" ry="4" fill="white" opacity="0.5"/>
+  <ellipse cx="288" cy="264" rx="4" ry="4" fill="white" opacity="0.5"/>
+
+  <!-- Nose -->
+  <ellipse cx="256" cy="290" rx="22" ry="16" fill="#2a2a38"/>
+  <!-- Nose highlight -->
+  <ellipse cx="250" cy="285" rx="7" ry="5" fill="#5a5a7a" opacity="0.5"/>
+
+  <!-- Muzzle -->
+  <ellipse cx="256" cy="316" rx="50" ry="36" fill="#c8c8d8"/>
+
+  <!-- Mouth line -->
+  <path d="M238 324 Q256 338 274 324" fill="none" stroke="#9a9aaa" stroke-width="3" stroke-linecap="round"/>
+  <!-- Nose-to-mouth line -->
+  <line x1="256" y1="306" x2="256" y2="320" stroke="#9a9aaa" stroke-width="2.5" stroke-linecap="round"/>
+
+  <!-- Chin whisker dots -->
+  <circle cx="218" cy="318" r="3.5" fill="#9a9aaa"/>
+  <circle cx="230" cy="326" r="3.5" fill="#9a9aaa"/>
+  <circle cx="282" cy="318" r="3.5" fill="#9a9aaa"/>
+  <circle cx="294" cy="326" r="3.5" fill="#9a9aaa"/>
+
+  <!-- Forehead fur stripe -->
+  <ellipse cx="256" cy="178" rx="18" ry="28" fill="#6a6a7a" opacity="0.5"/>
+
+  <!-- Tail stripes — decorative bottom corners -->
+  <path d="M96 430 Q68 470 104 480 Q148 492 136 450" fill="none" stroke="#7a7a8a" stroke-width="14" stroke-linecap="round"/>
+  <path d="M96 430 Q68 470 104 480 Q148 492 136 450" fill="none" stroke="#2a2a38" stroke-width="6" stroke-linecap="round" stroke-dasharray="18 14"/>
+
+  <path d="M416 430 Q444 470 408 480 Q364 492 376 450" fill="none" stroke="#7a7a8a" stroke-width="14" stroke-linecap="round"/>
+  <path d="M416 430 Q444 470 408 480 Q364 492 376 450" fill="none" stroke="#2a2a38" stroke-width="6" stroke-linecap="round" stroke-dasharray="18 14"/>
+
+  <!-- Music note accent -->
+  <text x="400" y="130" font-family="Arial" font-size="52" fill="#c084a0" opacity="0.6">♪</text>
+</svg>

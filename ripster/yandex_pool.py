@@ -1,0 +1,99 @@
+"""
+Yandex Music multi-account load-balancing pool.
+
+Same shape as soundcloud_pool.py — ymd takes the token as a plain `--token`
+CLI argument (ripster/engines/yandex.py), no shared file, so a pool slot is
+just "which token to substitute into this task's config view".
+"""
+from __future__ import annotations
+
+import threading
+
+from ripster import account_fallback as _afb
+
+
+def _configured_accounts(config: dict) -> list[dict]:
+    """Primary account (slot 0) + any extras from `yandex-accounts`."""
+    accounts: list[dict] = []
+    primary = (config.get("yandex-token") or "").strip()
+    if primary:
+        accounts.append(_afb.stamp({"token": primary, "label": "primary"}, _afb.primary_src(config, "yandex"), 0))
+    for a in (config.get("yandex-accounts") or []):
+        tok = (a.get("token") or "").strip()
+        if tok:
+            accounts.append(_afb.stamp(
+                {"token": tok, "label": a.get("label") or f"account{len(accounts)+1}"},
+                a, len(accounts)))
+    return accounts
+
+
+def pool_enabled(config: dict) -> bool:
+    return len(_configured_accounts(config)) >= 2
+
+
+class YandexPool:
+    def __init__(self, accounts: list[dict]):
+        self.accounts = accounts
+        self._busy = [False] * len(accounts)
+        self._lock = threading.Lock()
+
+    def acquire(self, exclude=()) -> tuple[int, str] | None:
+        """`exclude` — слоты, уже отказавшие в этой задаче по правам/региону
+        (ripster/account_fallback.py); без него перебор топчется на первом."""
+        ex = set(exclude or ())
+        with self._lock:
+            for i in _afb.order_indices(self.accounts):
+                if not self._busy[i] and i not in ex:
+                    self._busy[i] = True
+                    return i, self.accounts[i]["token"]
+
+    def release(self, slot: int) -> None:
+        with self._lock:
+            if 0 <= slot < len(self._busy):
+                self._busy[slot] = False
+
+    def status(self) -> dict:
+        with self._lock:
+            return {
+                "pool_enabled": True,
+                "accounts": [
+                    {"slot": i, "label": a["label"], "primary": i == 0, "busy": self._busy[i],
+                     "enabled": a.get("enabled", True), "priority": a.get("priority", i),
+                     "order": _afb.order_pos(self.accounts, i)}
+                    for i, a in enumerate(self.accounts)
+                ],
+            }
+
+
+_pool_instance: YandexPool | None = None
+_pool_fingerprint: tuple = ()
+
+
+def get_pool(config: dict) -> YandexPool | None:
+    global _pool_instance, _pool_fingerprint
+    if not pool_enabled(config):
+        return None
+    accounts = _configured_accounts(config)
+    # В отпечаток ОБЯЗАТЕЛЬНО входят `enabled` и `priority`: без них смена
+    # этих полей (кнопка вкл/выкл, перетаскивание порядка) не пересобирала
+    # закэшированный пул, и панель отдавала СТАРОЕ состояние до перезапуска —
+    # выглядело как «нажал, ничего не произошло». 18.09.2026.
+    fp = tuple((a["token"], a.get("enabled", True), a.get("priority"))
+               for a in accounts)
+    if _pool_instance is None or fp != _pool_fingerprint:
+        _pool_instance = YandexPool(accounts)
+        _pool_fingerprint = fp
+    return _pool_instance
+
+
+def live_status(config: dict) -> dict:
+    p = get_pool(config)
+    if p is None:
+        accounts = _configured_accounts(config)
+        return {"pool_enabled": False, "accounts": [
+            {"slot": i, "label": a["label"], "primary": i == 0, "busy": False,
+             "enabled": a.get("enabled", True), "priority": a.get("priority", i),
+             "order": _afb.order_pos(accounts, i)}
+            for i, a in enumerate(accounts)
+        ]}
+    return p.status()
